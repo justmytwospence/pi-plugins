@@ -1,13 +1,27 @@
 /** Optional System 1 presentation state. Querying it never performs I/O or inference. */
 export const SYSTEM1_STATE_CHANNEL = "pi-plugins.system1-state.v1";
 export interface System1Status {
-  backend: "jev" | "openai-decisions";
-  label: "Jev" | "Decisions";
-  provider: string;
-  model: string;
-  /** Local configuration, not verified entitlement or funding. */
-  availability: "unknown" | "configured" | "unavailable";
-  reason?: string;
+  waterfall: ("jev" | "openai-decisions")[];
+  /** Default targets only; feature-specific Jev overrides may differ. */
+  candidates: {
+    backend: "jev" | "openai-decisions";
+    provider: string;
+    model: string;
+    /** Local configuration, not verified entitlement or funding. */
+    local: "unknown" | "configured" | "missing";
+    cooldownUntil?: number;
+    lastFailure?: { code: string; at: number };
+  }[];
+  status: "unknown" | "ready" | "fallback" | "unavailable";
+  /** Last completed main-registry request, not a universally active model. */
+  lastUsed?: {
+    backend: "jev" | "openai-decisions";
+    provider: string;
+    model: string;
+    at: number;
+    fallback: boolean;
+  };
+  nextRetryAt?: number;
 }
 export interface System1StateRequest {
   version: 1;

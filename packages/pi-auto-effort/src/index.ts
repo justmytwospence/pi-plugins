@@ -43,7 +43,7 @@ import {
 import { DEFAULT_PREFILTER, type PrefilterConfig, isGoAhead, prefilterConfig } from "./prefilter.ts";
 import { type Counts, countsFromBranch, describeCounts, emptyCounts, tally } from "./stats.ts";
 import { SETTINGS_REASONING_COMMITTED, settingsCycles } from "./settings-cycle.ts";
-import { SYSTEM1_CHANGED, readSystem1Setting, resolveSystem1Target } from "./system1.js";
+import { SYSTEM1_CHANGED, installSystem1Notifications, provenanceOf, readSystem1Setting, resolveSystem1Target } from "./system1.js";
 import { clip, messageText } from "./transcript.ts";
 import { UNTRUSTED_REPLY } from "./untrusted.ts";
 import { CodexPoller } from "./usage.ts";
@@ -237,6 +237,7 @@ export function pressureTag(p: Pressure): string {
 }
 
 export default function autoEffort(pi: ExtensionAPI, deps: AutoEffortDeps = {}) {
+  installSystem1Notifications(pi);
   const cycles = settingsCycles(pi);
   const toggleOwner = "pi-auto-effort";
   let lifecycle = 0;
@@ -246,6 +247,7 @@ export default function autoEffort(pi: ExtensionAPI, deps: AutoEffortDeps = {}) 
   let manualLevel = "high";
   // The last judgment's need per level and theta, for the trend arrow and the status.
   let lastNeed: Record<string, number> | undefined;
+  let lastNeedProvenance: unknown;
   let lastTheta: number | undefined;
   let lastLevel: string | undefined;
   let pressure: Pressure = NO_PRESSURE;
@@ -286,7 +288,7 @@ export default function autoEffort(pi: ExtensionAPI, deps: AutoEffortDeps = {}) 
   // Bumped when a prompt, session, branch, model, manual level or gate replaces the state a
   // Jev answer would apply to. Shutdown invalidates callbacks from the old runtime too.
   let generation = 0;
-  // Cache the effective physical target, not the global setting's backend-only key.
+  // Cache the whole configured chain/reset identity, not the last winning target.
   let selectionKey: string | undefined;
   const pending = new Set<AbortController>();
   const cancelAssessments = () => {
@@ -295,6 +297,7 @@ export default function autoEffort(pi: ExtensionAPI, deps: AutoEffortDeps = {}) 
   };
   const clearAssessment = () => {
     lastNeed = undefined;
+    lastNeedProvenance = undefined;
     lastTheta = undefined;
     lastLevel = undefined;
     lastReason = "";
@@ -411,13 +414,15 @@ export default function autoEffort(pi: ExtensionAPI, deps: AutoEffortDeps = {}) 
     const data = (isRecord(branch[savedIndex]?.data) ? branch[savedIndex]!.data : undefined) as Record<string, unknown> | undefined;
     manualLevel = typeof data?.ceiling === "string" ? data.ceiling : pi.getThinkingLevel();
     const target = refreshTarget(ctx);
-    // Older entries predate backend switching and describe Jev; never restore them as Decisions.
-    const sameTarget = typeof data?.selectionKey === "string" ? data.selectionKey === target.key : target.ok && target.backend === "jev";
+    // Unkeyed legacy evidence belongs only to the original singleton Jev policy.
+    const sameTarget = typeof data?.selectionKey === "string" ? data.selectionKey === target.key
+      : target.ok && target.key === JSON.stringify(["jev", config.jev.provider, config.jev.model]);
     clearAssessment();
     if (sameTarget) {
       lastLevel = typeof data?.level === "string" ? data.level : undefined;
       lastReason = typeof data?.reason === "string" ? data.reason : "";
       lastNeed = isRecord(data?.need) ? numbers(data.need) : undefined;
+      lastNeedProvenance = data?.needProvenance ?? data?.classifier;
       lastTheta = typeof data?.theta === "number" ? data.theta : undefined;
     }
     counts = countsFromBranch(branch, STATE_ENTRY);
@@ -547,7 +552,10 @@ export default function autoEffort(pi: ExtensionAPI, deps: AutoEffortDeps = {}) 
     const decision: Omit<Decision, "reason"> & { reason: Decision["reason"] | typeof GO_AHEAD } =
       outcome === GO_AHEAD ? { level: current, reason: GO_AHEAD, theta: threshold(policy(), p) } : decide(current, manualLevel, j, policy(), p, bounds);
     // A go-ahead's own need says nothing about the work, so the trend keeps the last one.
-    if (j && decision.reason !== "ack") lastNeed = j.need;
+    if (j && decision.reason !== "ack") {
+      lastNeed = j.need;
+      lastNeedProvenance = outcome !== GO_AHEAD && outcome.ok ? provenanceOf(outcome) : undefined;
+    }
     lastTheta = decision.theta;
     lastReason = outcome === GO_AHEAD || outcome.ok ? decision.reason : `assessment unavailable: ${outcome.reason}`;
 
@@ -571,7 +579,8 @@ export default function autoEffort(pi: ExtensionAPI, deps: AutoEffortDeps = {}) 
         ? { limit: { tier: pressure.tier, window: pressure.window, used: pressure.used, projected: pressure.projected, exhaustsAt: pressure.exhaustsAt } }
         : {}),
       ...(j ? { need: j.need, ack: j.ack } : {}),
-      ...(outcome !== GO_AHEAD && outcome.ok ? { latencyMs: outcome.latencyMs, inputTokens: outcome.usage?.input } : {}),
+      ...(lastNeedProvenance ? { needProvenance: lastNeedProvenance } : {}),
+      ...(outcome !== GO_AHEAD && outcome.ok ? { classifier: provenanceOf(outcome), latencyMs: outcome.latencyMs, inputTokens: outcome.usage?.input } : {}),
     };
     tally(counts, data);
     pi.appendEntry(STATE_ENTRY, data);

@@ -1,3 +1,4 @@
+import "./isolated-agent-dir.ts";
 import { describe, expect, test } from "vitest";
 import { askJev, type ClassifierRegistry, type ClassifierResult, type JevConfig } from "../src/jev.ts";
 import { askSystem1 } from "../src/system1.ts";
@@ -33,7 +34,7 @@ describe("askJev timeout retry policy", () => {
 
   test("does not retry a timeout when the evaluation disables retries", async () => {
     const fake = fakeRegistry(() => timeout);
-    expect(await ask(fake.registry, undefined, { retryTimeout: false })).toEqual({ ok: false, reason: "timed out" });
+    expect(await ask(fake.registry, undefined, { retryTimeout: false })).toMatchObject({ ok: false, code: "exhausted", reason: "Jev: timed out", attempts: [{ status: "failed", code: "timeout", sdkCalls: 1 }] });
     expect(fake.calls()).toBe(1);
   });
 

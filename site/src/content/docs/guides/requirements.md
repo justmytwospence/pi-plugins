@@ -33,7 +33,7 @@ The documentation does **not** assert a Windows compatibility matrix for the who
 
 ## Classifier features are optional, not free
 
-System 1 selects a classifier for the suite's classifier features. The global default is [Jev](https://docs.typesafe.ai); `/system1` selects Jev or native OpenAI Decisions. When a feature is enabled and the classifier is available, it sends the data needed for the judgment to the selected external provider. Requests can be billed by that provider.
+System 1 configures an ordered route for the suite's classifier features. The global default is [Jev](https://docs.typesafe.ai) only; `/system1` can select either native classifier alone or an ordered Jev and OpenAI Decisions chain. On an operational failure it can notify you and try the next configured provider; it does not shop outside that chain or bypass a safety refusal. Each attempted provider can receive the data needed for the judgment and can bill for requests.
 
 | Plugin | What the classifier sees | Without it |
 | --- | --- | --- |
@@ -46,11 +46,11 @@ System 1 selects a classifier for the suite's classifier features. The global de
 | [Plan mode](/plugins/pi-plan-mode/) | Planning task and available tools | You can select tools manually |
 | [Sidebar](/plugins/pi-sidebar/) | Proposed guarded action | Refuses an unconfirmed call |
 
-The selection is global to the Pi agent directory, not a per-project or per-feature backend switch. For most plugins, `"jev": { "enabled": false }` in the plugin’s own configuration still disables that feature's classifier use; plan mode uses `"jevToolSelection": false`. Jev mode retains existing provider/model settings and discovery; Decisions overrides those targets. See the reference pages for filenames and merge precedence.
+The order is global to the Pi agent directory, not a per-project or per-feature backend switch. For most plugins, `"jev": { "enabled": false }` in the plugin’s own configuration still disables that feature's classifier use; plan mode uses `"jevToolSelection": false`. Jev mode retains existing provider/model settings and discovery; Decisions overrides those targets. See the reference pages for filenames and merge precedence.
 
 The default TypeSafe provider uses Pi’s credentials, such as `TYPESAFE_API_KEY` or `/login typesafe`. OpenAI Decisions instead uses the isolated `system1-openai/gpt-6-luna` classifier via the real OpenAI Decisions API, authenticated only by `/login system1-openai` or `SYSTEM1_OPENAI_API_KEY`. It does not use the ordinary OpenAI chat credential. Do not put credentials in these docs, a public repository, or a front-end environment variable.
 
-Before selecting Decisions, claim the eligible [ChatGPT Pro API credits](https://developers.openai.com/api/docs/guides/chatgpt-api-credits) into an API organization with active included credits, no purchased balance, no auto-recharge and no paid or postpaid continuation. Check those conditions in OpenAI billing; Pi cannot verify entitlement, credit balance or which funds pay for a request, and does not enforce a credits-only spending cap. Keep Jev selected if the prerequisites cannot be established. A failed classifier request does not silently switch providers.
+Before selecting Decisions, claim the eligible [ChatGPT Pro API credits](https://developers.openai.com/api/docs/guides/chatgpt-api-credits) into an API organization with active included credits, no purchased balance, no auto-recharge and no paid or postpaid continuation. Check those conditions in OpenAI billing; Pi cannot verify entitlement, credit balance or which funds pay for a request, and does not enforce a credits-only spending cap. Do not include Decisions in the order if the prerequisites cannot be established. A configured fallback may use a different provider after an operational failure; `/system1 status` shows the order and recent route.
 
 :::caution[Tool gate is not a security boundary]
 Classifier judgments are probabilistic, and fallback behavior depends on the feature and context. Do not use this gate as your only control over untrusted programs or secrets.
@@ -58,6 +58,6 @@ Classifier judgments are probabilistic, and fallback behavior depends on the fea
 
 ## Read the right number
 
-Footer cost is a reported token-price estimate, not an invoice or a subscription charge. Cache guard uses published model prices where available and an idle-time heuristic where a cache TTL is unknown. Classifier latency and savings depend on the workload and provider; benchmark anecdotes are not performance guarantees.
+The `/system1` classifier route is independent of `/waterfall`, the subscription chat-model router. API credits, subscription usage windows, throttles and catalog-estimated cost are different quantities; none proves the state of the others. Footer cost is a reported token-price estimate, not an invoice or a subscription charge. Cache guard uses published model prices where available and an idle-time heuristic where a cache TTL is unknown. Classifier latency and savings depend on the workload and provider; benchmark anecdotes are not performance guarantees.
 
 Quota lookup can make authenticated HTTP requests without making a model call. The status footer’s Claude account reading may belong to a different account from Pi’s model session. [Manage context and cost](/recipes/cache-cost/) explains the distinctions.

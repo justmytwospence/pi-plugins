@@ -12,6 +12,7 @@ import subagents, { RESUME_FOOTER, RESUME_HEADING, recordedRun, recordedStatus, 
 import { harness } from "./harness.ts";
 import { fakeUI } from "./ui-helpers.ts";
 import { FAMILY_CHANNEL, type PreparedAgent } from "../src/family-contract.ts";
+import { type System1Notice, encodeSystem1Notice, notifySystem1Notice, parseSystem1Notice, resetSystem1Runtime } from "../src/system1.ts";
 
 const explicit = { agent: "general", model: "p/m", thinking: "low" };
 const tick = async () => { for (let i = 0; i < 12; i++) await Promise.resolve(); };
@@ -72,6 +73,75 @@ function session() {
   }
   return { agentDir, cwd, file, entries, children, stop, records, runtime };
 }
+
+const healthNotice = (at = Date.now()): System1Notice => ({ version: 1, at, kind: "provider_failed", waterfall: ["jev"], backend: "jev", code: "rate_limited" });
+const childNotice = (child: Child, notice: System1Notice) => (child as any).onLine(JSON.stringify({ type: "extension_ui_request", id: "notice-1", method: "notify", message: encodeSystem1Notice(notice) }));
+
+test("RPC notices queued during reload flush only to the adopter, bounded to the newest eight", async () => {
+  const s = session();
+  const first = await s.runtime();
+  await first.run({ ...explicit, task: "notice gap", async: true });
+  await first.shutdown("reload");
+  const now = Date.now();
+  // Distinct wire-valid codes exercise the queue bound independently of user-notice
+  // deduplication; varying retry timestamps must not create twelve duplicate toasts.
+  const codes = ["disabled", "cancelled", "selection_changed", "invalid_input", "refused", "missing_credentials", "invalid_credentials", "quota_exhausted", "rate_limited", "unavailable_model", "timeout", "invalid_answers"] as const;
+  for (const code of codes) childNotice(s.children[0]!, { ...healthNotice(now - 100), kind: "provider_failed", backend: "jev", code });
+  expect(first.ui.notes).toEqual([]);
+  const second = await s.runtime();
+  expect(second.ui.notes).toHaveLength(8);
+  expect(second.ui.notes.every((text) => text.startsWith("System 1: Jev"))).toBe(true);
+  expect(second.ui.notes[0]).toContain("refused this judgment");
+  expect(first.stale).toEqual([]);
+  expect(first.h.messages).toEqual([]);
+  expect(second.h.messages).toEqual([]);
+  await second.shutdown("quit");
+});
+
+test("adoption drops wrong-order and pre-manual-reset notices, not older reload-gap arrivals", async () => {
+  const s = session();
+  const first = await s.runtime();
+  await first.run({ ...explicit, task: "notice freshness", async: true });
+  const now = Date.now();
+  vi.spyOn(Date, "now").mockReturnValue(now);
+  resetSystem1Runtime(undefined);
+  await first.shutdown("reload");
+  childNotice(s.children[0]!, healthNotice(now - 1));
+  childNotice(s.children[0]!, { ...healthNotice(now), waterfall: ["openai-decisions"], kind: "provider_failed", backend: "openai-decisions", code: "missing_credentials" });
+  childNotice(s.children[0]!, healthNotice(now + 1));
+  vi.mocked(Date.now).mockReturnValue(now + 5000);
+  const second = await s.runtime();
+  expect(second.ui.notes).toHaveLength(1);
+  // Same notice with a new packet timestamp is deduplicated using receipt time.
+  childNotice(s.children[0]!, healthNotice(now + 5001));
+  expect(second.ui.notes).toHaveLength(1);
+  expect(first.ui.notes).toEqual([]);
+  expect(first.stale).toEqual([]);
+  await second.shutdown("quit");
+});
+
+test("a bound relay uses the current tree context and RPC parents forward upward without child responses", async () => {
+  const s = session();
+  const runtime = await s.runtime();
+  await runtime.run({ ...explicit, task: "nested notices", async: true });
+  const ui = fakeUI();
+  const ctx = runtime.h.ctx({ ...runtime.ctx, mode: "rpc", ui });
+  await runtime.h.emit("session_tree", {}, ctx);
+  const child = s.children[0]!;
+  const send = vi.spyOn(child as any, "send");
+  const notice = healthNotice();
+  childNotice(child, notice);
+  expect(runtime.ui.notes).toEqual([]);
+  expect(ui.notes).toEqual([encodeSystem1Notice(notice)]);
+  expect(send).not.toHaveBeenCalled();
+  const upstreamUI = fakeUI();
+  notifySystem1Notice({ mode: "tui", hasUI: true, ui: upstreamUI }, parseSystem1Notice(ui.notes[0]!)!, "upstream-child");
+  expect(upstreamUI.notes).toHaveLength(1);
+  expect(upstreamUI.notes[0]).toMatch(/^System 1: Jev unavailable/u);
+  expect(ui.notes).toHaveLength(1);
+  expect(runtime.h.messages).toEqual([]);
+  await runtime.shutdown("quit");
+});
 
 test.each(["after adoption", "while parked"])("a reload hands a running async run to the next runtime; its result (due %s) is delivered once, by it", async (when) => {
   const s = session();

@@ -98,7 +98,7 @@ const flowSnapshot = (workflow, blocked, provider = 'anthropic', model = 'claude
   ...(blocked ? { blocked } : {}),
 });
 const activity = width => [...renderPill({ label: '1 task' }, false, width, theme), ''];
-function statusFooter(width, statuses, { compact = false, phase = 'idle', flow, autoEffort, providerUsage, providerUsageMore, settingsCycle, readOnly = false, model = 'claude-opus-5-5', provider = 'anthropic' } = {}) {
+function statusFooter(width, statuses, { compact = false, phase = 'idle', flow, autoEffort, providerUsage, providerUsageMore, system1, settingsCycle, readOnly = false, model = 'claude-opus-5-5', provider = 'anthropic' } = {}) {
   const absorbed = absorbStatuses(statuses, { claudeRow: false });
   const actions = {
     'model.open': {}, 'reasoning.cycle': {},
@@ -106,6 +106,7 @@ function statusFooter(width, statuses, { compact = false, phase = 'idle', flow, 
     ...(absorbed.exec !== undefined ? { 'execution.status': {} } : {}),
     ...(absorbed.mode ? { 'approvals.open': {} } : {}),
     ...(autoEffort === undefined ? {} : { 'effort.toggle': { active: autoEffort } }),
+    ...(system1 ? { 'system1.open': {} } : {}),
   };
   const snapshot = {
     cwd: '/tmp/pi-plugins', model, provider, thinking: 'high', oauth: true,
@@ -113,7 +114,7 @@ function statusFooter(width, statuses, { compact = false, phase = 'idle', flow, 
     git: { project: 'pi-plugins', branch: 'main' },
     totals: { input: 23000, output: 1500, cacheRead: 90000, cacheWrite: 400, cost: 1.24, compactions: 1, started: NOW - 60000 },
     quotas: [], now: NOW, queued: false, borderGauge: true, phase,
-    ...absorbed, statuses: absorbed.rest, compact, flow, actions, providerUsage, providerUsageMore, settingsCycle, readOnly,
+    ...absorbed, statuses: absorbed.rest, compact, flow, actions, providerUsage, providerUsageMore, system1, settingsCycle, readOnly,
     primaryKeys: { model: kb.getKeys('app.model.select')[0], workflow: absorbed.workflow?.key, approvals: absorbed.mode?.key },
   };
   const layout = layoutFooter(snapshot, width, theme);
@@ -672,7 +673,23 @@ for (const width of [46, 120, 180]) for (const phase of ['pending', 'applying'])
       'blocked and other-session chrome must not advertise main preview values');
   }
 }
+const system1Fixture = (status, lastBackend, nextRetryAt) => ({
+  waterfall: ['jev', 'openai-decisions'], status,
+  candidates: [
+    { backend: 'jev', provider: 'typesafe', model: 'jev-latest', local: 'configured' },
+    { backend: 'openai-decisions', provider: 'system1-openai', model: 'gpt-6-luna', local: 'configured' },
+  ],
+  ...(lastBackend ? { lastUsed: { backend: lastBackend, provider: lastBackend === 'jev' ? 'typesafe' : 'system1-openai',
+    model: lastBackend === 'jev' ? 'jev-latest' : 'gpt-6-luna', at: NOW, fallback: true } } : {}),
+  ...(nextRetryAt === undefined ? {} : { nextRetryAt }),
+});
 const FOOTERS = [
+  ...['ready', 'fallback', 'unknown', 'unavailable', 'cooldown expired'].flatMap(state => [false, true].map(linked => ({
+    name: `System 1 ${state}${linked ? ' Linked' : ''}`, statuses: modeStatuses('plan', 'auto'),
+    ...(linked ? { flow: flowSnapshot('plan') } : {}),
+    system1: system1Fixture(state === 'cooldown expired' ? 'unavailable' : state, state === 'fallback' ? 'openai-decisions' : undefined,
+      state === 'cooldown expired' ? NOW - 1 : state === 'unavailable' ? NOW + 300000 : undefined),
+  }))),
   ...['work', 'chat', 'plan', 'exec'].flatMap(workflow => ['auto', 'yolo'].map(approval => ({
     name: `${workflow}/${approval}`, statuses: modeStatuses(workflow, approval, workflow === 'exec' ? 'implementing' : undefined),
   }))),
@@ -754,6 +771,12 @@ for (const width of [46, 120, 180]) {
           if (fixture.providerUsage[0] === codexResetDue) assert.match(rendered, /stale.*reset due/u);
         }
         if (fixture.providerUsageMore && width >= 120) assert.match(rendered, /OpenAI.*\+3 more/u, 'additional sources are counted on the second account row');
+      }
+      if (fixture.system1) {
+        const expected = fixture.name.includes('cooldown expired') || fixture.system1.status === 'unknown' ? 'S1 Jev→OpenAI?'
+          : fixture.system1.status === 'fallback' ? 'S1 OpenAI*'
+          : fixture.system1.status === 'unavailable' ? 'S1 unavailable' : 'S1 Jev→OpenAI';
+        assert.ok(rendered.includes(expected), `actual System 1 badge ${expected} fits ${width}`);
       }
       const baseline = screens.length;
       for (const [under, options] of IDLE) {

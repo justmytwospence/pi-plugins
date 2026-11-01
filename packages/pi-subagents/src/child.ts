@@ -8,6 +8,7 @@ import { existsSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { Conversation, type Message, describeTool } from "./conversation.ts";
+import { type System1Notice, parseSystem1Notice } from "./system1.ts";
 
 export interface Usage {
   input: number;
@@ -90,6 +91,8 @@ export interface ChildOptions {
   sessionDir: string;
   onUpdate?: (state: ChildState) => void;
   onDialog?: (request: DialogRequest) => Promise<DialogAnswer>;
+  /** Branded classifier health notices; never permission requests or model messages. */
+  onSystem1Notice?: (notice: System1Notice) => void;
   /** Each finished message, for example to save it. */
   onMessage?: (message: Message) => void;
   /** Prompt-cache TTL for the child (`PI_CACHE_RETENTION`); `inherit` (the default) keeps the parent's. */
@@ -375,9 +378,19 @@ export class Child {
         // After stop(), Pi settles the aborted run before it exits.
         this.finishAndClose(this.stopping ? "stopped" : this.state.error ? "failed" : "done");
         break;
-      case "extension_ui_request":
-        void this.answerDialog(event);
+      case "extension_ui_request": {
+        if (event.method === "notify") {
+          const notice = parseSystem1Notice(event.message);
+          if (notice) {
+            try {
+              this.options.onSystem1Notice?.(notice);
+            } catch {
+              // A notification sink must not interrupt the child's RPC stream.
+            }
+          }
+        } else void this.answerDialog(event);
         break;
+      }
     }
   }
 

@@ -1,4 +1,5 @@
 // A minimal fake of Pi's extension API: records handlers, commands, entries and UI calls.
+import "./isolated-agent-dir.ts";
 type Handler = (event: any, ctx: any) => unknown;
 
 export interface FakeJev {
@@ -58,7 +59,11 @@ export function harness(options: { tools?: any[]; exec?: (cmd: string, args: str
   };
   async function emit(event: string, payload: any, ctx?: any) {
     let result: unknown;
-    for (const handler of handlers.get(event) ?? []) result = (await handler(payload, ctx ?? lastCtx)) ?? result;
+    for (const handler of handlers.get(event) ?? []) {
+      const value = handler(payload, ctx ?? lastCtx);
+      // Preserve synchronous lifecycle reentry in this fake even with notification hooks first.
+      result = (value instanceof Promise ? await value : value) ?? result;
+    }
     return result;
   }
   let lastCtx: any;
@@ -85,7 +90,7 @@ export function harness(options: { tools?: any[]; exec?: (cmd: string, args: str
       mode: "tui",
       ui,
       signal: undefined,
-      sessionManager: { getBranch: () => [], getSessionId: () => "session-1" },
+      sessionManager: { getBranch: () => [], getSessionId: () => "session-1", getLeafId: () => "leaf-1" },
       modelRegistry: undefined,
       ...overrides,
     };

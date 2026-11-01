@@ -1,13 +1,20 @@
-import { mkdtempSync } from "node:fs";
+import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { describe, expect, test } from "vitest";
+import { afterEach, describe, expect, test, vi } from "vitest";
 import vet from "../eval/vet.target.ts";
-import { auc, buildCases, countRequests, isSuggestible, lowestReal, summarize, turnsOf } from "../eval/vet.ts";
+import { auc, buildCases, countRequests, isSuggestible, lowestReal, scoreTurns, summarize, turnsOf } from "../eval/vet.ts";
+import type { JevOutcome, System1Attempt } from "../src/jev.ts";
+import { Spend } from "../../../evals/shared/spend.ts";
 import { last } from "../../../evals/shared/results.ts";
 import { runEval } from "../../../evals/shared/runner.ts";
 import type { Sample, Session, SessionEntry } from "../../../evals/shared/sessions.ts";
 import { fakeJev, usage } from "./harness.ts";
+
+// harness.ts installs a fresh temporary agent directory for each test.
+afterEach(() => vi.restoreAllMocks());
+const preferred = { backend: "jev", provider: "typesafe", model: "jev-latest" } as const;
+const decisions = { backend: "openai-decisions", provider: "system1-openai", model: "gpt-6-luna" } as const;
 
 const user = (text: string): SessionEntry => ({ type: "message", message: { role: "user", content: text } });
 const assistant = (text: string): SessionEntry => ({ type: "message", message: { role: "assistant", content: [{ type: "text", text }] } });
@@ -120,6 +127,62 @@ describe("the vet eval target", () => {
     const result = JSON.parse(r.out.at(-1)!);
     expect(result.targets.vet.metrics).toMatchObject({ passRateReal: 0.5, rejectRateMismatch: 0.5, meanProbReal: 0.55 });
     expect(result.targets.vet.metrics.separation).toBe(0.5);
+  });
+
+  test.each([false, true])("retains the whole outcome and counts aggregate usage only once (exhausted=%s)", async (failed) => {
+    const reported = { ...usage(300), cost: { ...usage(300).cost, total: 0.001 } };
+    const attempts: System1Attempt[] = [
+      { ...preferred, targetKey: "preferred", status: "failed", code: "quota_exhausted", reason: "quota or credits exhausted", sdkCalls: 1, latencyMs: 1, usage: reported },
+      { ...decisions, targetKey: "fallback", status: failed ? "failed" : "succeeded", ...(failed ? { code: "timeout" as const, reason: "timed out" } : {}), sdkCalls: 1, latencyMs: 1, usage: reported },
+    ];
+    const aggregate = { ...reported, cost: { ...reported.cost, total: 0.002 } };
+    const outcome: JevOutcome = failed
+      ? { ok: false, code: "exhausted", reason: "all providers unavailable", attempts, latencyMs: 2, usage: aggregate, selectionKey: "chain" }
+      : { ok: true, answers: { useful: { type: "bool", probability: 0.9 } }, ...decisions, waterfall: ["jev", "openai-decisions"], selectionKey: "chain", targetKey: "fallback", fallback: true, attempts, latencyMs: 2, usage: aggregate };
+    const add = vi.spyOn(Spend.prototype, "addOutcome");
+    const item = buildCases(sample.sessions, 3).positives[0]!;
+    const result = await scoreTurns({}, [item], { concurrency: 1, timeoutMs: 1000, ask: async () => outcome });
+    expect(add).toHaveBeenCalledExactlyOnceWith(outcome);
+    expect(add.mock.calls[0]![0]).toBe(outcome);
+    expect(result.scored[0]!.outcome).toBe(outcome);
+    expect(result.scored[0]!.outcome!.attempts).toBe(attempts);
+    expect(result.spend.calls).toBe(1);
+    expect(result.spend.total).toBeCloseTo(0.002);
+    expect(result.spend.backendAttempts).toEqual({ jev: 1, "openai-decisions": 1 });
+    expect(result.spend.registryCalls).toBe(2);
+    expect(result.spend.attempts).toMatchObject(attempts);
+    expect(result.spend.attempts.every((attempt) => !("error" in attempt))).toBe(true);
+    expect(result.spend.actualProviders).toEqual(failed ? {} : { [JSON.stringify([decisions.backend, decisions.provider, decisions.model])]: 1 });
+    expect(result.failures).toBe(Number(failed));
+    expect(result.scored[0]!.probability).toBe(failed ? undefined : 0.9);
+  });
+
+  test("a configured waterfall retains actual fallback provenance and failed-attempt usage", async () => {
+    writeFileSync(path.join(process.env.PI_CODING_AGENT_DIR!, "system1.json"), JSON.stringify({ waterfall: ["jev", "openai-decisions"] }));
+    const reported = { ...usage(300), cost: { ...usage(300).cost, total: 0.001 } };
+    const models: string[] = [];
+    const registry = {
+      findOfType: (_type: string, provider: string, id: string) => ({ provider, id, type: "classifier", api: provider === decisions.provider ? "openai-decisions" : "typesafe", baseUrl: "https://api.openai.com/v1" }),
+      classify: async (model: { provider: string }) => {
+        models.push(model.provider);
+        return model.provider === preferred.provider
+          ? { stopReason: "error", errorMessage: "quota exhausted", answers: {}, usage: reported }
+          : { stopReason: "stop", answers: { useful: { type: "bool", probability: 0.9 } }, usage: reported };
+      },
+    };
+    const item = buildCases(sample.sessions, 3).positives[0]!;
+    const result = await scoreTurns(registry, [item], { concurrency: 1, timeoutMs: 1000 });
+    expect(models).toEqual([preferred.provider, decisions.provider]);
+    expect(result.scored[0]!.outcome).toMatchObject({
+      ok: true, ...decisions, waterfall: ["jev", "openai-decisions"], fallback: true,
+      attempts: [
+        { ...preferred, status: "failed", code: "quota_exhausted", sdkCalls: 1, usage: reported },
+        { ...decisions, status: "succeeded", sdkCalls: 1, usage: reported },
+      ],
+    });
+    expect(result.failures).toBe(0);
+    expect(result.spend.calls).toBe(1);
+    expect(result.spend.total).toBeCloseTo(0.002);
   });
 
   test("fails when 20% or more of the requests do not answer", async () => {

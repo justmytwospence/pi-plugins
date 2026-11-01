@@ -4,7 +4,7 @@
 // too), applies the timeout and abort signal, and reports token usage. The registry types are
 // mirrored structurally, so this type-checks against older Pi type packages as well.
 import type { Question } from "./lean.ts";
-import { askSystem1, readSystem1Setting, resolveSystem1Target, type System1Outcome } from "./system1.ts";
+import { askSystem1, readSystem1Setting, resolveSystem1Route, type ClassifierProvenance, type System1Backend, type System1Outcome } from "./system1.ts";
 
 export interface ClassifierUsage {
   input: number;
@@ -57,14 +57,22 @@ export const JEV_LOGINS: ReadonlyArray<{ provider: string; label: string }> = [
 
 export const label = (t: JevTarget) => `${t.provider}/${t.model}`;
 
+export type System1Candidate = ClassifierProvenance & { available: boolean; reason?: string };
+interface JevAvailability {
+  /** Independent Jev override/discovery, never an OpenAI physical target. */
+  jevTarget: JevTarget;
+  others: JevTarget[];
+  waterfall: System1Backend[];
+  candidates: System1Candidate[];
+}
 export type JevState =
-  | { kind: "ready"; target: JevTarget; others: JevTarget[] }
-  | { kind: "missing"; reason: string }
+  | ({ kind: "ready" } & JevAvailability)
+  | ({ kind: "missing"; reason: string } & Partial<JevAvailability>)
   | { kind: "off" };
 
 /**
- * Which Jev to use: the configured one when its provider has credentials, else the first of
- * `JEV_MODELS` that Pi can reach. Never throws.
+ * Local availability for the authorized order, with independent Jev discovery. Ready means
+ * at least one configured rung is available, not that the preferred rung can answer. Never probes.
  */
 export async function resolveJev(registry: unknown, settings: { enabled: boolean; provider: string; model: string }): Promise<JevState> {
   if (!settings.enabled) return { kind: "off" };
@@ -75,23 +83,11 @@ export async function resolveJev(registry: unknown, settings: { enabled: boolean
   if (typeof reg?.classify !== "function" || typeof reg.getAvailableOfType !== "function") {
     return { kind: "missing", reason: "this Pi has no classifier models (needs Pi 0.99 or newer)" };
   }
-  if (selection.backend === "openai-decisions") {
-    const target = resolveSystem1Target(settings, selection);
-    const reason = "OpenAI Decisions is unavailable; enable pi-system1 and configure /login system1-openai";
-    if (!target.ok) return { kind: "missing", reason: target.reason };
-    try {
-      const model = reg.findOfType?.("classifier", target.provider, target.model) as { api?: string; provider?: string; id?: string; baseUrl?: string } | undefined;
-      if (model?.api !== "openai-decisions" || model.provider !== target.provider || model.id !== target.model || model.baseUrl !== "https://api.openai.com/v1") return { kind: "missing", reason };
-      const available = await reg.getAvailableOfType("classifier", target.provider);
-      if (!available.some((m) => m.provider === target.provider && m.id === target.model)) return { kind: "missing", reason };
-      if (readSystem1Setting().key !== selection.key) return { kind: "missing", reason: "System 1 changed while checking availability" };
-      return { kind: "ready", target: { provider: target.provider, model: target.model }, others: [] };
-    } catch {
-      return { kind: "missing", reason };
-    }
-  }
-  // Only the providers that serve Jev are asked, so no other provider's credentials are resolved.
-  const providers = [...new Set([...(settings.provider ? [settings.provider] : []), ...JEV_MODELS.map((t) => t.provider)])];
+  // Discover Jev only when it is authorized somewhere in the configured order.
+  // OpenAI availability never replaces the independent Jev config slot.
+  const providers = selection.waterfall.includes("jev")
+    ? [...new Set([...(settings.provider ? [settings.provider] : []), ...JEV_MODELS.map((t) => t.provider)])]
+    : [];
   const available: { provider: string; id: string }[] = [];
   for (const provider of providers) {
     if (readSystem1Setting().key !== selection.key) return { kind: "missing", reason: "System 1 changed while checking availability" };
@@ -104,20 +100,41 @@ export async function resolveJev(registry: unknown, settings: { enabled: boolean
   if (readSystem1Setting().key !== selection.key) return { kind: "missing", reason: "System 1 changed while checking availability" };
   const has = (t: JevTarget) => available.some((m) => m.provider === t.provider && m.id === t.model);
   const found = JEV_MODELS.filter(has);
-  if (settings.provider) {
-    const model = settings.model || JEV_MODELS.find((t) => t.provider === settings.provider)?.model || "jev-latest";
-    const target = { provider: settings.provider, model };
-    if (!has(target)) return { kind: "missing", reason: `${label(target)} is not available (no credentials, or no such classifier)` };
-    return { kind: "ready", target, others: found.filter((t) => label(t) !== label(target)) };
+  const jevTarget = settings.provider
+    ? { provider: settings.provider, model: settings.model || JEV_MODELS.find((t) => t.provider === settings.provider)?.model || "jev-latest" }
+    : found[0] ?? JEV_MODELS[0]!;
+  const route = resolveSystem1Route(jevTarget, selection);
+  if (!route.ok) return { kind: "missing", reason: route.reason };
+  const candidates: System1Candidate[] = [];
+  for (const target of route.targets) {
+    if (readSystem1Setting().key !== selection.key) return { kind: "missing", reason: "System 1 changed while checking availability" };
+    if (target.backend === "jev") {
+      const reason = settings.provider ? `${label(jevTarget)} is not available (no credentials, or no such classifier)` : "no provider with Jev has credentials";
+      candidates.push({ ...target, available: has(jevTarget), ...(!has(jevTarget) ? { reason } : {}) });
+      continue;
+    }
+    const reason = "OpenAI Decisions is unavailable; enable pi-system1 and configure /login system1-openai";
+    let available = false;
+    try {
+      const model = reg.findOfType?.("classifier", target.provider, target.model) as { api?: string; provider?: string; id?: string; baseUrl?: string } | undefined;
+      if (model?.api === "openai-decisions" && model.provider === target.provider && model.id === target.model && model.baseUrl === "https://api.openai.com/v1") {
+        available = (await reg.getAvailableOfType("classifier", target.provider)).some((m) => m.provider === target.provider && m.id === target.model);
+      }
+    } catch {
+      // A missing optional native provider must not hide an available Jev rung.
+    }
+    candidates.push({ ...target, available, ...(!available ? { reason } : {}) });
   }
-  const [first, ...others] = found;
-  if (!first) return { kind: "missing", reason: "no provider with Jev has credentials" };
-  return { kind: "ready", target: first, others };
+  if (readSystem1Setting().key !== selection.key) return { kind: "missing", reason: "System 1 changed while checking availability" };
+  const metadata = { jevTarget, others: found.filter((t) => label(t) !== label(jevTarget)), waterfall: route.waterfall, candidates };
+  return candidates.some((candidate) => candidate.available)
+    ? { kind: "ready", ...metadata }
+    : { kind: "missing", reason: candidates.map((candidate) => candidate.reason).join("; "), ...metadata };
 }
 
 export type JevOutcome = System1Outcome;
 
-/** Ask Jev one request. Never throws: every failure is `{ ok: false, reason }`. */
+/** Ask the configured System 1 order with this independent Jev target. Never throws. */
 export async function askJev(
   registry: unknown,
   target: JevTarget,
@@ -129,7 +146,7 @@ export async function askJev(
   return askSystem1(registry, { enabled: true, ...target, timeoutMs }, state, questions, signal);
 }
 
-/** A one-question request, to check that Jev answers with the credentials Pi has. */
+/** An explicit one-question probe of the configured order (never used by setup/status). */
 export function probe(registry: unknown, target: JevTarget, timeoutMs = 10_000): Promise<JevOutcome> {
   return askJev(registry, target, timeoutMs, { message: "The tests pass now, thanks." }, {
     approved: { type: "bool", instructions: "Is the user satisfied?", criteria: { true: "Satisfied", false: "Not satisfied" } },

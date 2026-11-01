@@ -1,7 +1,7 @@
 import { mkdtempSync, rmSync } from "node:fs";
 import { expect, test } from "vitest";
 import nextPrompt from "../src/index.ts";
-import { harness } from "./harness.ts";
+import { fakeJev, harness } from "./harness.ts";
 const { routePromptTab, TASK_TAB } = await import(new URL("../../pi-select-nav/src/prompt-tab.ts", import.meta.url).href);
 const { PillView } = await import(new URL("../../pi-bg/src/pill.ts", import.meta.url).href);
 const { createEventBus } = await import(new URL("../node_modules/@earendil-works/pi-coding-agent/dist/core/event-bus.js", import.meta.url).href);
@@ -9,7 +9,8 @@ const { createEventBus } = await import(new URL("../node_modules/@earendil-works
 for (const nextFirst of [true, false]) test(`Tab accepts next before tasks regardless of input registration order (${nextFirst})`, async () => {
   const h = harness(); h.pi.events = createEventBus(); nextPrompt(h.pi);
   const cwd = mkdtempSync("/tmp/pi-tab-");
-  const ctx = h.ctx({ cwd });
+  const jev = fakeJev(() => ({ useful: { type: "bool", probability: 0.9 } }));
+  const ctx = h.ctx({ cwd, modelRegistry: jev.registry });
   let popup = false;
   const editor = {
     getText: () => ctx.ui.editorText, setText: (text: string) => ctx.ui.setEditorText(text),
@@ -101,7 +102,8 @@ for (const nextFirst of [true, false]) test(`Tab accepts next before tasks regar
 test("another extension's prompt:offer shows only while idle and never replaces the model's suggestion", async () => {
   const h = harness(); h.pi.events = createEventBus(); nextPrompt(h.pi);
   const cwd = mkdtempSync("/tmp/pi-offer-");
-  const ctx = h.ctx({ cwd });
+  const jev = fakeJev(() => ({ useful: { type: "bool", probability: 0.9 } }));
+  const ctx = h.ctx({ cwd, modelRegistry: jev.registry });
   const editor = {
     getText: () => ctx.ui.editorText, setText: (text: string) => ctx.ui.setEditorText(text),
     getCursor: () => ({ line: 0, col: ctx.ui.editorText.length }), render: () => [],

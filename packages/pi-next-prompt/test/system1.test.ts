@@ -2,7 +2,7 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
-import nextPrompt from "../src/index.ts";
+import nextPrompt, { DEFAULT_CONFIG, vet } from "../src/index.ts";
 import { SYSTEM1_CHANGED } from "../src/system1.js";
 import { harness } from "./harness.ts";
 
@@ -16,7 +16,8 @@ afterEach(() => {
   rmSync(root, { recursive: true, force: true });
 });
 const backend = (value: string) => writeFileSync(path.join(root, "system1.json"), JSON.stringify({ backend: value }));
-const flush = async () => { for (let i = 0; i < 8; i++) await Promise.resolve(); };
+const waterfall = (order: string[]) => writeFileSync(path.join(root, "system1.json"), JSON.stringify({ waterfall: order }));
+const flush = async () => { for (let i = 0; i < 40; i++) await Promise.resolve(); };
 
 async function setup(ghost = false) {
   const h = harness();
@@ -163,4 +164,122 @@ test("a current-backend classifier failure still fails open without touching the
   s.ui.edit("");
   await flush();
   expect(s.rendered()).toContain("Fail-open handoff");
+});
+
+test.each([
+  ["jev", "openai-decisions"],
+  ["openai-decisions", "jev"],
+])("fallback vetting records the actual winner without invalidating the offer (%s → %s)", async (first, second) => {
+  waterfall([first, second]);
+  const s = await setup();
+  const current = await s.begin("Fallback handoff");
+  s.calls[0]!.finish(0.9, true);
+  await flush();
+  expect(s.calls).toHaveLength(2);
+  s.calls[1]!.finish();
+  await current.settled;
+  expect(s.rendered()).toContain("Fallback handoff");
+  expect(s.diagnostics().vet).toBe("approved");
+  const provenance = s.diagnostics().provenance!;
+  expect(provenance).toMatchObject({ backend: second, waterfall: [first, second], fallback: true });
+  expect(provenance.attempts.map(attempt => attempt.status)).toEqual(["failed", "succeeded"]);
+  expect(provenance.targetKey).not.toBe(provenance.selectionKey);
+  // Diagnostics are snapshots, not a mutable view into the owning verdict.
+  provenance.waterfall.reverse();
+  provenance.attempts.length = 0;
+  expect(s.diagnostics().provenance!.waterfall).toEqual([first, second]);
+  expect(s.diagnostics().provenance!.attempts).toHaveLength(2);
+  expect(s.ui.press("\t")).toBe(true);
+  expect(s.ui.editorText).toBe("Fallback handoff");
+});
+
+test("a valid veto retains provenance and never tries the fallback", async () => {
+  waterfall(["jev", "openai-decisions"]);
+  const s = await setup();
+  const current = await s.begin("Unhelpful handoff");
+  s.calls[0]!.finish(0.1);
+  await current.settled;
+  expect(s.calls).toHaveLength(1);
+  expect(s.rendered()).toBe("");
+  expect(s.diagnostics()).toMatchObject({ vet: "vetoed", provenance: { backend: "jev", fallback: false } });
+});
+
+test("whole-chain exhaustion fails open without claiming a winning classifier", async () => {
+  waterfall(["jev", "openai-decisions"]);
+  const s = await setup();
+  s.ui.edit("private draft");
+  const current = await s.begin("Exhausted handoff");
+  s.calls[0]!.finish(0.9, true);
+  await flush();
+  s.calls[1]!.finish(0.9, true);
+  await current.settled;
+  expect(s.diagnostics()).toMatchObject({ vet: "unavailable (shown)", offer: "concealed" });
+  expect(s.diagnostics().provenance).toBeUndefined();
+  expect(s.ui.editorWrites).toEqual([]);
+  s.ui.edit("");
+  await flush();
+  expect(s.rendered()).toContain("Exhausted handoff");
+});
+
+test("changing only the fallback fences a pending verdict", async () => {
+  waterfall(["jev", "openai-decisions"]);
+  const s = await setup();
+  const current = await s.begin("Old chain handoff");
+  waterfall(["jev"]);
+  s.calls[0]!.finish();
+  await current.settled;
+  expect(s.rendered()).toBe("");
+  expect(s.diagnostics().provenance).toBeUndefined();
+  expect(s.diagnostics().vet).toContain("System 1 changed");
+});
+
+test.each(["offer_prompt", "offer_terminal"])("%s stays classifier-free under a waterfall", async tool => {
+  waterfall(["jev", "openai-decisions"]);
+  const s = await setup();
+  s.h.pi.events.on("interactive-shell:inspect", (request: any) => {
+    request.reply({ available: true, layout: "inline" });
+  });
+  const args = tool === "offer_prompt" ? { text: "Explicit handoff" } : { command: "printf explicit" };
+  const result = s.h.tools.get(tool).execute("explicit", args, undefined, undefined, s.ctx);
+  s.rendered(); // The real tool only acknowledges an offer after component output is observed.
+  await flush();
+  expect((await result).details.status).toBe("displayed");
+  waterfall(["openai-decisions", "jev"]);
+  s.h.pi.events.emit(SYSTEM1_CHANGED, {});
+  expect(s.calls).toEqual([]);
+  expect(s.diagnostics().provenance).toBeUndefined();
+  expect(s.rendered()).toContain(tool === "offer_prompt" ? "Explicit handoff" : "printf explicit");
+});
+
+test("vet exposes successful decision provenance and leaves disabled judgments unclassified", async () => {
+  waterfall(["openai-decisions", "jev"]);
+  const s = await setup();
+  const pending = { suggestion: "Next", userPrompt: "Go", assistantTail: "Done" };
+  const result = vet(s.ctx.modelRegistry, DEFAULT_CONFIG.jev, pending);
+  s.calls[0]!.finish();
+  expect(await result).toMatchObject({ show: true, provenance: { backend: "openai-decisions", fallback: false } });
+  expect(await vet(s.ctx.modelRegistry, { ...DEFAULT_CONFIG.jev, enabled: false }, pending)).toEqual({ show: true, reason: "judge off" });
+  expect(s.calls).toHaveLength(1);
+});
+
+test.each(["external", "explicit"])("a late fallback cannot replace a newer %s offer or its diagnostics", async kind => {
+  waterfall(["jev", "openai-decisions"]);
+  const s = await setup();
+  const old = await s.begin("Old automatic handoff");
+  s.calls[0]!.finish(0.9, true);
+  await flush();
+  expect(s.calls).toHaveLength(2);
+  if (kind === "external") s.h.pi.events.emit("prompt:offer", { source: "fixture", text: "Owned handoff" });
+  else {
+    const result = s.h.tools.get("offer_prompt").execute("explicit", { text: "Owned handoff" }, undefined, undefined, s.ctx);
+    s.rendered();
+    expect((await result).details.status).toBe("displayed");
+  }
+  s.calls[1]!.finish(0.1);
+  await old.settled;
+  expect(s.rendered()).toContain("Owned handoff");
+  expect(s.diagnostics().provenance).toBeUndefined();
+  expect(s.ui.editorWrites).toEqual([]);
+  expect(s.ui.press("\t")).toBe(true);
+  expect(s.ui.editorText).toBe("Owned handoff");
 });

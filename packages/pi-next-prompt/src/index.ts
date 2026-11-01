@@ -9,7 +9,7 @@ import { type KeyId, type TUI, isKeyRelease, matchesKey, truncateToWidth, visibl
 import { Type } from "typebox";
 import { loadConfig } from "./config.ts";
 import { type ClassifierQuestion, type JevConfig, askJev, bool } from "./jev.ts";
-import { SYSTEM1_CHANGED, resolveSystem1Target } from "./system1.js";
+import { SYSTEM1_CHANGED, installSystem1Notifications, provenanceOf, resolveSystem1Target, type System1DecisionProvenance } from "./system1.js";
 import { INSTRUCTION, INTERACTIVE_INSTRUCTION, PROMPT_OFFER_INSTRUCTION, extractNext } from "./tag.ts";
 import { clip, clipTail, messageText } from "./transcript.ts";
 
@@ -85,6 +85,7 @@ export interface Pending {
 export interface Verdict {
   show: boolean;
   reason: string;
+  provenance?: System1DecisionProvenance;
 }
 
 /** What the vet tells Jev about a suggestion: the prompt and the response's tail, clipped, and the suggestion. */
@@ -101,9 +102,10 @@ export async function vet(registry: unknown, config: NextPromptConfig["jev"], pe
   if (!config.enabled) return { show: true, reason: "judge off" };
   const outcome = await askJev(registry, config, vetState(pending), QUESTIONS, signal);
   if (!outcome.ok) return { show: true, reason: `judge unavailable (${outcome.reason}), shown anyway` };
+  const provenance = provenanceOf(outcome);
   const p = bool(outcome.answers, "useful");
-  if (p === undefined) return { show: true, reason: "judge gave no answer, shown anyway" };
-  return { show: p >= config.threshold, reason: `judge ${p.toFixed(2)} ${p >= config.threshold ? ">=" : "<"} ${config.threshold}` };
+  if (p === undefined) return { show: true, reason: "judge gave no answer, shown anyway", provenance };
+  return { show: p >= config.threshold, reason: `judge ${p.toFixed(2)} ${p >= config.threshold ? ">=" : "<"} ${config.threshold}`, provenance };
 }
 
 type Block = { type?: string; text?: string };
@@ -121,6 +123,7 @@ export interface Diagnostics {
   trace: DiagnosticEvent[];
   enabled: boolean; ui: string; offer: string; explicit: string; lastExplicit: string;
   instruction: string; tag: string; vet: string; outcome: string | undefined; ready: boolean;
+  provenance?: System1DecisionProvenance;
 }
 
 const offerLabel = (state: DiagnosticState) => state.offerId === null ? `generation ${state.generation}` : `offer #${state.offerId}/generation ${state.generation}`;
@@ -178,6 +181,7 @@ export function processAssistant(message: { role?: string; content?: unknown }, 
 }
 
 export default function nextPrompt(pi: ExtensionAPI) {
+  installSystem1Notifications(pi);
   let config: NextPromptConfig = DEFAULT_CONFIG;
   let sessionOn = true;
   let ui: ExtensionUIContext | undefined;
@@ -210,6 +214,7 @@ export default function nextPrompt(pi: ExtensionAPI) {
   let instruction = "not evaluated yet";
   let uiState = "not attached";
   let vetState = "not run";
+  let vetProvenance: System1DecisionProvenance | undefined;
   let mainEditor: Renderable | undefined;
   let terminal: TUI | undefined;
   let observedMainEditors = new WeakSet<Renderable>();
@@ -363,6 +368,7 @@ export default function nextPrompt(pi: ExtensionAPI) {
       if (generation === stale.generation) {
         generation++;
         vetState = "discarded (System 1 changed)";
+        vetProvenance = undefined;
       }
     }
     if (automaticOffer && automaticOffer.key !== key && automaticOffer.generation === generation && !explicit && offerSource === undefined) {
@@ -514,6 +520,7 @@ export default function nextPrompt(pi: ExtensionAPI) {
     explicitTakenThisTurn = false;
     lastTag = "none yet";
     vetState = "not run";
+    vetProvenance = undefined;
   };
 
   const show = (text: string) => {
@@ -898,11 +905,13 @@ export default function nextPrompt(pi: ExtensionAPI) {
     vetting?.controller.abort();
     vetting = request;
     vetState = "pending";
+    vetProvenance = undefined;
     const verdict = await vet(ctx.modelRegistry, config.jev, candidate, request.controller.signal);
     if (mine !== generation || vetting !== request || !ui) return;
     syncSystem1();
     if (mine !== generation || vetting !== request) return;
     vetting = undefined;
+    vetProvenance = verdict.provenance;
     vetState = !verdict.show ? "vetoed" : verdict.reason === "judge off" ? "disabled (shown)"
       : verdict.reason.startsWith("judge unavailable") ? "unavailable (shown)"
       : verdict.reason.startsWith("judge gave no answer") ? "no answer (shown)" : "approved";
@@ -926,6 +935,7 @@ export default function nextPrompt(pi: ExtensionAPI) {
     explicit: explicit ? `${explicit.kind} #${explicit.id} ${explicit.acknowledged ? "rendered" : explicit.queued ? "queued; awaiting render" : "awaiting render"}` : "",
     lastExplicit: lastExplicit.startsWith("terminal: interactive-shell unavailable:") ? "terminal: interactive-shell unavailable (see tool result)" : lastExplicit,
     instruction, tag: lastTag, vet: vetState, outcome,
+    ...(vetProvenance ? { provenance: structuredClone(vetProvenance) } : {}),
     ready: active() && shown !== undefined && !!mainFocused() && ui?.getEditorText() === "" && (!explicit || explicit.acknowledged),
   });
   const notifyDiagnostics = (lines: string[], ctx: ExtensionContext) =>

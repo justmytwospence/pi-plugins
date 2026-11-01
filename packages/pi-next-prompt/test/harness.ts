@@ -1,4 +1,20 @@
 // A minimal fake of Pi's extension API: records handlers, commands, entries and UI calls.
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import path from "node:path";
+import { afterEach, beforeEach, vi } from "vitest";
+
+// Fake/SDK consumers must never inherit the developer's System 1 policy or configuration.
+let agentDir: string;
+beforeEach(() => {
+  agentDir = mkdtempSync(path.join(tmpdir(), "pi-next-prompt-agent-"));
+  vi.stubEnv("PI_CODING_AGENT_DIR", agentDir);
+});
+afterEach(() => {
+  vi.unstubAllEnvs();
+  rmSync(agentDir, { recursive: true, force: true });
+});
+
 type Handler = (event: any, ctx: any) => unknown;
 
 export interface FakeJev {

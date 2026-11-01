@@ -132,7 +132,11 @@ test.each([["fast", "luna"], ["balanced", "terra"], ["strong", "sol"], ["premium
     writeFileSync(path.join(cwd, ".pi", "pi-subagents.json"), JSON.stringify({
       tiers: { fast: "anthropic/claude-haiku-5", balanced: "anthropic/claude-fable-5-1", strong: "anthropic/claude-opus-5-5", premium: "anthropic/claude-fable-5-1" },
     }));
-    const jev = fakeJev(() => ({ tier: { type: "choice", choice: tier, confidence: 1, probabilities: {} } }));
+    const jev = fakeJev(() => ({
+      role: { type: "choice", choice: "general", confidence: 1, probabilities: { general: 1 } },
+      tier: { type: "choice", choice: tier, confidence: 1, probabilities: {} },
+      effort: { type: "choice", choice: "medium", confidence: 1, probabilities: { medium: 1 } },
+    }));
     const h = harness();
     let tool: any;
     h.pi.registerTool = (t: unknown) => void (tool = t);
@@ -156,7 +160,11 @@ test.each([["fast", "claude-haiku-5"], ["balanced", "claude-sonnet-5-5"], ["stro
   const { setPiInvocation } = await import("../src/child.ts");
   setPiInvocation({ command: process.execPath, args: [path.join(import.meta.dirname, "fixtures", "fake-pi-loop.mjs")] });
   try {
-    const jev = fakeJev(() => ({ tier: { type: "choice", choice: tier, confidence: 1, probabilities: {} } }));
+    const jev = fakeJev(() => ({
+      role: { type: "choice", choice: "general", confidence: 1, probabilities: { general: 1 } },
+      tier: { type: "choice", choice: tier, confidence: 1, probabilities: {} },
+      effort: { type: "choice", choice: "medium", confidence: 1, probabilities: { medium: 1 } },
+    }));
     const h = harness();
     let tool: any;
     h.pi.registerTool = (t: unknown) => void (tool = t);
@@ -353,6 +361,7 @@ test("quota pressure on the parent's provider tightens Jev's picks, and the row 
       providerTiers: { p: { fast: "p/small", balanced: "p/mid", strong: "p/big" } },
     }));
     const jev = fakeJev(() => ({
+      role: { type: "choice", choice: "general", confidence: 1, probabilities: { general: 1 } },
       tier: { type: "choice", choice: "strong", confidence: 0.5, probabilities: { fast: 0.1, balanced: 0.4, strong: 0.5 } },
       effort: { type: "choice", choice: "high", confidence: 0.5, probabilities: { low: 0.05, medium: 0.25, high: 0.5, xhigh: 0.2 } },
     }));

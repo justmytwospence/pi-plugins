@@ -24,6 +24,7 @@ beforeEach(() => {
   vi.stubEnv("PI_CODING_AGENT_DIR", configDir);
 });
 afterEach(() => {
+  vi.useRealTimers();
   vi.unstubAllEnvs();
   rmSync(configDir, { recursive: true, force: true });
 });
@@ -111,34 +112,69 @@ test("judge exposes approved snapshots as subordinate context alongside later wi
   }
 });
 
-test("askJev retries a timed-out request once", async () => {
+test("askJev retries a timed-out singleton once within its remaining budget", async () => {
+  vi.useFakeTimers();
   const reg = registry([timedOut, ok]);
   const outcome = await askJev(reg, config, {}, questions);
   expect(outcome).toMatchObject({
     ok: true, answers: ok.answers, backend: "jev", provider: config.provider, model: config.model,
     selectionKey: resolveSystem1Target(config).key,
+    waterfall: ["jev"], targetKey: resolveSystem1Target(config).key, fallback: false,
+    attempts: [{ backend: "jev", status: "succeeded", sdkCalls: 2 }],
   });
   expect(reg.calls).toEqual([
-    { timeoutMs: 10, retries: 0, maxRetries: 0, signal: expect.any(AbortSignal) },
+    { timeoutMs: 5, retries: 0, maxRetries: 0, signal: expect.any(AbortSignal) },
     { timeoutMs: 10, retries: 0, maxRetries: 0, signal: expect.any(AbortSignal) },
   ]);
 });
 
+test("singleton timeout retry cannot double the total logical deadline even when the host ignores abort", async () => {
+  vi.useFakeTimers();
+  const classify = vi.fn(async (_model: unknown, _context: unknown, _options: unknown) => new Promise<never>(() => {}));
+  const reg = { findOfType: () => ({ provider: "typesafe", id: "jev-latest" }), classify };
+  const pending = askJev(reg, { ...config, timeoutMs: 100 }, {}, questions);
+  let settled = false;
+  void pending.then(() => { settled = true; });
+  await vi.advanceTimersByTimeAsync(49);
+  expect(classify).toHaveBeenCalledTimes(1);
+  expect(settled).toBe(false);
+  await vi.advanceTimersByTimeAsync(1);
+  expect(classify).toHaveBeenCalledTimes(2);
+  await vi.advanceTimersByTimeAsync(49);
+  expect(settled).toBe(false);
+  await vi.advanceTimersByTimeAsync(1);
+  expect(await pending).toMatchObject({
+    ok: false, code: "exhausted", latencyMs: 100,
+    attempts: [{ code: "timeout", sdkCalls: 2, latencyMs: 100 }],
+  });
+  expect(classify.mock.calls.map(([, , options]) => options)).toEqual([
+    { timeoutMs: 50, retries: 0, maxRetries: 0, signal: expect.any(AbortSignal) },
+    { timeoutMs: 50, retries: 0, maxRetries: 0, signal: expect.any(AbortSignal) },
+  ]);
+  expect(vi.getTimerCount()).toBe(0);
+});
+
 test("askJev gives up after the retry also times out", async () => {
   const reg = registry([timedOut, new Error("Request timed out after 10ms")]);
-  expect(await askJev(reg, config, {}, questions)).toMatchObject({ ok: false, reason: "timed out" });
+  expect(await askJev(reg, config, {}, questions)).toMatchObject({
+    ok: false, code: "exhausted", attempts: [{ backend: "jev", status: "failed", code: "timeout", sdkCalls: 2 }],
+  });
   expect(reg.calls).toHaveLength(2);
 });
 
 test("askJev does not retry other errors or a cancelled request", async () => {
   const failing = registry([{ ...timedOut, errorMessage: "System One API error (400)" }]);
-  expect(await askJev(failing, config, {}, questions)).toMatchObject({ ok: false });
+  expect(await askJev(failing, config, {}, questions)).toMatchObject({
+    ok: false, code: "exhausted", attempts: [{ backend: "jev", status: "failed", code: "provider_error", sdkCalls: 1 }],
+  });
   expect(failing.calls).toHaveLength(1);
 
   const controller = new AbortController();
   controller.abort();
   const cancelled = registry([timedOut, ok]);
-  expect(await askJev(cancelled, config, {}, questions, controller.signal)).toEqual({ ok: false, reason: "cancelled" });
+  expect(await askJev(cancelled, config, {}, questions, controller.signal)).toMatchObject({
+    ok: false, code: "cancelled", reason: "cancelled", attempts: [], latencyMs: expect.any(Number),
+  });
   expect(cancelled.calls).toHaveLength(0);
 });
 
@@ -164,6 +200,8 @@ test("compatibility exports retain accessors and use the selected target", async
 
 test("an empty question set fails without touching the registry", async () => {
   const reg = registry([ok]);
-  expect(await askJev(reg, config, {}, {})).toEqual({ ok: false, reason: "no questions to judge" });
+  expect(await askJev(reg, config, {}, {})).toMatchObject({
+    ok: false, code: "invalid_input", attempts: [], latencyMs: expect.any(Number),
+  });
   expect(reg.calls).toHaveLength(0);
 });

@@ -99,7 +99,7 @@ test("Jev unavailable keeps the level; /auto-effort off restores the ceiling", a
   await h.emit("session_start", { type: "session_start" }, ctx);
   await h.emit("before_agent_start", { prompt: "x" }, ctx);
   expect(h.thinkingChanges).toEqual([]);
-  expect(h.entries.at(-1)?.data).toMatchObject({ reason: "assessment unavailable: timed out" });
+  expect(h.entries.at(-1)?.data).toMatchObject({ reason: "assessment unavailable: Jev: timed out" });
 
   const s = setup([0]);
   await s.h.emit("session_start", { type: "session_start" }, s.ctx);

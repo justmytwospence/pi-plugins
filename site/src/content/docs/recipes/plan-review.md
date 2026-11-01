@@ -20,7 +20,7 @@ When another approach is worth a second model session, use the planners screen i
 
 On the Settings screen, choose the two real models available to your Pi installation and their effort levels.
 
-On the Tools screen, review what planners may access. The selected System 1 classifier (Jev by default, or native OpenAI Decisions via `/system1`) can suggest a selection, but your choices win. Tools selected because of `alwaysOffer` remain preselected; “a classifier chose it” is not the same as an authorization review.
+On the Tools screen, review what planners may access. The configured System 1 classifier chain (Jev only by default, with optional Jev/OpenAI Decisions ordering via `/system1`) can suggest a selection, but your choices win. Operational failure can advance to the next configured classifier; this is separate from subscription chat-model `/waterfall` routing. Tools selected because of `alwaysOffer` remain preselected; “a classifier chose it” is not the same as an authorization review.
 
 Planners have a read-only policy: ordinary file edits and writes are blocked, shell commands are checked, and MCP/tool access is narrowed. Explicit command grants and trusted tool choices widen that policy, so keep them deliberate.
 

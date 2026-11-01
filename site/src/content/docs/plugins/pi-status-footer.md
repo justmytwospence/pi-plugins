@@ -86,7 +86,7 @@ With the actual main editor focused in fullscreen Pi, a plain single left click 
 | Exec badge or `/plan-exec` hint | Inspect execution status/recovery, never launch, stop or silently complete it. |
 | Approval value (`auto`, `yolo`, etc.) or its trailing hint | Open the approvals picker; do not silently enable Yolo. |
 | Context percentage | Open the context breakdown. |
-| `S1 Jev`, `S1 Decisions` or `S1 unavailable` | Open the System 1 picker when its provider offers the action. |
+| `S1 Jev→OpenAI`, a singleton, a fallback `*` or an unknown `?` | Open the System 1 waterfall picker when its provider offers the action. |
 | Skills | Open the skills preview. |
 | Cache | Read-only cache status; no warming, compaction or spending. |
 | MCP | Open Pi's native MCP manager when pi-cc-render supplies the bridge. |
@@ -139,7 +139,9 @@ Both features are ported from [pi-cc-extensions](https://github.com/minuque/pi-c
 
 ## Understand the measurements
 
-The optional [System 1](/plugins/pi-system1/) chip shows the selected backend or unavailable state on the existing Context row, not a new row. Its availability describes local configuration, not verified credits or entitlement; compact, blocked and other-session read-only views do not offer the control. The footer makes no classifier request to display it.
+The optional [System 1](/plugins/pi-system1/) chip shows the configured native-classifier order on the existing Context row: `S1 Jev→OpenAI`, the reverse order, or a singleton. After a completed main-registry request uses a fallback it shows the actual winner with `*`, such as `S1 OpenAI*`; this is recent provenance, not a rewritten preference or a universally active physical model. `?` marks unknown health, including a cooldown that is eligible to retry but has not proved recovery, and `S1 unavailable` marks an exhausted/unavailable chain. A child's notice does not assert a main-registry route. Click the value or use `/system1 status` for order, default targets, actual requests and cooldown details.
+
+System 1 owns failure/fallback notifications and bounded retries; the footer neither classifies nor probes providers to display the chip. Local configuration does not verify entitlement, API credits or the funding source. Compact, blocked and other-session read-only views do not offer the control. This API-classifier waterfall is independent of the chat-model `/waterfall` and its subscription quota readings.
 
 Context is Pi's estimate against the actual model window. An unknown value, including immediately after compaction, is not zero usage. Cache state/timer, MCP and skills belong on this row, not the model row. `Cache cold` and `Cache unknown` name those states explicitly; `model changed` is a lower-priority qualifier. Estimated timers retain their `~` marker (for example, `Cache ~4:12`) on the same Context row, never as a separate notice. The cache-guard provider still owns timer semantics. Cache reuse in details measures the last assistant prompt on the current branch/model; it does not predict the next cache hit. See [Cache and cost](/recipes/cache-cost/).
 

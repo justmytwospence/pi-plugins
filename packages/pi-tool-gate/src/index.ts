@@ -66,7 +66,7 @@ import {
 import { type DirGrant, rulesCommand, type RuleStore } from "./rules-command.ts";
 import { whileBlocked } from "./herdr.ts";
 import { type ClassifierUsage, type JevConfig, askJev } from "./jev.ts";
-import { resolveSystem1Target, SYSTEM1_CHANGED } from "./system1.js";
+import { installSystem1Notifications, provenanceOf, resolveSystem1Target, SYSTEM1_CHANGED, type System1FailureCode } from "./system1.js";
 import {
   DEFAULT_THRESHOLDS,
   type JudgeInput,
@@ -427,6 +427,7 @@ export function judgeStateOf(branch: readonly unknown[], call: Omit<JudgeInput, 
 }
 
 export default function toolGate(pi: ExtensionAPI) {
+  installSystem1Notifications(pi);
   const settings = settingsCycles(pi);
   registerWorkflowRenderer(pi);
   // A message on a declined call is the user's words: pi-sticky-last-prompt pins it like a prompt.
@@ -1124,7 +1125,13 @@ export default function toolGate(pi: ExtensionAPI) {
         const suggestion = await askJev(ctx.modelRegistry, config.jev, { ...h.state, held_because: h.reason }, workaroundQuestion(), ctx.signal);
         if (decisionStale(h.revision) || (suggestion.ok && suggestion.selectionKey !== h.selectionKey)) return staleResult();
         ideas = suggestion.ok ? suggestions(suggestion.answers) : [];
-        if (suggestion.ok && suggestion.usage) h.recordUsage(suggestion.usage);
+        if (suggestion.usage) h.recordUsage(suggestion.usage);
+        pi.appendEntry("tool-gate:workaround", {
+          toolCallId: h.toolCallId,
+          tool: h.tool,
+          ...(suggestion.ok ? { classifier: provenanceOf(suggestion) } : { code: suggestion.code, attempts: suggestion.attempts }),
+          ...(suggestion.usage ? { usage: suggestion.usage } : {}),
+        });
       }
       const noWorkaround = ideas[0] === WORKAROUNDS.user_only;
       const advice = h.advice !== undefined ? h.advice : noWorkaround
@@ -1456,12 +1463,13 @@ export default function toolGate(pi: ExtensionAPI) {
         if (!ctx.hasUI) return { block: true, reason: `${previousFailure}\nBlocked: there is no user to approve it.` };
         return ask(ctx, { tool, input, held: previousFailure, agentCase: clip(callerText(ctx.sessionManager.getBranch(), event.toolCallId), 4_000) }, undefined);
       }
-      const unavailable = (errorClass: string) => {
+      const unavailable = (errorClass: string, metadata: Record<string, unknown> = {}, exhausted = false) => {
         const reason = `${CLASSIFIER_UNAVAILABLE} (${errorClass})`;
-        classifierFailures.set(exactFailureKey, reason);
+        // Only a completed, unavailable chain earns the identical-call hold.
+        if (exhausted) classifierFailures.set(exactFailureKey, reason);
         held++;
         status(ctx);
-        pi.appendEntry("tool-gate:decision", { tool, args: clip(p.args, 500), action: "block", errorClass });
+        pi.appendEntry("tool-gate:decision", { tool, args: clip(p.args, 500), action: "block", errorClass, ...metadata });
         return { block: true, reason };
       };
       const rules = loadRules(await contextFor(ctx.cwd));
@@ -1472,21 +1480,28 @@ export default function toolGate(pi: ExtensionAPI) {
       const outcome = await askJev(ctx.modelRegistry, config.jev, state, judgeQuestions(rules, { script: script !== undefined }), ctx.signal);
 
       if (stale() || (outcome.ok && outcome.selectionKey !== selectionKey)) return staleResult();
+      if (outcome.usage) recordUsage(outcome.usage);
       if (!outcome.ok) {
-        // Expose stable classes, never raw provider messages which may contain credentials.
-        const errorClass = outcome.reason === "timed out" ? "ClassifierTimeoutError"
-          : outcome.reason === "cancelled" ? "ClassifierCancelledError"
-          : /credentials|invalid API key/u.test(outcome.reason) ? "ClassifierCredentialsError"
-          : /no classifier model|OpenAI Decisions is unavailable|requires the native model/u.test(outcome.reason) ? "ClassifierModelUnavailableError"
-          : /invalid answers/u.test(outcome.reason) ? "ClassifierInvalidAnswerError"
-          : /off in settings/u.test(outcome.reason) ? "ClassifierDisabledError"
-          : "ClassifierUnavailableError";
-        return unavailable(errorClass);
+        // Typed terminal metadata, never an aggregated provider display sentence.
+        const classes: Partial<Record<System1FailureCode, string>> = {
+          timeout: "ClassifierTimeoutError",
+          cancelled: "ClassifierCancelledError",
+          selection_changed: "ClassifierCancelledError",
+          missing_credentials: "ClassifierCredentialsError",
+          invalid_credentials: "ClassifierCredentialsError",
+          unavailable_model: "ClassifierModelUnavailableError",
+          invalid_answers: "ClassifierInvalidAnswerError",
+          invalid_input: "ClassifierInvalidInputError",
+          refused: "ClassifierRefusedError",
+          disabled: "ClassifierDisabledError",
+        };
+        return unavailable(classes[outcome.code] ?? "ClassifierUnavailableError", {
+          code: outcome.code, attempts: outcome.attempts, usage: outcome.usage,
+        }, outcome.code === "exhausted");
       }
 
-      if (outcome.usage) recordUsage(outcome.usage);
       const v = verdict(outcome.answers, rules, config.thresholds);
-      if (!v) return unavailable("ClassifierInvalidAnswerError");
+      if (!v) return unavailable("ClassifierInvalidAnswerError", { classifier: provenanceOf(outcome), usage: outcome.usage });
       const action = v.allow ? "allow" : "hold";
       pi.appendEntry("tool-gate:decision", {
         tool,
@@ -1497,6 +1512,8 @@ export default function toolGate(pi: ExtensionAPI) {
         ...(script ? { script: script.path } : {}),
         latencyMs: outcome.latencyMs,
         inputTokens: outcome.usage?.input,
+        classifier: provenanceOf(outcome),
+        ...(outcome.usage ? { usage: outcome.usage } : {}),
       });
 
       if (action === "allow") {

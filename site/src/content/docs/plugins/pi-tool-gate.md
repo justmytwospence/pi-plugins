@@ -15,7 +15,7 @@ plugin: pi-tool-gate
 
 Tool gate separates workflow from approvals and, in auto mode, reduces routine approval interruptions while escalating risky calls. It is an approval policy inside Pi, **not a sandbox**, a complete secret scanner or a guarantee that every dangerous operation will be caught.
 
-The global [System 1](/plugins/pi-system1/) selection (`/system1`) chooses Jev by default or native OpenAI Decisions. The legacy `jev` settings still control this feature, including its enabled flag and timeout; provider/model overrides apply in Jev mode only. Decisions requires pi-system1 and its isolated API credential; it uses API billing, not subscription OAuth. Pi does not verify credit funding. A backend failure never silently switches providers.
+The global [System 1](/plugins/pi-system1/) configuration (`/system1`) sets an ordered chain of Jev and native OpenAI Decisions (Jev only by default). The legacy `jev` settings still control this feature, including its enabled flag and timeout; provider/model overrides apply only to Jev. Decisions requires pi-system1 and its isolated API credential; it uses API billing, not subscription OAuth. Pi does not verify credit funding. Operational failures can advance to the next configured backend with a notification; valid judgments and safety refusals do not trigger failover.
 
 ## Enable and requirements
 

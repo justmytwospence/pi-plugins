@@ -4,7 +4,7 @@ description: Claude Code-style plan mode in your conversation, or two constraine
 plugin: pi-plan-mode
 ---
 
-The global [System 1](/plugins/pi-system1/) selection (`/system1`) chooses Jev by default or native OpenAI Decisions for tool preselection. The legacy `jevToolSelection` switch still disables preselection; Jev provider/model settings apply in Jev mode only. Decisions requires pi-system1 and its isolated API credential; it uses API billing, not subscription OAuth. Pi does not verify credit funding. A backend failure never silently switches providers; manual selection remains available.
+The global [System 1](/plugins/pi-system1/) configuration (`/system1`) sets an ordered chain of Jev and native OpenAI Decisions for tool preselection and implementation-effort recommendations (Jev only by default). The legacy `jevToolSelection` switch disables tool preselection only; Jev provider/model settings apply to both uses only when Jev answers. Decisions requires pi-system1 and its isolated API credential; it uses API billing, not subscription OAuth. Pi does not verify credit funding. Operational failures can advance to the next configured backend with a notification; valid judgments and safety refusals do not trigger failover. Manual tool selection remains available.
 
 ## Quick reference
 

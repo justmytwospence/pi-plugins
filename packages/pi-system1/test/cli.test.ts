@@ -6,7 +6,7 @@ import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { runCli, validateCliRequest } from "../src/cli.js";
 import { registerDecisionsProvider } from "../src/provider.js";
-import type { ClassifierQuestion } from "../src/system1.js";
+import { resetSystem1Runtime, resolveSystem1Route, type ClassifierQuestion, type System1Backend } from "../src/system1.js";
 
 vi.mock("../src/provider.js", () => ({ registerDecisionsProvider: vi.fn(async () => true) }));
 
@@ -15,15 +15,16 @@ const request = { state: "legacy state", questions: { approved: { type: "noul", 
 const usage = { input: 10, output: 2, cacheRead: 0, cacheWrite: 0, totalTokens: 12,
   cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } };
 
-function select(backend: "jev" | "openai-decisions") {
-  writeFileSync(join(directory, "system1.json"), JSON.stringify({ backend }));
+function select(backend: System1Backend | System1Backend[]) {
+  writeFileSync(join(directory, "system1.json"), JSON.stringify(Array.isArray(backend) ? { waterfall: backend } : { backend }));
 }
-function registry() {
+function registry(nativeAvailable = true) {
   return {
     registerProvider: vi.fn(),
-    findOfType: vi.fn((_type: string, provider: string, id: string) => ({ type: "classifier", provider, id,
-      api: provider === "system1-openai" ? "openai-decisions" : "typesafe-system-one", baseUrl: "https://api.openai.com/v1" })),
-    classify: vi.fn(async (model: { id: string }, context: { state: Record<string, unknown>; questions: Record<string, ClassifierQuestion> }) => ({
+    findOfType: vi.fn((_type: string, provider: string, id: string) =>
+      !nativeAvailable && provider === "system1-openai" ? undefined : { type: "classifier", provider, id,
+        api: provider === "system1-openai" ? "openai-decisions" : "typesafe-system-one", baseUrl: "https://api.openai.com/v1" }),
+    classify: vi.fn(async (model: { id: string; provider: string }, context: { state: Record<string, unknown>; questions: Record<string, ClassifierQuestion> }) => ({
       stopReason: "stop", model: model.id, usage,
       answers: Object.fromEntries(Object.entries(context.questions).map(([id, q]) => [id,
         q.type === "bool" ? { type: "bool", probability: 0.83 } : q.type === "score" ? { type: "score", score: 0.6, confidence: 0.7 } :
@@ -63,8 +64,12 @@ describe("runCli", () => {
     expect(result.exitCode).toBe(0);
     expect(result.stderr).toBe("");
     const output = JSON.parse(result.stdout);
-    expect(output).toEqual({ backend, provider: backend === "jev" ? "typesafe" : "system1-openai",
-      model: backend === "jev" ? "jev-latest" : "gpt-6-luna", answers: expect.any(Object), usage });
+    const provider = backend === "jev" ? "typesafe" : "system1-openai";
+    const model = backend === "jev" ? "jev-latest" : "gpt-6-luna";
+    const key = JSON.stringify([backend, provider, model]);
+    expect(output).toEqual({ backend, provider, model, waterfall: [backend], selectionKey: key, targetKey: key,
+      fallback: false, attempts: [{ backend, provider, model, targetKey: key, status: "succeeded",
+        latencyMs: expect.any(Number), sdkCalls: 1, usage }], answers: expect.any(Object), usage });
     expect(output.answers.score.score).toBe(0.6);
     expect(output.answers.approved.probability).toBe(0.83);
     expect(registerDecisionsProvider).toHaveBeenCalledOnce();
@@ -94,6 +99,107 @@ describe("runCli", () => {
     expect(result.exitCode).toBe(0);
     expect(JSON.parse(result.stdout)).toMatchObject({ backend: "jev", model: "jev-preview" });
     expect(reg.findOfType).toHaveBeenCalledWith("classifier", "typesafe", "jev-preview");
+  });
+  it.each([
+    ["jev", "openai-decisions"], ["openai-decisions", "jev"],
+  ] satisfies System1Backend[][])("uses only the first successful rung of %j → %j", async (first, second) => {
+    select([first, second]);
+    const reg = registry();
+    const result = await runCli(request, reg);
+    expect(result.exitCode).toBe(0);
+    expect(result.stderr).toBe("");
+    expect(JSON.parse(result.stdout)).toMatchObject({ backend: first, waterfall: [first, second], fallback: false,
+      selectionKey: resolveSystem1Route({ provider: "typesafe", model: "jev-latest" }).key,
+      attempts: [{ backend: first, status: "succeeded", sdkCalls: 1 }] });
+    expect(reg.classify).toHaveBeenCalledOnce();
+  });
+  it.each([
+    ["jev", "openai-decisions"], ["openai-decisions", "jev"],
+  ] satisfies System1Backend[][])("reports the actual fallback for %j → %j and aggregates attempted usage once", async (first, second) => {
+    select([first, second]);
+    const reg = registry();
+    reg.classify.mockResolvedValueOnce({ model: "failed-model", answers: {}, usage, stopReason: "error",
+      errorMessage: "429 insufficient_quota credits exhausted private-provider-body" } as never);
+    const result = await runCli(request, reg);
+    expect(result.exitCode).toBe(0);
+    const output = JSON.parse(result.stdout);
+    const provider = second === "jev" ? "typesafe" : "system1-openai";
+    const model = second === "jev" ? "jev-latest" : "gpt-6-luna";
+    expect(output).toMatchObject({ backend: second, provider, model, waterfall: [first, second], fallback: true,
+      selectionKey: resolveSystem1Route({ provider: "typesafe", model: "jev-latest" }).key,
+      targetKey: JSON.stringify([second, provider, model]),
+      attempts: [{ backend: first, status: "failed", code: "quota_exhausted", sdkCalls: 1, usage },
+        { backend: second, status: "succeeded", sdkCalls: 1, usage }],
+      usage: { ...usage, input: 20, output: 4, totalTokens: 24 } });
+    expect(output.answers.approved.probability).toBe(0.83);
+    expect(result.stderr).toBe(first === "jev"
+      ? "System 1: Jev unavailable (quota or credits exhausted); trying OpenAI Decisions.\n"
+      : "System 1: OpenAI Decisions unavailable (quota or credits exhausted); trying Jev.\n");
+    expect(result.stdout + result.stderr).not.toContain("private-provider-body");
+    expect(reg.classify).toHaveBeenCalledTimes(2);
+  });
+  it("keeps a server-reported Jev model distinct from the configured target key", async () => {
+    select(["jev", "openai-decisions"]);
+    const reg = registry();
+    reg.classify.mockResolvedValueOnce({ model: "jev-version-123", answers: { approved: { type: "bool", probability: 0.4 } },
+      stopReason: "stop" } as never);
+    const result = await runCli(request, reg);
+    expect(JSON.parse(result.stdout)).toMatchObject({ model: "jev-version-123", fallback: false,
+      targetKey: JSON.stringify(["jev", "typesafe", "jev-latest"]), usage: null,
+      attempts: [{ model: "jev-latest", sdkCalls: 1 }] });
+  });
+  it.each([false, "throws"] as const)("keeps Jev viable after optional native registration returns %j", async (registered) => {
+    vi.mocked(registerDecisionsProvider).mockImplementation(async () => {
+      if (registered === "throws") throw new Error("private-registration-body");
+      return registered;
+    });
+    for (const waterfall of [["jev"], ["jev", "openai-decisions"], ["openai-decisions", "jev"]] satisfies System1Backend[][]) {
+      select(waterfall);
+      const reg = registry(false);
+      const result = await runCli(request, reg);
+      expect(result.exitCode).toBe(0);
+      expect(JSON.parse(result.stdout)).toMatchObject({ backend: "jev", waterfall, fallback: waterfall[0] !== "jev" });
+      expect(reg.classify).toHaveBeenCalledOnce();
+      expect(reg.classify.mock.calls[0][0].provider).toBe("typesafe");
+      expect(result.stderr).not.toContain("private-registration-body");
+      if (waterfall[0] === "openai-decisions") {
+        expect(result.stderr).toContain("trying Jev");
+        expect(JSON.parse(result.stdout).attempts).toMatchObject([
+          { backend: "openai-decisions", code: "unavailable_model", sdkCalls: 0 }, { backend: "jev", sdkCalls: 1 },
+        ]);
+      } else expect(result.stderr).toBe("");
+    }
+  });
+  it("works without the optional registry registration method", async () => {
+    select(["openai-decisions", "jev"]);
+    const { registerProvider: _unused, ...reg } = registry(false);
+    expect((await runCli(request, reg)).exitCode).toBe(0);
+    expect(registerDecisionsProvider).not.toHaveBeenCalled();
+    expect(reg.classify).toHaveBeenCalledOnce();
+  });
+  it("fails only after the entire configured chain is exhausted and keeps stdout empty", async () => {
+    select(["jev", "openai-decisions"]);
+    const reg = registry();
+    reg.classify.mockResolvedValue({ model: "failed-model", answers: {}, stopReason: "error",
+      errorMessage: "401 invalid API key private-provider-body" } as never);
+    const result = await runCli(request, reg);
+    expect(result).toMatchObject({ exitCode: 1, stdout: "" });
+    expect(result.stderr).toContain("System 1: Jev unavailable");
+    expect(result.stderr).toContain("trying OpenAI Decisions");
+    expect(result.stderr).toContain("OpenAI Decisions unavailable");
+    expect(result.stderr).toContain("system1: ");
+    expect(result.stderr).not.toContain("private-provider-body");
+    expect(reg.classify).toHaveBeenCalledTimes(2);
+  });
+  it("does not fail over after a native safety refusal", async () => {
+    select(["openai-decisions", "jev"]);
+    const reg = registry();
+    reg.classify.mockResolvedValueOnce({ model: "gpt-6-luna", answers: {}, stopReason: "error",
+      errorMessage: "OpenAI Decisions refused to answer approved" } as never);
+    const result = await runCli(request, reg);
+    expect(result).toMatchObject({ exitCode: 1, stdout: "" });
+    expect(result.stderr).toContain("safety refusals do not fail over");
+    expect(reg.classify).toHaveBeenCalledOnce();
   });
   it.each([
     undefined, null, "string", [], {}, { questions: request.questions }, { state: "x" },
@@ -126,28 +232,79 @@ describe("runCli", () => {
     expect(registerDecisionsProvider).not.toHaveBeenCalled();
   });
   it.each([
-    [{ ...request, model: "gpt-6-luna" }, "model override"],
-    [{ ...request, assets: {} }, "assets"],
-    [{ ...request, long_context: false }, "long_context"],
-    [{ ...request, questions: { box: { type: "box", instructions: "Find it" } } }, "box"],
-  ])("rejects TypeSafe-only native options explicitly before any call: %j", async (input, reason) => {
-    select("openai-decisions");
+    ["jev", "openai-decisions"], ["openai-decisions", "jev"], ["openai-decisions"],
+  ] satisfies System1Backend[][])("rejects model overrides for the entire %j policy before bootstrap", async (...waterfall) => {
+    select(waterfall);
+    const input = { ...request, model: "jev-preview" };
     const reg = registry();
-    const result = await runCli(input, reg);
-    expect(result.exitCode).toBe(2);
-    expect(result.stderr).toContain(reason);
-    expect(result.stderr).toContain("OpenAI Decisions does not support");
+    expect(validateCliRequest(input)).toMatchObject({ exitCode: 2, stderr: expect.stringContaining("model override") });
+    expect(await runCli(input, reg)).toMatchObject({ exitCode: 2, stdout: "", stderr: expect.stringContaining("Jev-only") });
     expect(registerDecisionsProvider).not.toHaveBeenCalled();
     expect(reg.findOfType).not.toHaveBeenCalled();
     expect(reg.classify).not.toHaveBeenCalled();
   });
-  it("rejects a model override if the backend changes during registration", async () => {
+  it.each([
+    [{ ...request, assets: {} }, "assets"],
+    [{ ...request, long_context: false }, "long_context"],
+    [{ ...request, questions: { box: { type: "box", instructions: "Find it" } } }, "box"],
+  ])("directs experimental requests to the explicit Jev-only legacy helper before any call: %j", async (input, reason) => {
+    for (const policy of [undefined, "jev", ["jev"], "openai-decisions", ["jev", "openai-decisions"], ["openai-decisions", "jev"]] as const) {
+      if (policy) select(typeof policy === "string" ? policy : [...policy]);
+      const reg = registry();
+      expect(validateCliRequest(input)).toMatchObject({ exitCode: 2 });
+      const result = await runCli(input, reg);
+      expect(result.exitCode).toBe(2);
+      expect(result.stdout).toBe("");
+      expect(result.stderr).toContain(reason);
+      expect(result.stderr).toContain("legacy jev-ask");
+      expect(result.stderr).toContain('explicit Jev-only chain (waterfall: ["jev"])');
+      expect(registerDecisionsProvider).not.toHaveBeenCalled();
+      expect(reg.findOfType).not.toHaveBeenCalled();
+      expect(reg.classify).not.toHaveBeenCalled();
+    }
+  });
+  it.each([true, false, "throws"] as const)("fences chain edits after registration outcome %j, even with an unchanged first rung", async (registered) => {
+    select(["jev", "openai-decisions"]);
+    vi.mocked(registerDecisionsProvider).mockImplementationOnce(async () => {
+      select(["jev"]);
+      if (registered === "throws") throw new Error("private-registration-body");
+      return registered;
+    });
+    const reg = registry();
+    const result = await runCli(request, reg);
+    expect(result).toMatchObject({ exitCode: 1, stdout: "", stderr: expect.stringContaining("selection changed") });
+    expect(reg.findOfType).not.toHaveBeenCalled();
+    expect(reg.classify).not.toHaveBeenCalled();
+  });
+  it("does not reinterpret an override when registration switches Jev to Decisions", async () => {
     vi.mocked(registerDecisionsProvider).mockImplementationOnce(async () => { select("openai-decisions"); return true; });
     const reg = registry();
-    const result = await runCli({ ...request, model: "jev-preview" }, reg);
-    expect(result.exitCode).toBe(2);
-    expect(result.stderr).toContain("model override");
+    expect(await runCli({ ...request, model: "jev-preview" }, reg)).toMatchObject({ exitCode: 1, stdout: "",
+      stderr: expect.stringContaining("selection changed") });
     expect(reg.classify).not.toHaveBeenCalled();
+  });
+  it.each(["reorder", "malformed"] as const)("fences a %s policy during bootstrap without model lookup", async (change) => {
+    select(["jev", "openai-decisions"]);
+    vi.mocked(registerDecisionsProvider).mockImplementationOnce(async () => {
+      if (change === "reorder") select(["openai-decisions", "jev"]);
+      else writeFileSync(join(directory, "system1.json"), "{broken");
+      return true;
+    });
+    const reg = registry();
+    expect(await runCli(request, reg)).toMatchObject({ exitCode: 1, stdout: "", stderr: expect.stringContaining("selection changed") });
+    expect(reg.findOfType).not.toHaveBeenCalled();
+    expect(reg.classify).not.toHaveBeenCalled();
+  });
+  it("fences a manual reset during registration", async () => {
+    const reg = registry();
+    vi.mocked(registerDecisionsProvider).mockImplementationOnce(async () => { resetSystem1Runtime(reg); return true; });
+    expect(await runCli(request, reg)).toMatchObject({ exitCode: 1, stdout: "", stderr: expect.stringContaining("selection changed") });
+    expect(reg.classify).not.toHaveBeenCalled();
+  });
+  it("accepts legacy canonicalization during registration without a policy change", async () => {
+    select("jev");
+    vi.mocked(registerDecisionsProvider).mockImplementationOnce(async () => { select(["jev"]); return true; });
+    expect((await runCli(request, registry())).exitCode).toBe(0);
   });
   it("reports malformed selection as unavailable, without registering or falling back", async () => {
     writeFileSync(join(directory, "system1.json"), "{broken");
@@ -156,14 +313,31 @@ describe("runCli", () => {
     expect(registerDecisionsProvider).not.toHaveBeenCalled();
     expect(reg.classify).not.toHaveBeenCalled();
   });
-  it("fails cleanly on an unsupported native host without trying Jev", async () => {
+  it.each([
+    { waterfall: [], backend: "jev" }, { waterfall: ["jev", "jev"] }, { waterfall: ["jev", "unknown"] },
+  ])("rejects an invalid authoritative chain before registration: %j", async (setting) => {
+    writeFileSync(join(directory, "system1.json"), JSON.stringify(setting));
+    const reg = registry();
+    expect(validateCliRequest(request)).toMatchObject({ exitCode: 1 });
+    expect(await runCli(request, reg)).toMatchObject({ exitCode: 1, stdout: "" });
+    expect(registerDecisionsProvider).not.toHaveBeenCalled();
+    expect(reg.findOfType).not.toHaveBeenCalled();
+    expect(reg.classify).not.toHaveBeenCalled();
+  });
+  it("uses the authoritative waterfall rather than its legacy primary mirror", async () => {
+    writeFileSync(join(directory, "system1.json"), JSON.stringify({ waterfall: ["openai-decisions", "jev"], backend: "jev" }));
+    const result = await runCli(request, registry());
+    expect(JSON.parse(result.stdout)).toMatchObject({ backend: "openai-decisions", waterfall: ["openai-decisions", "jev"] });
+  });
+  it("exhausts an unsupported native-only host without trying unconfigured Jev", async () => {
     select("openai-decisions");
     vi.mocked(registerDecisionsProvider).mockResolvedValue(false);
-    const reg = registry();
+    const reg = registry(false);
     const result = await runCli(request, reg);
-    expect(result.exitCode).toBe(1);
-    expect(result.stderr).toContain("/login system1-openai");
-    expect(reg.findOfType).not.toHaveBeenCalled();
+    expect(result).toMatchObject({ exitCode: 1, stdout: "" });
+    expect(result.stderr).toContain("OpenAI Decisions");
+    expect(reg.findOfType).toHaveBeenCalledExactlyOnceWith("classifier", "system1-openai", "gpt-6-luna");
+    expect(reg.classify).not.toHaveBeenCalled();
   });
   it.each(["No API key for provider", "401 invalid API key", "429 insufficient_quota credits exhausted"])
     ("exits 1 for native provider failures without fallback: %s", async (message) => {
@@ -173,7 +347,7 @@ describe("runCli", () => {
       const result = await runCli(request, reg);
       expect(result.exitCode).toBe(1);
       expect(result.stdout).toBe("");
-      expect(result.stderr).toMatch(/OpenAI Decisions API/u);
+      expect(result.stderr).toContain("OpenAI Decisions");
       expect(reg.findOfType).toHaveBeenCalledOnce();
       expect(reg.findOfType).toHaveBeenCalledWith("classifier", "system1-openai", "gpt-6-luna");
       expect(reg.classify).toHaveBeenCalledOnce();
@@ -183,8 +357,8 @@ describe("runCli", () => {
     reg.classify.mockRejectedValueOnce(new Error("secret-private-body"));
     expect((await runCli(request, reg)).stderr).not.toContain("secret-private-body");
     vi.mocked(registerDecisionsProvider).mockRejectedValueOnce(new Error("secret-private-key"));
-    const result = await runCli(request, reg);
-    expect(result.exitCode).toBe(1);
+    const result = await runCli(request, registry());
+    expect(result.exitCode).toBe(0);
     expect(result.stderr).not.toContain("secret-private-key");
   });
 });
@@ -297,7 +471,11 @@ describe("plain Node installed-host bootstrap", () => {
     select("openai-decisions");
     const result = invoke(JSON.stringify(request), { PI_PACKAGE_DIR: sdk });
     expect(result.status, result.stderr).toBe(0);
+    const key = JSON.stringify(["openai-decisions", "system1-openai", "gpt-6-luna"]);
     expect(JSON.parse(result.stdout)).toEqual({ backend: "openai-decisions", provider: "system1-openai", model: "gpt-6-luna",
+      waterfall: ["openai-decisions"], selectionKey: key, targetKey: key, fallback: false,
+      attempts: [{ backend: "openai-decisions", provider: "system1-openai", model: "gpt-6-luna", targetKey: key,
+        status: "succeeded", latencyMs: expect.any(Number), sdkCalls: 1 }],
       answers: { approved: { type: "bool", probability: 0.91 } }, usage: null });
   });
   it("finds the installed SDK from a real pi executable, skipping npm's dev bin", () => {

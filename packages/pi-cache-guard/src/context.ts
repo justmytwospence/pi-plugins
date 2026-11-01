@@ -9,7 +9,7 @@
 //    recovery) writes the summary in code, with no LLM; `/compact` and threshold compaction run
 //    Pi's own summarizer on the filtered conversation and append the verbatim items.
 //
-// Without Jev (not set up, or off) none of this runs and Pi compacts as it always does.
+// Without an available System 1 rung (or when off), Pi compacts as it always does.
 import { mkdirSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { compact } from "@earendil-works/pi-coding-agent";
@@ -35,7 +35,7 @@ import {
   verbatimSection,
 } from "./lean.ts";
 import { extractUnits, filterMessages, lastUserMessages, recentTexts } from "./units.ts";
-import { SYSTEM1_CHANGED, resolveSystem1Target, type ClassifierProvenance } from "./system1.ts";
+import { SYSTEM1_CHANGED, provenanceOf, resolveSystem1Target, type System1Attempt, type System1DecisionProvenance, type System1FailureCode } from "./system1.ts";
 
 /** Session entries recording each Jev decision (never sent to the model). */
 export const DECISION_TYPE = "cache-guard:jev";
@@ -45,6 +45,19 @@ export const TRIM_STATUS_KEY = "lean-context";
 const RECHECK_MS = 60_000;
 
 type Content = { type: string; text?: string; [key: string]: unknown };
+
+/** One logical batch, ordered by input rather than asynchronous completion. */
+interface BatchDecision {
+  batch: number;
+  units: string[];
+  classifier?: System1DecisionProvenance;
+  code?: System1FailureCode;
+  reason?: string;
+  attempts: System1Attempt[];
+  selectionKey?: string;
+  latencyMs: number;
+  usage?: ClassifierUsage;
+}
 
 export interface JevCompaction {
   /** What the compacted conversation continues toward; default: the instructions or the last requests. */
@@ -183,13 +196,13 @@ export function leanContext(pi: ExtensionAPI): Lean {
     const availabilityKey = jevKey;
     const jev = await jevState;
     if (jev.kind !== "ready" || keyOf(loadSettings(ctx.cwd)) !== availabilityKey || jevKey !== availabilityKey) return undefined;
-    const op = operation(ctx, jev.target, ctx.signal);
+    const op = operation(ctx, jev.jevTarget, ctx.signal);
     try {
       const { lines, blocks } = blocksFor(text, settings.trim);
       const texts = recentTexts(ctx.sessionManager.getBranch());
       const state = trimState({ user_request: texts.user, agent_said: texts.assistant, tool: event.toolName, arguments: JSON.stringify(event.input) }, blocks);
       if (!op.valid()) return undefined;
-      const outcome = await askJev(ctx.modelRegistry, jev.target, settings.jev.timeoutMs, state, trimQuestions(blocks), op.signal);
+      const outcome = await askJev(ctx.modelRegistry, jev.jevTarget, settings.jev.timeoutMs, state, trimQuestions(blocks), op.signal);
       const usage = addUsage(event.usage as ClassifierUsage | undefined, outcome.usage);
       const passUsage = usage ? { usage: usage as never } : undefined;
       if (!outcome.ok || !op.valid() || outcome.selectionKey !== op.selectionKey) return passUsage;
@@ -204,7 +217,8 @@ export function leanContext(pi: ExtensionAPI): Lean {
         blocks: blocks.length,
         latencyMs: outcome.latencyMs,
         inputTokens: outcome.usage?.input,
-        classifier: { backend: outcome.backend, provider: outcome.provider, model: outcome.model },
+        usage: outcome.usage,
+        classifier: provenanceOf(outcome),
       });
       if (!verdict.trim) return passUsage;
       try {
@@ -252,20 +266,25 @@ export function leanContext(pi: ExtensionAPI): Lean {
     if (!units.length) return jevOnly ? fail("nothing to judge") : undefined;
 
     const goal = request?.goal?.trim() || event.customInstructions?.trim() || lastUserMessages(event.branchEntries, 2);
-    const op = operation(ctx, jev.target, event.signal);
+    const op = operation(ctx, jev.jevTarget, event.signal);
+    const classifiers: BatchDecision[] = [];
     try {
       const recordFailure = (reason: string, usage?: ClassifierUsage) => {
         // A cancelled/failed compaction has no usage-bearing compaction entry. Retain all
         // attempted classifier usage in the decision audit entry, including failed batches.
-        if (usage) pi.appendEntry(DECISION_TYPE, { kind: "compact", failed: true, reason, usage });
+        if (usage || classifiers.length) pi.appendEntry(DECISION_TYPE, { kind: "compact", failed: true, reason, usage, classifiers });
         return fail(reason);
       };
-      const judged = await judgeUnits(ctx, jev.target, units, goal, op);
+      const judged = await judgeUnits(ctx, jev.jevTarget, units, goal, op, classifiers);
       if (!judged.ok) return recordFailure(judged.reason, judged.usage);
       if (!op.valid()) return recordFailure(event.signal.aborted ? "cancelled" : changed, judged.usage);
       const { keep, usage } = judged;
       const counts = keepCounts(keep);
-      const recordSuccess = () => pi.appendEntry(DECISION_TYPE, { kind: "compact", jevOnly, units: units.length, ...counts, latencyMs: judged.latencyMs, usage, classifier: judged.classifier });
+      const recordSuccess = () => pi.appendEntry(DECISION_TYPE, {
+        kind: "compact", jevOnly, units: units.length, ...counts, latencyMs: judged.latencyMs, usage,
+        classifier: classifiers.length === 1 ? classifiers[0]?.classifier : undefined,
+        classifiers,
+      });
 
       if (jevOnly) {
         recordSuccess();
@@ -314,25 +333,34 @@ export function leanContext(pi: ExtensionAPI): Lean {
     }
   });
 
-  async function judgeUnits(ctx: ExtensionContext, target: { provider: string; model: string }, units: Unit[], goal: string, op: ReturnType<typeof operation>) {
+  async function judgeUnits(ctx: ExtensionContext, target: { provider: string; model: string }, units: Unit[], goal: string, op: ReturnType<typeof operation>, classifiers: BatchDecision[]) {
     const started = Date.now();
     const keep = new Map<string, Keep>();
     let usage: ClassifierUsage | undefined;
-    const queue = batches(units);
+    const queue = batches(units).map((units, batch) => ({ units, batch }));
     let reason: string | undefined;
-    let classifier: ClassifierProvenance | undefined;
     const timeoutMs = settings.compact.timeoutMs;
     const concurrency = settings.compact.concurrency;
     const worker = async () => {
-      for (let batch = queue.shift(); batch && !reason; batch = queue.shift()) {
-        // One captured selection owns every batch. Never start a later batch on a
-        // newly-selected backend, even if a file change arrived without an event.
+      for (let item = queue.shift(); item && !reason; item = queue.shift()) {
+        const batch = item.units;
+        // One captured order owns every batch. Winners may differ, but never start a
+        // later batch under a replacement order, even without a change event.
         if (!op.valid()) {
           reason ??= op.signal.aborted ? "cancelled or System 1 changed" : changed;
           return;
         }
         const outcome = await askJev(ctx.modelRegistry, target, timeoutMs, keepState(goal, batch), keepQuestions(batch), op.signal);
         usage = addUsage(usage, outcome.usage);
+        classifiers.push({
+          batch: item.batch,
+          units: batch.map((unit) => unit.id),
+          ...(outcome.ok ? { classifier: provenanceOf(outcome) } : { code: outcome.code, reason: outcome.reason }),
+          attempts: outcome.attempts,
+          selectionKey: outcome.selectionKey,
+          latencyMs: outcome.latencyMs,
+          usage: outcome.usage,
+        });
         if (!op.valid() || (outcome.ok && outcome.selectionKey !== op.selectionKey)) {
           reason ??= "cancelled or System 1 changed";
           return;
@@ -341,13 +369,13 @@ export function leanContext(pi: ExtensionAPI): Lean {
           reason ??= outcome.reason;
           return;
         }
-        classifier = { backend: outcome.backend, provider: outcome.provider, model: outcome.model };
         keepAnswers(batch, outcome.answers, keep);
       }
     };
     await Promise.all(Array.from({ length: Math.max(1, concurrency) }, worker));
+    classifiers.sort((a, b) => a.batch - b.batch);
     if (reason) return { ok: false as const, reason: `classification failed (${reason})`, usage };
-    return { ok: true as const, keep, usage, classifier, latencyMs: Date.now() - started };
+    return { ok: true as const, keep, usage, latencyMs: Date.now() - started };
   }
 
   return {

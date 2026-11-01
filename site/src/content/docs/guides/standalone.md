@@ -23,7 +23,7 @@ PI_CODING_AGENT_DIR="$(mktemp -d)" pi --offline --no-extensions --no-skills \
 
 This example is for input and startup checks without credentials. A model-driven feature still needs its own model or classifier configuration. Do not copy credentials into a public reproduction.
 
-Standalone classifier features work with Jev without loading `pi-system1`. The global System 1 selection defaults to Jev; use `/system1` when `pi-system1` is loaded to select a backend. OpenAI Decisions requires that component's isolated `system1-openai` provider registration and its own API key (`/login system1-openai` or `SYSTEM1_OPENAI_API_KEY`). If Decisions is selected but the component is absent, classification fails visibly rather than falling back to Jev. See [Requirements & costs](/guides/requirements/) for the Pro-credit billing prerequisites.
+Standalone classifier features work with Jev without loading `pi-system1`. The global System 1 order defaults to Jev only; use `/system1` when `pi-system1` is loaded to configure an order. OpenAI Decisions requires that component's isolated `system1-openai` provider registration and its own API key (`/login system1-openai` or `SYSTEM1_OPENAI_API_KEY`). If Decisions is unavailable, an operational failure can advance to Jev only when Jev is next in the configured order; a Decisions-only order fails. See [Requirements & costs](/guides/requirements/) for the Pro-credit billing prerequisites.
 
 ## Optional composition
 

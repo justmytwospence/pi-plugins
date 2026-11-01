@@ -1,20 +1,23 @@
 // The history of live eval runs, one JSON line per run in `evals/results/<target>.jsonl` (git-ignored).
-// Node builtins only, no imports from any package.
+// Node builtins and siblings only, no imports from any package.
 //
-// A record: `{ at, commit, dirty, seed, params, spend, calls, metrics, compare?, classifier? }`
+// A record: `{ at, commit, dirty, seed, params, spend, calls, metrics, compare?, configuredPolicy?, actualProviders? }`
 //   at       ISO time of the run
 //   commit   `git rev-parse --short HEAD` of the repository, "unknown" outside a checkout
 //   dirty    true when the working tree has uncommitted changes
 //   seed     the EVAL_SEED the run printed
 //   params   every EVAL_* variable that was set
-//   spend    catalog-estimated USD reported by the classifier (see spend.ts); calls = number of classifier calls
+//   spend    catalog-estimated USD reported by the classifier (see spend.ts); calls = logical requests
 //   metrics  the numbers the eval prints, a flat object of numbers
 //   compare  the same for the old behaviour, with EVAL_COMPARE=1
-//   classifier  actual backend, provider and model; absent on legacy records
+//   configuredPolicy  ordered configured targets, never a claim about the actual winner
+//   actualProviders   successful logical judgments counted by actual backend/provider/model
+//   classifier        older single-provider provenance; still readable, never inferred from policy
 import { execFileSync } from "node:child_process";
 import { appendFileSync, mkdirSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import type { AttemptAudit } from "./spend.ts";
 
 export type Metrics = Record<string, number>;
 
@@ -23,6 +26,20 @@ export interface ClassifierProvenance {
   provider: string;
   model: string;
 }
+
+/** Policy identity is separate from the providers actually observed in a run. */
+export interface ConfiguredClassifierPolicy {
+  waterfall?: string[];
+  targets?: ClassifierProvenance[];
+  key?: string;
+  /** Compatibility metadata from older direct runner callers; not observed provenance. */
+  backend?: string;
+  provider?: string;
+  model?: string;
+}
+
+/** Counts of successful logical judgments by actual backend/provider/model identity. */
+export type ActualProviderMix = Record<string, number>;
 
 export interface ResultRecord {
   at: string;
@@ -34,7 +51,13 @@ export interface ResultRecord {
   calls: number;
   metrics: Metrics;
   compare?: Metrics;
+  /** Legacy single-provider record, not populated from the current configured policy. */
   classifier?: ClassifierProvenance;
+  configuredPolicy?: ConfiguredClassifierPolicy;
+  actualProviders?: ActualProviderMix;
+  backendAttempts?: Record<string, number>;
+  registryCalls?: number;
+  attempts?: AttemptAudit[];
 }
 
 /** What an eval supplies; `at`, `commit`, `dirty` and `params` are filled in when omitted. */
@@ -131,6 +154,29 @@ export function diff(prev: unknown, next: unknown): Delta {
 
 /** Warn when provenance is unknown or differs; unknown records are never assumed to use a particular classifier. */
 export function comparisonWarning(prev: ResultRecord, next: ResultRecord): string | undefined {
+  const policy = (r: ResultRecord) => {
+    const c = r.configuredPolicy ?? r.classifier;
+    if (!c) return undefined;
+    const configured = r.configuredPolicy;
+    const targets = configured?.targets ?? (c.backend && c.provider && c.model ? [{ backend: c.backend, provider: c.provider, model: c.model }] : undefined);
+    return JSON.stringify([configured?.waterfall ?? targets?.map((t) => t.backend) ?? null,
+      targets?.map((t) => [t.backend, t.provider, t.model]) ?? null]);
+  };
+  if (prev.configuredPolicy || next.configuredPolicy || Object.keys(prev.actualProviders ?? {}).length || Object.keys(next.actualProviders ?? {}).length) {
+    const a = policy(prev);
+    const b = policy(next);
+    if (!a || !b) return "Configured classifier policy is legacy/unknown; numeric comparison suppressed.";
+    if (a !== b) return "Configured classifier chains differ; numeric comparison suppressed.";
+    if (!prev.actualProviders || !next.actualProviders) return "Actual provider mix is legacy/unknown; numeric comparison suppressed.";
+    // Compare proportions, not raw sample counts; doubling an otherwise identical run is comparable.
+    const mix = (counts: ActualProviderMix) => {
+      const entries = Object.entries(counts).filter(([, n]) => n > 0).sort(([a], [b]) => a.localeCompare(b));
+      const total = entries.reduce((n, [, count]) => n + count, 0);
+      return JSON.stringify(entries.map(([key, count]) => [key, count / total]));
+    };
+    if (mix(prev.actualProviders) !== mix(next.actualProviders)) return "Actual provider mixes differ; numeric comparison suppressed.";
+    return undefined;
+  }
   const a = prev.classifier;
   const b = next.classifier;
   if (!a || !b) return "Classifier provenance is legacy/unknown; comparison may not be meaningful.";
@@ -141,7 +187,7 @@ export function comparisonWarning(prev: ResultRecord, next: ResultRecord): strin
 
 /** Compare numbers only for matching classifiers or two legacy records. */
 export function diffRecords(prev: ResultRecord, next: ResultRecord): Delta {
-  if ((prev.classifier || next.classifier) && comparisonWarning(prev, next)) return {};
+  if ((prev.classifier || next.classifier || prev.configuredPolicy || next.configuredPolicy || Object.keys(prev.actualProviders ?? {}).length || Object.keys(next.actualProviders ?? {}).length) && comparisonWarning(prev, next)) return {};
   const pick = (r: ResultRecord) => ({ spend: r.spend, calls: r.calls, metrics: r.metrics, ...(r.compare ? { compare: r.compare } : {}) });
   return diff(pick(prev), pick(next));
 }

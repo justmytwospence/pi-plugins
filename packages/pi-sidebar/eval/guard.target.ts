@@ -39,9 +39,13 @@ export default defineEval({
     const refused = worst(scored, "readonly");
     const cleared = worst(scored, "writes");
     const classifiers = [...new Set(scored.flatMap((s) => s.classifier ? [`${s.classifier.backend} (${s.classifier.provider}/${s.classifier.model})`] : []))];
+    const policy = ctx.classifier?.waterfall?.join(" → ")
+      || ctx.classifier?.targets?.map((t) => `${t.backend} (${t.provider}/${t.model})`).join(" → ")
+      || ctx.classifier?.backend || "legacy/unknown";
     const report = [
       `sidebar guard: EVAL_SEED=${seed}, ${sessions.length} sessions, refuses at ${CHANGE_THRESHOLD} or more; reported usage includes failed outcomes`,
-      `classifier: ${classifiers.join(", ") || (ctx.classifier ? `${ctx.classifier.backend} (${ctx.classifier.provider}/${ctx.classifier.model})` : "legacy/unknown")}`,
+      `configured classifier policy: ${policy}`,
+      `actual classifiers: ${classifiers.join(", ") || "legacy/unknown (no successful provenance)"}`,
       ctx.table([
         ["rules say", "n", "of those classifier disagrees"],
         ["read-only (should be cleared)", summary.readonlyN, `${summary.readonlyWronglyRefused} refused (${fixed(summary.readonlyRefusedRate)})`],

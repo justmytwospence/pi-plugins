@@ -21,7 +21,7 @@ export type ToolTreeResult =
 
 /** System 1 preselection, arriving after the screen opens. */
 export interface ToolPreselection {
-  /** The actual selected backend, captured before judging; never inferred from the chat model. */
+  /** Configured preferred order, captured before judging; not a claim about the eventual winner. */
   label?: string;
   /** Resolves to a one-line summary and a guarded function that applies the picks to the tree. */
   pending: Promise<{ message: string; isCurrent?(): boolean; apply(keepSelection: boolean): void }>;
@@ -249,7 +249,7 @@ export class ToolTreeView implements Component {
     const selectedCount = all.filter((leaf) => leaf.selected).length;
     const jev =
       this.jevStatus?.kind === "pending"
-        ? `${theme.fg("accent", spinner())} ${theme.fg("muted", `${this.options.preselection?.label ?? "Classifier"}: picking tools…`)}`
+        ? `${theme.fg("accent", spinner())} ${theme.fg("muted", `Preferred ${this.options.preselection?.label ?? "classifier"}; picking tools…`)}`
         : this.jevStatus?.kind === "done"
           ? theme.fg("muted", this.jevStatus.message)
           : undefined;

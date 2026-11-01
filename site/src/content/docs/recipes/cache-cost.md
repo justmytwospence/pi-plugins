@@ -19,7 +19,7 @@ Keep the distinctions clear:
 - **Context usage** estimates how much of the model window is occupied.
 - **Cache reuse** describes the last measured request, not the next one.
 - **Cache time left** is based on request timing and known TTL, not direct access to the provider’s cache.
-- **Cost** is the reported token-price estimate, not a subscription invoice.
+- **Cost** is the reported token-price estimate, not a subscription invoice or classifier API credit balance. Subscription windows and throttles are separate measurements.
 - **Quota used** is account-level data, when available and fresh.
 
 ## Decide when the cache is cold
@@ -35,7 +35,7 @@ Choose based on the work:
 - **Compact quickly** when an assembled selection of exact requirements, decisions and file notes is enough.
 - **Start fresh** when the next request is independent.
 
-A model switch can also make the cache cold. System/tool changes and other invalidations are not all visible to the clock.
+The classifier `/system1` order is separate from `/waterfall`, which routes subscription chat models. A chat model switch can also make the cache cold. System/tool changes and other invalidations are not all visible to the clock.
 
 ## Enable classifier features deliberately
 
@@ -47,7 +47,7 @@ Cache guard’s warnings and clock work without a classifier. Its optional trimm
 }
 ```
 
-Use `/system1` to choose the global classifier: Jev is the default; native OpenAI Decisions is the alternative. `/cache-guard jev` remains a compatibility alias for classifier setup and status; opening it does not itself run a paid connectivity probe. Configure credentials in Pi, not in the site or project docs. Decisions requires a separate API key and billing setup; see [Requirements & costs](/guides/requirements/) before selecting it.
+Use `/system1` to choose the global classifier order: Jev only is the default; either native classifier can be used alone or in an ordered Jev/OpenAI Decisions chain. Operational failures can advance to the next configured provider, with a notification; `/system1 status` shows the recent route. `/cache-guard jev` remains a compatibility alias for classifier setup and status; opening it does not itself run a paid connectivity probe. Configure credentials in Pi, not in the site or project docs. Decisions requires a separate API key and billing setup; see [Requirements & costs](/guides/requirements/) before selecting it.
 
 Tool trimming runs before results enter context and points to a saved full-output file. Asking for the same output again in the turn can return it untrimmed. Nested codemode calls are not trimmed by this path. A compacted history is still lossy; inspect important exact values before discarding the originals.
 

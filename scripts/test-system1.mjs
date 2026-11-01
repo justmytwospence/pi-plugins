@@ -26,7 +26,7 @@ const answered = (model, context) => ({
         probabilities: Object.fromEntries(Object.keys(q.criteria).map((key, i) => [key, i ? 0 : 1])) },
   ])),
 });
-function registry({ native = true, pending = false } = {}) {
+function registry({ native = true, pending = false, failures = {} } = {}) {
   const lookups = [], calls = [], available = [];
   let settle;
   return {
@@ -45,6 +45,8 @@ function registry({ native = true, pending = false } = {}) {
     async classify(model, context, options) {
       calls.push({ model, context, options });
       assert.equal(options.retries, 0, 'host retry multiplication is disabled');
+      assert.equal(options.maxRetries, 0, 'native host retries are disabled too');
+      if (failures[model.provider]) return { model: model.id, stopReason: 'error', answers: {}, errorMessage: failures[model.provider], usage };
       if (pending) return await new Promise(resolve => { settle = () => resolve(answered(model, context)); });
       return answered(model, context);
     },
@@ -108,9 +110,40 @@ try {
     }
     const available = registry();
     const resolved = await cache.resolveJev(available, config);
-    assert.equal(resolved.kind, 'ready'); assert.equal(resolved.target.provider, expected);
+    assert.equal(resolved.kind, 'ready');
+    assert.equal(resolved.jevTarget.provider, 'typesafe', 'availability keeps the independent Jev config slot');
+    assert.ok(resolved.candidates.some(candidate => candidate.available && candidate.provider === expected));
     if (backend === 'openai-decisions') assert.deepEqual(available.available, ['system1-openai'], 'no Jev discovery under Decisions');
   }
+
+  const { subscribeSystem1Events } = await jiti.import('../packages/pi-system1/src/system1.ts');
+  const events = [];
+  const releaseEvents = subscribeSystem1Events(event => events.push(event));
+  try {
+    for (const order of [['jev', 'openai-decisions'], ['openai-decisions', 'jev']]) {
+      writeFileSync(join(dir, 'system1.json'), JSON.stringify({ waterfall: order, backend: order[0] }));
+      const first = order[0] === 'jev' ? 'typesafe' : 'system1-openai';
+      const second = order[1] === 'jev' ? 'typesafe' : 'system1-openai';
+      for (const adapter of adapters) {
+        const failedFirst = registry({ failures: { [first]: 'quota or credits exhausted' } });
+        const result = await adapter.call(failedFirst);
+        assert.ok(result.ok === true || result.kind === 'jev', `${adapter.name} must use its configured fallback: ${JSON.stringify(result)}`);
+        assert.deepEqual(failedFirst.calls.map(call => call.model.provider), [first, second], adapter.name);
+        const outcome = events.findLast(event => event.type === 'outcome' && event.registry === failedFirst)?.outcome;
+        assert.equal(outcome?.provider, second, `${adapter.name} records the actual winner`);
+        assert.equal(outcome.fallback, true);
+        assert.equal(outcome.usage.input, 2, 'failed and successful reported usage aggregate once');
+        assert.ok(events.some(event => event.type === 'notice' && event.registry === failedFirst && event.notice.kind === 'provider_failed'), `${adapter.name} failure is observable`);
+        const healthy = registry();
+        await adapter.call(healthy);
+        assert.deepEqual(healthy.calls.map(call => call.model.provider), [first], 'a valid first-rung answer never shops providers');
+        const exhausted = registry({ failures: { [first]: 'quota or credits exhausted', [second]: 'quota or credits exhausted' } });
+        const failure = await adapter.call(exhausted);
+        assert.ok(failure.ok === false || failure.kind === 'fallback', `${adapter.name} preserves its exhaustion behavior`);
+        assert.deepEqual(exhausted.calls.map(call => call.model.provider), [first, second]);
+      }
+    }
+  } finally { releaseEvents(); }
 
   select('openai-decisions');
   for (const adapter of adapters) {

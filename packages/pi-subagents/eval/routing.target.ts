@@ -1,9 +1,10 @@
 // Offline routing fixtures: Jev classifies the delegated task, but no selected chat model is called.
-// A live run costs one classifier request per case/repeat. Never run it without the bounded budget.
-import { defineEval } from "../../../evals/shared/target.ts";
+// One logical request per case/repeat; each configured rung can classify once (no timeout retry).
+// Bound the maximum registry-classify count, not just the logical requests.
+import { defineEval, type PlanContext } from "../../../evals/shared/target.ts";
 import { BUILTIN_AGENTS } from "../src/agents.ts";
 import { DEFAULT_CONFIG } from "../src/index.ts";
-import { askJev, type ClassifierAnswer } from "../src/jev.ts";
+import { askJev, resolveSystem1Route, type ClassifierAnswer } from "../src/jev.ts";
 import { type AvailableModel, type Resolved, type Tier, type TierConfig, fixedAgentDefaults, physicalChatModels, pickQuestions, providerTiers, readPicks, resolve } from "../src/pick.ts";
 
 const PARENT_REQUEST = "Implement strict cross-provider lifecycle orchestration, model guards, interactive footer controls, and remote-client integration. This child owns only the delegated task.";
@@ -73,6 +74,20 @@ function settings(env: NodeJS.ProcessEnv): { cases: readonly RoutingCase[]; repe
   return { cases: CASES.filter((c) => ids.includes(c.id)), repeats };
 }
 
+/** Configured policy only; an observed winner never reduces the potential attempt count. */
+function configuredRungs(ctx: PlanContext): number {
+  const count = ctx.classifier?.waterfall?.length ?? ctx.classifier?.targets?.length;
+  if (count !== undefined) {
+    if (count < 1) throw new Error("routing calibration requires a nonempty configured classifier policy");
+    return count;
+  }
+  // Older callers can supply a singleton policy, or omit the metadata entirely.
+  if (ctx.classifier?.backend) return 1;
+  const route = resolveSystem1Route(DEFAULT_CONFIG.jev);
+  if (!route.ok) throw new Error(`routing calibration cannot resolve System 1 policy: ${route.reason}`);
+  return route.targets.length;
+}
+
 /** Score the resolved selection, not just a raw Jev label. Equivalent physical tier IDs count. */
 export function scoreCase(c: RoutingCase, result: Resolved | { error: string } | undefined, tiers: TierConfig) {
   if (!result || "error" in result) return { tierOK: false, effortOK: false, jointOK: false, overEscalated: false, underEscalated: false };
@@ -94,12 +109,16 @@ export default defineEval({
   kind: "cases",
   plan(ctx) {
     const { cases, repeats } = settings(ctx.env);
-    return { calls: cases.length * repeats, notes: `${cases.length} cases x ${repeats} repeats, one classifier request per repeat; no chat-model calls` };
+    const calls = cases.length * repeats;
+    const rungs = configuredRungs(ctx);
+    return { calls, notes: `${cases.length} cases x ${repeats} repeats = ${calls} logical calls, up to ${calls * rungs} registry-classify attempts (${rungs} configured rungs; retryTimeout:false); no chat-model calls` };
   },
   async run(ctx) {
     const { cases, repeats } = settings(ctx.env);
     const count = cases.length * repeats;
-    if (count > 100) throw new Error(`routing calibration would exceed 100 calls (${count})`);
+    const rungs = configuredRungs(ctx);
+    const potentialAttempts = count * rungs;
+    if (potentialAttempts > 100) throw new Error(`routing calibration would exceed 100 registry-classify calls (${count} logical calls x ${rungs} configured rungs = ${potentialAttempts} potential attempts). Use EVAL_ROUTING_REPEATS=2 for 48 logical calls/up to 96 attempts with the full two-rung matrix; repeats are never reduced automatically.`);
     // Preserve the raw registry snapshot for availability decisions. Filtering it first would
     // make a nonempty registry of excluded entries look like an unknown empty registry.
     const available = AVAILABLE;

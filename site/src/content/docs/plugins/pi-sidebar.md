@@ -21,7 +21,7 @@ Sidebar is a second agent inside main's Pi process. It sees main's latest state:
 
 It cannot change anything.
 
-The global [System 1](/plugins/pi-system1/) selection (`/system1`) chooses Jev by default or native OpenAI Decisions for Sidebar's read-only guard. Decisions requires pi-system1 and its isolated API credential; it uses API billing, not subscription OAuth. Pi does not verify credit funding. A backend failure never silently switches providers; an unconfirmed call is refused.
+The global [System 1](/plugins/pi-system1/) configuration (`/system1`) sets an ordered chain of Jev and native OpenAI Decisions for Sidebar's read-only guard (Jev only by default). Decisions requires pi-system1 and its isolated API credential; it uses API billing, not subscription OAuth. Pi does not verify credit funding. Operational failures can advance to the next configured backend with a notification; valid judgments and safety refusals do not trigger failover. An unconfirmed call is refused after the chain is exhausted.
 
 ## Enable and requirements
 

@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { beforeEach, onTestFinished, test } from "vitest";
 import { pickToolsWithJev, type ToolCapability } from "../src/jev-tool-picker.js";
 import { configuredAlwaysOffer } from "../src/settings.js";
-import { resolveSystem1Target } from "../src/system1.js";
+import { resolveSystem1Target, type System1Backend } from "../src/system1.js";
 import {
   applyAlwaysOffer,
   applyJevPick,
@@ -28,6 +28,21 @@ beforeEach(() => {
 });
 
 const selectBackend = (backend: string) => writeFileSync(join(agentDir, "system1.json"), JSON.stringify({ backend }));
+const selectWaterfall = (waterfall: System1Backend[]) =>
+  writeFileSync(join(agentDir, "system1.json"), JSON.stringify({ waterfall }));
+
+function pickProvenance(backend: System1Backend, provider: string, model: string) {
+  return {
+    backend,
+    provider,
+    model,
+    selectionKey: resolveSystem1Target({ provider, model }).key,
+    waterfall: [backend],
+    targetKey: JSON.stringify([backend, provider, model]),
+    fallback: false,
+    attempts: [],
+  };
+}
 
 const CAPABILITIES: ToolCapability[] = [
   { id: "shell", label: "Shell", description: "git and rg", fallbackSelected: true },
@@ -75,7 +90,14 @@ test("Jev preselects capabilities at the threshold from one request", async () =
     capabilities: CAPABILITIES,
     registry,
   });
-  assert.deepEqual(pick, {
+  assert.ok(pick.kind === "jev");
+  const { waterfall, targetKey, fallback, attempts, ...legacyPick } = pick;
+  assert.deepEqual(waterfall, ["jev"]);
+  assert.equal(targetKey, JSON.stringify(["jev", "typesafe", "jev-latest"]));
+  assert.equal(fallback, false);
+  assert.equal(attempts.length, 1);
+  assert.equal(attempts[0]?.status, "succeeded");
+  assert.deepEqual(legacyPick, {
     kind: "jev",
     backend: "jev",
     provider: "typesafe",
@@ -92,7 +114,7 @@ test("Jev preselects capabilities at the threshold from one request", async () =
   });
   assert.equal(calls[0]?.context.questions.c2?.type, "bool");
   assert.match(calls[0]?.context.questions.c2?.instructions ?? "", /"MCP servers" gives the agents: notes and docs/u);
-  assert.equal(calls[0]?.options.timeoutMs, 4_000);
+  assert.ok((calls[0]?.options.timeoutMs as number) <= 4_000);
   assert.equal(calls[0]?.options.retries, 0);
 
   const strict = await pickToolsWithJev({
@@ -123,7 +145,7 @@ test("Jev falls back gracefully without a classifier, a task, credentials, or a 
   const base = { task: "t", conversation: "", cwd: "/w", capabilities: CAPABILITIES };
   assert.deepEqual(await pickToolsWithJev({ ...base, registry: missing.registry }), {
     kind: "fallback",
-    reason: "no classifier model typesafe/jev-latest",
+    reason: "Jev: model unavailable",
   });
   assert.equal((await pickToolsWithJev({ ...base, task: " ", registry: missing.registry })).kind, "fallback");
   assert.equal(missing.calls.length, 0);
@@ -135,7 +157,7 @@ test("Jev falls back gracefully without a classifier, a task, credentials, or a 
   }));
   assert.deepEqual(await pickToolsWithJev({ ...base, registry: noKey.registry }), {
     kind: "fallback",
-    reason: "no classifier credentials",
+    reason: "Jev: credentials missing",
   });
 
   const denied = fakeRegistry(() => ({
@@ -145,7 +167,7 @@ test("Jev falls back gracefully without a classifier, a task, credentials, or a 
   }));
   assert.deepEqual(await pickToolsWithJev({ ...base, registry: denied.registry }), {
     kind: "fallback",
-    reason: "invalid API key",
+    reason: "Jev: credentials invalid",
   });
 
   const timeout = fakeRegistry(() => ({
@@ -155,7 +177,7 @@ test("Jev falls back gracefully without a classifier, a task, credentials, or a 
   }));
   assert.deepEqual(await pickToolsWithJev({ ...base, registry: timeout.registry }), {
     kind: "fallback",
-    reason: "timed out",
+    reason: "Jev: timed out",
   });
 
   const aborted = fakeRegistry(() => ({ stopReason: "aborted", answers: {} }));
@@ -167,7 +189,7 @@ test("Jev falls back gracefully without a classifier, a task, credentials, or a 
   const malformed = fakeRegistry(() => bools({ c0: 0.9, c1: "yes" }));
   assert.deepEqual(await pickToolsWithJev({ ...base, registry: malformed.registry }), {
     kind: "fallback",
-    reason: "the classifier returned an unexpected answer",
+    reason: "Jev: invalid answers",
   });
 });
 
@@ -229,10 +251,7 @@ test("tools in alwaysOffer start selected, show it, and Jev scores but never des
   const probabilities = Object.fromEntries(leaves(roots).map((candidate) => [candidate.id, 0.1]));
   applyJevPick(roots, {
     kind: "jev",
-    backend: "jev",
-    provider: "typesafe",
-    model: "jev",
-    selectionKey: JSON.stringify(["jev", "typesafe", "jev"]),
+    ...pickProvenance("jev", "typesafe", "jev"),
     probabilities,
     selected: Object.fromEntries(leaves(roots).map((candidate) => [candidate.id, false])),
   });
@@ -297,7 +316,14 @@ test("Decisions overrides dormant Jev targets and retains native bool probabilit
     model: "legacy-model",
     registry,
   });
-  assert.deepEqual(pick, {
+  assert.ok(pick.kind === "jev");
+  const { waterfall, targetKey, fallback, attempts, ...legacyPick } = pick;
+  assert.deepEqual(waterfall, ["openai-decisions"]);
+  assert.equal(targetKey, JSON.stringify(["openai-decisions", "system1-openai", "gpt-6-luna"]));
+  assert.equal(fallback, false);
+  assert.equal(attempts.length, 1);
+  assert.equal(attempts[0]?.status, "succeeded");
+  assert.deepEqual(legacyPick, {
     kind: "jev",
     backend: "openai-decisions",
     provider: "system1-openai",
@@ -364,7 +390,7 @@ test("Decisions failures preserve defaults and never fall back to Jev", async ()
     capabilities: CAPABILITIES,
     registry: missing.registry,
   });
-  assert.match(pick.kind === "fallback" ? pick.reason : "", /enable pi-system1/u);
+  assert.match(pick.kind === "fallback" ? pick.reason : "", /OpenAI Decisions: model unavailable/u);
   assert.deepEqual(missing.lookups, ["classifier:system1-openai/gpt-6-luna"]);
   selectBackend("unsupported");
   assert.equal(
@@ -380,6 +406,110 @@ test("Decisions failures preserve defaults and never fall back to Jev", async ()
     "fallback",
   );
   assert.equal(missing.lookups.length, 1, "invalid settings cannot cause backend discovery");
+});
+
+for (const waterfall of [
+  ["jev", "openai-decisions"],
+  ["openai-decisions", "jev"],
+] satisfies System1Backend[][]) {
+  test(`${waterfall.join(" → ")} picks retain the actual fallback winner and complete decision provenance`, async () => {
+    selectWaterfall(waterfall);
+    const selectionKey = resolveSystem1Target({ provider: "typesafe", model: "jev-latest" }).key;
+    const firstProvider = waterfall[0] === "jev" ? "typesafe" : "system1-openai";
+    const winner = waterfall[1];
+    const provider = winner === "jev" ? "typesafe" : "system1-openai";
+    const configuredModel = winner === "jev" ? "jev-latest" : "gpt-6-luna";
+    const { registry, calls } = fakeRegistry((call) =>
+      (call.model as { provider: string }).provider === firstProvider
+        ? { stopReason: "error", errorMessage: "quota exhausted", answers: {} }
+        : { ...bools({ c0: 0.8, c1: 0.1, c2: 0.9 }), model: "reported-winner-version" },
+    );
+    const pick = await pickToolsWithJev({
+      task: "t",
+      conversation: "",
+      cwd: "/w",
+      capabilities: CAPABILITIES,
+      registry,
+    });
+    assert.ok(pick.kind === "jev", "the legacy pick kind does not assert a Jev winner");
+    assert.equal(calls.length, 2);
+    assert.equal(pick.backend, winner);
+    assert.equal(pick.provider, provider);
+    assert.equal(pick.model, winner === "jev" ? "reported-winner-version" : configuredModel);
+    assert.deepEqual(pick.waterfall, waterfall);
+    assert.equal(pick.selectionKey, selectionKey, "freshness remains scoped to the whole chain");
+    assert.equal(pick.targetKey, JSON.stringify([winner, provider, configuredModel]));
+    assert.notEqual(pick.targetKey, pick.selectionKey);
+    assert.equal(pick.fallback, true);
+    assert.equal(pick.attempts.length, 2);
+    assert.equal(pick.attempts[0]?.backend, waterfall[0]);
+    assert.equal(pick.attempts[0]?.status, "failed");
+    assert.equal(pick.attempts[0]?.code, "quota_exhausted");
+    assert.equal(pick.attempts[1]?.backend, winner);
+    assert.equal(pick.attempts[1]?.status, "succeeded");
+    assert.equal(pick.attempts[1]?.targetKey, pick.targetKey);
+    assert.deepEqual(pick.selected, { shell: true, "toolset:web": false, "toolset:mcp": true });
+  });
+}
+
+test("valid negative picks never shop the configured waterfall for a different verdict", async () => {
+  selectWaterfall(["jev", "openai-decisions"]);
+  const { registry, calls } = fakeRegistry(() => bools({ c0: 0, c1: 0.1, c2: 0.49 }));
+  const pick = await pickToolsWithJev({
+    task: "t",
+    conversation: "",
+    cwd: "/w",
+    capabilities: CAPABILITIES,
+    registry,
+  });
+  assert.ok(pick.kind === "jev");
+  assert.equal(pick.backend, "jev");
+  assert.equal(pick.fallback, false);
+  assert.equal(calls.length, 1);
+  assert.deepEqual(pick.selected, { shell: false, "toolset:web": false, "toolset:mcp": false });
+});
+
+test("replacing only the tail of a pending waterfall discards the pick without failover", async () => {
+  selectWaterfall(["jev", "openai-decisions"]);
+  let finish!: (value: ReturnType<typeof bools>) => void;
+  const { registry, calls } = fakeRegistry(
+    () =>
+      new Promise((resolve) => {
+        finish = resolve;
+      }),
+  );
+  const pending = pickToolsWithJev({ task: "t", conversation: "", cwd: "/w", capabilities: CAPABILITIES, registry });
+  selectWaterfall(["jev"]);
+  finish(bools({ c0: 0.9, c1: 0.9, c2: 0.9 }));
+  const pick = await pending;
+  assert.ok(pick.kind === "fallback");
+  assert.match(pick.reason, /System 1 changed/u);
+  assert.equal(calls.length, 1);
+});
+
+test("whole-chain exhaustion leaves the configured tool defaults untouched", async () => {
+  selectWaterfall(["jev", "openai-decisions"]);
+  const { registry, calls } = fakeRegistry(() => ({
+    stopReason: "error",
+    errorMessage: "quota exhausted",
+    answers: {},
+  }));
+  const pick = await pickToolsWithJev({
+    task: "t",
+    conversation: "",
+    cwd: "/w",
+    capabilities: CAPABILITIES,
+    registry,
+  });
+  assert.ok(pick.kind === "fallback");
+  assert.equal(calls.length, 2);
+  const roots = buildToolTree({ toolsets: {}, mcpCatalog: [], scoutTargets: [] });
+  const defaults = leaves(roots).map((leaf) => leaf.selected);
+  applyJevPick(roots, pick);
+  assert.deepEqual(
+    leaves(roots).map((leaf) => leaf.selected),
+    defaults,
+  );
 });
 
 for (const backend of ["jev", "openai-decisions"] as const) {
@@ -400,10 +530,11 @@ for (const backend of ["jev", "openai-decisions"] as const) {
     const all = leaves(roots);
     const pick = {
       kind: "jev" as const,
-      backend,
-      provider: backend === "jev" ? "typesafe" : "system1-openai",
-      model: backend === "jev" ? "jev-latest" : "gpt-6-luna",
-      selectionKey: resolveSystem1Target({ provider: "typesafe", model: "jev-latest" }).key,
+      ...pickProvenance(
+        backend,
+        backend === "jev" ? "typesafe" : "system1-openai",
+        backend === "jev" ? "jev-latest" : "gpt-6-luna",
+      ),
       probabilities: Object.fromEntries(all.map((leaf) => [leaf.id, leaf.id === "tool:untrusted" ? 0.99 : 0.01])),
       selected: Object.fromEntries(all.map((leaf) => [leaf.id, leaf.id === "tool:untrusted"])),
     };

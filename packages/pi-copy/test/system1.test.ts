@@ -6,7 +6,7 @@ import piCopy, { DEFAULT_CONFIG } from "../src/index.ts";
 import { askJev, type ClassifierAnswer, type JevOutcome } from "../src/jev.ts";
 import type { Picker } from "../src/picker.ts";
 import { chronological } from "../src/rank.ts";
-import { SYSTEM1_CHANGED, resolveSystem1Target } from "../src/system1.js";
+import { SYSTEM1_CHANGED, resolveSystem1Target, system1TargetKey } from "../src/system1.js";
 import { assistantEntry, harness } from "./harness.ts";
 
 // Deliberately ignore cancellation and return old successes: consumers must guard UI application too.
@@ -48,7 +48,7 @@ function judgments() {
           question.type === "score" ? { type: "score", score: id.includes("0") ? 3 : 0, confidence: 1 }
             : { type: "bool", probability: hideAll ? 0 : 1 },
         ]));
-        resolve({ ...target, selectionKey: target.key, answers, latencyMs: 1 });
+        resolve({ ...target, selectionKey: target.key, targetKey: system1TargetKey(target), waterfall: [target.backend], fallback: false, attempts: [], answers, latencyMs: 1 });
       } });
     });
   });
@@ -174,7 +174,7 @@ test("closing a picker aborts work and a late success is not cached", async () =
 });
 
 test("unavailable ranking keeps chronological fallback", async () => {
-  vi.mocked(askJev).mockResolvedValue({ ok: false, reason: "unavailable" });
+  vi.mocked(askJev).mockResolvedValue({ ok: false, code: "exhausted", reason: "unavailable", attempts: [], latencyMs: 1 });
   const s = setup();
   const opened = s.open();
   await flush();

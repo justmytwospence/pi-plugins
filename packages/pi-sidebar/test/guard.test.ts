@@ -96,6 +96,46 @@ describe("judgeCall", () => {
     expect((await judgeCall("mcp__unknown__call", {}, host({ probability: 0.5 }).host)).allowed).toBe(false);
   });
 
+  it.each([undefined, -0.1, 1.1, NaN, Infinity])("refuses an unconfirmed fallback probability of %s after primary exhaustion", async (probability) => {
+    writeFileSync(join(agentDir, "system1.json"), JSON.stringify({ waterfall: ["jev", "openai-decisions"] }));
+    const h = host();
+    const classify = vi.fn(async (model: { provider: string }) => model.provider === "typesafe"
+      ? { answers: {}, stopReason: "error", errorMessage: "quota exhausted" }
+      : { answers: probability === undefined ? {} : { q: { type: "bool", probability } }, stopReason: "stop" });
+    h.host.registry = { ...(h.host.registry as object), classify };
+    const verdict = await judgeCall("mcp__unknown__call", {}, h.host);
+    expect(verdict.allowed).toBe(false);
+    if (!verdict.allowed) expect(verdict.reason).toMatch(/could not be confirmed/);
+    expect(classify).toHaveBeenCalledTimes(2);
+  });
+
+  it.each([0.49, 0.5, 0.99])("uses the actual fallback probability of %s without weakening the threshold", async (probability) => {
+    writeFileSync(join(agentDir, "system1.json"), JSON.stringify({ waterfall: ["jev", "openai-decisions"] }));
+    const h = host();
+    const classify = vi.fn(async (model: { provider: string }) => model.provider === "typesafe"
+      ? { answers: {}, stopReason: "error", errorMessage: "quota exhausted" }
+      : { answers: { q: { type: "bool", probability } }, stopReason: "stop" });
+    h.host.registry = { ...(h.host.registry as object), classify };
+    expect((await judgeCall("mcp__unknown__call", {}, h.host)).allowed).toBe(probability < 0.5);
+    expect(classify).toHaveBeenCalledTimes(2);
+  });
+
+  it("keeps whole-chain operational exhaustion fail-closed", async () => {
+    writeFileSync(join(agentDir, "system1.json"), JSON.stringify({ waterfall: ["jev", "openai-decisions"] }));
+    const h = host({ failure: "quota exhausted" });
+    const verdict = await judgeCall("mcp__unknown__call", {}, h.host);
+    expect(verdict.allowed).toBe(false);
+    if (!verdict.allowed) expect(verdict.reason).toMatch(/could not be confirmed/);
+    expect(h.asked).toHaveLength(2);
+  });
+
+  it.each([{ probability: 0.99 }, { failure: "OpenAI Decisions refused to answer q" }])("never bypasses a valid unsafe judgment or refusal: %j", async (options) => {
+    writeFileSync(join(agentDir, "system1.json"), JSON.stringify({ waterfall: ["openai-decisions", "jev"] }));
+    const h = host(options);
+    expect((await judgeCall("mcp__unknown__call", {}, h.host)).allowed).toBe(false);
+    expect(h.asked).toHaveLength(1);
+  });
+
   it("refuses a pending call after the backend changes", async () => {
     let complete!: (result: unknown) => void;
     const h = host();

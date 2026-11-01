@@ -15,13 +15,13 @@ plugin: pi-cache-guard
 
 Cache guard gives you a choice before sending a prompt that is likely to re-cache an expensive conversation. Its clock and warnings work without a classifier. Optional classifier features trim incoming tool output and help compact history.
 
-The global [System 1](/plugins/pi-system1/) selection (`/system1`) chooses Jev by default or native OpenAI Decisions. The legacy `jev` settings still control this feature, including its enabled flag and timeout; provider/model overrides apply in Jev mode only. Decisions requires pi-system1 and its isolated API credential; it uses API billing, not subscription OAuth. Pi does not verify credit funding. A backend failure never silently switches providers.
+The global [System 1](/plugins/pi-system1/) configuration (`/system1`) sets an ordered chain of Jev and native OpenAI Decisions (Jev only by default). The legacy `jev` settings still control this feature, including its enabled flag and timeout; provider/model overrides apply only to Jev. Decisions requires pi-system1 and its isolated API credential; it uses API billing, not subscription OAuth. Pi does not verify credit funding. Operational failures can advance to the next configured backend with a notification; valid judgments and safety refusals do not trigger failover.
 
 ## Enable and requirements
 
 Use [Install & select](/guides/install/) with `packages/pi-cache-guard/src/index.ts`. The suite enables every entry by default; selected components share one Git pin. Interactive dialogs need a UI. Classifier features require Pi 0.99 or newer, classifier credentials and permission to send conversation excerpts to that provider.
 
-**Classifier calls can incur charges.** `/cache-guard jev` is a compatibility alias for classifier setup/status; opening it does not run a connectivity probe. Use `/system1` to manage the backend. A summary produced by Pi also uses the configured summarization model. The menu counts conversation tokens, not classifier requests: "no summary model" does not mean the classifier is free. See [Cache and cost](/recipes/cache-cost/) before enabling automated context reduction.
+**Classifier calls can incur charges.** `/cache-guard jev` is a compatibility alias for classifier setup/status; opening it does not run a connectivity probe. Use `/system1` to manage the order. A summary produced by Pi also uses the configured summarization model. The menu counts conversation tokens, not classifier requests: "no summary model" does not mean the classifier is free. See [Cache and cost](/recipes/cache-cost/) before enabling automated context reduction.
 
 ## Decide what to send
 
@@ -55,7 +55,7 @@ Commands, shell input, steering, running-agent follow-ups and extension-generate
 | --- | --- |
 | `/cache-guard` or `/cache-guard status` | Inspect the clock, next warning and classifier availability. |
 | `/cache-guard compact [focus]` | Request classifier compaction; without a classifier, offer Pi's summary. |
-| `/cache-guard jev` | Compatibility alias for classifier setup/status; manage the backend with `/system1`. |
+| `/cache-guard jev` | Compatibility alias for classifier setup/status; manage the order with `/system1`. |
 | `/cache-guard fresh` | Start a linked session using the editor's text. |
 | `/cache-guard on` or `/cache-guard off` | Toggle warnings, clock and transcript notices for this session. |
 

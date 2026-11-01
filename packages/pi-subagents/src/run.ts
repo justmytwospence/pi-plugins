@@ -3,7 +3,7 @@ import path from "node:path";
 import type { Child, ChildState, Usage } from "./child.ts";
 import type { Conversation } from "./conversation.ts";
 import type { ChoiceSource, Resolved, Tier } from "./pick.ts";
-import type { ClassifierProvenance } from "./system1.ts";
+import type { System1Notice } from "./system1.ts";
 
 export interface Run {
   id: string;
@@ -18,7 +18,7 @@ export interface Run {
   thinking: string;
   byJev: Resolved["byJev"];
   /** Actual classifier target; absent on old records or deterministic fallback. */
-  classifier?: ClassifierProvenance;
+  classifier?: Resolved["classifier"];
   /** Where the model and thinking came from; absent on records from before it was kept. */
   source?: ChoiceSource;
   /** The quota pressure (0..1) Jev's model or effort pick was made under, when above 0. */
@@ -50,12 +50,26 @@ export interface RunLink {
   update?: () => void;
   /** The child ended and its output is saved. */
   ended?: () => void;
+  /** A classifier health notice, delivered only through the runtime that owns the run now. */
+  system1Notice?: (notice: System1Notice) => void;
+  /** Newest eight notices received while parked, flushed by the adopting runtime. */
+  system1Notices?: System1Notice[];
   /** The child ended while no runtime owned the run: the adopting runtime still owes its final record. */
   missedEnd?: boolean;
   /** The record carrying the child's session file has been written. */
   sessionRecorded?: boolean;
   /** Settles once the child has ended and its output is saved. */
   done: Promise<void>;
+}
+
+/** Transport-only: no callback from a retired runtime is retained while a run is parked. */
+export function relaySystem1Notice(link: RunLink, notice: System1Notice): void {
+  if (link.system1Notice) link.system1Notice(notice);
+  else {
+    const queued = link.system1Notices ??= [];
+    queued.push(notice);
+    if (queued.length > 8) queued.splice(0, queued.length - 8);
+  }
 }
 
 /** Tokens to show for a run: input, output and cache writes. Cache reads re-count the same prefix every turn. */

@@ -8,7 +8,7 @@ test("Spend adds costs and counts every call, even without a cost", () => {
   assert.equal(spend.calls, 4);
   assert.ok(Math.abs(spend.total - 0.0035) < 1e-12);
   assert.equal(spend.line(), "spend: $0.0035 over 4 calls (catalog estimate; not a cash charge or verified credit debit)");
-  assert.deepEqual(JSON.parse(JSON.stringify(spend)), { spend: 0.0035, calls: 4 });
+  assert.deepEqual(JSON.parse(JSON.stringify(spend)), { spend: 0.0035, calls: 4, backendAttempts: {}, registryCalls: 0, actualProviders: {}, attempts: [] });
 });
 
 test("addOutcome reads usage.cost.total from an askJev outcome and counts failures", () => {
@@ -16,6 +16,30 @@ test("addOutcome reads usage.cost.total from an askJev outcome and counts failur
   spend.addOutcome({ ok: true, usage: { cost: { total: 0.002 } } }).addOutcome({ ok: true }).addOutcome({ ok: false, reason: "timeout", usage: { cost: { total: 0.003 } } }).addOutcome({ ok: false, reason: "unavailable" }).addOutcome(undefined);
   assert.equal(spend.calls, 5);
   assert.equal(spend.total, 0.005);
+});
+
+test("waterfall usage is charged once while logical, backend and registry calls stay distinct", () => {
+  const first = { backend: "jev", provider: "typesafe", model: "jev-latest", status: "failed", sdkCalls: 2, usage: { cost: { total: 0.03 } } };
+  const winner = { backend: "openai-decisions", provider: "system1-openai", model: "reported-version", status: "succeeded", sdkCalls: 1, usage: { cost: { total: 0.02 } } };
+  const spend = new Spend().addOutcome({ ok: true, ...winner, usage: { cost: { total: 0.05 } }, attempts: [first, winner] });
+  spend.addOutcome({ ok: false, attempts: [{ ...first, status: "cooldown", sdkCalls: 0 }], usage: { cost: { total: 0.01 } } });
+  assert.equal(spend.calls, 2);
+  assert.ok(Math.abs(spend.total - 0.06) < 1e-10);
+  assert.deepEqual(spend.backendAttempts, { jev: 1, "openai-decisions": 1 });
+  assert.equal(spend.registryCalls, 3);
+  assert.deepEqual(spend.actualProviders, { '["openai-decisions","system1-openai","reported-version"]': 1 });
+  assert.equal(spend.attempts.length, 3);
+  assert.deepEqual(spend.attempts[0].usage, first.usage);
+  const merged = new Spend().merge(spend);
+  assert.deepEqual(merged.audit(), spend.audit());
+  assert.match(merged.line(), /2 backend attempts, 3 registry calls/u);
+});
+
+test("audit whitelists fields and never keeps questions or raw bodies", () => {
+  const spend = new Spend().addOutcome({ ok: false, attempts: [{ backend: "jev", status: "failed", sdkCalls: 0, state: "secret", answers: {}, raw: "private" }] });
+  assert.doesNotMatch(JSON.stringify(spend.audit()), /secret|private|answers|state/u);
+  assert.equal(spend.calls, 1);
+  assert.equal(spend.total, 0);
 });
 
 test("an empty Spend", () => {

@@ -18,7 +18,7 @@
 // sampler), EVAL_COMPARE=1, EVAL_COST_PER_CALL, EVAL_RESULTS_DIR, and whatever else a target reads.
 // Exit codes: 0 done or skipped, 1 a target failed, 2 a usage error (including an unknown id).
 import path from "node:path";
-import { comparisonWarning, diffRecords, last, record, resultsDir, type ClassifierProvenance, type ResultRecord } from "./results.ts";
+import { comparisonWarning, diffRecords, last, record, resultsDir, type ConfiguredClassifierPolicy, type ResultRecord } from "./results.ts";
 import { pool } from "./pool.ts";
 import { type Sample, sampleSessions, summarizeSession } from "./sessions.ts";
 import { Spend, estimate } from "./spend.ts";
@@ -39,7 +39,7 @@ export interface RunnerDeps {
   /** Explicit offline/backwards-compatible override; otherwise use classifier.configured or TYPESAFE_API_KEY. */
   hasCredentials?: boolean;
   /** Injected by the CLI, never imported from a component here. Omit for legacy direct runner use. */
-  classifier?: ClassifierProvenance & {
+  classifier?: ConfiguredClassifierPolicy & {
     key: string;
     configured(registry: unknown): Promise<boolean>;
     /** Re-read the effective global target, without auth or inference; checked around every target. */
@@ -171,12 +171,18 @@ interface Ctx {
   deps: RunnerDeps;
 }
 
-const classifierProvenance = (deps: RunnerDeps): ClassifierProvenance | undefined => {
+const configuredPolicy = (deps: RunnerDeps): ConfiguredClassifierPolicy | undefined => {
   const c = deps.classifier;
-  return c ? { backend: c.backend, provider: c.provider, model: c.model } : undefined;
+  if (!c) return undefined;
+  const targets = c.targets ?? (c.backend && c.provider && c.model ? [{ backend: c.backend, provider: c.provider, model: c.model }] : []);
+  return { waterfall: c.waterfall ? [...c.waterfall] : targets.map((t) => t.backend), targets: targets.map((t) => ({ ...t })), key: c.key };
 };
-const classifierLabel = (c: ClassifierProvenance) => `${c.backend} (${c.provider}/${c.model})`;
-const classifierJSON = (deps: RunnerDeps) => deps.classifier ? { classifier: classifierProvenance(deps) } : {};
+const classifierLabel = (c: ConfiguredClassifierPolicy) => c.waterfall
+  ? (c.waterfall.join(" → ") || "unavailable") + (c.targets?.length ? ` (${c.targets.map((t) => `${t.provider}/${t.model}`).join(" → ")})` : "")
+  : `${c.backend} (${c.provider}/${c.model})`;
+// Never label configured metadata as the observed physical classifier, even for legacy injection.
+const classifierJSON = (deps: RunnerDeps) => deps.classifier ? { configuredPolicy: configuredPolicy(deps) } : {};
+const attemptMultiplier = (deps: RunnerDeps) => Math.max(1, deps.classifier?.waterfall?.length ?? deps.classifier?.targets?.length ?? 1);
 const selectionChanged = (deps: RunnerDeps): boolean => {
   try {
     return deps.classifier?.currentKey !== undefined && deps.classifier.currentKey() !== deps.classifier.key;
@@ -203,6 +209,7 @@ function sampler({ env, deps, say }: Ctx) {
 
 function planContext(ctx: Ctx, sampled: ReturnType<typeof sampler>, used: { sample: boolean }): PlanContext {
   return {
+    classifier: configuredPolicy(ctx.deps),
     sample: () => {
       used.sample = true;
       return sampled.get();
@@ -217,13 +224,14 @@ async function dry(ctx: Ctx): Promise<number> {
   const { options, selected, io, say, env } = ctx;
   const sampled = sampler(ctx);
   if (selected.some(needsSessions)) sampled.get();
-  const targets: Record<string, { kind: string; calls?: number; notes?: string; error?: string }> = {};
+  const targets: Record<string, { kind: string; calls?: number; logicalCalls?: number; attemptMultiplier?: number; maxAttempts?: number; notes?: string; error?: string }> = {};
+  const multiplier = attemptMultiplier(ctx.deps);
   let failed = false;
   for (const target of selected) {
     try {
       const plan = await target.plan(planContext(ctx, sampled, { sample: false }));
-      targets[target.id] = { kind: target.kind, calls: plan.calls, notes: plan.notes };
-      say(`${target.id}: ${plan.calls} calls (${plan.notes})`);
+      targets[target.id] = { kind: target.kind, calls: plan.calls, logicalCalls: plan.calls, attemptMultiplier: multiplier, maxAttempts: plan.calls * multiplier, notes: plan.notes };
+      say(`${target.id}: ${plan.calls} calls (${plan.notes}); ${plan.calls} logical calls, up to ${plan.calls * multiplier} backend attempts (${multiplier} configured rungs per request)`);
     } catch (error) {
       failed = true;
       targets[target.id] = { kind: target.kind, error: message(error) };
@@ -231,10 +239,10 @@ async function dry(ctx: Ctx): Promise<number> {
     }
   }
   const totalCalls = Object.values(targets).reduce((n, t) => n + (t.calls ?? 0), 0);
-  const cost = estimate(totalCalls, env);
+  const cost = estimate(totalCalls * multiplier, env);
   say(`${cost.note}: $${cost.usd.low.toFixed(4)} to $${cost.usd.high.toFixed(4)}`);
   const sample = sampled.peek();
-  if (options.json) io.out(JSON.stringify({ ...classifierJSON(ctx.deps), seed: sample?.seed ?? null, sessions: sample?.sessions.map(summarizeSession) ?? [], targets, totalCalls, estimate: cost }));
+  if (options.json) io.out(JSON.stringify({ ...classifierJSON(ctx.deps), seed: sample?.seed ?? null, sessions: sample?.sessions.map(summarizeSession) ?? [], targets, totalCalls, logicalCalls: totalCalls, attemptMultiplier: multiplier, maxAttempts: totalCalls * multiplier, estimate: cost }));
   return failed ? 1 : 0;
 }
 
@@ -285,7 +293,7 @@ async function live(ctx: Ctx): Promise<number> {
     say(`\n== ${target.id}: ${target.title} (${target.package}, ${target.kind}) ==`);
     const used = { sample: false };
     const spend = new Spend();
-    const runContext: RunContext = { ...planContext(ctx, sampled, used), ...classifierJSON(deps), registry, spend, pool, table, concurrency: CONCURRENCY, timeoutMs: TIMEOUT_MS };
+    const runContext: RunContext = { ...planContext(ctx, sampled, used), registry, spend, pool, table, concurrency: CONCURRENCY, timeoutMs: TIMEOUT_MS };
     let result;
     let error: string | undefined;
     try {
@@ -305,7 +313,7 @@ async function live(ctx: Ctx): Promise<number> {
       const compare = finite(result.compare);
       const seed = used.sample || needsSessions(target) ? (sampled.peek()?.seed ?? null) : null;
       try {
-        record(target.id, { ...classifierJSON(deps), seed, spend: spend.total, calls: spend.calls, metrics, ...(compare ? { compare } : {}) }, env);
+        record(target.id, { ...classifierJSON(deps), ...spend.audit(), seed, spend: spend.total, calls: spend.calls, metrics, ...(compare ? { compare } : {}) }, env);
         say(`recorded: ${path.join(resultsDir(env), `${target.id}.jsonl`)}`);
       } catch (thrown) {
         error = `could not record the run: ${message(thrown)}`;
@@ -325,6 +333,7 @@ async function live(ctx: Ctx): Promise<number> {
       ...(result?.failures !== undefined ? { failures: result.failures } : {}),
       spend: spend.total,
       calls: spend.calls,
+      ...spend.audit(),
       metrics: stopped ? {} : result?.metrics ?? {},
       ...(!stopped && result?.compare ? { compare: result.compare } : {}),
       ...(error ? { error } : {}),
@@ -332,7 +341,7 @@ async function live(ctx: Ctx): Promise<number> {
     if (stopped) break;
   }
   if (selected.length > 1) say(`\n${Object.keys(outcomes).length - failed.length}/${selected.length} targets passed${failed.length ? ` (failed: ${failed.join(", ")})` : ""}; total ${total.line()}`);
-  if (options.json) io.out(JSON.stringify({ ...classifierJSON(deps), ...(stopped ? { stopped } : {}), seed: sampled.peek()?.seed ?? null, pass: !failed.length && !stopped, spend: total.total, calls: total.calls, targets: outcomes }));
+  if (options.json) io.out(JSON.stringify({ ...classifierJSON(deps), ...(stopped ? { stopped } : {}), seed: sampled.peek()?.seed ?? null, pass: !failed.length && !stopped, spend: total.total, calls: total.calls, ...total.audit(), targets: outcomes }));
   return failed.length || stopped ? 1 : 0;
 }
 
@@ -355,7 +364,8 @@ function lastRuns({ options, selected, io, env, deps }: Ctx): number {
       continue;
     }
     io.out(`${id}: ${next.at}, commit ${next.commit}${next.dirty ? " (dirty)" : ""}, seed ${next.seed ?? "-"}, ${runs} run${runs === 1 ? "" : "s"} kept for the comparison`);
-    io.out(`classifier: ${next.classifier ? classifierLabel(next.classifier) : "legacy/unknown"}`);
+    io.out(`configured policy: ${next.configuredPolicy ? classifierLabel(next.configuredPolicy) : next.classifier ? classifierLabel(next.classifier) : "legacy/unknown"}`);
+    if (next.actualProviders) io.out(`actual providers (successful logical judgments): ${JSON.stringify(next.actualProviders)}`);
     if (warning) io.out(`warning: ${warning}`);
     const comparable = prev && Object.keys(diffRecords(prev, next)).length > 0;
     const rows: (string | number)[][] = [["", ...(prev ? ["previous"] : []), "last", ...(prev ? ["change"] : [])]];

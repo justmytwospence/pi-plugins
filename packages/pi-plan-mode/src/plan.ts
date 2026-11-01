@@ -101,7 +101,7 @@ import {
   readPlanModeSettings,
   updatePlanModeSettings,
 } from "./settings.js";
-import { resolveSystem1Target, SYSTEM1_CHANGED } from "./system1.js";
+import { resolveSystem1Route, resolveSystem1Target, SYSTEM1_CHANGED } from "./system1.js";
 import { applyAlwaysOffer, applyJevPick, buildToolTree, leafCapabilities, type ToolNode } from "./tool-tree.js";
 import { type ToolPreselection, ToolTreeView } from "./tool-tree-view.js";
 import { transcriptCheckpoint } from "./transcript-contract.js";
@@ -1898,7 +1898,7 @@ export default async function plan(pi: ExtensionAPI, dependencies: PlanDependenc
               provider: settings.jevProvider?.trim() || DEFAULT_JEV_PROVIDER,
               model: settings.jevModel?.trim() || DEFAULT_JEV_MODEL,
             };
-            const target = resolveSystem1Target(config);
+            const target = resolveSystem1Route(config);
             const selectionEpoch = system1Epoch;
             const selectionCurrent = () =>
               !closed &&
@@ -1907,7 +1907,9 @@ export default async function plan(pi: ExtensionAPI, dependencies: PlanDependenc
               selectionEpoch === system1Epoch &&
               resolveSystem1Target(config).key === target.key;
             tree.preselection = {
-              label: target.ok ? (target.backend === "jev" ? "Jev" : "Decisions") : "unavailable",
+              label: target.ok
+                ? target.targets.map((candidate) => (candidate.backend === "jev" ? "Jev" : "Decisions")).join(" → ")
+                : "unavailable",
               pending: (dependencies.pickTools ?? pickToolsWithJev)({
                 task: draft.task,
                 conversation: buildPlannerTranscript(ctx.sessionManager.getBranch()),
@@ -1922,7 +1924,7 @@ export default async function plan(pi: ExtensionAPI, dependencies: PlanDependenc
                 return {
                   message:
                     result.kind === "jev"
-                      ? `${result.backend === "jev" ? "Jev" : "Decisions"} picked ${Object.values(result.selected).filter(Boolean).length} tools for this task.`
+                      ? `${result.backend === "jev" ? "Jev" : "Decisions"}${result.fallback ? " (fallback)" : ""} picked ${Object.values(result.selected).filter(Boolean).length} tools for this task.`
                       : `Not used (${result.reason}); the defaults from settings apply.`,
                   isCurrent,
                   apply: (keep: boolean) => {

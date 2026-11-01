@@ -36,7 +36,7 @@ All 35 references include activation, controls, defaults, requirements, costs an
 
 | Plugin | Use it to… |
 | --- | --- |
-| [pi-system1](https://pi-plugins.vercel.app/plugins/pi-system1/) | Select a classifier backend and request typed judgments. |
+| [pi-system1](https://pi-plugins.vercel.app/plugins/pi-system1/) | Configure an ordered classifier route and request typed judgments. |
 | [pi-cache-guard](https://pi-plugins.vercel.app/plugins/pi-cache-guard/) | Review cold-cache sends and optionally trim context. |
 | [pi-auto-effort](https://pi-plugins.vercel.app/plugins/pi-auto-effort/) | Adjust reasoning effort within your manual ceiling. |
 | [pi-status-footer](https://pi-plugins.vercel.app/plugins/pi-status-footer/) | Read Git, context and provider usage at a glance. |
@@ -64,6 +64,8 @@ All 35 references include activation, controls, defaults, requirements, costs an
 | [pi-herdr-scrollbar-width](https://pi-plugins.vercel.app/plugins/pi-herdr-scrollbar-width/) | Fix one-column wrapping at fullscreen exit inside Herdr. |
 
 Notebooks: [pi-marimo](https://github.com/justmytwospence/pi-marimo) is a separate package (`pi install npm:pi-marimo`) that integrates with these components.
+
+`/system1` configures native classifier failover; it is separate from `/waterfall` subscription chat-model routing. Classifier API credits, subscription windows, throttles and catalog-estimated cost are different quantities.
 
 Some features make paid classifier requests or patch private TUI hooks. **Ctrl+L and Shift+Tab need explicit stock-key remaps** before the suite shortcuts work; see the [keymap](https://pi-plugins.vercel.app/guides/keyboard/#resolve-the-two-stock-conflicts). Read [requirements](https://pi-plugins.vercel.app/guides/requirements/) before enabling everything.
 

@@ -15,7 +15,7 @@ plugin: pi-next-prompt
 
 Next prompt offers a likely follow-up after a completed run. Automatic suggestions are deliberately selective: a finished task, an unresolved question or several equally plausible directions should produce no suggestion. Explicit requested handoffs use a verified tool instead of this heuristic. All offer types—automatic tags, external offers and explicit prompt/terminal handoffs—live underneath your draft without overwriting it. Accepting text never sends it automatically.
 
-The global [System 1](/plugins/pi-system1/) selection (`/system1`) chooses Jev by default or native OpenAI Decisions. The legacy `jev` settings still control this feature, including its enabled flag and timeout; provider/model overrides apply in Jev mode only. Decisions requires pi-system1 and its isolated API credential; it uses API billing, not subscription OAuth. Pi does not verify credit funding. A backend failure never silently switches providers.
+The global [System 1](/plugins/pi-system1/) configuration (`/system1`) sets an ordered chain of Jev and native OpenAI Decisions (Jev only by default). The legacy `jev` settings still control this feature, including its enabled flag and timeout; provider/model overrides apply only to Jev. Decisions requires pi-system1 and its isolated API credential; it uses API billing, not subscription OAuth. Pi does not verify credit funding. Operational failures can advance to the next configured backend with a notification; valid judgments and safety refusals do not trigger failover.
 
 ## Enable and requirements
 

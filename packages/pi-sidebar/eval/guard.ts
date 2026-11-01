@@ -11,7 +11,7 @@ import { askJevBool, type JevBool } from "../src/jev.ts";
 import { pool } from "../../../evals/shared/pool.ts";
 import { branchOf, shuffle, type Session } from "../../../evals/shared/sessions.ts";
 import { Spend } from "../../../evals/shared/spend.ts";
-import type { ClassifierProvenance } from "../../../evals/shared/results.ts";
+import type { System1ProvenanceRecord } from "../src/system1.ts";
 
 /** At most this many commands per label. */
 export const PER_LABEL = 150;
@@ -112,7 +112,9 @@ export interface Scored {
   probability?: number;
   reason?: string;
   /** Actual successful classifier, when the adapter reports it (old records/fakes may omit it). */
-  classifier?: ClassifierProvenance;
+  classifier?: System1ProvenanceRecord;
+  /** Whole adapter outcome: aggregate usage once, plus flat per-backend attempt metadata. */
+  outcome?: JevBool;
 }
 
 /** Asks the guard's question for every command, as `judgeCall` would for a call the rules cannot settle. */
@@ -128,10 +130,14 @@ export async function scoreCommands(
     const answer = await ask(registry, changeState(command.tool, undefined, { command: command.command }, command.cwd), CHANGE_QUESTION);
     // Include reported catalog cost even when the adapter returned an unusable answer.
     spend.addOutcome(answer);
-    const source = answer as Partial<ClassifierProvenance>;
-    const classifier = typeof source.backend === "string" && typeof source.provider === "string" && typeof source.model === "string"
-      ? { backend: source.backend, provider: source.provider, model: source.model } : undefined;
-    scored[index] = { command, ...(answer.ok ? { probability: answer.probability, ...(classifier ? { classifier } : {}) } : { reason: answer.reason }) };
+    if (answer.ok) {
+      const { backend, provider, model, waterfall, selectionKey, targetKey, fallback, attempts } = answer;
+      const classifier = typeof backend === "string" && typeof provider === "string" && typeof model === "string"
+        ? { backend, provider, model, waterfall, selectionKey, targetKey, fallback, attempts } : undefined;
+      scored[index] = { command, outcome: answer, probability: answer.probability, ...(classifier ? { classifier } : {}) };
+    } else {
+      scored[index] = { command, outcome: answer, reason: answer.reason };
+    }
   });
   return { scored, failures: scored.filter((s) => s.probability === undefined).length, spend };
 }

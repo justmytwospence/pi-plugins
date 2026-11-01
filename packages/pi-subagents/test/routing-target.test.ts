@@ -1,11 +1,26 @@
-import { mkdtempSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { describe, expect, test } from "vitest";
+import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import routing, { AVAILABLE, CASES, scoreCase } from "../eval/routing.target.ts";
 import { last } from "../../../evals/shared/results.ts";
 import { runEval } from "../../../evals/shared/runner.ts";
 import type { Resolved, TierConfig } from "../src/pick.ts";
+
+let agentDir: string;
+beforeEach(() => {
+  agentDir = mkdtempSync(path.join(tmpdir(), "routing-target-agent-"));
+  vi.stubEnv("PI_CODING_AGENT_DIR", agentDir);
+});
+afterEach(() => {
+  vi.unstubAllEnvs();
+  rmSync(agentDir, { recursive: true, force: true });
+});
+const waterfall = ["jev", "openai-decisions"];
+const targets = [
+  { backend: "jev", provider: "typesafe", model: "jev-latest" },
+  { backend: "openai-decisions", provider: "system1-openai", model: "gpt-6-luna" },
+];
 
 const usage = { input: 300, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 300, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0.001 } };
 const suffix = (role: string, task: string) => CASES.find((c) => c.role === role && c.task === task)?.id.split("-").at(-1);
@@ -17,19 +32,22 @@ const expected = (role: string, task: string): [string, string] => {
     default: return ["strong", "high"];
   }
 };
-function fakeJev(answer: (questions: Record<string, any>, state: Record<string, any>) => [string, string] | "timeout" | "error" = (q, s) => expected(s.role, s.task)) {
-  const calls: Array<{ questions: Record<string, any>; state: Record<string, any> }> = [];
+function fakeJev(answer: (questions: Record<string, any>, state: Record<string, any>) => [string, string] | "timeout" | "error" = (_q, s) => expected(s.role, s.task), options: { primaryTimeout?: boolean } = {}) {
+  const calls: Array<{ provider: string; questions: Record<string, any>; state: Record<string, any> }> = [];
   const registry = {
     findOfType: (type: string, provider: string, id: string) => {
       if (type !== "classifier") throw new Error("chat model was requested");
-      return { provider, id };
+      return { provider, id, type: "classifier", api: provider === "system1-openai" ? "openai-decisions" : "typesafe", baseUrl: "https://api.openai.com/v1" };
     },
-    classify: async (_model: unknown, { questions, state }: { questions: Record<string, any>; state: Record<string, any> }) => {
-      calls.push({ questions, state });
-      const decision = answer(questions, state);
+    classify: async (model: { provider: string }, { questions, state }: { questions: Record<string, any>; state: Record<string, any> }) => {
+      calls.push({ provider: model.provider, questions, state });
+      const decision = options.primaryTimeout && model.provider === "typesafe" ? "timeout" : answer(questions, state);
       if (typeof decision === "string") return { model: "jev-latest", answers: {}, stopReason: "error", errorMessage: decision === "timeout" ? "timed out" : "other error", ...(decision === "error" ? { usage } : {}) };
       const [tier, effort] = decision;
-      const chosen = (id: string, key: string) => ({ type: "choice", choice: key, confidence: 0.99, probabilities: Object.fromEntries(Object.keys(questions[id].criteria).map((k) => [k, k === key ? 0.99 : 0])) });
+      const chosen = (id: string, key: string) => {
+        const labels = Object.keys(questions[id].criteria);
+        return { type: "choice", choice: key, confidence: 0.99, probabilities: Object.fromEntries(labels.map((k) => [k, k === key ? 0.99 : 0.01 / (labels.length - 1)])) };
+      };
       return { model: "jev-latest", stopReason: "stop", answers: { tier: chosen("tier", tier), effort: chosen("effort", effort) }, usage };
     },
   };
@@ -64,6 +82,62 @@ describe("the bounded routing eval target", () => {
     expect(await r.code).toBe(0);
     expect(JSON.parse(r.out[0]!).targets.routing).toMatchObject({ calls: 72 });
     expect(fake.calls).toHaveLength(0);
+  });
+
+  test("two-rung dry plan shows 72 logical calls and up to 144 registry attempts without classifying", async () => {
+    writeFileSync(path.join(agentDir, "system1.json"), JSON.stringify({ waterfall }));
+    const fake = fakeJev();
+    const r = run(["routing", "--dry", "--json"], fake.registry);
+    expect(await r.code).toBe(0);
+    const plan = JSON.parse(r.out[0]!).targets.routing;
+    expect(plan.calls).toBe(72);
+    expect(plan.notes).toContain("72 logical calls, up to 144 registry-classify attempts");
+    expect(fake.calls).toHaveLength(0);
+  });
+
+  test.each([
+    { waterfall, targets, backend: "jev", provider: "typesafe", model: "jev-latest" },
+    { targets },
+  ])("dry planning counts configured rungs, not the first/legacy backend ($backend)", async (classifier) => {
+    // Metadata is authoritative even when the temporary settings file has no waterfall.
+    const plan = await routing.plan({ classifier, env: {}, compare: false, sample: () => { throw Error("no sample"); }, log: () => {} });
+    expect(plan.calls).toBe(72);
+    expect(plan.notes).toContain("up to 144 registry-classify attempts");
+  });
+
+  test("default two-rung live plan is rejected before any classification with an explicit repeat override", async () => {
+    writeFileSync(path.join(agentDir, "system1.json"), JSON.stringify({ waterfall }));
+    const fake = fakeJev();
+    const r = run(["routing", "--json"], fake.registry);
+    expect(await r.code).toBe(1);
+    expect(fake.calls).toHaveLength(0);
+    const result = JSON.parse(r.out.at(-1)!);
+    expect(result.calls).toBe(0);
+    expect(result.targets.routing.error).toContain("100 registry-classify calls (72 logical calls x 2 configured rungs = 144 potential attempts)");
+    expect(result.targets.routing.error).toContain("EVAL_ROUTING_REPEATS=2");
+    expect(result.targets.routing.error).toContain("48 logical calls/up to 96 attempts");
+  });
+
+  test("explicit repeats=2 permits 48 logical calls/up to 96 attempts with no retry or silent reduction", async () => {
+    writeFileSync(path.join(agentDir, "system1.json"), JSON.stringify({ waterfall }));
+    const fake = fakeJev(undefined, { primaryTimeout: true });
+    const plan = await routing.plan({ env: { EVAL_ROUTING_REPEATS: "2" }, sample: () => { throw Error("no sample"); }, compare: false, log: () => {} });
+    expect(plan.calls).toBe(48);
+    expect(plan.notes).toContain("48 logical calls, up to 96 registry-classify attempts");
+    const r = run(["routing", "--json"], fake.registry, { EVAL_ROUTING_REPEATS: "2" });
+    expect(await r.code, r.err.join("\n")).toBe(0);
+    expect(fake.calls).toHaveLength(96);
+    expect(fake.calls.filter((c) => c.provider === "typesafe")).toHaveLength(48);
+    expect(fake.calls.filter((c) => c.provider === "system1-openai")).toHaveLength(48);
+    const result = JSON.parse(r.out.at(-1)!);
+    expect(result.calls).toBe(48);
+    expect(result.spend).toBeCloseTo(0.048);
+    expect(result.targets.routing.metrics.jointAccuracy).toBe(1);
+    expect(result.targets.routing.registryCalls).toBe(96);
+    expect(result.targets.routing.backendAttempts).toEqual({ jev: 48, "openai-decisions": 48 });
+    expect(result.targets.routing.actualProviders).toEqual({ '["openai-decisions","system1-openai","gpt-6-luna"]': 48 });
+    expect(result.targets.routing.attempts).toHaveLength(96);
+    expect(result.targets.routing.attempts[0]).toMatchObject({ backend: "jev", status: "failed", code: "timeout", reason: "timed out", sdkCalls: 1 });
   });
 
   test("exact case filtering and integer repeats are validated before calls", async () => {
@@ -150,7 +224,7 @@ describe("the bounded routing eval target", () => {
     const result = JSON.parse(r.out.at(-1)!);
     expect(result.spend).toBeCloseTo(0.020);
     expect(result).toMatchObject({ calls: 24, targets: { routing: { pass: false, failures: 4, metrics: { calls: 24, failures: 4, tierAccuracy: 20 / 24, effortAccuracy: 20 / 24, jointAccuracy: 20 / 24 } } } });
-    expect(r.err.join("\n")).toContain("anthropic-lookup #1: FAILED timed out (tier/effort/joint miss)");
+    expect(r.err.join("\n")).toContain("anthropic-lookup #1: FAILED Jev: timed out (tier/effort/joint miss)");
     expect(last("routing", 1, r.env)[0]).toMatchObject({ calls: 24 });
     expect(last("routing", 1, r.env)[0]!.spend).toBeCloseTo(0.020);
   });

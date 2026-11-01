@@ -1111,10 +1111,21 @@ export function layoutFooter(snapshot: Snapshot, width: number, theme: Paint): F
   const mcpStatus = statuses.find((status) => stripVTControlCharacters(status).startsWith(`${ICONS.mcp} `));
   const mcpText = mcpStatus ? inline(ICONS.mcp, mcpStatus.replace(`${ICONS.mcp} `, "")) : s.mcp ? inline(ICONS.mcp, mcpChip(s.mcp, theme)) : "";
   const skillsText = s.skills ? inline(ICONS.skills, `${theme.fg("muted", "Skills")} ${s.skills}`) : "";
+  const system1 = s.system1;
+  const system1Name = (backend: "jev" | "openai-decisions") => backend === "jev" ? "Jev" : "OpenAI";
+  // A retry becoming eligible is not evidence of recovery. Only a completed request
+  // changes lastUsed; rendering these detached fields never probes a provider.
+  const system1State = system1?.status === "unavailable" && system1.nextRetryAt !== undefined && system1.nextRetryAt <= s.now
+    ? "unknown" : system1?.status;
+  const system1Order = system1?.waterfall.map(system1Name).join("→") ?? "";
+  const system1Value = system1State === "unavailable" ? "unavailable"
+    : system1State === "fallback" && system1?.lastUsed?.fallback && system1.waterfall.includes(system1.lastUsed.backend)
+      ? `${system1Name(system1.lastUsed.backend)}*`
+      : `${system1Order}${system1State === "unknown" ? "?" : ""}`;
   controlRow(ICONS.context, [
     partsSegment([...ctxParts, { text: `${context === null ? "" : theme.fg("dim", " used")}${context === null || s.borderGauge ? "" : ` ${gauge(theme, context)}`}` }], 100, ctxParts),
-    partsSegment(s.system1 ? [
-      { text: theme.fg(s.system1.availability === "unavailable" ? "warning" : "muted", `S1 ${s.system1.availability === "unavailable" ? "unavailable" : s.system1.availability === "unknown" ? "unknown" : s.system1.label}`), action: action("system1.open") },
+    partsSegment(system1 ? [
+      { text: theme.fg(system1State === "unavailable" || system1State === "fallback" ? "warning" : "muted", `S1 ${system1Value}`), action: action("system1.open") },
     ] : [], 35),
     { text: s.lean ? theme.fg("muted", `Lean ${clean(s.lean)}`) : "", priority: 20 },
     partsSegment([{ text: cache ? `${theme.fg("muted", "Cache")} ${theme.fg(cacheValue === "unknown" ? "muted" : cacheValue === "cold" ? "warning" : "success", cacheValue)}` : "", action: action("cache.status") }], 30),

@@ -108,10 +108,10 @@ describe("replaySession", () => {
 
 const jev = (depth: number): Assessment => ({
   kind: "jev",
-  outcome: { ok: true, answers: {}, backend: "jev", provider: "typesafe", model: "m", selectionKey: JSON.stringify(["jev", "typesafe", "m"]), latencyMs: 100 },
+  outcome: { ok: true, answers: {}, backend: "jev", provider: "typesafe", model: "m", selectionKey: JSON.stringify(["jev", "typesafe", "m"]), targetKey: JSON.stringify(["jev", "typesafe", "m"]), waterfall: ["jev"], fallback: false, attempts: [], latencyMs: 100 },
   judgment: judgmentOf(depth),
 });
-const failed: Assessment = { kind: "jev", outcome: { ok: false, reason: "timed out" }, judgment: undefined };
+const failed: Assessment = { kind: "jev", outcome: { ok: false, code: "timeout", reason: "timed out", attempts: [], latencyMs: 100 }, judgment: undefined };
 const goAhead: Assessment = { kind: "go-ahead" };
 
 /** need(L) for a preset depth (0 trivial to 3 hard), as the harness's fake Jev answers it. */
@@ -165,7 +165,9 @@ describe("assess", () => {
     const out = await assess(fake.registry, [replay], CURRENT);
     expect(out[0]!.map((a) => a.kind)).toEqual(["jev", "go-ahead", "jev"]);
     expect(fake.calls).toHaveLength(2);
-    expect(fake.calls[0]!.options.timeoutMs).toBe(20_000);
+    // The singleton timeout retry reserves half of the total logical deadline.
+    expect(fake.calls[0]!.options.timeoutMs).toBeGreaterThan(0);
+    expect(fake.calls[0]!.options.timeoutMs).toBeLessThanOrEqual(10_000);
     // Each state is built from the entries before its message.
     expect(fake.calls[0]!.state).toMatchObject({ request: "Add caching", previous_requests: ["(none: this is the first request)"], agent_reply_untrusted: "(none)" });
     expect(fake.calls[1]!.state).toMatchObject({ request: "now fix the test", previous_requests: ["Add caching", "thanks!"], agent_reply_untrusted: "You're welcome." });
@@ -201,7 +203,8 @@ describe("assess", () => {
     expect(fake.calls[1]!.state).toMatchObject({ request: "thanks!", last_outcome: "Done; one test fails." });
     expect(fake.calls[1]!.state).not.toHaveProperty("agent_reply_untrusted");
     expect(fake.calls[1]!.questions.depth.instructions).toContain("`last_outcome`");
-    expect(fake.calls[0]!.options.timeoutMs).toBe(5_000);
+    expect(fake.calls[0]!.options.timeoutMs).toBeGreaterThan(0);
+    expect(fake.calls[0]!.options.timeoutMs).toBeLessThanOrEqual(2_500);
   });
 
   test("at most `concurrency` calls at a time, results in prompt order, failures kept", async () => {
@@ -227,7 +230,7 @@ describe("assess", () => {
     const depths = out[0]!.map((a) => (a.kind === "jev" && a.judgment ? Math.round(a.judgment.need.xhigh! * 100) : undefined));
     expect(depths[3]).toBe(70);
     expect(depths[4]).toBe(1);
-    expect(out[0]![7]).toEqual({ kind: "jev", outcome: { ok: false, reason: "classifier request failed" }, judgment: undefined });
+    expect(out[0]![7]).toMatchObject({ kind: "jev", outcome: { ok: false, code: "exhausted", attempts: [{ backend: "jev", code: "provider_error", sdkCalls: 1 }] }, judgment: undefined });
   });
 });
 

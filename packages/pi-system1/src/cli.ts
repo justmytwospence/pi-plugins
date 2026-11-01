@@ -1,6 +1,9 @@
 import type { Provider } from "@earendil-works/pi-ai";
 import { registerDecisionsProvider } from "./provider.js";
-import { askSystem1, readSystem1Setting, type ClassifierQuestion } from "./system1.js";
+import {
+  askSystem1, formatSystem1Notice, provenanceOf, readSystem1Setting, resolveSystem1Route,
+  type ClassifierQuestion,
+} from "./system1.js";
 
 type CliResult = { exitCode: number; stdout: string; stderr: string };
 const failure = (exitCode: number, reason: string): CliResult => ({ exitCode, stdout: "", stderr: `system1: ${reason}\n` });
@@ -63,7 +66,7 @@ function normalize(request: unknown): {
 }
 
 function prepareRequest(request: unknown):
-  | { ok: true; normalized: ReturnType<typeof normalize>; backend: "jev" | "openai-decisions" }
+  | { ok: true; normalized: ReturnType<typeof normalize>; selectionKey: string }
   | { ok: false; result: CliResult } {
   let normalized: ReturnType<typeof normalize>;
   try { normalized = normalize(request); } catch (error) {
@@ -71,13 +74,17 @@ function prepareRequest(request: unknown):
   }
   const setting = readSystem1Setting();
   if (!setting.ok) return { ok: false, result: failure(1, setting.reason) };
-  if (setting.backend === "openai-decisions") {
-    const unsupported = [...normalized.experimental, ...(normalized.modelOverride ? ["request-level model override"] : [])];
-    if (unsupported.length) return { ok: false, result: failure(2, `OpenAI Decisions does not support ${[...new Set(unsupported)].join(", ")}`) };
-  } else if (normalized.experimental.length) {
-    return { ok: false, result: failure(2, "experimental box/assets/long_context requests require the legacy jev-ask implementation in Jev mode") };
+  const jevOnly = setting.waterfall.length === 1 && setting.waterfall[0] === "jev";
+  if (normalized.experimental.length) {
+    return { ok: false, result: failure(2,
+      `${[...new Set(normalized.experimental)].join(", ")} requests require the legacy jev-ask implementation under an explicit Jev-only chain (waterfall: ["jev"])`) };
   }
-  return { ok: true, normalized, backend: setting.backend };
+  if (normalized.modelOverride && !jevOnly) {
+    return { ok: false, result: failure(2, "request-level model override requires a singleton Jev-only chain (waterfall: [\"jev\"])") };
+  }
+  const route = resolveSystem1Route({ provider: "typesafe", model: normalized.model }, setting);
+  if (!route.ok) return { ok: false, result: failure(1, route.reason) };
+  return { ok: true, normalized, selectionKey: route.key };
 }
 
 /** Input/selection preflight only; safe before constructing any model or credential runtime. */
@@ -86,34 +93,38 @@ export function validateCliRequest(request: unknown): CliResult | undefined {
   return prepared.ok ? undefined : prepared.result;
 }
 
-/** No chat session or project extensions: only the selected native classifier and its registry. */
+/** No chat session or project extensions: only the configured native waterfall and its registry. */
 export async function runCli(request: unknown, registry: unknown): Promise<CliResult> {
   const prepared = prepareRequest(request);
   if (!prepared.ok) return prepared.result;
-  const { normalized, backend } = prepared;
+  const { normalized, selectionKey } = prepared;
+  const config = { enabled: true, provider: "typesafe", model: normalized.model, timeoutMs: 5_000 };
   const reg = registry as { registerProvider?(provider: Provider): void } | undefined;
   try {
-    const registered = typeof reg?.registerProvider === "function" && await registerDecisionsProvider(reg as { registerProvider(provider: Provider): void });
-    if (!registered && backend === "openai-decisions") {
-      return failure(1, "OpenAI Decisions is unavailable; update Pi and enable pi-system1, then configure /login system1-openai");
+    if (typeof reg?.registerProvider === "function") {
+      await registerDecisionsProvider(reg as { registerProvider(provider: Provider): void });
     }
   } catch {
-    return failure(1, "System 1 provider registration failed");
+    // Optional native registration must not stop a viable Jev rung. The executor handles
+    // missing capability for every configured target and sanitizes whole-chain failures.
   }
-  // Registration is asynchronous. A switch during bootstrap must not turn a legacy model
-  // override into an implicitly accepted native request.
-  const current = readSystem1Setting();
-  if (!current.ok) return failure(1, current.reason);
-  if (current.backend === "openai-decisions" && normalized.modelOverride) {
-    return failure(2, "OpenAI Decisions does not support request-level model override");
+  // Fence the entire resolved order, including manual resets, after any bootstrap outcome.
+  // Never reinterpret a request against a replacement policy, even without a model override.
+  if (resolveSystem1Route(config).key !== selectionKey) {
+    return failure(1, "System 1 selection changed during provider registration; run the request again");
   }
-  const result = await askSystem1(registry, {
-    enabled: true, provider: "typesafe", model: normalized.model, timeoutMs: 5_000,
-  }, normalized.state, normalized.questions);
-  if (!result.ok) return failure(1, result.reason);
+  const notices: string[] = [];
+  const result = await askSystem1(registry, config, normalized.state, normalized.questions, undefined, {
+    onNotice: (notice) => { notices.push(`${formatSystem1Notice(notice)}\n`); },
+  });
+  const stderr = notices.join("");
+  if (!result.ok) {
+    const failed = failure(result.code === "invalid_input" ? 2 : 1, result.reason);
+    return { ...failed, stderr: stderr + failed.stderr };
+  }
   return {
-    exitCode: 0, stderr: "",
-    stdout: `${JSON.stringify({ backend: result.backend, provider: result.provider, model: result.model,
-      answers: result.answers, usage: result.usage ?? null }, null, 2)}\n`,
+    exitCode: 0, stderr,
+    stdout: `${JSON.stringify({ ...provenanceOf(result), answers: result.answers,
+      usage: result.usage ?? null }, null, 2)}\n`,
   };
 }

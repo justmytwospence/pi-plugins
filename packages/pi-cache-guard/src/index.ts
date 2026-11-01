@@ -15,7 +15,7 @@ import { type Lean, leanContext, trimStatus } from "./context.ts";
 import { FOOTER_ACTIONS_CHANNEL, type FooterActionsRequest } from "./footer-actions.ts";
 import { HerdrReporter, alertHeld, whileBlocked } from "./herdr.ts";
 import { JEV_LOGINS, type JevState, label } from "./jev.ts";
-import { readSystem1Setting, resolveSystem1Target } from "./system1.ts";
+import { installSystem1Notifications, readSystem1Setting, resolveSystem1Route } from "./system1.ts";
 import { JEV_KEY_URL, JEV_PITCH } from "./lean.ts";
 import { type AssistantLike, NOTICE_TYPE, type Notice, detectMiss, noticeLine } from "./notices.ts";
 import { type Wire, cachePolicy, echoedRetention, requestedTtl } from "./policy.ts";
@@ -205,6 +205,7 @@ export default function cacheGuard(
   pi: ExtensionAPI,
   options: { herdr?: HerdrReporter; expiring?: HerdrReporter; alert?: (body: string) => void } = {},
 ) {
+  installSystem1Notifications(pi);
   // Inside a herdr pane (through pi-herdr): the `cache` token, so herdr's agents sidebar shows this
   // session when doomed, and `cache_expires`, so a queue (herdr-plugins' agent-cycle) can bring an
   // idle session up before its cache goes cold.
@@ -588,7 +589,7 @@ export default function cacheGuard(
       if (pick !== JEV_ON || !save({ enabled: true })) return;
     }
     const selection = readSystem1Setting();
-    const mayEditJev = () => selection.ok && selection.backend === "jev" && readSystem1Setting().key === selection.key;
+    const mayEditJev = () => selection.ok && selection.waterfall.includes("jev") && readSystem1Setting().key === selection.key;
     const state = await lean.refresh(context);
     const off = async () => {
       if (!save({ enabled: false })) return;
@@ -597,8 +598,12 @@ export default function cacheGuard(
     };
     if (state.kind === "ready") {
       const others = mayEditJev() ? state.others.map((target) => ({ target, text: oneLine(`Use ${label(target)} instead`, OPTION_MAX) })) : [];
+      const order = state.candidates.map(label).join(" → ");
+      const availability = state.candidates.length > 1
+        ? `\nLocal availability: ${state.candidates.map((candidate) => `${candidate.backend === "jev" ? "Jev" : "OpenAI Decisions"} ${candidate.available ? "configured" : "unavailable"}`).join("; ")}.`
+        : "";
       const pick = await context.ui.select(
-        `System 1: ${label(state.target)} is configured.\n${JEV_PITCH}\n${management}`,
+        `System 1: ${order} is configured.${availability}\n${JEV_PITCH}\n${management}`,
         [JEV_DONE, ...others.map((o) => o.text), JEV_OFF],
       );
       const other = others.find((o) => o.text === pick);
@@ -763,9 +768,9 @@ export function jevLine(jev: JevState, settings: Settings, savedChars: number): 
   if (jev.kind === "missing") return `System 1: unavailable (${jev.reason}); /system1 manages the backend, /cache-guard system1 configures this feature.`;
   const trim = settings.trim.enabled ? `trimming on${savedChars ? ` (${trimStatus(savedChars)?.replace("lean: ", "")} so far)` : ""}` : "trimming off";
   const compaction = `Quick compaction from the cold-cache menu and /cache-guard compact${settings.compact.filter ? "; it filters /compact too" : ""}`;
-  const target = resolveSystem1Target(jev.target);
-  if (!target.ok) return `System 1: unavailable (${target.reason}); /system1.`;
-  return `System 1: ${label(target)}; ${trim}; ${compaction}.`;
+  const route = resolveSystem1Route(jev.jevTarget);
+  if (!route.ok) return `System 1: unavailable (${route.reason}); /system1.`;
+  return `System 1: ${route.targets.map(label).join(" → ")}; ${trim}; ${compaction}.`;
 }
 
 /** In the new session: the old session's model and thinking level, then the held prompt. */

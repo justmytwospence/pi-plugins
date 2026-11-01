@@ -1,4 +1,4 @@
-// Capture the actual System 1 picker and billing confirmation with local, noncredential fixtures.
+// Capture the actual System 1 waterfall picker and billing confirmation using local-only fixtures.
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
@@ -17,13 +17,16 @@ export async function system1Dialogs({ ExtensionSelectorComponent }) {
   try {
     const dialogs = [];
     for (const spec of [
-      { name: 'System 1 picker (Jev selected)', backend: 'jev' },
-      { name: 'System 1 picker (Decisions selected)', backend: 'openai-decisions' },
-      { name: 'System 1 picker (Decisions unavailable)', backend: 'jev', unavailable: true },
-      { name: 'System 1 included-credit confirmation', backend: 'jev', billing: true },
+      { name: 'System 1 picker (Jev then OpenAI)', waterfall: ['jev', 'openai-decisions'] },
+      { name: 'System 1 picker (OpenAI then Jev)', waterfall: ['openai-decisions', 'jev'] },
+      { name: 'System 1 picker (Jev only)', waterfall: ['jev'] },
+      { name: 'System 1 picker (OpenAI only)', waterfall: ['openai-decisions'] },
+      { name: 'System 1 picker (OpenAI unavailable)', waterfall: ['jev', 'openai-decisions'], unavailable: true },
+      { name: 'System 1 picker (all unavailable)', waterfall: ['jev', 'openai-decisions'], unavailable: true, allMissing: true },
+      { name: 'System 1 included-credit confirmation', waterfall: ['jev'], billing: true },
     ]) {
-      writeFileSync(path.join(dir, 'system1.json'), JSON.stringify({ backend: spec.backend }));
-      const before = JSON.stringify({ backend: spec.backend });
+      const before = JSON.stringify({ waterfall: spec.waterfall, backend: spec.waterfall[0] });
+      writeFileSync(path.join(dir, 'system1.json'), before);
       const bus = new EventEmitter();
       const events = { emit: (name, value) => bus.emit(name, value), on: (name, fn) => { bus.on(name, fn); return () => bus.off(name, fn); } };
       let blocked = false, captured, selects = 0;
@@ -33,7 +36,7 @@ export async function system1Dialogs({ ExtensionSelectorComponent }) {
         modelRegistry: {
           findOfType: (_type, provider, id) => ({ type: 'classifier', provider, id, api: provider === 'system1-openai' ? 'openai-decisions' : 'typesafe-system-one', baseUrl: 'https://api.openai.com/v1' }),
           classify: () => assert.fail('rendering System 1 dialogs must not call a model'),
-          hasConfiguredAuth: () => true,
+          hasConfiguredAuth: () => !spec.allMissing,
           getProviderAuthStatus: () => ({ configured: !spec.unavailable }),
         },
         ui: {
@@ -42,9 +45,12 @@ export async function system1Dialogs({ ExtensionSelectorComponent }) {
             assert.equal(blocked, true, 'the complete picker/confirmation holds the blocked protocol');
             assert.ok(options.every(label => visibleWidth(label) <= 42), 'native select labels fit phone width');
             selects++;
-            if (spec.billing && selects === 1) return 'OpenAI Decisions (Pro credits)';
+            if (spec.billing && selects === 1) return 'Jev → OpenAI';
             if (spec.billing) assert.equal(title, BILLING_CONFIRMATION);
-            else assert.match(title, /System 1/);
+            else {
+              assert.match(title, /System 1/);
+              assert.deepEqual(options, ['Jev → OpenAI', 'OpenAI → Jev', 'Jev only', 'OpenAI only']);
+            }
             captured = { title, options: [...options] };
             return undefined;
           },
@@ -54,9 +60,9 @@ export async function system1Dialogs({ ExtensionSelectorComponent }) {
       assert.ok(captured, `${spec.name} captured the real select`);
       assert.equal(blocked, false, 'cancellation releases the blocked protocol');
       assert.equal(selects, spec.billing ? 2 : 1);
-      if (spec.unavailable) assert.match(captured.title, /Decisions: unavailable/);
+      if (spec.unavailable) assert.match(captured.title, /OpenAI: missing/);
       const { readFileSync } = await import('node:fs');
-      assert.equal(readFileSync(path.join(dir, 'system1.json'), 'utf8'), before, 'capture never changes the backend');
+      assert.equal(readFileSync(path.join(dir, 'system1.json'), 'utf8'), before, 'capture never changes the configured order');
       dialogs.push({
         name: spec.name, question: captured.title.replace(/\s+/gu, ' ').trim(),
         lines: width => new ExtensionSelectorComponent(captured.title, captured.options, () => {}, () => {}).render(width),

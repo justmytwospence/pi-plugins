@@ -221,7 +221,7 @@ for (const stale of ["none", "event", "file", "event-roundtrip", "manual", "disa
       assert.doesNotMatch(app.render().join("\n"), /picking tools/u);
     } else {
       assert.ok(input);
-      assert.match(app.render().join("\n"), /System 1.*Jev: picking tools/u);
+      assert.match(app.render().join("\n"), /System 1.*Preferred Jev; picking tools/u);
       const target = resolveSystem1Target({ provider: "typesafe", model: "jev-latest" });
       assert.ok(target.ok);
       if (stale === "file")
@@ -235,6 +235,10 @@ for (const stale of ["none", "event", "file", "event-roundtrip", "manual", "disa
         provider: target.provider,
         model: target.model,
         selectionKey: target.key,
+        waterfall: [target.backend],
+        targetKey: JSON.stringify([target.backend, target.provider, target.model]),
+        fallback: false,
+        attempts: [],
         probabilities: Object.fromEntries(input.capabilities.map((capability) => [capability.id, 0.9])),
         selected: Object.fromEntries(input.capabilities.map((capability) => [capability.id, true])),
       });
@@ -257,6 +261,92 @@ for (const stale of ["none", "event", "file", "event-roundtrip", "manual", "disa
     app.handleInput("\u001b");
     await opened;
   });
+}
+
+for (const reversed of [false, true]) {
+  for (const change of ["none", "manual", "tail", "order", "event"] as const) {
+    test(`/planners preferred waterfall and actual fallback remain distinct (${reversed}, ${change})`, async () => {
+      const previous = process.env.PI_CODING_AGENT_DIR;
+      const directory = mkdtempSync(join(tmpdir(), "plan-waterfall-preselection-"));
+      process.env.PI_CODING_AGENT_DIR = directory;
+      onTestFinished(() => {
+        if (previous === undefined) delete process.env.PI_CODING_AGENT_DIR;
+        else process.env.PI_CODING_AGENT_DIR = previous;
+        rmSync(directory, { recursive: true, force: true });
+      });
+      const waterfall = reversed ? (["openai-decisions", "jev"] as const) : (["jev", "openai-decisions"] as const);
+      writeFileSync(join(directory, "system1.json"), JSON.stringify({ waterfall }));
+      const target = resolveSystem1Target({ provider: "typesafe", model: "jev-latest" });
+      assert.ok(target.ok);
+      let finish!: (pick: JevToolPick) => void;
+      let input: Parameters<typeof pickToolsWithJev>[0] | undefined;
+      const state = setup({
+        settings: {
+          jevToolSelection: true,
+          alwaysOffer: [],
+          plannerToolsets: {
+            research: { label: "Research", tools: ["research"], extensions: [], enabled: false, scouts: false },
+          },
+        },
+        pickTools: (request) => {
+          input = request;
+          return new Promise((resolve) => {
+            finish = resolve;
+          });
+        },
+      });
+      await state.ready;
+      const opened = state.mock.commands.get("planners")?.handler("plan it", state.context.ctx);
+      await flush();
+      const app = state.harness();
+      assert.ok(app);
+      app.handleInput("\u001b[B");
+      app.handleInput("\r");
+      assert.ok(input);
+      assert.match(app.render().join("\n"), reversed ? /Preferred Decisions → Jev/u : /Preferred Jev → Decisions/u);
+      if (change === "manual") app.handleInput("n");
+      if (change === "tail" || change === "order") {
+        writeFileSync(
+          join(directory, "system1.json"),
+          JSON.stringify({
+            waterfall: change === "tail" ? [waterfall[0]] : [...waterfall].reverse(),
+          }),
+        );
+      }
+      if (change === "event") state.mock.eventBus.emit(SYSTEM1_CHANGED, {});
+      const winner = waterfall[1];
+      const provider = winner === "jev" ? "typesafe" : "system1-openai";
+      const model = winner === "jev" ? "jev-latest" : "gpt-6-luna";
+      finish({
+        kind: "jev",
+        backend: winner,
+        provider,
+        model,
+        waterfall: [...waterfall],
+        selectionKey: target.key,
+        targetKey: JSON.stringify([winner, provider, model]),
+        fallback: true,
+        attempts: [],
+        probabilities: Object.fromEntries(input.capabilities.map((capability) => [capability.id, 0.9])),
+        selected: Object.fromEntries(input.capabilities.map((capability) => [capability.id, true])),
+      });
+      await flush();
+      const screen = app.render().join("\n");
+      if (change === "none" || change === "manual") {
+        assert.match(screen, reversed ? /Jev \(fallback\) picked/u : /Decisions \(fallback\) picked/u);
+        assert.match(screen, /90% suggested/u);
+        assert.match(screen, change === "manual" ? /\[ \] research/u : /\[x\] research/u);
+        if (change === "manual") assert.match(screen, /Your own changes were kept/u);
+      } else {
+        assert.match(screen, /System 1 changed/u);
+        assert.match(screen, /\[ \] research/u);
+        assert.doesNotMatch(screen, /90% suggested|\(fallback\) picked/u);
+      }
+      app.handleInput("\u0003");
+      app.handleInput("\u001b");
+      await opened;
+    });
+  }
 }
 
 async function implementationScreen(

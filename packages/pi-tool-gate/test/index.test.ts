@@ -207,8 +207,14 @@ describe("System 1 selection", () => {
     if (failure === "invalid setting") expect(find).not.toHaveBeenCalled();
     else expect(find).toHaveBeenCalledWith("classifier", "system1-openai", "gpt-6-luna");
     ctx.ui.selectAnswers.push("Allow once");
-    expect(await h.emit("tool_call", event, ctx)).toBeUndefined();
-    expect(ctx.ui.selects[0].options).toEqual(["Allow once", "Block", "Block with a message"]);
+    const retry = await h.emit("tool_call", event, ctx);
+    if (failure === "invalid setting") {
+      expect(retry).toMatchObject({ block: true, reason: expect.stringContaining("ClassifierInvalidInputError") });
+      expect(ctx.ui.selects).toHaveLength(0);
+    } else {
+      expect(retry).toBeUndefined();
+      expect(ctx.ui.selects[0].options).toEqual(["Allow once", "Block", "Block with a message"]);
+    }
     expect(JSON.stringify([h.entries, ctx.ui.selects])).not.toContain("private-secret");
   });
 
@@ -765,7 +771,8 @@ describe("awaited Linked gate transitions", () => {
       const notes = [...s.ctx.ui.notes];
       const shutdown = s.h.emit("session_shutdown", {}, s.ctx);
       const completion = shutdown.then(settled);
-      // The harness awaits the coordinator's earlier shutdown hook before the gate hook.
+      // The harness awaits notification and coordinator shutdown hooks before the gate hook.
+      await Promise.resolve();
       await Promise.resolve();
       expect(queryFlow(s.h.pi.events)).toBeUndefined();
       expect(queryFooterActions(s.h.pi.events)).toEqual({});
@@ -1310,7 +1317,10 @@ test.each([true, false])("malformed answers block initially and restrict retries
   const { h, ctx, jev } = setup({ ...safe, requested: { type: "bool", probability: NaN } }, { hasUI });
   await h.emit("before_agent_start", { prompt: "x" }, ctx);
   const event = call("bg_run", { command: "npm test", kind: "job" });
-  expect(await h.emit("tool_call", event, ctx)).toMatchObject({ block: true, reason: expect.stringContaining("ClassifierInvalidAnswerError") });
+  expect(await h.emit("tool_call", event, ctx)).toMatchObject({ block: true, reason: expect.stringContaining("ClassifierUnavailableError") });
+  expect(h.entries.find(e => e.customType === "tool-gate:decision")?.data).toMatchObject({
+    code: "exhausted", attempts: [{ backend: "jev", code: "invalid_answers" }],
+  });
   ctx.ui.selectAnswers.push("Allow once");
   const retry = await h.emit("tool_call", event, ctx);
   if (hasUI) expect(retry).toBeUndefined();
@@ -1320,13 +1330,17 @@ test.each([true, false])("malformed answers block initially and restrict retries
 });
 
 test.each([
-  ["credentials", "ClassifierCredentialsError"],
-  ["model", "ClassifierModelUnavailableError"],
-  ["timeout", "ClassifierTimeoutError"],
-])("classifier %s failure is blocked with a sanitized class", async (failure, errorClass) => {
+  ["credentials", "missing_credentials"],
+  ["model", "unavailable_model"],
+  ["timeout", "timeout"],
+])("classifier %s exhaustion is blocked with sanitized typed attempts", async (failure, code) => {
   const { h, ctx, jev } = setup({ stopReason: "error", errorMessage: failure === "timeout" ? "timed out" : "No API key secret-value", answers: {} });
   if (failure === "model") (jev.registry as any).findOfType = () => undefined;
-  expect(await h.emit("tool_call", call("bash", { command: "npm test" }), ctx)).toMatchObject({ block: true, reason: expect.stringContaining(errorClass!) });
+  expect(await h.emit("tool_call", call("bash", { command: "npm test" }), ctx)).toMatchObject({ block: true, reason: expect.stringContaining("ClassifierUnavailableError") });
+  expect(h.entries.find(e => e.customType === "tool-gate:decision")?.data).toMatchObject({
+    code: "exhausted", attempts: [{ backend: "jev", code, sdkCalls: failure === "timeout" ? 2 : failure === "model" ? 0 : 1 }],
+  });
+  expect(JSON.stringify(h.entries)).not.toContain("secret-value");
   expect(jev.calls).toHaveLength(failure === "timeout" ? 2 : failure === "model" ? 0 : 1);
 });
 

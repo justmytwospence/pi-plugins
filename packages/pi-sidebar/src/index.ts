@@ -13,6 +13,7 @@ import { subagentsGuarded } from "./child.ts";
 import { MODEL_HELP, QUIZ_HELP, SIDEBAR_HEADSUP_HELP, SidebarController } from "./controller.ts";
 import { HEADSUP_HELP, headsUpChange, headsUpChanged } from "./headsup/headsup.ts";
 import { GUARD_ENV, judgeCall, SUBAGENT_ENV_CHANNEL, type SubagentEnvRequest } from "./guard.ts";
+import { installSystem1Notifications } from "./system1.ts";
 
 /**
  * Inside a subagent Sidebar started (GUARD_ENV set by the pi-subagents contract), pi-sidebar only
@@ -45,6 +46,7 @@ const COMMAND_HELP = [
 ].join("\n");
 
 export default function piSidebar(pi: ExtensionAPI) {
+  installSystem1Notifications(pi);
   if (process.env[OBSERVER_ENV]) {
     installEnvironmentObserver(pi);
     if (process.env[GUARD_ENV] === "1") installGuardOnly(pi);

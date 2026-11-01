@@ -1,6 +1,6 @@
 import { basename } from "node:path";
 import type { ModelRegistry } from "@earendil-works/pi-coding-agent";
-import { askSystem1, type ClassifierProvenance } from "./system1.js";
+import { askSystem1, provenanceOf } from "./system1.js";
 
 /** One toggle in the planner picker that Jev can preselect. */
 export interface ToolCapability {
@@ -13,15 +13,11 @@ export interface ToolCapability {
 }
 
 export type JevToolPick =
-  | {
+  | ({
       kind: "jev";
-      backend: ClassifierProvenance["backend"];
-      provider: string;
-      model: string;
-      selectionKey: string;
       probabilities: Record<string, number>;
       selected: Record<string, boolean>;
-    }
+    } & ReturnType<typeof provenanceOf>)
   | { kind: "fallback"; reason: string };
 
 export const DEFAULT_JEV_PROVIDER = "typesafe";
@@ -114,10 +110,7 @@ export async function pickToolsWithJev(input: PickToolsInput): Promise<JevToolPi
     }
     return {
       kind: "jev",
-      backend: result.backend,
-      provider: result.provider,
-      model: result.model,
-      selectionKey: result.selectionKey,
+      ...provenanceOf(result),
       probabilities,
       selected,
     };

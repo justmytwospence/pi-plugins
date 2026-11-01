@@ -5,6 +5,11 @@ import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import guard from "../eval/guard.target.ts";
 import { countRequests, labelOf, plainlyWrites, scoreCommands, selectCommands, settledCommands, summarize, worst } from "../eval/guard.ts";
 import { CHANGE_QUESTION } from "../src/guard.ts";
+import type { JevBool } from "../src/jev.ts";
+import type { System1Attempt } from "../src/system1.ts";
+import { Spend } from "../../../evals/shared/spend.ts";
+import { pool } from "../../../evals/shared/pool.ts";
+import { table } from "../../../evals/shared/table.ts";
 import { last } from "../../../evals/shared/results.ts";
 import { runEval } from "../../../evals/shared/runner.ts";
 import type { Sample, Session, SessionEntry } from "../../../evals/shared/sessions.ts";
@@ -15,10 +20,12 @@ beforeEach(() => {
   vi.stubEnv("PI_CODING_AGENT_DIR", agentDir);
 });
 afterEach(() => {
+  vi.restoreAllMocks();
   vi.unstubAllEnvs();
   rmSync(agentDir, { recursive: true, force: true });
 });
-const decisions = { backend: "openai-decisions", provider: "system1-openai", model: "gpt-6-luna" };
+const decisions = { backend: "openai-decisions", provider: "system1-openai", model: "gpt-6-luna" } as const;
+const preferred = { backend: "jev", provider: "typesafe", model: "jev-latest" } as const;
 const usage = { input: 10, output: 1, cacheRead: 0, cacheWrite: 0, totalTokens: 11, cost: { input: 0.001, output: 0, cacheRead: 0, cacheWrite: 0, total: 0.001 } };
 
 const call = (name: string, command: unknown): SessionEntry => ({ type: "message", message: { role: "assistant", content: [{ type: "text", text: "ok" }, { type: "toolCall", id: "c", name, arguments: { command } }] } });
@@ -92,17 +99,17 @@ describe("guard eval: numbers", () => {
 });
 
 // A registry answering the guard's question by command: writes (rm, mv, redirects) look like changes.
-function jev(options: { fail?: boolean; usage?: boolean; decisions?: boolean } = {}) {
+function jev(options: { fail?: boolean; usage?: boolean; decisions?: boolean; failPrimary?: boolean } = {}) {
   const calls: Array<{ state: Record<string, any>; questions: Record<string, any> }> = [];
   const lookups: string[][] = [];
   const registry = {
     findOfType: (type: string, provider: string, id: string) => {
       lookups.push([type, provider, id]);
-      return { type: "classifier", id, provider, api: options.decisions ? "openai-decisions" : "typesafe", baseUrl: "https://api.openai.com/v1" };
+      return { type: "classifier", id, provider, api: provider === "system1-openai" ? "openai-decisions" : "typesafe", baseUrl: "https://api.openai.com/v1" };
     },
-    classify: async (_model: unknown, context: { state: Record<string, any>; questions: Record<string, any> }) => {
+    classify: async (model: { provider: string }, context: { state: Record<string, any>; questions: Record<string, any> }) => {
       calls.push(context);
-      if (options.fail) return { answers: {}, stopReason: "error", errorMessage: "quota exhausted", ...(options.usage ? { usage } : {}) };
+      if (options.fail || (options.failPrimary && model.provider === "typesafe")) return { answers: {}, stopReason: "error", errorMessage: "quota exhausted", ...(options.usage ? { usage } : {}) };
       const command = JSON.parse(context.state.arguments).command as string;
       return { answers: { q: { type: "bool", probability: /rm |mv |>|sed -i/u.test(command) ? 0.9 : 0.05 } }, stopReason: "stop", ...(options.usage ? { usage } : {}) };
     },
@@ -160,9 +167,53 @@ describe("the guard eval target", () => {
     expect(result.spend.calls).toBe(9);
     expect(result.spend.total).toBeCloseTo(0.009);
     expect(result.failures).toBe(0);
-    expect(result.scored.every((s) => JSON.stringify(s.classifier) === JSON.stringify(decisions))).toBe(true);
+    for (const scored of result.scored) {
+      expect(scored.classifier).toMatchObject({ ...decisions, waterfall: [decisions.backend], fallback: false, attempts: [expect.objectContaining({ ...decisions, status: "succeeded", sdkCalls: 1 })] });
+      expect(scored.outcome).toMatchObject({ ok: true, ...decisions, usage });
+    }
     expect(fake.lookups).toHaveLength(9);
     expect(fake.lookups.every((args) => args.join("/") === "classifier/system1-openai/gpt-6-luna")).toBe(true);
+  });
+
+  test.each([false, true])("scoring retains the whole outcome and spends aggregate usage once (exhausted=%s)", async (failed) => {
+    const attempts: System1Attempt[] = [
+      { ...preferred, targetKey: "preferred", status: "failed", code: "quota_exhausted", reason: "quota or credits exhausted", sdkCalls: 1, latencyMs: 1, usage },
+      { ...decisions, targetKey: "fallback", status: failed ? "failed" : "succeeded", ...(failed ? { code: "timeout" as const, reason: "timed out" } : {}), sdkCalls: 1, latencyMs: 1, usage },
+    ];
+    const aggregate = { ...usage, cost: { ...usage.cost, total: 0.002 } };
+    const outcome: JevBool = failed
+      ? { ok: false, code: "exhausted", reason: "all providers unavailable", attempts, latencyMs: 2, usage: aggregate, selectionKey: "chain" }
+      : { ok: true, probability: 0.1, ...decisions, waterfall: ["jev", "openai-decisions"], selectionKey: "chain", targetKey: "fallback", fallback: true, attempts, latencyMs: 2, usage: aggregate };
+    const add = vi.spyOn(Spend.prototype, "addOutcome");
+    const result = await scoreCommands({}, settledCommands(sample.sessions).slice(0, 1), { concurrency: 1, ask: async () => outcome });
+    expect(add).toHaveBeenCalledExactlyOnceWith(outcome);
+    expect(add.mock.calls[0]![0]).toBe(outcome);
+    expect(result.scored[0]!.outcome).toBe(outcome);
+    expect(result.scored[0]!.outcome!.attempts).toBe(attempts);
+    expect(result.spend.calls).toBe(1);
+    expect(result.spend.total).toBeCloseTo(0.002);
+    expect(result.spend.backendAttempts).toEqual({ jev: 1, "openai-decisions": 1 });
+    expect(result.spend.registryCalls).toBe(2);
+    expect(result.spend.attempts).toMatchObject(attempts);
+    expect(result.spend.attempts.every((attempt) => !("error" in attempt))).toBe(true);
+    expect(result.spend.actualProviders).toEqual(failed ? {} : { [JSON.stringify([decisions.backend, decisions.provider, decisions.model])]: 1 });
+    expect(result.failures).toBe(Number(failed));
+    if (!failed) expect(result.scored[0]!.classifier).toMatchObject({ ...decisions, selectionKey: "chain", targetKey: "fallback", fallback: true, attempts });
+  });
+
+  test.each([false, true])("reports configured policy separately from successful provenance (exhausted=%s)", async (failed) => {
+    writeFileSync(path.join(agentDir, "system1.json"), JSON.stringify({ waterfall: ["jev", "openai-decisions"] }));
+    const fake = jev({ fail: failed, failPrimary: true, usage: true });
+    const result = await guard.run({
+      classifier: { waterfall: ["jev", "openai-decisions"], targets: [preferred, decisions] },
+      registry: fake.registry, sample: () => sample, spend: new Spend(), pool, table,
+      env: {}, compare: false, concurrency: 1, timeoutMs: 1000, log: () => {},
+    });
+    expect(result.report).toContain("configured classifier policy: jev → openai-decisions");
+    expect(result.report).toContain(failed
+      ? "actual classifiers: legacy/unknown (no successful provenance)"
+      : "actual classifiers: openai-decisions (system1-openai/gpt-6-luna)");
+    expect(result.report).not.toContain("actual classifiers: jev");
   });
 
   test("fails when 20% or more of the requests do not answer", async () => {

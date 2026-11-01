@@ -1,14 +1,14 @@
 // Compatibility adapter for Sidebar's single yes/no judgment. Transport follows the global
 // System 1 selection; an unavailable or invalid answer never permits a guarded call.
-import { askSystem1, type ClassifierProvenance, type ClassifierUsage } from "./system1.ts";
+import { askSystem1, provenanceOf, type System1DecisionProvenance, type System1Outcome, type ClassifierUsage } from "./system1.ts";
 
 export const JEV = { provider: "typesafe", model: "jev-latest", timeoutMs: 5_000 } as const;
 
 export type JevBool =
-  | ({ ok: true; probability: number; selectionKey: string; latencyMs: number; usage?: ClassifierUsage } & ClassifierProvenance)
-  | { ok: false; reason: string; usage?: ClassifierUsage };
+  | ({ ok: true; probability: number; latencyMs: number; usage?: ClassifierUsage } & System1DecisionProvenance)
+  | Extract<System1Outcome, { ok: false }>;
 
-/** The probability that `question` is true of `state`. Never throws; no backend fallback. */
+/** The probability that `question` is true of `state`, using the configured System 1 waterfall. */
 export async function askJevBool(
   registry: unknown,
   state: Record<string, unknown>,
@@ -19,15 +19,20 @@ export async function askJevBool(
   if (!outcome.ok) return outcome;
   const answer = outcome.answers.q;
   if (answer?.type !== "bool" || !Number.isFinite(answer.probability) || answer.probability < 0 || answer.probability > 1) {
-    return { ok: false, reason: "no valid answer", ...(outcome.usage ? { usage: outcome.usage } : {}) };
+    return {
+      ok: false,
+      code: "invalid_answers",
+      reason: "no valid answer",
+      selectionKey: outcome.selectionKey,
+      attempts: outcome.attempts,
+      latencyMs: outcome.latencyMs,
+      ...(outcome.usage ? { usage: outcome.usage } : {}),
+    };
   }
   return {
     ok: true,
     probability: answer.probability,
-    backend: outcome.backend,
-    provider: outcome.provider,
-    model: outcome.model,
-    selectionKey: outcome.selectionKey,
+    ...provenanceOf(outcome),
     latencyMs: outcome.latencyMs,
     ...(outcome.usage ? { usage: outcome.usage } : {}),
   };

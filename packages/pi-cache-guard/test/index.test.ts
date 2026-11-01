@@ -1035,7 +1035,7 @@ describe("jev", () => {
     expect(await h.emit("session_before_compact", preparation())).toEqual({ cancel: true });
     h.ui.compactions[0].onError(new Error("Compaction cancelled"));
     expect(h.ui.editor).toBe("fix the parser");
-    expect(h.ui.notes.at(-1)).toBe("Quick compaction did not run: classification failed (invalid API key). Your prompt is back in the editor.");
+    expect(h.ui.notes.at(-1)).toBe("Quick compaction did not run: classification failed (Jev: credentials invalid). Your prompt is back in the editor.");
     expect(h.sent).toEqual([]);
   });
 
@@ -1149,6 +1149,35 @@ describe("jev", () => {
     expect(JSON.parse(readFileSync(userFile(), "utf8"))).toEqual({ jev: { ...dormant, enabled: true } });
     expect(registry.calls).toEqual([]);
     expect(discovered.length).toBeGreaterThan(0);
+    expect(h.ui.menus.flat().every((option) => option.length <= OPTION_MAX)).toBe(true);
+  });
+
+  test.each([
+    ["jev", "openai-decisions"],
+    ["openai-decisions", "jev"],
+  ])("setup/status show %s → %s and keep Jev editing available anywhere in the order without probing", async (first, second) => {
+    writeFileSync(system1File(), JSON.stringify({ waterfall: [first, second] }));
+    const native = { provider: "system1-openai", id: "gpt-6-luna", api: "openai-decisions", baseUrl: "https://api.openai.com/v1" };
+    const jev = jevRegistry(keepAll, [
+      { provider: "typesafe", id: "jev-latest" },
+      { provider: "openrouter", id: "~typesafe/jev-latest" },
+    ]);
+    const registry = {
+      ...jev,
+      findOfType: (type: string, provider: string, id: string) => provider === native.provider ? native : jev.findOfType(type, provider, id),
+      getAvailableOfType: async (_type: string, provider: string) => provider === native.provider ? [native] : (await jev.getAvailableOfType()).filter((model) => model.provider === provider),
+    };
+    const h = cold(registry);
+    await h.emit("session_start", {});
+    await h.commands.get("cache-guard").handler("status", h.ctx);
+    const labels = { jev: "typesafe/jev-latest", "openai-decisions": "system1-openai/gpt-6-luna" };
+    expect(h.ui.notes.at(-1)).toContain(`${labels[first as keyof typeof labels]} → ${labels[second as keyof typeof labels]}`);
+    h.ui.answers = ["Use openrouter"];
+    await h.commands.get("cache-guard").handler("system1", h.ctx);
+    expect(h.ui.titles.at(-1)).toContain("Local availability:");
+    expect(h.ui.menus.at(-1)?.some((item) => item.startsWith("Use openrouter"))).toBe(true);
+    expect(JSON.parse(readFileSync(userFile(), "utf8"))).toEqual({ jev: { provider: "openrouter", model: "~typesafe/jev-latest" } });
+    expect(registry.calls).toEqual([]);
     expect(h.ui.menus.flat().every((option) => option.length <= OPTION_MAX)).toBe(true);
   });
 

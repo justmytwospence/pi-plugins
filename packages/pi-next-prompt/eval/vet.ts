@@ -108,6 +108,8 @@ export interface Scored {
   /** The vet's probability that the suggestion is useful; undefined when Jev gave no answer. */
   probability?: number;
   reason?: string;
+  /** Whole classifier outcome, including actual provenance and every reported backend attempt. */
+  outcome?: JevOutcome;
 }
 
 export interface Scoring {
@@ -127,7 +129,7 @@ export async function scoreTurns(registry: unknown, cases: readonly Case[], opti
     const outcome: JevOutcome = await ask(registry, config, vetState(item), QUESTIONS);
     spend.addOutcome(outcome);
     const probability = outcome.ok ? bool(outcome.answers, "useful") : undefined;
-    scored[index] = { case: item, ...(probability === undefined ? { reason: outcome.ok ? "no answer" : outcome.reason } : { probability }) };
+    scored[index] = { case: item, outcome, ...(probability === undefined ? { reason: outcome.ok ? "no answer" : outcome.reason } : { probability }) };
   });
   return { scored, failures: scored.filter((s) => s.probability === undefined).length, requests: cases.length, spend };
 }

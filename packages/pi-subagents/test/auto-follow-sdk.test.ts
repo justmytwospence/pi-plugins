@@ -1,6 +1,7 @@
 // SDK regression, not a synthetic lifecycle harness: prompt() drives the real 1.4 agent loop,
 // extension runner, nested tools and codemode cancellation. Only provider/subprocess transports
 // and terminal UI are local fakes. In particular, isIdle and lifecycle events are never mocked.
+import "./isolated-agent-dir.ts";
 import { spawn, type ChildProcess } from "node:child_process";
 import { EventEmitter } from "node:events";
 import { mkdtempSync, rmSync } from "node:fs";

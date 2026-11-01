@@ -97,8 +97,11 @@ Terminal labels and rows in this document are examples, not screenshots.
 None are required. When installed, their statuses move into the row they describe
 instead of the status row:
 
+System 1's optional Context chip shows the configured native-classifier order (`S1 Jev→OpenAI`, its reverse, or a singleton). A recent main-registry fallback shows the actual winner with `*` (`S1 OpenAI*`); `?` marks unknown health and `S1 unavailable` an unavailable chain. Those observations do not rewrite the preference or identify one universally active physical classifier. Click the value to open the same waterfall picker as `/system1`; `/system1 status` explains targets, attempts and cooldowns. System 1 owns failure notifications. Rendering never classifies, probes or verifies funding, and the control is absent in blocked or other-session read-only chrome. The classifier waterfall is separate from chat-model `/waterfall` routing and subscription quotas.
+
 | Extension | Status | Shown as |
 | --- | --- | --- |
+| pi-system1 | Structured order, recent-route and health snapshot | `S1 Jev→OpenAI`, an actual fallback `*`, unknown `?` or unavailable value on Context; no new row |
 | pi-auto-effort | `effort: high (auto ↑)` | `reasoning high · auto ↑` on the model row (arrow and any `limited:` note kept) |
 | pi-cache-guard | `cache 4:12`, `cache cold` | `Cache 4:12` or `Cache ❄` on the context row (warm in green, cold in the warning color) |
 | pi-tool-gate | `workflow: work (shift+tab to cycle)` and `⏵⏵ auto mode on (alt+a to cycle)` | separate Workflow and Approvals rows, with key hints and the gate tally on Approvals |

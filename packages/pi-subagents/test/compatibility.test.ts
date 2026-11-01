@@ -1,3 +1,4 @@
+import "./isolated-agent-dir.ts";
 import { existsSync, mkdtempSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import path from "node:path";
@@ -22,7 +23,7 @@ test.skipIf(!existsSync(webStorage))("real web-access state is process-local whi
     for (let i = 0; i < 2; i++) {
       const child = new Child({ task: "fixture", cwd, model: "fixture/model", thinking: "low", sessionDir: cwd, invocation }).start();
       const state = await child.done;
-      expect(state.status, state.error).toBe("done");
+      expect(state.status, (child as any).stderr || state.error).toBe("done");
       expect(JSON.parse(state.output)).toEqual({ parentVisible: false, previousChildVisible: false, childVisible: true, authSeen: true, pinned: true, thinking: "low", classifications: 0, changes: 0, depth: "1" });
       expect(storage.getResult("parent-only")).not.toBeNull();
       expect(storage.getResult("child-only")).toBeNull();

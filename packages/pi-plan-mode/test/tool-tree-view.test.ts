@@ -33,18 +33,20 @@ function view(roots: ToolNode[], preselection: ToolPreselection) {
   return { screen, renders: () => renders };
 }
 
-for (const label of ["Jev", "Decisions"]) {
-  test(`System 1 shows actual ${label} backend while pending and completed at narrow and wide widths`, async () => {
+for (const label of ["Jev", "Decisions", "Jev → Decisions", "Decisions → Jev"]) {
+  test(`System 1 shows preferred ${label} order while pending and the actual winner when completed`, async () => {
     const pick = pendingPick();
     const roots = [{ id: "research", label: "Research", description: "Research", selected: false }];
     const { screen, renders } = view(roots, { label, pending: pick.pending });
     for (const width of [46, 120, 180]) {
       const lines = screen.render(width);
       assert.ok(lines.every((line) => visibleWidth(line) <= width));
-      assert.match(lines.join("\n"), new RegExp(`System 1.*${label}: picking tools`, "u"));
+      assert.match(lines.join("\n"), new RegExp(`System 1.*Preferred ${label}`, "u"));
+      assert.doesNotMatch(lines.join("\n"), /picked/u);
     }
+    const winner = label.includes("→") ? `${label.split(" → ")[1]} (fallback)` : label;
     pick.resolve({
-      message: `${label} picked 1 tools for this task.`,
+      message: `${winner} picked 1 tools for this task.`,
       apply: (keep) => {
         if (!keep) roots[0].selected = true;
       },
@@ -52,7 +54,12 @@ for (const label of ["Jev", "Decisions"]) {
     await pick.pending;
     assert.equal(roots[0].selected, true);
     assert.equal(renders(), 1);
-    assert.match(screen.render(120).join("\n"), new RegExp(`System 1.*${label} picked`, "u"));
+    for (const width of [46, 120, 180]) {
+      const lines = screen.render(width);
+      assert.ok(lines.every((line) => visibleWidth(line) <= width));
+      assert.ok(lines.join("\n").includes(`${winner} picked`));
+      assert.doesNotMatch(lines.join("\n"), /Preferred/u);
+    }
   });
 }
 

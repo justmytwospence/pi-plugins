@@ -21,9 +21,9 @@ afterEach(() => {
   rmSync(root, { recursive: true, force: true });
 });
 
-function setting(backend: string) {
+function setting(backend: string | string[]) {
   mkdirSync(process.env.PI_CODING_AGENT_DIR!, { recursive: true });
-  writeFileSync(path.join(process.env.PI_CODING_AGENT_DIR!, "system1.json"), JSON.stringify({ backend }));
+  writeFileSync(path.join(process.env.PI_CODING_AGENT_DIR!, "system1.json"), JSON.stringify(Array.isArray(backend) ? { waterfall: backend } : { backend }));
 }
 
 const BORDERLINE = [0.15, 0.4, 0.35, 0.1];
@@ -101,7 +101,7 @@ test("backend notifications still cancel pending judgments after the same factor
   finish({ model: "jev-latest", stopReason: "stop", answers: answers(3) });
   await pending;
   expect(s.ctx.ui.status.get("auto-effort")).toBe("effort: medium (auto → ≤medium)");
-  expect(s.h.entries).toHaveLength(2);
+  expect(s.h.entries.filter(entry => entry.customType === "auto-effort:state")).toHaveLength(2);
 });
 
 test("backend events clear judgments and trends, not effort, manual ceiling, counts or policy", async () => {
@@ -179,7 +179,7 @@ describe.each(["prompt", "run"])("pending %s judgment", (phase) => {
     if (change !== "completion") await pending; // Cancellation must not wait for an uncooperative host.
     finish({ model: "jev-latest", stopReason: "stop", answers: answers(0) });
     await pending;
-    expect(s.h.entries).toEqual([]);
+    expect(s.h.entries.filter(entry => entry.customType === "auto-effort:state")).toEqual([]);
     expect(s.h.thinkingChanges).toEqual([]);
     expect(s.ctx.ui.status.get("auto-effort")).toBe("effort: high (auto → ≤high)");
     expect(await s.status()).not.toContain("last decision:");
@@ -192,7 +192,7 @@ describe.each(["prompt", "run"])("pending %s judgment", (phase) => {
     vi.spyOn(jevModule, "askJev").mockImplementationOnce(() => new Promise((resolve) => { finish = resolve; }));
     const pending = phase === "prompt" ? s.prompt() : s.turn();
     setting("openai-decisions");
-    finish({ ok: true, answers: answers(0) as any, backend: "jev", provider: "typesafe", model: "jev-latest", selectionKey: JEV_KEY, latencyMs: 1 });
+    finish({ ok: true, answers: answers(0) as any, backend: "jev", provider: "typesafe", model: "jev-latest", selectionKey: JEV_KEY, targetKey: JEV_KEY, waterfall: ["jev"], fallback: false, attempts: [], latencyMs: 1 });
     await pending;
     expect(s.h.entries).toEqual([]);
     expect(s.h.thinkingChanges).toEqual([]);
@@ -202,7 +202,7 @@ describe.each(["prompt", "run"])("pending %s judgment", (phase) => {
     const s = setup();
     await s.h.emit("session_start", {}, s.ctx);
     vi.spyOn(jevModule, "askJev").mockResolvedValueOnce({
-      ok: true, answers: answers(0) as any, backend: "jev", provider: "typesafe", model: "jev-latest", selectionKey: JEV_KEY, latencyMs: 1,
+      ok: true, answers: answers(0) as any, backend: "jev", provider: "typesafe", model: "jev-latest", selectionKey: JEV_KEY, targetKey: JEV_KEY, waterfall: ["jev"], fallback: false, attempts: [], latencyMs: 1,
     });
     const pending = phase === "prompt" ? s.prompt() : s.turn();
     // The adapter continuation runs first; the setting changes before the outer handler resumes.
@@ -216,7 +216,7 @@ describe.each(["prompt", "run"])("pending %s judgment", (phase) => {
     const s = setup();
     await s.h.emit("session_start", {}, s.ctx);
     vi.spyOn(jevModule, "askJev").mockResolvedValueOnce({
-      ok: true, answers: answers(0) as any, backend: "openai-decisions", provider: "system1-openai", model: "gpt-6-luna", selectionKey: DECISIONS_KEY, latencyMs: 1,
+      ok: true, answers: answers(0) as any, backend: "openai-decisions", provider: "system1-openai", model: "gpt-6-luna", selectionKey: DECISIONS_KEY, targetKey: DECISIONS_KEY, waterfall: ["openai-decisions"], fallback: false, attempts: [], latencyMs: 1,
     });
     await (phase === "prompt" ? s.prompt() : s.turn());
     expect(s.h.entries).toEqual([]);
@@ -287,7 +287,7 @@ test("backend switching respects a disabled local classifier and the session off
   setting("jev");
   s.h.pi.events.emit(SYSTEM1_CHANGED, {});
   await s.prompt();
-  expect(s.h.entries).toHaveLength(1);
+  expect(s.h.entries.filter(entry => entry.customType === "auto-effort:state")).toHaveLength(1);
   expect(s.ctx.ui.status.get("auto-effort")).toBeUndefined();
   expect(queryFooterActions(s.h.pi.events)["effort.toggle"]?.active).toBe(false);
 });
@@ -332,6 +332,64 @@ test("native judgments can be restored on the same target", async () => {
   await s.h.emit("session_tree", {}, s.ctx);
   expect(await s.status()).toContain("need(medium)=0.15");
   expect(resolveSystem1Target({ provider: "ignored", model: "ignored" })).toMatchObject({ ok: true, key: DECISIONS_KEY });
+});
+
+test("a fallback records the actual winner without changing the chain, ceiling, or policy", async () => {
+  setting(["jev", "openai-decisions"]);
+  const s = setup([3]);
+  await s.h.emit("session_start", {}, s.ctx);
+  const key = resolveSystem1Target({ provider: "typesafe", model: "jev-latest" }).key;
+  s.classify.mockResolvedValueOnce({ model: "jev-latest", stopReason: "error", errorMessage: "quota exhausted", answers: {} });
+  await s.prompt("hard work");
+  expect(s.classify).toHaveBeenCalledTimes(2);
+  expect(s.h.thinking).toBe("high");
+  const data = s.h.entries.findLast(entry => entry.customType === "auto-effort:state")!.data;
+  expect(data).toMatchObject({
+    selectionKey: key, ceiling: "high", bounds: "ceiling", level: "high",
+    classifier: { backend: "openai-decisions", provider: "system1-openai", model: "gpt-6-luna", selectionKey: key, targetKey: DECISIONS_KEY, waterfall: ["jev", "openai-decisions"], fallback: true, attempts: [
+      { backend: "jev", code: "quota_exhausted", status: "failed" },
+      { backend: "openai-decisions", status: "succeeded" },
+    ] },
+    needProvenance: { backend: "openai-decisions", fallback: true },
+  });
+  expect(s.h.events.filter(event => event.channel === SYSTEM1_CHANGED)).toEqual([]);
+  expect(await s.status()).toContain("Assessment: need(");
+  expect(s.ctx.ui.notes.some((note: { message: string }) => note.message.includes("trying OpenAI Decisions"))).toBe(true);
+});
+
+test("whole-chain exhaustion keeps the current effort", async () => {
+  setting(["jev", "openai-decisions"]);
+  const s = setup();
+  await s.h.emit("session_start", {}, s.ctx);
+  s.classify.mockImplementation(async model => ({ model: model.id, stopReason: "error", errorMessage: "quota exhausted", answers: {} }));
+  await s.prompt();
+  expect(s.classify).toHaveBeenCalledTimes(2);
+  expect(s.h.thinkingChanges).toEqual([]);
+  expect(s.h.entries.findLast(entry => entry.customType === "auto-effort:state")!.data).not.toHaveProperty("classifier");
+});
+
+test.each([undefined, JEV_KEY])("old singleton evidence (%s) is not restored into a mixed chain", async (selectionKey) => {
+  setting(["jev", "openai-decisions"]);
+  const s = setup();
+  s.ctx.sessionManager.getBranch = () => [{
+    type: "custom", customType: "auto-effort:state",
+    data: { ceiling: "xhigh", level: "low", reason: "down", theta: 0.7, need: { low: 1, medium: 0.1 }, ...(selectionKey ? { selectionKey } : {}) },
+  }];
+  await s.h.emit("session_start", {}, s.ctx);
+  expect(await s.status()).toContain("low to xhigh, your last manual level");
+  expect(await s.status()).toContain("Assessment: none yet");
+  expect(s.classify).not.toHaveBeenCalled();
+});
+
+test("legacy unkeyed Jev evidence remains restorable into the original singleton", async () => {
+  const s = setup();
+  s.ctx.sessionManager.getBranch = () => [{
+    type: "custom", customType: "auto-effort:state",
+    data: { ceiling: "xhigh", level: "low", reason: "down", theta: 0.7, need: { low: 1, medium: 0.1 } },
+  }];
+  await s.h.emit("session_start", {}, s.ctx);
+  expect(await s.status()).toContain("need(medium)=0.10");
+  expect(s.classify).not.toHaveBeenCalled();
 });
 
 test("a footer action captured before a change event cannot toggle the session", async () => {

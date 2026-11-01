@@ -1,9 +1,20 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { type EvalTarget, defineEval, needsSessions, shortPackage, validateTargets, withinFailureLimit } from "./target.ts";
+import { type EvalTarget, type PlanContext, defineEval, needsSessions, shortPackage, validateTargets, withinFailureLimit } from "./target.ts";
 
 const target = (id: string, over: Partial<EvalTarget> = {}): EvalTarget =>
   defineEval({ id, title: id, package: "pi-demo", kind: "cases", plan: () => ({ calls: 1, notes: "" }), run: async () => ({ metrics: {}, report: "", pass: true }), ...over });
+
+test("plans receive optional configured order, not an asserted actual winner", () => {
+  const context: PlanContext = { sample: () => ({ seed: 1, sessions: [] }), compare: false, env: {}, log() {},
+    classifier: { waterfall: ["jev", "openai-decisions"], targets: [
+      { backend: "jev", provider: "typesafe", model: "jev-latest" },
+      { backend: "openai-decisions", provider: "system1-openai", model: "gpt-6-luna" },
+    ], key: "chain" } };
+  const t = target("policy", { plan: (ctx) => ({ calls: 1, notes: ctx.classifier?.waterfall?.join(" → ") ?? "legacy" }) });
+  assert.deepEqual(t.plan(context), { calls: 1, notes: "jev → openai-decisions" });
+  assert.deepEqual(t.plan({ ...context, classifier: undefined }), { calls: 1, notes: "legacy" });
+});
 
 test("defineEval is the identity", () => {
   const t = target("a");

@@ -8,7 +8,7 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 import { loadConfig } from "./config.ts";
 import { whileBlocked } from "./herdr.ts";
 import { type JevConfig, askJev } from "./jev.ts";
-import { SYSTEM1_CHANGED, resolveSystem1Target } from "./system1.js";
+import { SYSTEM1_CHANGED, getSystem1RoutingKey, installSystem1Notifications, provenanceOf, resolveSystem1Target } from "./system1.js";
 import { Picker, type PickerModel } from "./picker.ts";
 import { DEFAULT_RANK, type Judged, type RankSettings, chronological, piecesToJudge, rankQuestions, rankState, readJudgments, suggested } from "./rank.ts";
 import { type Segment, extractSegments, segmentKey } from "./segments.ts";
@@ -41,9 +41,10 @@ export const DEFAULT_CONFIG: CopyConfig = {
 };
 
 export default function piCopy(pi: ExtensionAPI) {
-  // Content judgments belong to one effective classifier target, never just a backend label.
-  const cache = new Map<string, Judged>();
-  let cacheTarget: string | undefined;
+  installSystem1Notifications(pi);
+  // Cache partitions use the chain and actual configured target, not a reported model version.
+  const cache = new Map<string, Map<string, Judged>>();
+  let cacheSelection: string | undefined;
   let config: CopyConfig = DEFAULT_CONFIG;
   const rankings = new Set<() => void>();
   const invalidateRankings = () => {
@@ -52,8 +53,8 @@ export default function piCopy(pi: ExtensionAPI) {
   };
   const syncTarget = () => {
     const key = resolveSystem1Target(config.jev).key;
-    if (key !== cacheTarget) {
-      cacheTarget = key;
+    if (key !== cacheSelection) {
+      cacheSelection = key;
       invalidateRankings();
     }
     return key;
@@ -66,8 +67,9 @@ export default function piCopy(pi: ExtensionAPI) {
       return;
     }
     config = loadConfig("copy", DEFAULT_CONFIG, ctx.cwd);
-    const targetKey = syncTarget();
+    const selectionKey = syncTarget();
     const settings = config;
+    let judgments = cache.get(getSystem1RoutingKey(ctx.modelRegistry, settings.jev)) ?? new Map<string, Judged>();
     const branch = ctx.sessionManager.getBranch();
     const segments = extractSegments(branch, config.maxTurns);
     if (!segments.length) {
@@ -78,13 +80,13 @@ export default function piCopy(pi: ExtensionAPI) {
     let valid = true;
     let open = true;
     const model = (ranking: PickerModel["ranking"]): PickerModel => ({
-      suggested: suggested(segments, valid ? cache : undefined, settings.rank),
+      suggested: suggested(segments, valid ? judgments : undefined, settings.rank),
       all: chronological(segments),
       ranking,
       lastTurn,
     });
 
-    const pending = piecesToJudge(segments, settings.rank).filter((s) => !cache.has(segmentKey(s)));
+    const pending = piecesToJudge(segments, settings.rank).filter((s) => !judgments.has(segmentKey(s)));
     const controller = new AbortController();
     let picker: Picker | undefined;
     const invalidate = () => {
@@ -95,14 +97,18 @@ export default function piCopy(pi: ExtensionAPI) {
     rankings.add(invalidate);
     const isCurrent = () => {
       syncTarget();
-      return open && valid && resolveSystem1Target(settings.jev).key === targetKey;
+      // Health/routing may change while this chain is still producing a valid fallback answer.
+      return open && valid && resolveSystem1Target(settings.jev).key === selectionKey;
     };
-    let state: PickerModel["ranking"] = pending.length ? "pending" : cache.size ? "done" : "unavailable";
+    let state: PickerModel["ranking"] = pending.length ? "pending" : judgments.size ? "done" : "unavailable";
     const ranking: Promise<PickerModel["ranking"]> = pending.length
       ? askJev(ctx.modelRegistry, settings.jev, rankState(pending, recentUserMessages(branch), settings.rank), rankQuestions(pending), controller.signal).then((outcome) => {
-          if (!isCurrent() || !outcome.ok || outcome.selectionKey !== targetKey) return "unavailable";
-          for (const [key, value] of readJudgments(pending, outcome.answers)) cache.set(key, value);
-          pi.appendEntry("copy:decision", { pieces: pending.length, latencyMs: outcome.latencyMs, inputTokens: outcome.usage?.input });
+          if (!isCurrent() || !outcome.ok || outcome.selectionKey !== selectionKey) return "unavailable";
+          const winnerKey = JSON.stringify([selectionKey, outcome.targetKey]);
+          judgments = cache.get(winnerKey) ?? new Map<string, Judged>();
+          for (const [key, value] of readJudgments(pending, outcome.answers)) judgments.set(key, value);
+          cache.set(winnerKey, judgments);
+          pi.appendEntry("copy:decision", { ...provenanceOf(outcome), pieces: pending.length, latencyMs: outcome.latencyMs, inputTokens: outcome.usage?.input, usage: outcome.usage });
           return "done";
         })
       : Promise.resolve(state);
@@ -192,7 +198,7 @@ export default function piCopy(pi: ExtensionAPI) {
     current = ctx;
     config = loadConfig("copy", DEFAULT_CONFIG, ctx.cwd);
     invalidateRankings();
-    cacheTarget = resolveSystem1Target(config.jev).key;
+    cacheSelection = resolveSystem1Target(config.jev).key;
   });
 
   pi.registerCommand("yank", {

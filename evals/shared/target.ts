@@ -14,7 +14,7 @@
 // records `ctx.spend.total` and `ctx.spend.calls`. A target never prints the spend line or writes the
 // results history itself.
 import type { pool } from "./pool.ts";
-import type { ClassifierProvenance } from "./results.ts";
+import type { ConfiguredClassifierPolicy } from "./results.ts";
 import type { Sample } from "./sessions.ts";
 import type { Spend } from "./spend.ts";
 import type { table } from "./table.ts";
@@ -42,6 +42,8 @@ export interface Plan {
 
 /** What every target gets, in the dry run and the live run. */
 export interface PlanContext {
+  /** Configured order/targets, NOT the physical classifier that answered. Absent for legacy callers. */
+  classifier?: ConfiguredClassifierPolicy;
   /**
    * The sampled sessions (`sampleSessions`: EVAL_SEED, EVAL_SAMPLE, EVAL_RECENT, EVAL_MIN_PROMPTS,
    * EVAL_MIN_TOOLS), the same object for every target of one runner invocation; it prints its summary
@@ -58,8 +60,6 @@ export interface PlanContext {
 
 /** What a live run adds: the classifier registry and shared helpers. */
 export interface RunContext extends PlanContext {
-  /** Selected physical classifier, supplied by the CLI; unknown for legacy direct callers. */
-  classifier?: ClassifierProvenance;
   /** Pi's model registry (`installedRegistry`), built once per runner invocation; pass it to the package's `askJev`. */
   registry: unknown;
   /** This target's own accumulator; see the header. */

@@ -26,11 +26,11 @@ import { Conversation, type Message, messageText, readTranscript, transcriptWrit
 import { type Mode, type OwedResult, type Parcel, type ParkedCall, adopt, isParked, park, sessionKey } from "./handoff.ts";
 import { discoverFamily } from "./family-contract.ts";
 import { type JevConfig, askJev } from "./jev.ts";
-import { type ClassifierProvenance, SYSTEM1_CHANGED, resolveSystem1Target } from "./system1.ts";
+import { SYSTEM1_CHANGED, installSystem1Notifications, notifySystem1Notice, provenanceOf, resolveSystem1Target } from "./system1.ts";
 import { runLabel, taskLabel } from "./label.ts";
 import { type AvailableModel, type ChoiceSource, DEFAULT_THRESHOLD, DEFAULT_TIER_DESCRIPTIONS, type Given, type Resolved, type Threshold, type Tier, fixedAgentDefaults, pickQuestions, providerTiers, readPicks, resolve } from "./pick.ts";
 import { REFERENCE_TYPE, type RunRef, compactTranscript, referenceContext, runAutocomplete } from "./references.ts";
-import { type Run, type RunLink, displayTokens, transcriptPath } from "./run.ts";
+import { type Run, type RunLink, displayTokens, relaySystem1Notice, transcriptPath } from "./run.ts";
 import { computeStats, formatStats, latestPerRun, readAllRuns, runRecords } from "./stats.ts";
 import { clip, recentTexts } from "./transcript.ts";
 import { FleetView, SUCCESS_HINT_MS } from "./ui/fleet.ts";
@@ -236,7 +236,7 @@ export interface RunView {
   thinking: string;
   byJev: Resolved["byJev"];
   /** Actual classifier target; absent on old records or deterministic fallback. */
-  classifier?: ClassifierProvenance;
+  classifier?: Resolved["classifier"];
   /** Where the model and thinking came from; absent on records from before it was kept. */
   source?: ChoiceSource;
   /** The quota pressure Jev's model or effort pick was made under, when above 0. */
@@ -427,6 +427,7 @@ function slug(text: string) {
 }
 
 export default function subagents(pi: ExtensionAPI) {
+  installSystem1Notifications(pi);
   // Observation is installed by the explicit family extension, not this tool's depth-limited
   // runtime. Keep the propagation contract available even when delegation is disabled.
   answerSubagentEnvProbes(pi.events);
@@ -918,7 +919,7 @@ export default function subagents(pi: ExtensionAPI) {
         const key = currentSelection();
         const generation = selectionGeneration;
         let picks: ReturnType<typeof readPicks> | undefined;
-        let classifier: ClassifierProvenance | undefined;
+        let classifier: Resolved["classifier"];
         if (Object.keys(questions).length) {
           const controller = new AbortController();
           pendingPicks.add(controller);
@@ -926,7 +927,7 @@ export default function subagents(pi: ExtensionAPI) {
             const outcome = await askJev(ctx.modelRegistry, config.jev, { task: clip(item.task, 6_000), parent_request: parentRequest || "(none)", role: given.agent ?? "auto" }, questions, signal ? AbortSignal.any([signal, controller.signal]) : controller.signal);
             if (outcome.ok && currentSelection() === key && generation === selectionGeneration && outcome.selectionKey === key && !controller.signal.aborted) {
               picks = readPicks(outcome.answers, { pressure: pressureFor(parent.model.split("/")[0]!), threshold: config.jev.threshold, tiers: Object.keys(questions.tier?.criteria ?? {}) as Tier[] });
-              classifier = { backend: outcome.backend, provider: outcome.provider, model: outcome.model };
+              classifier = provenanceOf(outcome);
             }
           } finally {
             pendingPicks.delete(controller);
@@ -974,6 +975,12 @@ export default function subagents(pi: ExtensionAPI) {
       refreshUI();
       scheduleAutoView();
     };
+    link.system1Notice = (notice) => {
+      // The shared sink checks current order/manual-reset time and deduplicates on receipt.
+      // Do not compare with session start: notices received in the reload gap are still owed.
+      if (live && sessionCtx) notifySystem1Notice(sessionCtx, notice, `subagent:${run.id}`);
+    };
+    for (const notice of link.system1Notices?.splice(0) ?? []) link.system1Notice(notice);
     // It ended while parked: its final record is owed now.
     if (link.missedEnd) {
       link.missedEnd = false;
@@ -985,6 +992,7 @@ export default function subagents(pi: ExtensionAPI) {
     if (!run.link) return;
     run.link.update = undefined;
     run.link.ended = undefined;
+    run.link.system1Notice = undefined;
   };
 
   const startRun = async (
@@ -1025,6 +1033,7 @@ export default function subagents(pi: ExtensionAPI) {
         run.state = state;
         link.update?.();
       },
+      onSystem1Notice: (notice) => relaySystem1Notice(link, notice),
       onMessage: transcriptWriter(transcriptPath(outputPath)),
     });
     const run: Run = {
@@ -1239,6 +1248,10 @@ export default function subagents(pi: ExtensionAPI) {
     refreshUI();
     scheduleAutoView();
     if (!owner.aborted) safely(() => pi.events.emit(ROLE_MODEL_READY, { ready: true }));
+  });
+
+  pi.on("session_tree", (_event, ctx) => {
+    if (live) sessionCtx = ctx;
   });
 
   pi.on("before_agent_start", () => setMainRequestActive(true));

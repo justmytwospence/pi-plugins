@@ -121,9 +121,9 @@ test("--dry samples once for the targets that need sessions, plans each, and est
   assert.equal(plan.seed, 7);
   assert.deepEqual(plan.sessions, [{ file: "/s/a.jsonl", cwd: "/s", prompts: 0, toolResults: 0 }]);
   assert.deepEqual(plan.targets, {
-    alpha: { kind: "cases", calls: 4, notes: "four" },
-    beta: { kind: "replay", calls: 10, notes: "compared" },
-    gamma: { kind: "replay", calls: 1, notes: "one per session" },
+    alpha: { kind: "cases", calls: 4, logicalCalls: 4, attemptMultiplier: 1, maxAttempts: 4, notes: "four" },
+    beta: { kind: "replay", calls: 10, logicalCalls: 10, attemptMultiplier: 1, maxAttempts: 10, notes: "compared" },
+    gamma: { kind: "replay", calls: 1, logicalCalls: 1, attemptMultiplier: 1, maxAttempts: 1, notes: "one per session" },
   });
   assert.equal(plan.totalCalls, 15);
   assert.equal(plan.estimate.calls, 15);
@@ -143,7 +143,7 @@ test("--dry without --json prints the plan lines on stdout; a plan that throws f
   const f = fixture();
   f.deps.targets = [defineEval({ id: "bad", title: "Bad", package: "pi-one", kind: "cases", plan: () => { throw new Error("no plan"); }, run: async () => ({ metrics: {}, report: "", pass: true }) }), ...f.deps.targets];
   assert.equal(await runEval(["--dry", "bad", "alpha"], f.deps), 1);
-  assert.match(f.out.join("\n"), /bad: plan failed: no plan\nalpha: 4 calls \(four\)\nestimate only: 4 calls/u);
+  assert.match(f.out.join("\n"), /bad: plan failed: no plan\nalpha: 4 calls \(four\); .*\nestimate only: 4 calls/u);
 });
 
 test("without credentials a live run skips cleanly: exit 0, no registry, no target run", async () => {
@@ -266,7 +266,7 @@ test("--last reads the history, with the diff from the run before; no history is
   assert.equal(targets.beta.last, null);
   f.out.length = 0;
   assert.equal(await runEval(["--last", "alpha", "beta"], f.deps), 0);
-  assert.match(f.out.join("\n"), /^alpha: .*\nclassifier: legacy\/unknown\nwarning: .*\n +previous +last +change\nspend .*\ncalls +3 +3 +0\nscore +0\.5 +0\.5 +0\nn +3 +3 +0\nbeta: no recorded runs/u);
+  assert.match(f.out.join("\n"), /^alpha: .*\nconfigured policy: legacy\/unknown\nactual providers .*\nwarning: .*\n +previous +last +change\nspend .*\ncalls +3 +3 +0\nscore +0\.5 +0\.5 +0\nn +3 +3 +0\nbeta: no recorded runs/u);
 });
 
 const DECISIONS = { backend: "openai-decisions", provider: "system1-openai", model: "gpt-6-luna" };
@@ -287,16 +287,18 @@ function selectedClassifier(f: Fake, configured = true) {
   return { checks: () => checks, change: () => { key = "other target"; } };
 }
 
-test("the selected provider predicate replaces the TypeSafe environment gate and records provenance", async () => {
+test("the selected provider predicate replaces the TypeSafe environment gate and records policy, not a winner", async () => {
   const f = fixture();
   const c = selectedClassifier(f);
   assert.equal(await runEval(["alpha", "--json"], f.deps), 0);
   assert.equal(c.checks(), 1);
   assert.equal(f.registries, 1);
-  assert.deepEqual(json(f.out).classifier, DECISIONS);
-  assert.deepEqual(json(f.out).targets.alpha.classifier, DECISIONS);
-  assert.deepEqual(last("alpha", 1, f.env)[0]?.classifier, DECISIONS);
-  assert.deepEqual(f.runs[0]?.ctx.classifier, DECISIONS);
+  const policy = { waterfall: [DECISIONS.backend], targets: [DECISIONS], key: f.deps.classifier!.key };
+  assert.deepEqual(json(f.out).configuredPolicy, policy);
+  assert.deepEqual(json(f.out).targets.alpha.configuredPolicy, policy);
+  assert.deepEqual(last("alpha", 1, f.env)[0]?.configuredPolicy, policy);
+  assert.equal(last("alpha", 1, f.env)[0]?.classifier, undefined);
+  assert.deepEqual(f.runs[0]?.ctx.classifier, policy);
   assert.match(f.err.join("\n"), /System 1: openai-decisions \(system1-openai\/gpt-6-luna\)/u);
 });
 
@@ -328,7 +330,8 @@ test("dry, list and last expose selection without registry, configured-auth or m
     assert.equal(await runEval(["alpha", mode, "--json"], f.deps), 0);
     assert.equal(c.checks() + f.registries + f.runs.length, 0);
     const output = json(f.out);
-    assert.deepEqual(mode === "--list" ? output[0].classifier : output.classifier, DECISIONS);
+    assert.deepEqual(mode === "--list" ? output[0].configuredPolicy : output.configuredPolicy,
+      { waterfall: [DECISIONS.backend], targets: [DECISIONS], key: f.deps.classifier!.key });
   }
 });
 
@@ -407,15 +410,120 @@ test("the CLI dry/list/last bootstrap reads the same global backend without load
         });
         assert.equal(result.status, 0, result.stderr);
         const output = JSON.parse(result.stdout);
-        const classifier = mode === "--list" ? output[0].classifier : output.classifier;
-        assert.equal(classifier.backend, backend);
-        assert.equal(classifier.provider, backend === "jev" ? "typesafe" : "system1-openai");
+        const policy = mode === "--list" ? output[0].configuredPolicy : output.configuredPolicy;
+        assert.deepEqual(policy.waterfall, [backend]);
+        assert.equal(policy.targets[0].backend, backend);
+        assert.equal(policy.targets[0].provider, backend === "jev" ? "typesafe" : "system1-openai");
+        assert.equal(output.classifier, undefined);
         assert.match(result.stderr, new RegExp(`System 1: ${backend}`, "u"));
       }
     }
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+test("the injected local predicate accepts any configured rung and ignores optional registration failure", async () => {
+  const module = new URL("../../scripts/eval.mjs", import.meta.url).href;
+  const { createEvalClassifier, prepareEvalRegistry } = await import(module);
+  for (const targets of [[JEV, DECISIONS], [DECISIONS, JEV]]) {
+    const lookups: string[] = [];
+    const auth: string[] = [];
+    let registrations = 0;
+    const registry = {
+      findOfType: (_type: string, provider: string, id: string) => {
+        lookups.push(provider);
+        return { id, api: provider === "system1-openai" ? "openai-decisions" : "typesafe-system-one", baseUrl: "https://api.openai.com/v1" };
+      },
+      getProviderAuthStatus: (provider: string) => { auth.push(provider); return { configured: provider === targets[1].provider }; },
+    };
+    assert.equal(await prepareEvalRegistry(registry, async () => { registrations++; throw new Error("SECRET registration body"); }), registry);
+    assert.equal(registrations, 1);
+    const classifier = createEvalClassifier({ ok: true, waterfall: targets.map((t) => t.backend), targets, key: "chain" }, () => "chain");
+    assert.equal(await classifier.configured(registry), true);
+    assert.deepEqual(auth, targets.map((t) => t.provider));
+    assert.deepEqual(lookups, targets.map((t) => t.provider));
+  }
+});
+
+test("mixed policy planning and live results separate policy, attempts and actual winner", async () => {
+  const f = fixture();
+  const policy = { waterfall: ["jev", "openai-decisions"], targets: [JEV, DECISIONS], key: "full-chain" };
+  f.deps.classifier = { ...policy, currentKey: () => policy.key, configured: async () => true };
+  delete f.deps.hasCredentials;
+  const attempts = [
+    { ...JEV, status: "failed", code: "quota_exhausted", sdkCalls: 1, usage: { cost: { total: 0.02 } } },
+    { ...DECISIONS, status: "succeeded", sdkCalls: 1, usage: { cost: { total: 0.01 } } },
+  ];
+  f.deps.targets = [defineEval({ id: "waterfall", title: "Waterfall", package: "pi-one", kind: "cases",
+    plan: (ctx) => { assert.deepEqual(ctx.classifier, policy); return { calls: 72, notes: "fixed count" }; },
+    run: async (ctx) => {
+      assert.deepEqual(ctx.classifier, policy);
+      ctx.spend.addOutcome({ ok: true, ...DECISIONS, waterfall: policy.waterfall, fallback: true, attempts, usage: { cost: { total: 0.03 } } });
+      return { metrics: { score: 1 }, report: "fallback succeeded", pass: true };
+    },
+  })];
+  assert.equal(await runEval(["waterfall", "--dry", "--json"], f.deps), 0);
+  const dry = json(f.out);
+  assert.deepEqual(dry.configuredPolicy, policy);
+  assert.equal(dry.classifier, undefined);
+  assert.equal(dry.logicalCalls, 72);
+  assert.equal(dry.maxAttempts, 144);
+  assert.equal(dry.attemptMultiplier, 2);
+  assert.equal(dry.estimate.calls, 144);
+  assert.equal(f.registries, 0);
+  // Optional targets-only policy metadata still describes both rungs.
+  delete f.deps.classifier!.waterfall;
+  f.out.length = 0;
+  assert.equal(await runEval(["waterfall", "--dry", "--json"], f.deps), 0);
+  assert.equal(json(f.out).maxAttempts, 144);
+  f.deps.classifier!.waterfall = policy.waterfall;
+  f.out.length = 0;
+  assert.equal(await runEval(["waterfall", "--json"], f.deps), 0);
+  const live = json(f.out);
+  assert.equal(live.stopped, undefined);
+  assert.equal(live.calls, 1);
+  assert.equal(live.registryCalls, 2);
+  assert.equal(live.spend, 0.03);
+  assert.deepEqual(live.backendAttempts, { jev: 1, "openai-decisions": 1 });
+  assert.deepEqual(live.actualProviders, { [JSON.stringify(Object.values(DECISIONS))]: 1 });
+  assert.equal(live.attempts.length, 2);
+  const saved = last("waterfall", 1, f.env)[0];
+  assert.deepEqual(saved.configuredPolicy, policy);
+  assert.deepEqual(saved.actualProviders, live.actualProviders);
+  assert.equal(saved.classifier, undefined);
+  assert.equal(saved.calls, 1);
+  assert.equal(saved.registryCalls, 2);
+});
+
+test("editing a later rung during live bootstrap stops before classification", async () => {
+  const f = fixture();
+  let key = "jev-openai";
+  f.deps.classifier = { waterfall: ["jev", "openai-decisions"], targets: [JEV, DECISIONS], key,
+    currentKey: () => key, configured: async () => { key = "jev-only"; return true; } };
+  delete f.deps.hasCredentials;
+  assert.equal(await runEval(["alpha", "--json"], f.deps), 1);
+  assert.equal(f.runs.length, 0);
+  assert.match(json(f.out).stopped, /System 1 changed/u);
+});
+
+test("mixed CLI dry/list/last never load a registry, auth or models", () => {
+  const dir = mkdtempSync(path.join(tmpdir(), "eval-cli-mixed-"));
+  try {
+    for (const waterfall of [["jev", "openai-decisions"], ["openai-decisions", "jev"]]) {
+      writeFileSync(path.join(dir, "system1.json"), JSON.stringify({ waterfall, backend: waterfall[0] }));
+      for (const mode of ["--dry", "--list", "--last"]) {
+        const result = spawnSync(process.execPath, [fileURLToPath(new URL("../../scripts/eval.mjs", import.meta.url)), "guard", mode, "--json"], {
+          encoding: "utf8", timeout: 20_000,
+          env: { PATH: process.env.PATH, HOME: dir, PI_CODING_AGENT_DIR: dir, PI_PACKAGE_DIR: path.join(dir, "sdk-must-not-load"), EVAL_RESULTS_DIR: path.join(dir, "results") },
+        });
+        assert.equal(result.status, 0, result.stderr);
+        const output = JSON.parse(result.stdout);
+        assert.deepEqual((mode === "--list" ? output[0] : output).configuredPolicy.waterfall, waterfall);
+        assert.equal(output.classifier, undefined);
+      }
+    }
+  } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
 test("credential/bootstrap errors never echo raw provider bodies", async () => {

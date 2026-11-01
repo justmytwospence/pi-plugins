@@ -88,6 +88,35 @@ test("record comparisons warn for unknown or mismatched classifier provenance", 
   }
 });
 
+test("policy and actual mix roundtrip independently and suppress incompatible numeric comparisons", () => {
+  const e = env();
+  const jev = { backend: "jev", provider: "typesafe", model: "jev-latest" };
+  const openai = { backend: "openai-decisions", provider: "system1-openai", model: "gpt-6-luna" };
+  const configuredPolicy = { waterfall: ["jev", "openai-decisions"], targets: [jev, openai], key: "full-chain" };
+  const jevKey = JSON.stringify(Object.values(jev));
+  const openaiKey = JSON.stringify(Object.values(openai));
+  const a = record("mixed", { spend: 0.03, calls: 3, metrics: { score: 0.5 }, configuredPolicy,
+    actualProviders: { [jevKey]: 2, [openaiKey]: 1 }, backendAttempts: { jev: 3, "openai-decisions": 1 }, registryCalls: 4 }, e);
+  assert.deepEqual(last("mixed", 1, e)[0], a);
+  assert.equal(a.classifier, undefined);
+  const b = { ...a, spend: 0.06, calls: 6, actualProviders: { [openaiKey]: 2, [jevKey]: 4 } };
+  assert.equal(comparisonWarning(a, b), undefined);
+  assert.equal(diffRecords(a, b).calls, 3);
+  for (const different of [
+    { ...b, configuredPolicy: { waterfall: ["openai-decisions", "jev"], targets: [openai, jev] } },
+    { ...b, configuredPolicy: { ...configuredPolicy, targets: [{ ...jev, model: "another" }, openai] } },
+    { ...b, actualProviders: { [jevKey]: 1, [openaiKey]: 1 } },
+    { ...b, actualProviders: undefined },
+    { ...b, configuredPolicy: undefined },
+  ]) {
+    assert.match(comparisonWarning(a, different)!, /numeric comparison suppressed/u);
+    assert.deepEqual(diffRecords(a, different), {});
+  }
+  // A reset key alone is not a different configured policy.
+  assert.equal(comparisonWarning(a, { ...a, configuredPolicy: { ...configuredPolicy, key: "reset" } }), undefined);
+  assert.deepEqual(diffRecords(a, { ...a, configuredPolicy: undefined, actualProviders: undefined, classifier: jev }), {});
+});
+
 test("evalParams keeps EVAL_* only and gitState answers", () => {
   assert.deepEqual(evalParams({ EVAL_B: "1", EVAL_A: "2", PATH: "x" }), { EVAL_A: "2", EVAL_B: "1" });
   assert.equal(typeof gitState().commit, "string");
