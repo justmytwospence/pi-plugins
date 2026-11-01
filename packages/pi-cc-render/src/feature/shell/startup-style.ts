@@ -4,11 +4,11 @@ export type ResourceMark = { text: string; color: string; highlight?: boolean };
 /** Connection and selection state, independent of source-category colors. */
 export const GLYPHS = {
 	live: { text: "●", color: "success" },
-	attention: { text: "●", color: "warning" },
+	attention: { text: "◆", color: "warning" },
 	failed: { text: "✕", color: "error" },
 	pending: { text: "◌", color: "dim" },
 	idle: { text: "○", color: "dim" },
-	favorite: { text: "★", color: "warning" },
+	favorite: { text: "☆", color: "muted" },
 } as const satisfies Record<string, ResourceMark>;
 
 export const CATEGORIES = {

@@ -5,7 +5,7 @@ import type { StartupHostState } from "./startup-state.ts";
 
 /** Display-only section: Container/viewport routing supplies component-local coordinates. */
 export function createInteractiveSection(
-	getSection: () => ResourceSection | undefined,
+	getSection: (width: number) => ResourceSection | undefined,
 	getTheme: () => StartupTheme,
 	actions: (action: SplashAction) => void,
 ): Component & { dispose(): void } {
@@ -23,7 +23,7 @@ export function createInteractiveSection(
 			if (disposed) return [];
 			// Recompute lines and hit rectangles together, including after a theme change or resize.
 			invalidate();
-			const section = getSection();
+			const section = getSection(nextWidth);
 			const layout = section ? layoutSection(section, nextWidth, getTheme()) : { lines: [], hits: [] };
 			width = nextWidth;
 			hits = layout.hits;

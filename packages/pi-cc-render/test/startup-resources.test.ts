@@ -15,6 +15,10 @@ import {
   packageItemName,
   renderSection,
   layoutSection,
+  planSplashSections,
+  splashSectionCandidates,
+  buildMcpSection,
+  type ResourceSection,
   type ResourceEntry,
   type StartupTheme,
 } from "../src/feature/shell/startup-resources.ts";
@@ -298,8 +302,9 @@ describe("startup resources", () => {
     expect(state.status("b")).toBeUndefined();
   });
 
-  test("the MCP section groups by level and marks servers that need attention", async () => {
+  test("the MCP section uses compact attention counts and leaves failure details to /mcp", async () => {
     const { buildMcpSection } = await import("../src/feature/shell/startup-resources.ts");
+    const detail = "http request failed: a very long diagnostic that belongs in /mcp";
     const section = buildMcpSection(
       [
         { name: "vercel", level: "user" },
@@ -307,20 +312,30 @@ describe("startup resources", () => {
         { name: "local", level: "project" },
       ],
       (name) => (name === "vercel" ? "needs-auth" : name === "obsidian" ? "failed" : "connected"),
-      (name) => (name === "obsidian" ? "http request failed" : undefined),
+      (name) => (name === "obsidian" ? detail : undefined),
+      () => 30,
     )!;
-    expect(renderSection(section, 100, plainTheme)).toEqual([
-      "■ MCP 3 · 1 needs sign-in, 1 failed, /mcp to fix",
-      "  project 1              user 2",
-      "  ■ ● local  connected   ■ ✕ obsidian         failed",
-      "                         ■ ● vercel    needs sign-in",
-      "  obsidian: http request failed",
-    ]);
+    expect(section.legend).toEqual([{ text: "◆ 1", color: "warning" }, { text: "✕ 1", color: "error" }]);
+    expect(section.notes).toBeUndefined();
+    for (const width of [46, 120, 180]) {
+      const lines = renderSection(section, width, plainTheme);
+      expect(lines[0]).toBe("■ MCP 3 · ◆ 1 · ✕ 1");
+      expect(lines.join("\n")).not.toContain(detail);
+      expect(lines.join("\n")).not.toMatch(/connected ·|needs sign-in|\/mcp to fix/);
+      expect(lines.some((line) => /■ ● local\s+30(?:\s|$)/.test(line))).toBe(true);
+      expect(lines.some((line) => /■ ✕ obsidian/.test(line))).toBe(true);
+      expect(lines.some((line) => /■ ◆ vercel/.test(line))).toBe(true);
+      expect(lines.every((line) => visibleWidth(line) <= width)).toBe(true);
+    }
+    const colored: StartupTheme = { fg: (name, text) => `<${name}>${text}</${name}>`, bold: (text) => text };
+    const heading = renderSection(section, 180, colored)[0]!;
+    expect(heading).toContain("<warning>◆ 1</warning>");
+    expect(heading).toContain("<error>✕ 1</error>");
     expect(buildMcpSection([], () => undefined)).toBeUndefined();
     expect(renderSection(buildMcpSection([{ name: "a", level: "user" }], () => "connected")!, 80, plainTheme)).toEqual([
       "■ MCP 1",
       "  user 1",
-      "  ■ ● a  connected",
+      "  ■ ● a",
     ]);
   });
 
@@ -339,15 +354,26 @@ describe("startup resources", () => {
     expect(group.prefixes![byName("connected")]).toEqual(GLYPHS.live);
     expect(group.prefixes![byName("connecting")]).toEqual(GLYPHS.pending);
     expect(group.prefixes![byName("needs-auth")]).toEqual(GLYPHS.attention);
+    expect(GLYPHS.attention).toEqual({ text: "◆", color: "warning" });
+    expect(GLYPHS.attention.text).not.toBe(GLYPHS.live.text);
     expect(group.prefixes![byName("failed")]).toEqual(GLYPHS.failed);
     for (const name of ["disabled", "disconnected", "unknown"]) expect(group.prefixes![byName(name)]).toEqual(GLYPHS.idle);
     expect(group.tones![byName("disabled")]).toBe("dim");
-    expect(group.right![byName("disabled")]).toEqual({ text: "disabled", color: "dim" });
-    expect(group.right![byName("connected")]).toEqual({ text: "connected · 0 tools", color: "dim" });
-    expect(group.right![byName("needs-auth")]).toEqual({ text: "needs sign-in", color: "warning" });
-    expect(group.right![byName("failed")]).toEqual({ text: "failed", color: "error" });
-    expect(renderSection(section, 80, plainTheme).join("\n")).toContain("disconnected");
-    expect(renderSection(section, 80, plainTheme).join("\n")).toContain("unknown");
+    expect(group.right![byName("connected")]).toBe("0");
+    for (const name of states.filter((state) => state !== "connected")) expect(group.right![byName(name)]).toBeUndefined();
+    const lines = renderSection(section, 80, plainTheme).join("\n");
+    expect(lines).toMatch(/■ ○ disabled/);
+    expect(lines).toMatch(/■ ○ disconnected/);
+    expect(lines).toMatch(/■ ○ unknown/);
+    const ansi: StartupTheme = {
+      fg: (name, text) => `\x1b[${{ success: 32, warning: 33, error: 31, dim: 2 }[name] ?? 37}m${text}\x1b[0m`,
+      bold: (text) => text,
+    };
+    const colored = renderSection(section, 180, ansi).join("\n");
+    expect(colored).toContain("\x1b[32m●\x1b[0m connected");
+    expect(colored).toContain("\x1b[33m◆\x1b[0m needs-auth");
+    expect(colored).toContain("\x1b[31m✕\x1b[0m failed");
+    expect(colored).toContain("\x1b[2m○\x1b[0m \x1b[2mdisabled\x1b[0m");
   });
 
   test("MCP runtime state wins over disk and tool registrations, including zero-tool servers", async () => {
@@ -372,25 +398,27 @@ describe("startup resources", () => {
       ["resource_only", { status: "connected", tools: 0 }],
     ]))!;
     const text = renderSection(section, 100, plainTheme).join("\n");
-    expect(text).toMatch(/● live\s+connected · 7 tools/);
-    expect(text).toMatch(/○ off\s+disabled/);
-    expect(text).toMatch(/● resource-only\s+connected · 0 tools/);
-    expect(text).toMatch(/○ no-tools\s+unknown/);
-    expect(text).toMatch(/○ stale-tools\s+unknown/);
+    expect(text).toMatch(/● live\s+7(?:\s|$)/);
+    expect(text).toMatch(/○ off(?:\s|$)/);
+    expect(text).toMatch(/● resource-only\s+0(?:\s|$)/);
+    expect(text).toMatch(/○ no-tools(?:\s|$)/);
+    expect(text).toMatch(/○ stale-tools(?:\s|$)/);
+    expect(text).not.toMatch(/connected ·|disabled(?:\s|$)|unknown(?:\s|$)/);
   });
 
-  test("MCP columns split long scopes and preserve right-hand states at narrow widths", async () => {
+  test("MCP columns split long scopes and preserve numeric counts at narrow widths", async () => {
     const { buildMcpSection } = await import("../src/feature/shell/startup-resources.ts");
     const entries = Array.from({ length: 10 }, (_, i) => ({ name: `server-${i}`, level: "user" as const }));
     const section = buildMcpSection(entries, () => "connected", undefined, () => 1)!;
     const wide = renderSection(section, 100, plainTheme);
     expect(wide.length).toBeLessThan(entries.length + 2);
-    expect(wide[2]).toMatch(/server-0.*server-5/);
+    expect(wide[2]).toMatch(/server-0.*server-4.*server-7/);
     const narrow = renderSection(section, 40, plainTheme);
-    expect(narrow).toHaveLength(entries.length + 2);
-    expect(narrow.slice(2).every((line) => line.endsWith("connected · 1 tool"))).toBe(true);
+    expect(narrow).toHaveLength(7);
+    expect(narrow[2]).toMatch(/server-0.*server-5/);
+    expect((narrow.slice(2).join(" ").match(/■ ● server-\d\s+1(?:\s|$)/g) ?? [])).toHaveLength(entries.length);
     const long = buildMcpSection([{ name: "a-very-long-server-name-界界", level: "project" }], () => "needs-auth")!;
-    expect(renderSection(long, 28, plainTheme)[2]!.replace(/\x1b\[[0-9;]*m/g, "")).toMatch(/…\s+needs sign-in$/);
+    expect(renderSection(long, 28, plainTheme)[2]!.replace(/\x1b\[[0-9;]*m/g, "")).toMatch(/◆ a-very-long-server-na…$/);
     const ansi: StartupTheme = { fg: (_name, text) => `\x1b[32m${text}\x1b[39m`, bold: (text) => `\x1b[1m${text}\x1b[22m` };
     for (const width of [0, 1, 2, 5, 15, 28, 40, 80, 140]) {
       for (const current of [section, long]) {
@@ -431,23 +459,23 @@ describe("startup resources", () => {
         shown = renderSection(collectMcpSection(mode, entries, states)!, 100, plainTheme).join("\n");
       });
       await vi.advanceTimersByTimeAsync(1);
-      expect(shown).toMatch(/live\s+connected · 2 tools/);
-      expect(shown).toMatch(/off\s+disabled/);
+      expect(shown).toMatch(/● live\s+2(?:\s|$)/);
+      expect(shown).toMatch(/○ off(?:\s|$)/);
       expect(shown).not.toContain("project 1");
       await vi.advanceTimersByTimeAsync(65_000);
       status = "live: disconnected, reconnects on next call (codemode)";
       await vi.advanceTimersByTimeAsync(1000);
-      expect(shown).toMatch(/○ live\s+disconnected/);
+      expect(shown).toMatch(/○ live(?:\s|$)/);
       status = "live: connected, 3 tools (codemode)\noff: connected, 0 tools (codemode)";
       trusted = true;
       await vi.advanceTimersByTimeAsync(1000);
-      expect(shown).toMatch(/live\s+connected · 3 tools/);
-      expect(shown).toMatch(/off\s+connected · 0 tools/);
+      expect(shown).toMatch(/● live\s+3(?:\s|$)/);
+      expect(shown).toMatch(/● off\s+0(?:\s|$)/);
       expect(shown).toContain("project 1");
       writeFileSync(join(dir, ".pi", "mcp.json"), JSON.stringify({ mcpServers: { off: { enabled: false } } }));
       status = "live: connected, 3 tools (codemode)\noff: disabled (codemode)";
       await vi.advanceTimersByTimeAsync(1000);
-      expect(shown).toMatch(/○ off\s+disabled/);
+      expect(shown).toMatch(/○ off(?:\s|$)/);
       expect(shown).not.toContain("project 1");
       mode.loadedResourcesContainer.children.length = 0;
       const calls = handler.mock.calls.length;
@@ -520,22 +548,28 @@ describe("startup resources", () => {
     expect(section.groups.map((group) => group.label)).toEqual(["anthropic", "openai"]);
     expect(section.groups[0]!.marks![0]).toEqual({ ...GLYPHS.live, highlight: true });
     expect(section.groups[0]!.prefixes![0]).toEqual(GLYPHS.favorite);
+    expect(GLYPHS.favorite).toEqual({ text: "☆", color: "muted" });
     expect(section.groups[1]!.actions![0]).toEqual({ kind: "model", provider: "openai", id: "gpt-6.1-sol", thinkingLevel: "high" });
     expect(renderSection(section, 80, plainTheme)).toEqual([
       "Models 3",
       "  anthropic 2               openai 1",
-      "  ★ claude-opus-5-5 ●  1M   ★ gpt-6.1-sol:high  922K",
+      "  ☆ claude-opus-5-5 ●  1M   ☆ gpt-6.1-sol:high  922K",
       "    claude-haiku-5-5   1M",
     ]);
     // Too narrow for both: providers wrap onto their own bands.
     expect(renderSection(section, 40, plainTheme)).toEqual([
       "Models 3",
       "  anthropic 2",
-      "  ★ claude-opus-5-5 ●  1M",
+      "  ☆ claude-opus-5-5 ●  1M",
       "    claude-haiku-5-5   1M",
       "  openai 1",
-      "  ★ gpt-6.1-sol:high  922K",
+      "  ☆ gpt-6.1-sol:high  922K",
     ]);
+    const colored: StartupTheme = { fg: (name, text) => `\x1b[${name === "muted" ? 90 : name === "success" ? 32 : 33}m${text}\x1b[0m`, bold: (text) => text };
+    const coloredModels = renderSection(section, 80, colored).join("\n");
+    expect(coloredModels).toContain("\x1b[90m☆\x1b[0m");
+    expect(coloredModels).toContain("\x1b[32mclaude-opus-5-5\x1b[0m \x1b[32m●\x1b[0m");
+    expect(coloredModels).not.toContain("\x1b[33m☆\x1b[0m");
     expect(buildModelsSection([])).toBeUndefined();
     const google = buildModelsSection([
       { provider: "google", id: "antigravity-gemini-4-argon" },
@@ -659,14 +693,20 @@ describe("startup resources", () => {
       const columns = Math.max(1, Math.floor(count / 3));
       expect(wide).toHaveLength(2 + Math.ceil(count / columns));
       const firstData = wide[2]!;
-      expect(firstData.split("connected · 1 tool").length - 1).toBe(columns);
-      expect(wide[2]).toContain("connected · 1 tool");
-      if (count === 10) expect(wide.slice(2).map((line) => (line.match(/connected · 1 tool/g) ?? []).length)).toEqual([3, 3, 3, 1]);
-      if (count === 17) expect(wide.slice(2).map((line) => (line.match(/connected · 1 tool/g) ?? []).length)).toEqual([5, 5, 5, 2]);
+      const cells = (line: string) => line.match(/■ ● s\d+\s+1(?:\s|$)/g) ?? [];
+      expect(cells(firstData)).toHaveLength(columns);
+      if (count === 10) expect(wide.slice(2).map((line) => cells(line).length)).toEqual([3, 3, 3, 1]);
+      if (count === 17) expect(wide.slice(2).map((line) => cells(line).length)).toEqual([5, 5, 5, 2]);
       expect(wide.every((line) => visibleWidth(line) <= 180)).toBe(true);
       for (const width of [46, 120, 180]) {
-        const lines = renderSection(section, width, plainTheme);
+        const { lines, hits } = layoutSection(section, width, plainTheme);
         expect(lines.every((line) => visibleWidth(line) <= width)).toBe(true);
+        expect(lines.slice(2).flatMap(cells)).toHaveLength(count);
+        expect(new Set(hits.map((hit) => JSON.stringify(hit.action))).size).toBe(count);
+        for (const hit of hits) {
+          expect(hit.endCol).toBeLessThanOrEqual(width);
+          expect(sliceByColumn(lines[hit.row]!, hit.startCol, hit.endCol - hit.startCol).trim()).not.toBe("");
+        }
       }
     }
   });
@@ -745,6 +785,79 @@ describe("startup resources", () => {
         expect([...actions.keys()].sort(), `${section.title} missing/repeated action at ${width}`).toEqual(expected.sort());
         expect(lines[0]).toContain(`${section.title} ${section.count}`);
       }
+    }
+  });
+
+  test("responsive candidates hide the fewest entries at the actual width, not whole sections", () => {
+    const extensions: ResourceSection = { title: "Extensions", count: 44, layout: "grid", category: "tools", groups: [
+      { label: "user", items: Array.from({ length: 44 }, (_, i) => `extension-${String(i).padStart(2, "0")}`) },
+    ] };
+    const models: ResourceSection = { title: "Models", count: 14, layout: "columns", groups: [
+      { label: "provider", items: Array.from({ length: 14 }, (_, i) => `model-${String(i).padStart(2, "0")}`),
+        actions: Array.from({ length: 14 }, (_, i) => ({ kind: "model" as const, provider: "provider", id: `model-${String(i).padStart(2, "0")}` })),
+        marks: [{ text: "●", color: "success", highlight: true }, ...Array(13).fill(undefined)],
+        prefixes: [undefined, { text: "☆", color: "muted" }, ...Array(12).fill(undefined)],
+        right: Array(14).fill("200K") },
+    ] };
+    const mcp = buildMcpSection(Array.from({ length: 10 }, (_, i) => ({ name: `server-${i}`, level: "user" as const })),
+      (name) => name === "server-0" ? "needs-auth" : "connected", undefined, () => 2)!;
+    const context: ResourceSection = { title: "Context", count: 2, tokens: 300, layout: "columns", groups: [
+      { label: "project", items: ["AGENTS.md", "SYSTEM.md"], tokens: [200, 100] },
+    ], notes: [{ text: "diagnostic retained", color: "warning" }] };
+    const skills: ResourceSection = { title: "Skills", count: 2, layout: "grid", groups: [{ label: "user", items: ["skill-a", "skill-b"], tokens: [10, 20] }] };
+    const prompts: ResourceSection = { title: "Prompts", count: 2, layout: "grid", groups: [{ label: "project", items: ["/a", "/b"] }] };
+    const sections = { Context: context, Skills: skills, Prompts: prompts, Extensions: extensions, MCP: mcp, Models: models };
+    const names = Object.keys(sections) as Array<keyof typeof sections>;
+    const count = (section: ResourceSection) => section.groups.reduce((total, group) => total + group.items.length + (group.children ?? []).reduce((sum, child) => sum + child.items.length, 0), 0);
+    for (const width of [46, 80, 120, 180]) {
+      const fullRows = names.reduce((sum, name) => sum + renderSection(sections[name], width, plainTheme).length, 0);
+      const unchanged = planSplashSections(sections, width, plainTheme, fullRows);
+      for (const name of names) expect(unchanged[name]).toBe(sections[name]);
+      const options = names.map((name) => splashSectionCandidates(name, sections[name], width, plainTheme));
+      for (const budget of [fullRows - 4, fullRows - 9]) {
+        const planned = planSplashSections(sections, width, plainTheme, budget);
+        const used = names.reduce((sum, name) => sum + renderSection(planned[name]!, width, plainTheme).length, 0);
+        expect(used).toBeLessThanOrEqual(budget);
+        // Independent bounded knapsack over the declared per-section candidate sets.
+        let possible = new Map<number, number>([[0, 0]]);
+        for (const choices of options) {
+          const next = new Map<number, number>();
+          for (const [rows, hidden] of possible) for (const choice of choices) {
+            const total = rows + choice.rows;
+            next.set(total, Math.min(next.get(total) ?? Infinity, hidden + choice.hidden));
+          }
+          possible = next;
+        }
+        const minimum = Math.min(...[...possible].filter(([rows]) => rows <= budget).map(([, hidden]) => hidden));
+        expect(names.reduce((sum, name) => sum + sections[name].count - count(planned[name]!), 0)).toBe(minimum);
+        for (const name of names) {
+          const original = sections[name];
+          const chosen = planned[name]!;
+          const lines = layoutSection(chosen, width, plainTheme);
+          const hidden = original.count - count(chosen);
+          expect(chosen.count).toBe(original.count);
+          expect(chosen.groups.map((group) => group.label)).toEqual(original.groups.map((group) => group.label));
+          expect(lines.lines[0]).toContain(`${name} ${original.count}`);
+          expect(lines.lines.every((line) => visibleWidth(line) <= width)).toBe(true);
+          if (hidden) expect(lines.lines.join("\n")).toContain(`+${hidden} hidden`);
+          for (const hit of lines.hits) {
+            expect(sliceByColumn(lines.lines[hit.row]!, hit.startCol, hit.endCol - hit.startCol).trim()).not.toBe("");
+            expect(hit.endCol).toBeLessThanOrEqual(width);
+          }
+        }
+        expect(planned.Context!.notes).toContainEqual({ text: "diagnostic retained", color: "warning" });
+        if (planned.Models!.groups[0]!.items.length) expect(planned.Models!.groups[0]!.items).toContain("model-00");
+        if (planned.Models!.groups[0]!.items.length > 1) expect(planned.Models!.groups[0]!.items).toContain("model-01");
+        if (planned.MCP!.groups[0]!.items.length) expect(planned.MCP!.groups[0]!.items).toContain("server-0");
+        const retained = planned.Models!.groups[0]!;
+        for (const [index, item] of retained.items.entries()) {
+          expect(retained.actions![index]).toMatchObject({ id: item });
+          expect(retained.right![index]).toBe("200K");
+        }
+      }
+      const impossible = planSplashSections(sections, width, plainTheme, 0);
+      expect(impossible.Context!.notes).toContainEqual({ text: "diagnostic retained", color: "warning" });
+      expect(renderSection(impossible.Models!, width, plainTheme)[0]).toContain("Models 14");
     }
   });
 

@@ -2,12 +2,12 @@ import { describe, expect, it } from "vitest";
 import { parseColor, stripTerminalSequences, visibleWidth } from "@earendil-works/pi-tui";
 import { capacitySegments, layoutContextTreemap, renderContextTreemap } from "../src/feature/shell/startup-treemap.ts";
 import { categoryStyle } from "../src/feature/shell/startup-style.ts";
-import type { ContextSource, StartupContextSnapshot } from "../src/feature/shell/startup-context.ts";
+import { ESTIMATE_CAVEAT, type ContextSource, type StartupContextSnapshot } from "../src/feature/shell/startup-context.ts";
 
 const source = (id: string, tokens: number, category: ContextSource["category"] = "files"): ContextSource => ({ id, label: id, category, tokens });
 const snapshot = (sources: ContextSource[], contextWindow?: number): StartupContextSnapshot => ({
 	stage: "starting", modelLabel: "p/m", contextWindow, usedEstimate: sources.reduce((sum, item) => sum + item.tokens, 0), sources,
-	attribution: { files: true, skills: true }, caveats: ["Estimated from loaded content; request hooks and provider framing may add tokens."],
+	attribution: { files: true, skills: true }, caveats: [ESTIMATE_CAVEAT],
 });
 const theme = (name: string) => ({
 	fg: (_token: string, text: string) => text,
@@ -70,7 +70,8 @@ describe("context treemap", () => {
 		const strip = lines.slice(1, 3).map(stripTerminalSequences).join("\n");
 		for (const label of ["Files", "System", "Tools"]) expect(strip).toContain(label);
 		expect(lines.join("\n")).toContain("Skills ~1.9k");
-		expect(strip).toContain("┃");
+		expect(strip).not.toContain("┃");
+		expect(strip).toContain("▓");
 		expect(strip).not.toContain(joined);
 		expect(lines[0]).toContain("2% of 1M (~18k)");
 		expect(lines.join("\n")).not.toContain("Capacity ·");
@@ -79,7 +80,7 @@ describe("context treemap", () => {
 		expect(lines.every((line) => visibleWidth(line) <= 120)).toBe(true);
 		const medium = renderContextTreemap(snapshot(sources, 1_048_576), 100, theme("light"));
 		for (const label of ["Files", "System", "Skills", "Tools"]) expect(medium.join("\n")).toContain(label);
-		expect(stripTerminalSequences(medium[2]!)).toMatch(/█.*┃.*█/);
+		expect(stripTerminalSequences(medium[2]!)).toMatch(/█+▓+.*█/);
 		expect(medium.every((line) => visibleWidth(line) <= 100)).toBe(true);
 		const manyMcp = [source("one", 700, "mcp"), source("two", 300, "mcp")];
 		const mcpTile = stripTerminalSequences(renderContextTreemap(snapshot(manyMcp, 200_000), 46, theme("dark"))[1]!);
@@ -88,10 +89,17 @@ describe("context treemap", () => {
 		expect(mcpTile).not.toContain("two");
 		const childSplit = { ...snapshot([{ id: "files", label: "Files", category: "files" as const, tokens: 1000, children: [source("a", 500), source("b", 480), source("too small", 20)] }], 200_000) };
 		const split = renderContextTreemap(childSplit, 60, theme("light"))[2]!;
-		expect(stripTerminalSequences(split).match(/┃/g)).toHaveLength(1);
+		expect(stripTerminalSequences(split)).toMatch(/^█{30}▓{29}▒$/);
 		expect(split).not.toContain("\x1b[48;2"); // foreground-only bars never expose a pale background gap
 		const tiny = renderContextTreemap(snapshot([{ id: "files", label: "Files", category: "files", tokens: 1000, children: [source("a", 990), source("tiny one", 5), source("tiny two", 5)] }], 200_000), 60, theme("light"));
-		expect(stripTerminalSequences(tiny[2]!)).not.toContain("┃");
+		expect(stripTerminalSequences(tiny[2]!)).toMatch(/^█+▒?$/);
+		const balanced = renderContextTreemap(snapshot([{ id: "tools", label: "Tools", category: "tools", tokens: 1000, children: Array.from({ length: 10 }, (_, i) => source(`tool${i}`, 100, "tools")) }], 200_000), 60, theme("light"));
+		expect(stripTerminalSequences(balanced[2]!)).toBe("▒".repeat(60));
+		const mcp = renderContextTreemap(snapshot([
+			{ ...source("large server", 700, "mcp"), children: [source("a", 350, "mcp"), source("b", 350, "mcp")] },
+			{ ...source("small server", 300, "mcp"), children: [source("c", 300, "mcp")] },
+		], 200_000), 60, theme("light"));
+		expect(stripTerminalSequences(mcp[2]!)).toBe(`${"█".repeat(42)}${"▓".repeat(18)}`); // MCP weights are per server, not individual declarations.
 		const narrow = renderContextTreemap(snapshot(sources, 200_000), 24, theme("light"));
 		expect(narrow.join("\n")).toContain("Skills ~1.9k");
 		expect(narrow.every((line) => visibleWidth(line) <= 24)).toBe(true);
@@ -116,6 +124,12 @@ describe("context treemap", () => {
 			const lines = renderContextTreemap(snapshot(sources, 200), width, theme("dark"));
 			expect(lines.every((line) => visibleWidth(line) <= width), `width ${width}`).toBe(true);
 		}
+		const detailed = renderContextTreemap({ ...snapshot(sources, 200), thinkingLevel: "xhigh", caveats: [ESTIMATE_CAVEAT, "window unknown"] }, 120, theme("dark"));
+		expect(detailed[0]).toContain("p/m:xhigh");
+		const narrowModel = renderContextTreemap({ ...snapshot(sources, 200), modelLabel: "anthropic/claude-opus-5-5", thinkingLevel: "xhigh" }, 46, theme("dark"));
+		expect(narrowModel[0]).toMatch(/Start.*250%\/200.*claude-opus-5-5:xhigh/);
+		expect(detailed.join("\n")).not.toContain(ESTIMATE_CAVEAT);
+		expect(detailed.join("\n")).toContain("window unknown");
 		const initial = renderContextTreemap({ ...snapshot([], undefined), stage: "initializing" }, 12, theme("light"));
 		expect(initial).toHaveLength(1);
 	});

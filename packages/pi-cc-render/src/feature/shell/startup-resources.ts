@@ -56,6 +56,8 @@ export type ResourceGroup = {
 	/** Sub-heading; undefined when the section needs none. */
 	label?: string;
 	items: string[];
+	/** Original count while a responsive splash retains only some entries. */
+	count?: number;
 	/** Groups nested under this one, after its own items (a level's packages). */
 	children?: ResourceGroup[];
 	/** Estimated tokens per item, parallel to `items`; present only when the section measures them. */
@@ -262,7 +264,7 @@ export function groupEntries(
 
 /** Entries in a group and everything nested under it. */
 export function groupCount(group: ResourceGroup): number {
-	return group.items.length + (group.children ?? []).reduce((sum, child) => sum + groupCount(child), 0);
+	return group.count ?? group.items.length + (group.children ?? []).reduce((sum, child) => sum + groupCount(child), 0);
 }
 
 function allGroups(groups: ResourceGroup[]): ResourceGroup[] {
@@ -326,7 +328,7 @@ type Block = { lines: string[]; hits: CellHit[]; width: number; height: number; 
 type Candidate = { columns: number; rows: number; width: number; lengths: number[]; widths: Array<{ name: number; count: number; total: number }> };
 
 function candidateShapes(group: ResourceGroup, available: number, theme: StartupTheme, category?: ResourceSection["category"]): { cells: Cell[]; heading: string; shapes: Candidate[] } {
-	const heading = `${theme.fg("accent", group.label ?? "")} ${theme.fg("dim", String(group.items.length))}`;
+	const heading = `${theme.fg("accent", group.label ?? "")} ${theme.fg("dim", String(group.count ?? group.items.length))}`;
 	const cells: Cell[] = markedItems(group, theme).map((name, index) => {
 		const right = rightText(group, index);
 		return {
@@ -563,6 +565,95 @@ export function renderSection(section: ResourceSection, width: number, theme: St
 	return layoutSection(section, width, theme).lines;
 }
 
+export type SplashCandidate = { section: ResourceSection; rows: number; hidden: number; losses: number[] };
+
+/** One candidate per hidden-entry count, in a deterministic priority order. Original group headings,
+ * metadata arrays and section counts survive filtering; the measured row count includes the notice. */
+export function splashSectionCandidates(name: string, original: ResourceSection, width: number, theme: StartupTheme): SplashCandidate[] {
+	const priority = (name: string, group: ResourceGroup, index: number): number => {
+		if (name === "Models" && group.marks?.[index]?.highlight) return 0;
+		if (name === "Models" && group.prefixes?.[index]?.text === GLYPHS.favorite.text) return 1;
+		if (name === "MCP" && (group.prefixes?.[index]?.text === GLYPHS.attention.text || group.prefixes?.[index]?.text === GLYPHS.failed.text)) return 2;
+		return ({ Context: 3, Skills: 4, Models: 5, MCP: 6, Prompts: 7, Extensions: 8 } as Record<string, number>)[name] ?? 8;
+	};
+	const entries: Array<{ key: string; rank: number; order: number }> = [];
+	const visit = (groups: ResourceGroup[], parent = "") => groups.forEach((group, position) => {
+		const path = `${parent}/${position}`;
+		group.items.forEach((_, index) => entries.push({ key: `${path}/${index}`, rank: priority(name, group, index), order: entries.length }));
+		visit(group.children ?? [], path);
+	});
+	visit(original.groups);
+	const removal = [...entries].sort((a, b) => b.rank - a.rank || b.order - a.order);
+	const result: SplashCandidate[] = [];
+	for (let hidden = 0; hidden <= entries.length; hidden++) {
+		const removed = new Set(removal.slice(0, hidden).map((entry) => entry.key));
+		const filter = (groups: ResourceGroup[], parent = ""): ResourceGroup[] => groups.map((group, position) => {
+			const path = `${parent}/${position}`;
+			const keep = group.items.map((_, index) => index).filter((index) => !removed.has(`${path}/${index}`));
+			const aligned = <T>(values: T[] | undefined) => values?.filter((_, index) => keep.includes(index));
+			return {
+				...group, count: groupCount(group), items: aligned(group.items)!,
+				...(group.tokens ? { tokens: aligned(group.tokens) } : {}),
+				...(group.marks ? { marks: aligned(group.marks) } : {}),
+				...(group.prefixes ? { prefixes: aligned(group.prefixes) } : {}),
+				...(group.right ? { right: aligned(group.right) } : {}),
+				...(group.tones ? { tones: aligned(group.tones) } : {}),
+				...(group.actions ? { actions: aligned(group.actions) } : {}),
+				...(group.children ? { children: filter(group.children, path) } : {}),
+			};
+		});
+		const route = name === "Models" ? "/model" : name === "MCP" ? "/mcp" : "Ctrl+O";
+		const section = hidden === 0 ? original : {
+			...original, groups: filter(original.groups),
+			notes: [...(original.notes ?? []), { text: `+${hidden} hidden · ${route} to see all`, color: "dim" }],
+		};
+		const losses = Array<number>(9).fill(0);
+		for (const entry of removal.slice(0, hidden)) losses[entry.rank]!++;
+		result.push({ section, rows: renderSection(section, width, theme).length, hidden, losses });
+	}
+	return result;
+}
+
+/** Minimize hidden entries over width-specific, actually rendered candidate rows. A row-indexed
+ * dynamic program bounds the search while allowing non-monotone grid/column packing. */
+export function planSplashSections(
+	sections: Record<string, ResourceSection>, width: number, theme: StartupTheme, availableRows: number,
+): Record<string, ResourceSection> {
+	const names = ["Context", "Skills", "Prompts", "Extensions", "MCP", "Models"].filter((name) => sections[name]);
+	if (names.reduce((sum, name) => sum + renderSection(sections[name]!, width, theme).length, 0) <= availableRows) {
+		return Object.fromEntries(names.map((name) => [name, sections[name]!]));
+	}
+	const options = names.map((name) => splashSectionCandidates(name, sections[name]!, width, theme));
+	const better = (a: { hidden: number; losses: number[] }, b: typeof a): boolean => {
+		if (a.hidden !== b.hidden) return a.hidden < b.hidden;
+		for (let index = 0; index < a.losses.length; index++) {
+			if (a.losses[index] !== b.losses[index]) return a.losses[index]! < b.losses[index]!;
+		}
+		return false;
+	};
+	type Choice = { hidden: number; losses: number[]; picked: SplashCandidate[] };
+	let frontier = new Map<number, Choice>([[0, { hidden: 0, losses: Array(9).fill(0), picked: [] }]]);
+	for (const sectionOptions of options) {
+		const next = new Map<number, Choice>();
+		for (const [rows, state] of frontier) for (const option of sectionOptions) {
+			const total = rows + option.rows;
+			const candidate = {
+				hidden: state.hidden + option.hidden,
+				losses: state.losses.map((value, index) => value + option.losses[index]!),
+				picked: [...state.picked, option],
+			};
+			const existing = next.get(total);
+			if (!existing || better(candidate, existing)) next.set(total, candidate);
+		}
+		frontier = next;
+	}
+	const fitting = [...frontier].filter(([rows]) => rows <= availableRows);
+	const chosen = fitting.length
+		? fitting.sort((a, b) => better(a[1], b[1]) ? -1 : better(b[1], a[1]) ? 1 : a[0] - b[0])[0]![1]
+		: [...frontier].sort((a, b) => a[0] - b[0] || (better(a[1], b[1]) ? -1 : 1))[0]?.[1];
+	return Object.fromEntries(names.map((name, index) => [name, chosen?.picked[index]?.section ?? sections[name]!]));
+}
+
 // ---- Collecting entries from pi's InteractiveMode ----
 
 type SourceInfoLike = { source?: string; scope?: string } | undefined;
@@ -740,36 +831,28 @@ export function collectMcpEntries(mode: any, cache?: McpConfigCache): McpEntry[]
 	}
 }
 
-/** One entry per row, state on the left and explicit status/count on the right, in adaptive scope columns. */
+/** One entry per row, state on the left and known tool count on the right, in adaptive scope columns. */
 export function buildMcpSection(
 	entries: McpEntry[],
 	status: (name: string) => McpStatus | undefined,
-	detail: (name: string) => string | undefined = () => undefined,
+	_detail: (name: string) => string | undefined = () => undefined,
 	tools: (name: string) => number | undefined = () => undefined,
 ): ResourceSection | undefined {
 	if (entries.length === 0) return undefined;
 	const sorted = [...entries].sort((a, b) => compareNames(a.name, b.name));
 	const groups: ResourceGroup[] = [];
-	const notes: ResourceMark[] = [];
 	let needAuth = 0;
 	let failed = 0;
 	for (const level of MCP_LEVELS) {
 		const inLevel = sorted.filter((entry) => entry.level === level);
 		if (inLevel.length === 0) continue;
 		const states = inLevel.map((entry) => entry.enabled === false ? "disabled" : status(entry.name) ?? "unknown");
-		const right = inLevel.map((entry, index): ResourceMark => {
+		const right = inLevel.map((entry, index): string | undefined => {
 			const state = states[index]!;
 			if (state === "needs-auth") needAuth++;
-			if (state === "failed") {
-				failed++;
-				const why = detail(entry.name);
-				if (why) notes.push({ text: `${entry.name}: ${why}`, color: "error" });
-			}
+			if (state === "failed") failed++;
 			const count = state === "connected" ? tools(entry.name) : undefined;
-			const text = state === "connected" && count !== undefined
-				? `connected · ${count} tool${count === 1 ? "" : "s"}`
-				: state === "needs-auth" ? "needs sign-in" : state;
-			return { text, color: state === "needs-auth" ? "warning" : state === "failed" ? "error" : "dim" };
+			return count === undefined ? undefined : String(count);
 		});
 		groups.push({
 			label: level,
@@ -780,15 +863,16 @@ export function buildMcpSection(
 			right,
 		});
 	}
-	const problems = [needAuth && `${needAuth} need${needAuth === 1 ? "s" : ""} sign-in`, failed && `${failed} failed`].filter(Boolean);
+	const legend: ResourceMark[] = [];
+	if (needAuth) legend.push({ text: `${GLYPHS.attention.text} ${needAuth}`, color: GLYPHS.attention.color });
+	if (failed) legend.push({ text: `${GLYPHS.failed.text} ${failed}`, color: GLYPHS.failed.color });
 	return {
 		title: "MCP",
 		count: entries.length,
 		layout: "columns",
 		groups,
 		category: "mcp",
-		...(problems.length > 0 ? { attention: `${problems.join(", ")}, /mcp to fix` } : {}),
-		...(notes.length > 0 ? { notes } : {}),
+		...(legend.length > 0 ? { legend } : {}),
 	};
 }
 
@@ -1165,12 +1249,22 @@ export function replaceSections(mode: any, options: unknown, pi?: ExtensionAPI):
 	host.refresh = refresh;
 	host.repaint = () => mode.ui?.requestRender?.();
 	refresh();
-	const interactive = (getSection: () => ResourceSection | undefined) =>
+	let planned: Record<string, ResourceSection> = {};
+	let planKey = "";
+	const native = new Map<any, (width: number) => string[]>();
+	// The first section (or an interactive section) plans from a render-time viewport width.
+	// Measure the other children through their original renderers, never through our wrappers:
+	// rendering loadedResourcesContainer here would recurse into the planner.
+	const selected = (name: string, width: number) => {
+		ensurePlan(width);
+		return planned[name];
+	};
+	const interactive = (getSection: (width: number) => ResourceSection | undefined) =>
 		controller ? createInteractiveSection(getSection, theme, (action) => void controller.activate(action)) : {
-			render(width: number) { const section = getSection(); return section ? renderSection(section, width, theme()) : []; },
+			render(width: number) { const value = getSection(width); return value ? renderSection(value, width, theme()) : []; },
 			invalidate() {},
 		};
-	const modelComponent = interactive(() => host.resourceSections?.Models);
+	const modelComponent = interactive((width) => selected("Models", width));
 	const modelSpacer = { render: () => host.resourceSections?.Models ? [""] : [], invalidate() {} };
 	const mapComponent = {
 		render(width: number) {
@@ -1188,12 +1282,39 @@ export function replaceSections(mode: any, options: unknown, pi?: ExtensionAPI):
 	}
 	const anchor = titled.find(([, title]) => title === "Extensions") ?? titled[titled.length - 1];
 	const mcpAt = anchor ? children.indexOf(anchor[0]) + 2 : children.length;
-	const component = interactive(section);
+	const component = interactive((width) => selected("MCP", width));
 	const spacer = { render: () => mcpEntries.length > 0 || statuses.size > 0 ? [""] : [], invalidate() {} };
 	children.splice(mcpAt, 0, component, spacer);
 	// Native sections (including diagnostics) end in a Spacer; when MCP is last its
 	// conditional spacer serves the same purpose. Neither leaves a blank after Models.
 	children.push(mapComponent, modelSpacer, modelComponent);
+	const dock = ["editorContainer", "footerContainer", "statusContainer", "pendingMessagesContainer", "widgetContainerAbove", "widgetContainerBelow"];
+	const height = (node: any, width: number) => typeof node?.render === "function" ? node.render(width).length : 0;
+	function ensurePlan(width: number): void {
+		const current = attachStartupHost(mode);
+		if (generation !== current.generation) { generation = current.generation; planKey = ""; }
+		const full = { ...host.resourceSections, MCP: section() } as Record<string, ResourceSection>;
+		if (!full.MCP) delete full.MCP;
+		const rows = mode.ui?.terminal?.rows;
+		if (!Number.isFinite(rows)) { planned = full; return; }
+		const fixed = height(mode.headerContainer, width) + height(mode.chatContainer, width)
+			+ dock.reduce((sum, name) => sum + height(mode[name], width), 0);
+		let splashFixed = 0;
+		const flexible: Record<string, ResourceSection> = {};
+		for (const child of children) {
+			if (child === component || child === modelComponent) continue;
+			const title = titled.find(([original]) => original === child)?.[1];
+			if (title && full[title] && !child.state?.expanded) flexible[title] = full[title];
+			else splashFixed += height(native.get(child) ? { render: native.get(child) } : child, width);
+		}
+		if (full.MCP) flexible.MCP = full.MCP;
+		if (full.Models) flexible.Models = full.Models;
+		// All splash-owned spacers and the map are included exactly once above.
+		const key = JSON.stringify([generation, width, rows, fixed, splashFixed, flexible]);
+		if (key === planKey) return;
+		planKey = key;
+		planned = { ...full, ...planSplashSections(flexible, width, theme(), rows - fixed - splashFixed) };
+	}
 	watchMcpState(mode, component, (entries, observed) => {
 		mcpEntries = entries;
 		statuses = observed;
@@ -1205,13 +1326,15 @@ export function replaceSections(mode: any, options: unknown, pi?: ExtensionAPI):
 			mode.ui?.requestRender?.();
 		}
 	});
+	for (const [child, title] of titled) native.set(child, child.render.bind(child));
 	for (const [child, title] of titled) {
-		const expandedRender = child.render.bind(child);
+		const expandedRender = native.get(child)!;
 		child.render = (width: number) => {
+			ensurePlan(width);
 			const section = host.resourceSections?.[title!];
 			return child.state?.expanded || !section
 				? expandedRender(width)
-				: renderSection(section, width, theme());
+				: renderSection(planned[title!] ?? section, width, theme());
 		};
 	}
 }
@@ -1261,9 +1384,9 @@ type McpNotifyPatch = {
 
 /**
  * Pi's MCP extension reports servers that need a sign-in or failed as one warning. Once the startup listing's
- * MCP section is on screen it shows the same thing next to each server, so the warning is taken in (its
- * configuration lines, which belong to no server, still show) and the later reconnect and sign-in confirmations
- * update the marks.
+ * MCP section is on screen its state marks show which servers need attention, so the warning is taken in (its
+ * configuration lines, which belong to no server, still show). Native /mcp retains the details; later reconnect
+ * and sign-in confirmations update the marks.
  */
 export function installMcpNotify(prototype: any): void {
 	if (typeof prototype.showExtensionNotify !== "function") return;

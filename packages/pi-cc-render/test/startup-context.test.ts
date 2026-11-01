@@ -78,6 +78,7 @@ describe("startup context attribution", () => {
 		expect(over.usedEstimate).toBe(25);
 		expect(over.caveats).toContain("over by ~15");
 		expect(collectStartupContext({ ...base(), declarations: undefined }).caveats).toContain("Tool declarations unavailable.");
+		expect(collectStartupContext({ ...base(), thinkingLevel: "high" }).thinkingLevel).toBe("high");
 		expect(collectStartupContext({}).stage).toBe("unavailable");
 		expect(readStartupContext({}).stage).toBe("initializing");
 	});
@@ -138,13 +139,16 @@ describe("startup context attribution", () => {
 	});
 	it("reads current projection and memoizes only unchanged snapshots", () => {
 		const projection = vi.fn(() => ({ messages: [message("hello")] }));
-		const session = { systemPrompt: "1234", model: { id: "x", contextWindow: 1000 }, agent: { state: { tools: [] } }, _hiddenDeclarations: new Set(),
+		const session = { systemPrompt: "1234", model: { id: "x", contextWindow: 1000 }, agent: { state: { tools: [], thinkingLevel: "low" } }, _hiddenDeclarations: new Set(),
 			sessionManager: { buildSessionProjection: projection }, resourceLoader: { getSystemPromptSource: () => undefined, getSystemPrompt: () => "", getAppendSystemPromptSources: () => [], getAppendSystemPrompt: () => [], getAgentsFiles: () => ({ agentsFiles: [] }), getSkills: () => ({ skills: [] }) }, getAllTools: () => [] };
 		const mode = { session };
 		expect(readStartupContext(mode)).toBe(readStartupContext(mode));
+		expect(readStartupContext(mode).thinkingLevel).toBe("low");
+		session.agent.state.thinkingLevel = "xhigh";
+		expect(readStartupContext(mode).thinkingLevel).toBe("xhigh");
 		session.model.contextWindow = 2000;
 		expect(readStartupContext(mode).contextWindow).toBe(2000);
-		expect(projection).toHaveBeenCalledTimes(3);
+		expect(projection).toHaveBeenCalledTimes(5);
 	});
 	it("replaces session lookup without leaking a previous mode snapshot", () => {
 		let id = "first";

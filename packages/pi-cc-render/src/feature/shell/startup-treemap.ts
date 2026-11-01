@@ -1,7 +1,7 @@
 import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import { formatContextWindow, formatTokens } from "./startup-resources.ts";
 import { CATEGORIES, categoryStyle, type ContextCategory, type ContextTheme } from "./startup-style.ts";
-import type { ContextSource, StartupContextSnapshot } from "./startup-context.ts";
+import { ESTIMATE_CAVEAT, type ContextSource, type StartupContextSnapshot } from "./startup-context.ts";
 
 export type ContextRectangle = { x: number; y: number; width: number; height: number; source: ContextSource };
 const positive = (sources: ContextSource[]) => sources.filter((source) => source.tokens > 0).sort((a, b) => b.tokens - a.tokens || a.id.localeCompare(b.id));
@@ -94,26 +94,28 @@ function categoryTiles(sources: ContextSource[], width: number, height: number):
 	return layoutContextTreemap(categories, width, height);
 }
 
-/** Mark only readable child-sized regions; collect tiny leaves into one unmarked remainder. */
-function itemBreaks(sources: ContextSource[], tile: ContextRectangle): number[] {
-	const leaves = positive(sources.filter((source) => source.category === tile.source.category)
-		.flatMap((source) => source.children?.length ? source.children : [source]));
-	if (leaves.length < 2 || tile.width < 9) return [];
-	const minimum = tile.source.tokens * 4 / tile.width;
-	const large = leaves.filter((leaf) => leaf.tokens >= minimum);
-	const other = leaves.filter((leaf) => leaf.tokens < minimum).reduce((sum, leaf) => sum + leaf.tokens, 0);
-	const weights = [...large.map((leaf) => leaf.tokens), ...(other >= minimum ? [other] : [])];
-	let consumed = 0;
+/** Shade only the largest one or two sources if they occupy at least a quarter of a category.
+ * Smaller sources share the lighter remainder; lengths use actual weights, never a fake minimum.
+ * MCP uses server totals, not individual declarations, when several servers contribute.
+ */
+function dominanceGlyphs(sources: ContextSource[], tile: ContextRectangle): string[] {
+	const categorySources = sources.filter((source) => source.category === tile.source.category);
+	const leaves = positive(tile.source.category === "mcp" && categorySources.length > 1
+		? categorySources
+		: categorySources.flatMap((source) => source.children?.length ? source.children : [source]));
+	const glyphs = Array<string>(tile.width).fill("▒");
+	if (leaves.length <= 1) return glyphs.fill("█");
+	const largest = leaves.filter((leaf) => leaf.tokens >= tile.source.tokens / 4 &&
+		Math.round(tile.width * leaf.tokens / tile.source.tokens) >= 4).slice(0, 2);
+	let cumulative = 0;
 	let previous = 0;
-	const breaks: number[] = [];
-	for (const weight of weights.slice(0, -1)) {
-		consumed += weight;
-		const boundary = Math.round(tile.width * consumed / tile.source.tokens);
-		if (boundary - previous < 4 || tile.width - boundary < 4) continue;
-		breaks.push(tile.x + boundary);
-		previous = boundary;
+	for (const [index, leaf] of largest.entries()) {
+		cumulative += leaf.tokens;
+		const end = Math.min(tile.width, Math.round(tile.width * cumulative / tile.source.tokens));
+		glyphs.fill(index === 0 ? "█" : "▓", previous, end);
+		previous = end;
 	}
-	return breaks;
+	return glyphs;
 }
 
 /** Resource map rendering only; collection and cache updates happen in the owner tick, never here. */
@@ -125,9 +127,12 @@ export function renderContextTreemap(snapshot: StartupContextSnapshot, width: nu
 	const window = snapshot.contextWindow;
 	const percent = window ? Math.round(snapshot.usedEstimate * 100 / window) : undefined;
 	const summary = `${snapshot.stage === "starting" ? "Starting context" : "Context"} · ${percent === undefined ? `~${formatTokens(snapshot.usedEstimate)} · window unknown` : `${percent}% of ${formatContextWindow(window)} (~${formatTokens(snapshot.usedEstimate)})`}`;
-	const title = `${summary} · ${snapshot.modelLabel}`;
+	const effort = snapshot.thinkingLevel ? `:${snapshot.thinkingLevel}` : "";
+	const title = `${summary} · ${snapshot.modelLabel}${effort}`;
 	const compact = `${snapshot.stage === "starting" ? "Start" : "Context"} · ~${formatTokens(snapshot.usedEstimate)}/${window ? formatContextWindow(window) : "?"}${percent === undefined ? "" : ` · ${percent}%`}`;
-	lines.push(fit(width < 24 ? `~${formatTokens(snapshot.usedEstimate)}${percent === undefined ? " · window unknown" : ` · ${percent}%`}` : visibleWidth(title) <= width ? title : visibleWidth(summary) <= width ? summary : compact, width));
+	const briefModel = snapshot.modelLabel.split("/").at(-1) ?? snapshot.modelLabel;
+	const shortTitle = `${snapshot.stage === "starting" ? "Start" : "Context"} ${percent === undefined ? `~${formatTokens(snapshot.usedEstimate)}` : `${percent}%`}/${window ? formatContextWindow(window) : "?"} · ${briefModel}${effort}`;
+	lines.push(fit(width < 24 ? `~${formatTokens(snapshot.usedEstimate)}${percent === undefined ? " · window unknown" : ` · ${percent}%`}` : visibleWidth(title) <= width ? title : visibleWidth(shortTitle) <= width ? shortTitle : visibleWidth(summary) <= width ? summary : compact, width));
 	if (snapshot.stage === "unavailable") lines.push(fit("Context estimate unavailable or partial", width));
 	if (width < 24) {
 		appendWrapped(lines, [...totals(snapshot.sources)].map(([category, tokens]) => `${CATEGORIES[category].label} ~${formatTokens(tokens)}`), width);
@@ -138,7 +143,7 @@ export function renderContextTreemap(snapshot: StartupContextSnapshot, width: nu
 		const named = new Set<ContextCategory>();
 		const complete = new Set<ContextCategory>();
 		for (const rect of categoryTiles(snapshot.sources, width, 1)) {
-			for (let x = rect.x; x < rect.x + rect.width; x++) bar[x] = { char: "█", category: rect.source.category };
+			for (const [offset, char] of dominanceGlyphs(snapshot.sources, rect).entries()) bar[rect.x + offset] = { char, category: rect.source.category };
 			const full = `${rect.source.label} ~${formatTokens(rect.source.tokens)}`;
 			const label = rect.width >= visibleWidth(full) + 2 ? full : rect.width >= visibleWidth(rect.source.label) + 2 ? rect.source.label : "";
 			if (label) {
@@ -153,7 +158,6 @@ export function renderContextTreemap(snapshot: StartupContextSnapshot, width: nu
 					col += cellWidth;
 				}
 			}
-			for (const x of itemBreaks(snapshot.sources, rect)) bar[x] = { char: "┃", category: rect.source.category };
 		}
 		const paint = (cells: Cell[]) => {
 			let output = "";
@@ -174,6 +178,8 @@ export function renderContextTreemap(snapshot: StartupContextSnapshot, width: nu
 			categoryStyle(theme, category).swatch(`■ ${CATEGORIES[category].label} ~${formatTokens(tokens)}`)), width);
 	} else lines.push(fit("No attributed sources", width));
 	for (const caveat of snapshot.caveats) {
+		// The approximate token notation and docs retain the caveat without a repeated startup line.
+		if (caveat === ESTIMATE_CAVEAT) continue;
 		const words = caveat.split(" ");
 		let row = "";
 		for (const word of words) {

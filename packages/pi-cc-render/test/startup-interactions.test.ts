@@ -2,7 +2,7 @@ import { Container, HStack, ScrollView, TuiAltScreen, VStack, visibleWidth, type
 import { renderLayoutFrame } from "../node_modules/@earendil-works/pi-tui/dist/layout.js";
 import { afterEach, describe, expect, test, vi } from "vitest";
 import { createInteractiveSection, createSplashActionController } from "../src/feature/shell/startup-interactions.ts";
-import { layoutSection, type ResourceSection, type SplashAction, type StartupTheme } from "../src/feature/shell/startup-resources.ts";
+import { layoutSection, planSplashSections, type ResourceSection, type SplashAction, type StartupTheme } from "../src/feature/shell/startup-resources.ts";
 import { attachStartupHost, disposeStartupHost } from "../src/feature/shell/startup-state.ts";
 
 const theme: StartupTheme = { fg: (_color, text) => text, bold: (text) => text };
@@ -129,6 +129,32 @@ describe("interactive startup sections", () => {
     expect(actions).toHaveBeenCalledTimes(1);
     overlay.hide();
     renderer.resetTextSelection();
+    component.dispose();
+  });
+
+  test("a same-width row change replaces hit maps with only retained model routes", () => {
+    const actions = vi.fn();
+    const width = 46;
+    let availableRows = layoutSection(section, width, theme).lines.length;
+    const getSection = (renderWidth: number) => planSplashSections({ Models: section }, renderWidth, theme, availableRows).Models;
+    const component = createInteractiveSection(getSection, () => theme, actions);
+    const full = component.render(width);
+    expect(full).toEqual(layoutSection(section, width, theme).lines);
+    availableRows -= 2;
+    const short = component.render(width);
+    expect(short).toHaveLength(availableRows);
+    expect(short.join("\n")).toMatch(/\+\d+ hidden · \/model/);
+    const retained = getSection(width)!;
+    const hits = layoutSection(retained, width, theme).hits;
+    const expected = retained.groups.flatMap((group) => group.actions ?? []).map((action) => JSON.stringify(action));
+    expect([...new Set(hits.map((hit) => JSON.stringify(hit.action)))].sort()).toEqual(expected.sort());
+    for (const hit of hits) {
+      expect(component.handleMouse?.(mouse(hit.startCol, hit.row, width))).toEqual({ handled: true, render: false });
+      expect(actions).toHaveBeenLastCalledWith(hit.action);
+    }
+    expect(component.handleMouse?.(mouse(2, short.length - 1, width))).toBeUndefined();
+    availableRows += 2;
+    expect(component.render(width)).toEqual(full);
     component.dispose();
   });
 

@@ -5,6 +5,7 @@ export type ContextSource = { id: string; category: ContextCategory; label: stri
 export type StartupContextSnapshot = {
 	stage: "initializing" | "starting" | "context" | "unavailable";
 	modelLabel: string;
+	thinkingLevel?: string;
 	contextWindow?: number;
 	usedEstimate: number;
 	sources: ContextSource[];
@@ -27,8 +28,9 @@ export type StartupContextInput = {
 	/** The canonical session projection, before convertToLlm. */
 	messages?: Parameters<typeof convertToLlm>[0];
 	model?: { provider?: string; id?: string; contextWindow?: number };
+	thinkingLevel?: string;
 };
-const CAVEAT = "Estimated from loaded content; request hooks and provider framing may add tokens.";
+export const ESTIMATE_CAVEAT = "Estimated from loaded content; request hooks and provider framing may add tokens.";
 const charsToTokens = (text: string) => Math.ceil(text.length / 4);
 const labelOf = (model?: StartupContextInput["model"]) => model?.id ? `${model.provider ? `${model.provider}/` : ""}${model.id}` : "Model unknown";
 
@@ -36,7 +38,7 @@ const labelOf = (model?: StartupContextInput["model"]) => model?.id ? `${model.p
 export function collectStartupContext(input: StartupContextInput): StartupContextSnapshot {
 	const window = input.model?.contextWindow;
 	const contextWindow = typeof window === "number" && Number.isFinite(window) && window > 0 ? window : undefined;
-	const caveats = [CAVEAT];
+	const caveats = [ESTIMATE_CAVEAT];
 	if (!contextWindow) caveats.push("window unknown");
 	const sources: ContextSource[] = [];
 	const attribution = {
@@ -136,7 +138,7 @@ export function collectStartupContext(input: StartupContextInput): StartupContex
 	}
 	const usedEstimate = sources.reduce((sum, source) => sum + source.tokens, 0);
 	if (contextWindow && usedEstimate > contextWindow) caveats.push(`over by ~${usedEstimate - contextWindow}`);
-	return { stage, modelLabel: labelOf(input.model), contextWindow, usedEstimate, sources, attribution, caveats };
+	return { stage, modelLabel: labelOf(input.model), ...(input.thinkingLevel ? { thinkingLevel: input.thinkingLevel } : {}), contextWindow, usedEstimate, sources, attribution, caveats };
 }
 
 const cache = new WeakMap<object, { digest: string; snapshot: StartupContextSnapshot }>();
@@ -147,7 +149,7 @@ export function resetStartupContext(mode: any): void {
 /** Read-only host adapter; never runs request hooks or walks the filesystem. */
 export function readStartupContext(mode: any): StartupContextSnapshot {
 	const session = mode?.session;
-	if (!session) return { stage: "initializing", modelLabel: "Model unknown", usedEstimate: 0, sources: [], attribution: { files: false, skills: false }, caveats: [CAVEAT] };
+	if (!session) return { stage: "initializing", modelLabel: "Model unknown", usedEstimate: 0, sources: [], attribution: { files: false, skills: false }, caveats: [ESTIMATE_CAVEAT] };
 	try {
 		const loader = session.resourceLoader;
 		let options: any;
@@ -202,6 +204,7 @@ export function readStartupContext(mode: any): StartupContextSnapshot {
 			registry,
 			messages,
 			model,
+			thinkingLevel: session.thinkingLevel ?? session.agent?.state?.thinkingLevel,
 		};
 		const leaf = session.sessionManager?.getLeafId?.();
 		const id = session.sessionManager?.getSessionId?.();
@@ -212,6 +215,6 @@ export function readStartupContext(mode: any): StartupContextSnapshot {
 		cache.set(session, { digest, snapshot });
 		return snapshot;
 	} catch {
-		return collectStartupContext({ model: session.model });
+		return collectStartupContext({ model: session.model, thinkingLevel: session.agent?.state?.thinkingLevel });
 	}
 }

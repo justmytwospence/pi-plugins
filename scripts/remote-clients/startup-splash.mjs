@@ -13,7 +13,7 @@ const { CustomEditor } = await import(new URL('./modes/interactive/components/cu
 const { McpManagerView, showMcpManager } = await import(new URL('./extensions/mcp/ui.js', sdkUrl));
 
 const snapshot = {
-  stage: 'starting', modelLabel: 'Claude Opus', contextWindow: 200_000, usedEstimate: 4100,
+  stage: 'starting', modelLabel: 'Claude Opus', thinkingLevel: 'high', contextWindow: 200_000, usedEstimate: 4100,
   sources: [
     { id: 'system', category: 'system', label: 'System', tokens: 1400 },
     { id: 'files', category: 'files', label: 'Files', tokens: 900 },
@@ -62,8 +62,9 @@ export async function startupSplashScreens({ theme, getEditorTheme, kb, sidebarS
   ], invalidate() {} };
   for (const width of [46, 120, 180]) {
     const lines = transcript.render(width).map(stripVTControlCharacters);
-    const headings = ['Context', 'Skills', 'Prompts', 'Extensions', 'MCP', 'Starting context', 'Models'];
+    const headings = ['Context', 'Skills', 'Prompts', 'Extensions', 'MCP', 'Start', 'Models'];
     const positions = headings.map(heading => lines.findIndex(line => line.includes(heading)));
+    assert.match(lines[positions[5]], /Claude Opus:high/u, 'the summary keeps the model and effort');
     assert.ok(positions.every((position, index) => position >= 0 && (!index || position > positions[index - 1])),
       `startup listing follows resources → map → Models at width ${width}: ${JSON.stringify(positions)}`);
     assert.match(lines[0], /Context/u, 'Context starts the listing without a leading blank');
@@ -77,7 +78,7 @@ export async function startupSplashScreens({ theme, getEditorTheme, kb, sidebarS
   const render = (width, dock, options) => {
     const { lines } = sidebarScreen({ width, height: splashHeight, transcript, dock, footer: idleFooter, ...options });
     const text = stripVTControlCharacters(lines.join('\n'));
-    assert.match(text, /Starting context/u, 'the real splash remains above the editor or MCP manager');
+    assert.match(text, /Start(?:ing context)?/u, 'the real splash remains above the editor or MCP manager');
     assert.match(text, /Models/u, 'model resource rows are on screen');
     assert.match(text, /MCP/u, 'MCP resource rows are on screen');
     return { ansi: lines.join('\n'), text };

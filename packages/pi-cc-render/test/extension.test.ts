@@ -347,6 +347,101 @@ describe("extension factory", () => {
     }
   });
 
+  test("startup budgets the actual dock, chart, spacers and diagnostics at the rendered width; native expansion is untouched", async () => {
+    const { replaceSections, stopStartupResources, renderSection } = await import("../src/feature/shell/startup-resources.ts");
+    const { attachStartupHost, disposeStartupHost } = await import("../src/feature/shell/startup-state.ts");
+    const { mcpState } = await import("../src/feature/shell/mcp-servers.ts");
+    vi.useFakeTimers();
+    let dockRows = 4;
+    const terminal = { rows: 100, columns: 180 };
+    const plain = { fg: (_color: string, value: string) => value, bold: (value: string) => value };
+    const native = (title: string) => ({ state: { expanded: false }, setExpanded() {}, render() {
+      return this.state.expanded ? [`[${title}] native expanded`, "native item A", "native item B", "native item C"] : [`[${title}] native collapsed`];
+    } });
+    const context = native("Context");
+    const diagnostics = { render: () => ["[Extension issues] native diagnostic"], invalidate() {} };
+    const children: any[] = [new Spacer(1), context, new Spacer(1), native("Skills"), new Spacer(1),
+      native("Prompts"), new Spacer(1), native("Extensions"), new Spacer(1), diagnostics, new Spacer(1)];
+    let sessionId = "responsive-session";
+    const mode: any = {
+      sessionManager: { getSessionId: () => sessionId, getCwd: () => temp },
+      session: { promptTemplates: [], scopedModels: [], getAllTools: () => [], resourceLoader: {
+        agentDir: temp, getSystemPromptSource: () => undefined, getAppendSystemPromptSources: () => [],
+        getAgentsFiles: () => ({ agentsFiles: [] }), getSkills: () => ({ skills: [] }), getExtensions: () => ({ extensions: [] }),
+      }, extensionRunner: { runtime: { mcpServers: { list: () => Array.from({ length: 10 }, (_, i) => ({ name: `server-${i}` })) } } } },
+      loadedResourcesContainer: { children }, shouldShowStartupDetails: () => true,
+      settingsManager: { isProjectTrusted: () => false },
+      ui: { terminal, requestRender: vi.fn() },
+      headerContainer: { render: () => ["header", "header"] }, chatContainer: { render: () => ["chat"] },
+      editorContainer: { render: () => Array(dockRows).fill("editor") },
+      footerContainer: { render: () => ["footer"] }, statusContainer: { render: () => ["status"] },
+      pendingMessagesContainer: { render: () => [] }, widgetContainerAbove: { render: () => ["widget"] }, widgetContainerBelow: { render: () => [] },
+    };
+    const render = (width: number) => children.flatMap((child) => child.render(width)) as string[];
+    try {
+      replaceSections(mode, { force: true, extensions: [] });
+      const host = attachStartupHost(mode);
+      host.contextSnapshot = { stage: "starting", modelLabel: "test/model", usedEstimate: 100, sources: [],
+        attribution: { files: false, skills: false }, caveats: [] };
+      host.resourceSections = {
+        Context: { title: "Context", count: 1, layout: "columns", groups: [{ label: "user", items: ["AGENTS.md"] }] },
+        Skills: { title: "Skills", count: 2, layout: "grid", groups: [{ label: "user", items: ["a", "b"] }] },
+        Prompts: { title: "Prompts", count: 1, layout: "grid", groups: [{ label: "project", items: ["/p"] }] },
+        Extensions: { title: "Extensions", count: 44, layout: "grid", groups: [{ label: "user", items: Array.from({ length: 44 }, (_, i) => `extension-${i}`) }] },
+        Models: { title: "Models", count: 14, layout: "columns", groups: [{ label: "test", items: Array.from({ length: 14 }, (_, i) => `model-${i}`),
+          actions: Array.from({ length: 14 }, (_, i) => ({ kind: "model", provider: "test", id: `model-${i}` })) }] },
+      } as any;
+      for (const width of [46, 80, 120, 180]) {
+        terminal.rows = 200;
+        const full = render(width);
+        const actual = full.length + 2 + 1 + dockRows + 1 + 1 + 1;
+        terminal.rows = actual;
+        expect(render(width)).toEqual(full);
+        expect(full.join("\n")).toContain("extension-43");
+        expect(full.join("\n")).toContain("server-9");
+        terminal.rows = actual - 8;
+        const short = render(width);
+        expect(short.length + 2 + 1 + dockRows + 1 + 1 + 1).toBeLessThanOrEqual(terminal.rows);
+        expect(short.join("\n")).toContain("[Extension issues] native diagnostic");
+        expect(short.join("\n")).toContain("No attributed sources");
+        expect(short.join("\n")).toContain("Models 14");
+        expect(short.join("\n")).toContain("Extensions 44");
+        expect(short.join("\n")).toContain("MCP 10");
+        expect(short.join("\n")).toMatch(/\+\d+ hidden/);
+        expect(short.join("\n")).toContain("extension-0");
+        context.state.expanded = true;
+        const expanded = render(width);
+        expect(expanded).toContain("native item C");
+        expect(expanded.join("\n")).toContain("[Context] native expanded");
+        context.state.expanded = false;
+        dockRows++;
+        const changedDock = render(width);
+        expect(changedDock.length).toBeLessThanOrEqual(short.length);
+        dockRows--;
+        terminal.rows = actual;
+        expect(render(width)).toEqual(full);
+        context.state.expanded = true;
+        expect(render(width)).toContain("native item C");
+        expect(render(width).join("\n")).not.toContain("[Context] native collapsed");
+        context.state.expanded = false;
+      }
+      expect(renderSection(host.resourceSections!.Models!, 46, plain).join("\n")).toContain("model-13");
+      host.resourceSections!.Models = { title: "Models", count: 1, layout: "columns", groups: [
+        { label: "test", items: ["replacement-model"], actions: [{ kind: "model", provider: "test", id: "replacement-model" }] },
+      ] };
+      expect(render(46).join("\n")).toContain("replacement-model");
+      mcpState.outcome("server-0", "needs-auth");
+      expect(render(46).join("\n")).toContain("◆ server-0");
+      sessionId = "next-session";
+      expect(render(46).join("\n")).toContain("[Context] native collapsed");
+      expect(attachStartupHost(mode).resourceSections).toBeUndefined();
+    } finally {
+      stopStartupResources();
+      disposeStartupHost(mode);
+      vi.useRealTimers();
+    }
+  });
+
   test("/ccstyle status reports the configuration and other arguments require the TUI", async () => {
     const extension = (await import("../src/index.ts")).default;
     const { pi, commands } = stubApi();

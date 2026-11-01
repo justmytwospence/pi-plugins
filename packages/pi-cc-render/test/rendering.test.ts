@@ -397,7 +397,7 @@ describe("startup header", () => {
   test("renders an occupied-context summary and colored category bar at client widths", async () => {
     const { renderHeaderLines } = await import("../src/feature/shell/startup-header.ts");
     const snapshot = {
-      stage: "starting" as const, modelLabel: "provider/model", contextWindow: 200_000,
+      stage: "starting" as const, modelLabel: "provider/model", thinkingLevel: "high", contextWindow: 200_000,
       usedEstimate: 5_000,
       attribution: { files: true, skills: true },
       sources: [
@@ -409,8 +409,12 @@ describe("startup header", () => {
     for (const width of [46, 120, 180]) {
       const lines = renderHeaderLines(width, theme, snapshot);
       const output = plain(lines).join("\n");
-      expect(output).toContain("Starting context");
-      expect(output).toContain("3% of 200K (~5k)");
+      if (width === 46) expect(lines[0]).toContain("Start 3%/200K · model:high");
+      else {
+        expect(output).toContain("Starting context");
+        expect(output).toContain("3% of 200K (~5k)");
+        expect(output).toContain("provider/model:high");
+      }
       expect(output).toContain("System ~3k");
       expect(output).toContain("Files ~2k");
       expect(output).not.toContain("Sources ·");
