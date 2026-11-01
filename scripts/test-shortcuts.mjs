@@ -77,6 +77,13 @@ try {
     { names: ['plan-mode', 'tool-gate'], gate: {}, plan: { toggleShortcut: 'shift+tab' }, key: 'shift+tab', duplicate: true },
     { names: ['tool-gate'], gate: { workflowShortcut: 'alt+o', approvalShortcut: 'alt+o' }, plan: {}, key: 'alt+o', duplicateAxes: true },
   ];
+  const settle = async (check, label) => {
+    const deadline = Date.now() + 3000;
+    while (!check()) {
+      assert.ok(Date.now() < deadline, `Timed out settling ${label}`);
+      await new Promise(resolve => setTimeout(resolve, 10));
+    }
+  };
   for (const [index, test] of cases.entries()) {
     const dir = resolve(temp, `case-${index}`);
     mkdirSync(dir, { recursive: true });
@@ -121,6 +128,7 @@ try {
     const before = events.length;
     await shortcuts.get(test.key).handler(runner.createContext());
     const workflow = () => /workflow: (\w+)/.exec(statuses.get('workflow-mode') ?? '')?.[1];
+    await settle(() => workflow() === (hasGate ? 'chat' : 'plan'), 'resolved workflow shortcut');
     assert.equal(workflow(), hasGate ? 'chat' : 'plan');
     if (hasGate) assert.equal(events.length - before, 1, 'one resolved key invokes exactly one workflow transition');
     if (hasGate && !test.duplicateAxes) {
@@ -131,15 +139,20 @@ try {
       await shortcuts.get('alt+a').handler(runner.createContext());
       assert.equal(workflow(), previousWorkflow);
       assert.equal(events.length, previousEvents, 'approvals do not publish workflow transitions');
+      await settle(() => /yolo.*alt\+a/.test(statuses.get('permission-mode') ?? ''), 'approval shortcut');
       assert.match(statuses.get('permission-mode'), /yolo.*alt\+a/);
       if (test.plan.toggleShortcut === 'alt+o') {
+        const forwardedEvents = events.length;
         await shortcuts.get('alt+o').handler(runner.createContext());
+        await settle(() => workflow() === 'plan', 'forwarded Plan shortcut');
         assert.equal(workflow(), 'plan', 'separate plan key forwards the gate workflow cycle');
+        assert.equal(events.length, forwardedEvents + 1, 'forwarded Plan key has one owner and one commit');
       }
     } else if (!hasGate) {
       assert(!shortcuts.has('alt+a'), 'standalone plan does not claim approvals');
       assert(!statuses.has('permission-mode'));
       await shortcuts.get(test.key).handler(runner.createContext());
+      await settle(() => workflow() === 'work', 'standalone Plan shortcut');
       assert.equal(workflow(), 'work', 'standalone configured plan key toggles locally');
     }
     assert.deepEqual(errors, []);

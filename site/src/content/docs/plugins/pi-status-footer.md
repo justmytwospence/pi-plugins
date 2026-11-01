@@ -119,6 +119,14 @@ Extension notices wrap onto their own row. Account limits appear last and explic
 
 A useful inspection sequence is `/status all`, followed by `/status details` to check every discovered source, window and unavailable reason, then `/status on` to return to the compact active-provider view. The compact footer keeps at most two account rows; additional sources are counted rather than expanding the client row budget.
 
+## Settings-cycle preview
+
+Workflow (including standalone Plan), reasoning, auto effort and approval cycles share a trailing **400 ms** pause. Repeated or mixed cycles update one combined, UI-only transcript line, with hidden append-only snapshots; preview text does not enter model context. For example, `Settings pending · Workflow plan · Effort high` shows targets, not effective settings. A pending restrictive mode is **not yet protection**. The footer labels targets `pending` or `applying` on their existing semantic rows, without adding rows or increasing the client budget. Only final changed settings apply; a round trip to all original values finishes `Settings unchanged` without invoking setters.
+
+With the custom footer active, the native reasoning key and footer click share staging in Independent and Linked. Without an active footer, native reasoning retains stock behavior; native model cycling is unchanged. Explicit picker, command and tool choices remain immediate, and plan/tool approvals still require confirmation.
+
+An ordinary prompt flushes the pending selection before it proceeds. If application fails, the message is not sent; recover interactive text from native prompt history. The footer does not replace a newer editor draft. Leaving main focus, opening a dialog or selector, external model or relevant setting changes, session/branch navigation, compaction and shutdown/reload cancel pending previews. Restored interrupted history is never reapplied; compaction does not guarantee retention of old lines. `/status details` includes sanitized preview diagnostics.
+
 ## Working row and MCP chip
 
 While a run streams, Pi's working indicator reads `Working (↓ 1,234 tokens · 12s)` (example) instead of `Working`. Pi's spinner, color and base label stay; only the parenthesized statistics are added through `setWorkingMessage`. Tokens are the streamed text and thinking at four characters per token until the provider's stream reports `usage.output`, which then replaces the estimate. Elapsed time counts from the agent's start across the run's turns and appears once the run has lasted three seconds, or as soon as there are tokens to show. The message refreshes once a second only while a turn is in progress. Normally Pi's default message is restored when a turn or run ends, on shutdown or reload, and when the row is turned off. An active wait override keeps priority until its owner releases. The token count starts over with each turn.

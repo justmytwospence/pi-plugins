@@ -82,12 +82,15 @@ function fixture({ width = 120, sidebar = false, vim = false, regular = false, b
   editor.setText("unsent 界 draft\nsecond line");
   const state = { generation: 1, active: true, blocked: 0, promptDepth: 0, idle: true, linked: false, editor, tui, actions: {} };
   const calls = [];
+  const cancellations = [];
   const notify = vi.fn();
   const refresh = vi.fn();
   const controller = createFooterActionController({
     getEditor: () => state.editor, getTui: () => state.tui, getGeneration: () => state.generation,
     isCurrent: () => state.active, getBlocked: () => state.blocked, getPromptDepth: () => state.promptDepth,
     isIdle: () => state.idle, isLinked: () => state.linked, getActions: () => state.actions, notify, refresh,
+    cycleReasoning: () => { calls.push("native.reasoning"); },
+    cancelSettings: reason => { cancellations.push(reason); },
   });
   const originalInput = editor.handleInput;
   const release = controller.wrapEditor(editor, tui);
@@ -107,7 +110,7 @@ function fixture({ width = 120, sidebar = false, vim = false, regular = false, b
   };
   // Deliberately after wrapping: InteractiveMode installs/copies action handlers after factory creation.
   editor.actionHandlers.set("app.model.select", native);
-  editor.actionHandlers.set("app.thinking.cycle", () => { calls.push("native.reasoning"); });
+  editor.actionHandlers.set("app.thinking.cycle", () => { calls.push("native.reasoning.immediate"); });
   state.actions = {
     "flow.open": { label: "Flow", run() { calls.push("flow"); } },
     "cache.status": { label: "Cache", run() { calls.push("cache"); } },
@@ -151,7 +154,7 @@ function fixture({ width = 120, sidebar = false, vim = false, regular = false, b
     const hit = layout(lastWidth).hits.find((candidate) => candidate.action === action);
     return { x: hit.startCol, y: row + hit.row, width: lastWidth };
   }
-  return { state, editor, tui, terminal, component, controller, calls, notify, refresh, native, originalInput,
+  return { state, editor, tui, terminal, component, controller, calls, cancellations, notify, refresh, native, originalInput,
     release, dock, footer, kb, side, scroll, root, splitState, point, closeSelector, get selector() { return selector; } };
 }
 
@@ -380,6 +383,28 @@ for (const vim of [false, true]) {
   });
 }
 
+for (const vim of [false, true]) {
+  test(`${vim ? "pi-vim" : "CustomEditor"}: rapid reasoning keys stage without invoking the native setter or locking input`, async () => {
+    const f = fixture({ vim, bindings: { "app.thinking.cycle": "ctrl+t" } });
+    const draft = f.editor.getText();
+    const native = vi.fn();
+    f.editor.actionHandlers.set("app.thinking.cycle", native);
+    f.terminal.send("\x14", "\x14");
+    assert.deepEqual(f.calls, ["native.reasoning", "native.reasoning"]);
+    assert.equal(native.mock.calls.length, 0);
+    assert.equal(f.editor.actionHandlers.get("app.thinking.cycle"), native);
+    assert.equal(f.controller.describe().opening, false);
+    await f.controller.activate("reasoning.cycle");
+    assert.equal(f.calls.length, 3, "mouse activation shares the staging callback");
+    assert.equal(f.editor.getText(), draft);
+    assert.equal(f.tui.getFocusedComponent(), f.editor);
+    await f.controller.activate("approvals.open");
+    assert.ok(f.cancellations.includes("opened settings picker"));
+    f.release();
+    assert.equal(f.editor.actionHandlers.get("app.thinking.cycle"), native);
+  });
+}
+
 test("native history and registered shortcut precedence are retained; unrelated model cycle is untouched", async () => {
   const f = fixture({ bindings: { "tui.editor.historyPrevious": "alt+p" } });
   f.state.linked = true;
@@ -591,7 +616,7 @@ for (const width of [46, 120, 180]) for (const sidebar of [false, true]) {
     const ctx = {
       mode: "tui", cwd: process.env.TMPDIR ?? "/tmp",
       model: { provider: "test", id: "physical", contextWindow: 200000, reasoning: true },
-      sessionManager: { getEntries: () => entries, getBranch: () => entries },
+      sessionManager: { getEntries: () => entries, getBranch: () => entries, getSessionId: () => "interaction-test", getLeafId: () => null },
       modelRegistry: { isUsingOAuth: () => false, getApiKeyForProvider: async () => { throw new Error("no credential discovery in this fixture"); } },
       isIdle: () => f.state.idle, hasPendingMessages: () => false, isProjectTrusted: () => false,
       getContextUsage: () => ({ tokens: 2000, percent: 1, contextWindow: 200000 }),
@@ -619,7 +644,14 @@ for (const width of [46, 120, 180]) for (const sidebar of [false, true]) {
       },
     };
     footerModule.default({
-      events: bus, on: (name, handler) => handlers.set(name, handler), registerCommand() {},
+      events: bus, on(name, handler) {
+        const previous = handlers.get(name);
+        handlers.set(name, previous ? (...args) => {
+          const result = previous(...args);
+          return result?.then ? result.then(() => handler(...args)) : handler(...args);
+        } : handler);
+        return () => {};
+      }, registerCommand() {}, registerEntryRenderer() {},
       getThinkingLevel: () => "high", getSessionName: () => "", appendEntry() {},
       getCommands() { assert.equal(renderDepth, 0, "command discovery is outside render"); return []; },
       getAllTools: () => [],

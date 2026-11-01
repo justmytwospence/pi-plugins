@@ -686,6 +686,53 @@ test("pi-marimo's Lens selections get their own row under the marimo row", () =>
   assert.deepEqual(mod.absorbStatuses(new Map([["marimo-lens", "lens ready"]]), { claudeRow: true }).rest, ["lens ready"]);
 });
 
+test("settings previews stay distinct from committed state in normal main rows without changing the row budget", () => {
+  for (const linked of [false, true]) for (const phase of ["pending", "applying"]) for (const width of [46, 120, 180]) {
+    const s = { ...fixture(), workflow: { kind: "work", key: "alt+w" }, mode: { kind: "auto", key: "alt+a" },
+      actions: { "workflow.cycle": {}, "reasoning.cycle": {}, "effort.toggle": { active: true }, "approvals.open": {} },
+      ...(linked ? { flow: { operatingMode: "linked", workflow: "work", ready: true, guardAvailable: true, selectedFlow: { provider: "anthropic" } } } : {}) };
+    const before = mod.layoutFooter(s, width, theme);
+    s.settingsCycle = { id: "preview", phase, settings: [
+      { key: "workflow", baseline: "work", target: "plan", actual: "work", label: "plan" },
+      { key: "reasoning", baseline: "xhigh", target: "high", actual: "xhigh", label: "high" },
+      { key: "auto-effort", baseline: true, target: false, actual: true, label: "off" },
+      { key: "approvals", baseline: "auto", target: "bypassPermissions", actual: "auto", label: "yolo" },
+    ] };
+    const layout = mod.layoutFooter(s, width, theme);
+    const text = layout.lines.map(plain).join("\n");
+    assert.equal(layout.lines.length, before.lines.length);
+    assert.ok(layout.lines.every(line => visibleWidth(line) <= width));
+    assert.match(text, new RegExp(`PLAN ${phase}`));
+    assert.match(text, new RegExp(`yolo ${phase}`));
+    if (width >= 120) {
+      assert.match(text, new RegExp(`high ${phase}`));
+      assert.match(text, new RegExp(`auto off ${phase}`));
+      assert.match(text, /opus-5\.5/, "Linked preview retains the effective physical model");
+    }
+    assert.equal(s.workflow.kind, "work"); assert.equal(s.mode.kind, "auto"); assert.equal(s.actions["effort.toggle"].active, true);
+    for (const hit of layout.hits) assert.ok(hit.startCol >= 0 && hit.endCol <= width);
+    const blocked = mod.layoutFooter({ ...s, compact: true }, width, theme);
+    assert.equal(blocked.lines.length, 1); assert.deepEqual(blocked.hits, []);
+    assert.doesNotMatch(blocked.lines.join("\n"), /pending|applying/);
+    const child = mod.renderFooter({ ...s, readOnly: true }, width, theme).join("\n");
+    assert.doesNotMatch(child, /pending|applying/);
+    const exec = mod.renderFooter({ ...s, flow: undefined, workflow: { kind: "exec" }, exec: "" }, width, theme).join("\n");
+    assert.match(exec, /EXEC/); assert.doesNotMatch(exec, /PLAN/);
+  }
+});
+
+test("narrow previews never display an unlabeled truncated pending value", () => {
+  const s = { ...fixture(), workflow: { kind: "work" }, mode: { kind: "auto" },
+    settingsCycle: { id: "preview", phase: "pending", settings: [{ key: "approvals", baseline: "auto", target: "acceptEdits", actual: "auto", label: "accept edits" }] } };
+  for (let width = 1; width < 46; width++) {
+    const rows = mod.renderFooter(s, width, theme);
+    for (const row of rows) {
+      assert.ok(visibleWidth(row) <= width);
+      if (row.includes("accept edits")) assert.match(row, /pending/);
+    }
+  }
+});
+
 test("external text is sanitized and over-100 gauges are bounded", () => {
   const s = fixture();
   s.git.project = "project\x1b[2J\nattack";
@@ -705,7 +752,15 @@ function host(entries = [], cwd = os.tmpdir(), mode = "tui", nativeBranch = null
       on(channel, listener) { listeners.set(channel, [...(listeners.get(channel) ?? []), listener]); return () => {}; },
       emit(channel, data) { for (const listener of listeners.get(channel) ?? []) listener(data); },
     },
-    on(event, handler) { handlers.set(event, handler); },
+    on(event, handler) {
+      const previous = handlers.get(event);
+      handlers.set(event, previous ? (...args) => {
+        const result = previous(...args);
+        return result?.then ? result.then(() => handler(...args)) : handler(...args);
+      } : handler);
+      return () => {};
+    },
+    registerEntryRenderer() {},
     registerCommand(key, command) { commands.set(key, command); },
     getThinkingLevel: () => "xhigh", getSessionName: () => name,
     appendEntry(customType, data) { entries.push({ type: "custom", customType, data }); },
@@ -713,7 +768,7 @@ function host(entries = [], cwd = os.tmpdir(), mode = "tui", nativeBranch = null
   };
   const ctx = {
     mode, cwd, model: { provider: "openai-codex", id: "gpt-6-astra", contextWindow: 200000, reasoning: true },
-    sessionManager: { getEntries: () => entries, getBranch: () => entries },
+    sessionManager: { getEntries: () => entries, getBranch: () => entries, getSessionId: () => "footer-test", getLeafId: () => entries.at(-1)?.id ?? null },
     modelRegistry: { isUsingOAuth: () => true,
       getApiKeyForProvider: async (p) => p === "openai-codex" ? jwt({ "https://api.openai.com/auth": { chatgpt_account_id: "acct-1" } }) : undefined },
     isIdle: () => true, hasPendingMessages: () => false, isProjectTrusted: () => trusted,

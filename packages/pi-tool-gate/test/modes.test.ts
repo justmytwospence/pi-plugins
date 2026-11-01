@@ -13,6 +13,8 @@ import {
 } from "../src/modes.ts";
 import { FLOW_ENTRY, queryFlow, requestWorkflow } from "../src/flow-contract.ts";
 import { queryFooterActions } from "../src/footer-actions.ts";
+import { SETTINGS_CYCLE_CHANNEL, settingsCycles } from "../src/settings-cycle.ts";
+import { ProviderFlowController } from "../src/provider-flows.ts";
 import { fakeJev, harness, userEntry } from "./harness.ts";
 
 let configDir: string;
@@ -44,7 +46,9 @@ function setup(branch: any[] = [userEntry("Fix the failing test")]) {
   const h = harness({ nonGitCwd: cwd });
   toolGate(h.pi);
   const jev = fakeJev(() => safe);
-  const ctx = h.ctx({ cwd, modelRegistry: jev.registry, sessionManager: { getBranch: () => branch } });
+  const ctx = h.ctx({ cwd, modelRegistry: jev.registry, sessionManager: {
+    getBranch: () => branch, getSessionId: () => "modes-session", getLeafId: () => null,
+  } });
   return { h, jev, ctx, branch };
 }
 const start = async (s: ReturnType<typeof setup>) => { await s.h.emit("session_start", { type: "session_start" }, s.ctx); return s; };
@@ -171,9 +175,11 @@ describe("workflow and approval ownership", () => {
   test("independent shortcuts persist only their axis; provider adds plan", async () => {
     const { h, ctx } = await start(setup());
     await h.shortcuts.get("alt+a").handler(ctx);
+    await settingsCycles(h.pi).flush();
     h.pi.events.emit(PLAN_PROVIDER, { planFile: "/tmp/plan.md" });
     for (const mode of ["chat", "plan", "work"]) {
       await h.shortcuts.get("shift+tab").handler(ctx);
+      await settingsCycles(h.pi).flush();
       expect(ctx.ui.status.get(WORKFLOW_STATUS_KEY)).toContain(`workflow: ${mode}`);
       expect(ctx.ui.status.get(MODE_STATUS_KEY)).toContain("yolo");
     }
@@ -190,6 +196,7 @@ describe("workflow and approval ownership", () => {
     expect(ctx.ui.notes.at(-1)?.message).toMatch(/needs pi-plan-mode/u);
     for (const mode of ["chat", "work"]) {
       h.pi.events.emit(WORKFLOW_CYCLE, {});
+      await settingsCycles(h.pi).flush();
       expect(ctx.ui.status.get(WORKFLOW_STATUS_KEY)).toContain(`workflow: ${mode}`);
     }
     h.pi.events.emit(MODE_SET, { mode: "plan" });
@@ -211,6 +218,7 @@ describe("workflow and approval ownership", () => {
       }
     }
     h.pi.events.emit(MODE_CYCLE, {});
+    await settingsCycles(h.pi).flush();
     expect(ctx.ui.status.get(MODE_STATUS_KEY)).toContain("yolo");
     await h.commands.get("gate").handler("on", ctx);
     expect(ctx.ui.status.get(MODE_STATUS_KEY)).toContain("auto");
@@ -249,9 +257,11 @@ describe("workflow and approval ownership", () => {
       expect(ctx.ui.notes.at(-1)?.message).toMatch(/Exec is active.*\/plan-exec.*\/plan-exec stop/u);
     }
     await h.shortcuts.get("shift+tab").handler(ctx);
+    await settingsCycles(h.pi).flush();
     h.pi.events.emit(WORKFLOW_SET, { mode: "work" });
     expect(ctx.ui.status.get(WORKFLOW_STATUS_KEY)).toBe("workflow: exec");
     await h.shortcuts.get("alt+a").handler(ctx);
+    await settingsCycles(h.pi).flush();
     expect(ctx.ui.status.get(MODE_STATUS_KEY)).toContain("yolo");
     expect(h.entries.filter(e => e.customType === WORKFLOW_ENTRY).some(e => (e.data as any).mode === "exec")).toBe(false);
     h.pi.events.emit(EXEC_CHANGED, { active: false, source: "transition" });
@@ -269,6 +279,7 @@ describe("workflow and approval ownership", () => {
     expect(ctx.ui.status.get(WORKFLOW_STATUS_KEY)).toContain("chat");
     expect(ctx.ui.status.get(MODE_STATUS_KEY)).toContain("manual (legacy)");
     await h.shortcuts.get("shift+tab").handler(ctx);
+    await settingsCycles(h.pi).flush();
     expect(ctx.ui.status.get(WORKFLOW_STATUS_KEY)).toContain("plan");
     branch.push(entry("plan-mode:exec", { active: true }));
     await h.emit("session_tree", { type: "session_tree" }, ctx);
@@ -290,7 +301,7 @@ describe("restore snapshots and destination queries", () => {
     query([entry("plan-mode:exec", { active: true })]);
     expect(reply.mock.calls.at(-1)?.[0].mode).toBe("exec");
     expect(h.entries).toHaveLength(0);
-    expect(h.events.every(event => event.channel === WORKFLOW_QUERY)).toBe(true);
+    expect(h.events.every(event => event.channel === WORKFLOW_QUERY || (event.channel === SETTINGS_CYCLE_CHANNEL && event.data.type === "discover"))).toBe(true);
     expect(ctx.ui.notes).toHaveLength(0);
     expect(ctx.ui.status.size).toBe(0);
     await h.emit("session_start", {}, ctx);
@@ -336,6 +347,179 @@ describe("restore snapshots and destination queries", () => {
   });
 });
 
+describe("settings cycle previews", () => {
+  beforeEach(() => vi.useFakeTimers());
+  afterEach(() => vi.useRealTimers());
+
+  test("workflow and approval shortcuts share one trailing deadline with no intermediate effects", async () => {
+    const { h, ctx } = await start(setup());
+    h.pi.events.emit(PLAN_PROVIDER, { planFile: "/tmp/plan.md" });
+    const events = h.events.length;
+    await h.shortcuts.get("shift+tab").handler(ctx);
+    expect(settingsCycles(h.pi).snapshot()).toMatchObject({ phase: "pending", settings: [
+      { key: "workflow", baseline: "work", target: "chat", actual: "work" },
+    ] });
+    await vi.advanceTimersByTimeAsync(300);
+    await h.shortcuts.get("shift+tab").handler(ctx);
+    await h.shortcuts.get("alt+a").handler(ctx);
+    await vi.advanceTimersByTimeAsync(399);
+    expect(queryFlow(h.pi.events)?.workflow).toBe("work");
+    expect(ctx.ui.status.get(MODE_STATUS_KEY)).toContain("auto");
+    expect(h.entries.filter(e => [WORKFLOW_ENTRY, APPROVAL_ENTRY].includes(e.customType))).toEqual([]);
+    expect(h.events.slice(events).filter(e => [WORKFLOW_CHANGED, MODE_CHANGED].includes(e.channel))).toEqual([]);
+    expect(h.messages).toEqual([]);
+    expect(h.entries.filter(e => e.customType === "settings:cycle")).toHaveLength(1);
+    expect(h.entries.filter(e => e.customType === "settings:cycle-state").length).toBeGreaterThan(1);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(queryFlow(h.pi.events)?.workflow).toBe("plan");
+    expect(ctx.ui.status.get(MODE_STATUS_KEY)).toContain("yolo");
+    expect(h.entries.filter(e => e.customType === WORKFLOW_ENTRY)).toEqual([
+      { customType: WORKFLOW_ENTRY, data: { version: 1, mode: "plan" } },
+    ]);
+    expect(h.events.slice(events).filter(e => e.channel === WORKFLOW_CHANGED && e.data.source === "transition")).toHaveLength(1);
+    expect(h.messages.filter(({ message }) => message.customType === "workflow:transition")).toEqual([]);
+    expect(settingsCycles(h.pi).snapshot()?.phase).toBe("applied");
+  });
+
+  test("event callers get a synchronously assigned promise for the final burst, including no-op", async () => {
+    const { h, ctx } = await start(setup());
+    const first: WorkflowCycleRequest = {};
+    const second: WorkflowCycleRequest = {};
+    const approvals: { result?: Promise<boolean> }[] = [{}, {}];
+    h.pi.events.emit(WORKFLOW_CYCLE, first);
+    let settled = false;
+    void first.result!.then(() => { settled = true; });
+    h.pi.events.emit(WORKFLOW_CYCLE, second);
+    for (const request of approvals) h.pi.events.emit(MODE_CYCLE, request);
+    expect(first.result).toBeInstanceOf(Promise);
+    expect(approvals[0].result).toBeInstanceOf(Promise);
+    await vi.advanceTimersByTimeAsync(399);
+    expect(settled).toBe(false);
+    expect(queryFlow(h.pi.events)?.workflow).toBe("work");
+    await vi.advanceTimersByTimeAsync(1);
+    expect(await Promise.all([first.result, second.result, ...approvals.map(r => r.result)])).toEqual([true, true, true, true]);
+    expect(h.entries.filter(e => [WORKFLOW_ENTRY, APPROVAL_ENTRY].includes(e.customType))).toEqual([]);
+    expect(h.messages).toEqual([]);
+    expect(settingsCycles(h.pi).snapshot()?.phase).toBe("unchanged");
+    expect(ctx.ui.status.get(MODE_STATUS_KEY)).toContain("auto");
+  });
+
+  test("footer actions return before settlement so rapid activation can stage a round trip", async () => {
+    const { h } = await start(setup());
+    const action = queryFooterActions(h.pi.events)["workflow.cycle"]!;
+    await action.run();
+    expect(settingsCycles(h.pi).snapshot()?.phase).toBe("pending");
+    await action.run();
+    await vi.advanceTimersByTimeAsync(400);
+    expect(settingsCycles(h.pi).snapshot()?.phase).toBe("unchanged");
+    expect(queryFlow(h.pi.events)?.workflow).toBe("work");
+  });
+
+  test("only a final chat change emits a hidden agent notice, not a duplicate visible transition", async () => {
+    const { h, ctx } = await start(setup());
+    ctx.isIdle = () => false;
+    await h.shortcuts.get("shift+tab").handler(ctx);
+    expect(h.messages).toEqual([]);
+    await vi.advanceTimersByTimeAsync(400);
+    expect(h.messages).toHaveLength(1);
+    expect(h.messages[0]).toMatchObject({ message: { customType: "tool-gate:chat-notice", display: false }, opts: { deliverAs: "steer" } });
+  });
+
+  test.each(["setter", "picker", "exec"])("explicit %s cancels previews and remains immediate", async action => {
+    const { h, ctx } = await start(setup());
+    const request: WorkflowCycleRequest = {};
+    h.pi.events.emit(WORKFLOW_CYCLE, request);
+    if (action === "setter") h.pi.events.emit(WORKFLOW_SET, { mode: "chat" });
+    else if (action === "picker") await h.commands.get("approvals").handler("", ctx);
+    else h.pi.events.emit(EXEC_CHANGED, { active: true, source: "transition" });
+    expect(await request.result).toBe(false);
+    expect(queryFlow(h.pi.events)?.workflow).toBe(action === "setter" ? "chat" : action === "exec" ? "exec" : "work");
+    await vi.advanceTimersByTimeAsync(400);
+    expect(settingsCycles(h.pi).snapshot()?.phase).toBe("cancelled");
+  });
+
+  test("new cycles are refused while an asynchronous workflow commit is applying", async () => {
+    const { h, ctx } = await start(setup());
+    ctx.isIdle = () => true;
+    const snapshot = { ...queryFlow(h.pi.events)!, operatingMode: "linked" as const };
+    const state = vi.spyOn(ProviderFlowController.prototype, "snapshot").mockImplementation(() => snapshot);
+    let release!: () => void;
+    const holding = new Promise<void>(resolve => { release = resolve; });
+    const prepare = vi.spyOn(ProviderFlowController.prototype, "prepareWorkflow").mockImplementation(async (_next, _ctx, commit) => {
+      await holding;
+      commit?.();
+      return { ok: true, snapshot };
+    });
+    try {
+      const pending: WorkflowCycleRequest = {};
+      h.pi.events.emit(WORKFLOW_CYCLE, pending);
+      await vi.advanceTimersByTimeAsync(400);
+      expect(settingsCycles(h.pi).snapshot()?.phase).toBe("applying");
+      for (const channel of [WORKFLOW_CYCLE, MODE_CYCLE]) {
+        const refused: { result?: Promise<boolean> } = {};
+        h.pi.events.emit(channel, refused);
+        expect(await refused.result).toBe(false);
+        expect(ctx.ui.notes.at(-1)?.message).toBe("Wait for the current settings change to finish.");
+      }
+      expect(prepare).toHaveBeenCalledTimes(1);
+      release();
+      expect(await pending.result).toBe(true);
+      expect(settingsCycles(h.pi).snapshot()?.phase).toBe("applied");
+    } finally {
+      release();
+      prepare.mockRestore();
+      state.mockRestore();
+    }
+  });
+
+  test("journal leaf advancement preserves branch ancestry ownership", async () => {
+    const { h, ctx, branch } = await start(setup());
+    ctx.sessionManager.getBranch = () => [...branch, ...h.entries.map((entry, index) => ({ type: "custom", id: `journal-${index}`, ...entry }))];
+    ctx.sessionManager.getLeafId = () => ctx.sessionManager.getBranch().at(-1)?.id ?? null;
+    const request: WorkflowCycleRequest = {};
+    h.pi.events.emit(WORKFLOW_CYCLE, request);
+    expect(ctx.sessionManager.getLeafId()).toMatch(/^journal-/u);
+    await vi.advanceTimersByTimeAsync(400);
+    expect(await request.result).toBe(true);
+    expect(queryFlow(h.pi.events)?.workflow).toBe("chat");
+  });
+
+  test("non-TUI cycles remain immediate without a settings journal", async () => {
+    const { h, ctx } = await start(setup());
+    ctx.mode = "rpc";
+    const request: WorkflowCycleRequest = {};
+    h.pi.events.emit(WORKFLOW_CYCLE, request);
+    expect(queryFlow(h.pi.events)?.workflow).toBe("chat");
+    expect(await request.result).toBe(true);
+    expect(h.entries.some(entry => entry.customType === "settings:cycle")).toBe(false);
+    expect(h.messages.filter(({ message }) => message.customType === "workflow:transition")).toHaveLength(1);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  test("forwarded user cycles retain the shortcut's Linked busy check and revalidate at commit", async () => {
+    const { h, ctx } = await start(setup());
+    const snapshot = queryFlow(h.pi.events)!;
+    const spy = vi.spyOn(ProviderFlowController.prototype, "snapshot").mockImplementation(() => ({ ...snapshot, operatingMode: "linked" }));
+    try {
+      ctx.isIdle = () => false;
+      await h.shortcuts.get("shift+tab").handler(ctx);
+      const request: WorkflowCycleRequest & { userInitiated: boolean } = { userInitiated: true };
+      h.pi.events.emit(WORKFLOW_CYCLE, request);
+      expect(await request.result).toBe(false);
+      expect(h.entries).toEqual([]);
+      expect(ctx.ui.notes.slice(-2).every((note: { message: string }) => /current turn/u.test(note.message))).toBe(true);
+      ctx.isIdle = () => true;
+      const pending: WorkflowCycleRequest & { userInitiated: boolean } = { userInitiated: true };
+      h.pi.events.emit(WORKFLOW_CYCLE, pending);
+      ctx.isIdle = () => false;
+      await vi.advanceTimersByTimeAsync(400);
+      expect(await pending.result).toBe(false);
+      expect(settingsCycles(h.pi).snapshot()?.phase).toBe("failed");
+      expect(h.entries.filter(e => e.customType === WORKFLOW_ENTRY)).toEqual([]);
+    } finally { spy.mockRestore(); }
+  });
+});
+
 describe("configuration compatibility", () => {
   test.each([
     [{ defaultMode: "chat" }, "chat", "auto"],
@@ -369,6 +553,7 @@ describe("configuration compatibility", () => {
     expect([...h.shortcuts.keys()]).toEqual(["alt+w"]);
     expect(JSON.stringify(ctx.ui.notes)).toMatch(/same|collision|duplicate|conflict/iu);
     await h.shortcuts.get("alt+w").handler(ctx);
+    await settingsCycles(h.pi).flush();
     expect(ctx.ui.status.get(WORKFLOW_STATUS_KEY)).toContain("chat");
     expect(ctx.ui.status.get(MODE_STATUS_KEY)).toContain("auto");
   });
@@ -394,9 +579,11 @@ describe("configuration compatibility", () => {
     h.pi.events.emit(PLAN_PROVIDER, { planFile: "/tmp/plan.md" });
     for (const workflow of ["chat", "plan", "work"]) {
       await h.shortcuts.get("shift+tab").handler(ctx);
+      await settingsCycles(h.pi).flush();
       expect(ctx.ui.status.get(WORKFLOW_STATUS_KEY)).toContain(workflow);
     }
     await h.shortcuts.get("alt+a").handler(ctx);
+    await settingsCycles(h.pi).flush();
     expect(ctx.ui.status.get(MODE_STATUS_KEY)).toContain("yolo");
   });
 });
@@ -465,20 +652,20 @@ describe("workflow guards precede approvals", () => {
 describe("visible workflow transitions", () => {
   const markers = (h: ReturnType<typeof harness>) => h.messages.filter(({ message }) => message.customType === "workflow:transition");
 
-  test("commands, shortcuts, events and exec lifecycle mark genuine transitions only", async () => {
+  test("explicit selections and Exec mark transitions while shortcut/event cycles use the settings journal", async () => {
     const { h, ctx } = await start(setup());
     h.pi.events.emit(PLAN_PROVIDER, { planFile: "/tmp/plan.md" });
     await h.commands.get("mode").handler("chat", ctx);
     await h.shortcuts.get("shift+tab").handler(ctx);
+    await settingsCycles(h.pi).flush();
     h.pi.events.emit(WORKFLOW_SET, { mode: "work" });
     h.pi.events.emit(WORKFLOW_CYCLE, {});
+    await settingsCycles(h.pi).flush();
     h.pi.events.emit(EXEC_CHANGED, { active: true, source: "transition" });
     h.pi.events.emit(EXEC_CHANGED, { active: false, source: "transition" });
     expect(markers(h)).toEqual([
       ["work", "chat", "read-only discussion"],
-      ["chat", "plan", "research and plan only"],
       ["plan", "work", "edits and actions"],
-      ["work", "chat", "read-only discussion"],
       ["chat", "exec", "implementing approved plan"],
       ["exec", "work", "edits and actions"],
     ].map(([previous, mode, explanation]) => ({
@@ -507,8 +694,10 @@ describe("visible workflow transitions", () => {
     for (const active of [true, false]) h.pi.events.emit(EXEC_CHANGED, { active, source: "restore" });
     await h.commands.get("approvals").handler("yolo", ctx);
     await h.shortcuts.get("alt+a").handler(ctx);
+    await settingsCycles(h.pi).flush();
     h.pi.events.emit(MODE_SET, { mode: "default" });
     h.pi.events.emit(MODE_CYCLE, {});
+    await settingsCycles(h.pi).flush();
     await h.commands.get("mode").handler("work", ctx);
     h.pi.events.emit(WORKFLOW_SET, { mode: "work" });
     h.pi.events.emit(EXEC_CHANGED, { active: false, source: "transition" });
@@ -561,7 +750,7 @@ describe("visible workflow transitions", () => {
 });
 
 describe("flow commands, protocol and optional footer actions", () => {
-  test("legacy workflow requests return an awaitable result without losing synchronous Independent behavior", async () => {
+  test("explicit workflow requests stay synchronous and cycles return an awaitable final result", async () => {
     const { h, ctx } = await start(setup());
     const set: WorkflowSetRequest = { mode: "chat" };
     h.pi.events.emit(WORKFLOW_SET, set);
@@ -570,6 +759,9 @@ describe("flow commands, protocol and optional footer actions", () => {
     expect(await set.result).toBe(true);
     const cycle: WorkflowCycleRequest = {};
     h.pi.events.emit(WORKFLOW_CYCLE, cycle);
+    expect(cycle.result).toBeInstanceOf(Promise);
+    expect(ctx.ui.status.get(WORKFLOW_STATUS_KEY)).toContain("chat");
+    await settingsCycles(h.pi).flush();
     expect(await cycle.result).toBe(true);
     expect(await requestWorkflow(h.pi.events, "plan")).toMatchObject({ ok: false });
     expect(await requestWorkflow(h.pi.events, "chat")).toMatchObject({ ok: true, snapshot: { operatingMode: "independent", workflow: "chat" } });

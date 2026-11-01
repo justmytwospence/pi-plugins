@@ -19,6 +19,22 @@ const SONNET = { provider: "anthropic", id: "claude-sonnet-5-5", name: "Claude S
 const OPUS = { provider: "anthropic", id: "claude-opus-5-5", name: "Claude Opus 5.5", reasoning: true };
 const flush = () => new Promise((resolve) => setTimeout(resolve, 10));
 
+function compactionDispatcher(mock: ReturnType<typeof createMockPi>) {
+  const handlers = [...(mock.events.get("session_before_compact") ?? [])];
+  assert.ok(handlers.length > 0, "plan-mode registers compaction handlers");
+  return async (event: unknown, ctx: ExtensionContext) => {
+    let result: unknown;
+    for (const handler of handlers) {
+      const response = await handler(event, ctx);
+      if (response !== undefined) {
+        assert.equal(result, undefined, "only one handler overrides compaction");
+        result = response;
+      }
+    }
+    return result;
+  };
+}
+
 /** Planner sessions that submit `# Plan from <model>` for any prompt (or, with `ask`, ask first). */
 function fakeSessions(ask = false, failFirst?: { model: string; error: string }) {
   const prompts: Array<{ model: string; text: string }> = [];
@@ -344,7 +360,7 @@ for (const author of ["A", "B", "M"]) {
       if (clear) {
         assert.ok(compaction);
         assert.equal(mock.sentUserMessages.length, 0);
-        const before = mock.events.get("session_before_compact")?.[0];
+        const before = compactionDispatcher(mock);
         assert.ok(before);
         assert.equal(await before({ customInstructions: "ordinary compaction" }, context.ctx), undefined);
         const result = (await before(
@@ -403,7 +419,7 @@ for (const outcome of ["error", "cancel", "tree", "shutdown"] as const) {
     await state.opened;
     await flush();
     assert.ok(compact);
-    const before = state.mock.events.get("session_before_compact")?.[0];
+    const before = compactionDispatcher(state.mock);
     assert.ok(before);
     const controller = new AbortController();
     if (outcome === "cancel") controller.abort();
@@ -433,7 +449,12 @@ for (const cacheFirst of [false, true]) {
   test(`/planners direct compaction preserves the exact brief with cache-guard ${cacheFirst ? "first" : "last"}`, async () => {
     const state = await implementationScreen();
     const { leanContext } = await import(new URL("../../pi-cache-guard/src/context.ts", import.meta.url).href);
+    const planHandlers = [...(state.mock.events.get("session_before_compact") ?? [])];
     const lean = leanContext(state.mock.pi);
+    const cacheHandlers = (state.mock.events.get("session_before_compact") ?? []).filter(
+      (handler) => !planHandlers.includes(handler),
+    );
+    assert.equal(cacheHandlers.length, 1, "cache-guard registers one compaction handler");
     lean.armJevCompaction({ strict: true });
     let compact:
       | { customInstructions: string; onComplete(result: unknown): void; onError(error: Error): void }
@@ -450,7 +471,7 @@ for (const cacheFirst of [false, true]) {
     await flush();
     assert.ok(compact);
     const handlers = [...(state.mock.events.get("session_before_compact") ?? [])];
-    assert.equal(handlers.length, 2, "compose the real plan-mode and cache-guard handlers");
+    assert.equal(handlers.length, planHandlers.length + 1, "compose the real plan-mode and cache-guard handlers");
     if (cacheFirst) handlers.reverse();
     let result: DirectCompactionResult | undefined;
     for (const handler of handlers) {
@@ -477,7 +498,7 @@ for (const cacheFirst of [false, true]) {
     assert.equal(state.mock.sentUserMessages[0]?.text, result.summary);
     assert.equal(lean.lastFailure(), undefined);
     // The reserved marker must not consume a previously armed quick compaction.
-    const cacheHandler = state.mock.events.get("session_before_compact")?.[1];
+    const cacheHandler = cacheHandlers[0];
     assert.ok(cacheHandler);
     assert.deepEqual(await cacheHandler({ customInstructions: "ordinary" }, state.context.ctx), { cancel: true });
   });
@@ -496,34 +517,30 @@ for (const replacement of ["summary", "firstKeptEntryId", "details"] as const) {
         compact = options;
       },
     });
-    state.mock.events.get("session_before_compact")?.push(() => ({
+    const planHandler = compactionDispatcher(state.mock);
+    const thirdPartyHandler = () => ({
       compaction: {
         summary: "Third-party summary",
         firstKeptEntryId: "retained-entry",
         tokensBefore: 1234,
         details: { planMode: { direct: "another-plan.md" } },
       },
-    }));
+    });
+    state.mock.events.get("session_before_compact")?.push(thirdPartyHandler);
     state.focus("Context");
     state.app.handleInput("\u001b[C");
     state.app.handleInput("\r");
     await state.opened;
     await flush();
     assert.ok(compact);
-    const handlers = state.mock.events.get("session_before_compact") ?? [];
     const event = {
       customInstructions: compact.customInstructions,
       signal: new AbortController().signal,
       preparation: { tokensBefore: 1234 },
     };
-    const planHandler = handlers[0];
-    const thirdPartyHandler = handlers[1];
-    assert.ok(planHandler);
-    assert.ok(thirdPartyHandler);
     const intended = ((await planHandler(event, state.context.ctx)) as { compaction: DirectCompactionResult })
       .compaction;
-    const override = ((await thirdPartyHandler(event, state.context.ctx)) as { compaction: DirectCompactionResult })
-      .compaction;
+    const override = thirdPartyHandler().compaction;
     assert.ok(intended);
     assert.ok(override);
     // Change only one field, so every part of the completion contract is checked independently.
@@ -538,7 +555,7 @@ for (const replacement of ["summary", "firstKeptEntryId", "details"] as const) {
         ({ message, level }) => level === "warning" && /replaced; implementation did not start/u.test(message),
       ),
     );
-    assert.equal(await handlers[0]?.(event, state.context.ctx), undefined);
+    assert.equal(await planHandler(event, state.context.ctx), undefined);
   });
 }
 

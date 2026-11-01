@@ -50,6 +50,7 @@ import { expandHome } from "./plan-hook.js";
 import { promptPlanName } from "./plan-name-input.js";
 import { PlanReviewViewport } from "./plan-review-viewport.js";
 import { type ReviewStatus, reviewBody, reviewTitle } from "./review-card.js";
+import { settingsCycles } from "./settings-cycle.js";
 import { findBlockedCommandSegment, readCommand, type SafeSubcommands } from "./tool-policy.js";
 import { transcriptCheckpoint } from "./transcript-contract.js";
 import { registerWorkflowRenderer, sendWorkflowTransition, type WorkflowKind } from "./workflow-ui.js";
@@ -201,6 +202,8 @@ interface ExitDetails {
 }
 
 export function registerInlinePlanMode(pi: ExtensionAPI, host: InlineHost): InlinePlanMode {
+  const settings = settingsCycles(pi);
+  const workflowOwner = {};
   registerWorkflowRenderer(pi);
   let state: InlineState = { active: false, told: false };
   /** pi-tool-gate owns the mode; its current mode and cycle. */
@@ -222,7 +225,8 @@ export function registerInlinePlanMode(pi: ExtensionAPI, host: InlineHost): Inli
     const mode = effectiveMode();
     const previous = presentedMode;
     presentedMode = mode;
-    if (!gate && previous && previous !== mode) sendWorkflowTransition(pi, previous, mode);
+    if (!gate && previous && previous !== mode && !settings.isCommitting("workflow"))
+      sendWorkflowTransition(pi, previous, mode);
   };
 
   const safely = (fn: () => void) => {
@@ -286,6 +290,7 @@ export function registerInlinePlanMode(pi: ExtensionAPI, host: InlineHost): Inli
   };
 
   const enterLocal = (ctx: ExtensionContext | undefined) => {
+    if (!settings.isCommitting("workflow")) settings.cancel("Plan entered explicitly.");
     // Restoration never allocates; a genuine entry (even into restored plan mode) may do so.
     allocatePlanFile();
     if (state.active) return;
@@ -299,6 +304,7 @@ export function registerInlinePlanMode(pi: ExtensionAPI, host: InlineHost): Inli
   };
 
   const exitLocal = (ctx: ExtensionContext | undefined, told?: boolean) => {
+    if (!settings.isCommitting("workflow")) settings.cancel("Plan exited explicitly.");
     if (!state.active) return;
     state.active = false;
     revision++;
@@ -310,6 +316,7 @@ export function registerInlinePlanMode(pi: ExtensionAPI, host: InlineHost): Inli
   };
 
   const requestMode = async (mode: "work" | "plan"): Promise<boolean> => {
+    settings.cancel("Workflow selected explicitly.");
     const coordinated = requestWorkflow(pi.events, mode);
     if (coordinated) {
       try {
@@ -348,6 +355,7 @@ export function registerInlinePlanMode(pi: ExtensionAPI, host: InlineHost): Inli
   };
 
   const enter = async (ctx: ExtensionContext, planFile?: string): Promise<boolean> => {
+    settings.cancel("Plan entered explicitly.");
     // Fresh handoff recovery can precede our lifecycle handler. Be ready to persist
     // the genuine transition before asking the gate to enter plan mode.
     if (!restored) restore(ctx);
@@ -373,6 +381,7 @@ export function registerInlinePlanMode(pi: ExtensionAPI, host: InlineHost): Inli
     const event = data as { mode?: unknown; cycle?: unknown; source?: unknown } | undefined;
     if (typeof event?.mode !== "string" || !["work", "chat", "plan", "exec"].includes(event.mode)) return;
     const previous = gate?.mode;
+    if (previous !== event.mode && !settings.isCommitting("workflow")) settings.cancel("Workflow changed externally.");
     gate = {
       mode: event.mode,
       cycle: Array.isArray(event.cycle) ? event.cycle.map(String) : [],
@@ -390,6 +399,7 @@ export function registerInlinePlanMode(pi: ExtensionAPI, host: InlineHost): Inli
   });
 
   const restore = (ctx: ExtensionContext) => {
+    settings.cancel("Plan state restored.");
     generation++;
     restored = false;
     revision++;
@@ -427,8 +437,9 @@ export function registerInlinePlanMode(pi: ExtensionAPI, host: InlineHost): Inli
   pi.on("session_start", (_event, ctx) => restore(ctx));
   pi.on("session_tree", (_event, ctx) => restore(ctx));
   pi.events.on("workflow-mode:exec", (data) => {
-    updateStatus();
     const source = (data as { source?: unknown } | undefined)?.source;
+    if (source === "transition") settings.cancel("Execution changed.");
+    updateStatus();
     if (source === "restore") presentedMode = effectiveMode();
     else if (source === "transition") presentTransition();
   });
@@ -487,6 +498,7 @@ export function registerInlinePlanMode(pi: ExtensionAPI, host: InlineHost): Inli
     promptGuidelines: ENTER_GUIDELINES,
     parameters: { type: "object", additionalProperties: false, properties: {} } as never,
     async execute(_id, _params, _signal, _onUpdate, ctx) {
+      settings.cancel("Plan entry requested by tool.");
       if (host.executing() || gate?.mode === "exec") {
         return text(EXEC_GUIDANCE);
       }
@@ -532,6 +544,7 @@ export function registerInlinePlanMode(pi: ExtensionAPI, host: InlineHost): Inli
       return options.isPartial ? reviewViewport.wrap(context.toolCallId, component) : component;
     },
     async execute(id, params, signal, onUpdate, ctx) {
+      settings.cancel("Plan review requested by tool.");
       const supplied = (params as { changes?: unknown } | undefined)?.changes;
       if (
         supplied !== undefined &&
@@ -829,6 +842,7 @@ export function registerInlinePlanMode(pi: ExtensionAPI, host: InlineHost): Inli
       await enter(ctx, planFile);
     },
     async work(ctx) {
+      settings.cancel("Work selected explicitly.");
       if (!restored) restore(ctx);
       hostCtx = ctx;
       const leavingGeneration = generation;
@@ -838,6 +852,7 @@ export function registerInlinePlanMode(pi: ExtensionAPI, host: InlineHost): Inli
       return !state.active;
     },
     commitExecution(ctx) {
+      settings.cancel("Execution committed.");
       exitLocal(ctx, false);
     },
     get revision() {
@@ -850,7 +865,9 @@ export function registerInlinePlanMode(pi: ExtensionAPI, host: InlineHost): Inli
         return false;
       }
       if (gate) {
-        const request: { result?: Promise<{ ok: boolean } | boolean | undefined> } = {};
+        const request: { userInitiated: true; result?: Promise<{ ok: boolean } | boolean | undefined> } = {
+          userInitiated: true,
+        };
         try {
           pi.events.emit(MODE_CYCLE, request);
           const result = await request.result;
@@ -860,9 +877,28 @@ export function registerInlinePlanMode(pi: ExtensionAPI, host: InlineHost): Inli
           return false;
         }
       }
-      if (state.active) exitLocal(ctx);
-      else enterLocal(ctx);
-      return true;
+      const ownerGeneration = generation;
+      const session = ctx.sessionManager.getSessionId();
+      const anchor = ctx.sessionManager.getLeafId?.();
+      return settings.stage(ctx, {
+        key: "workflow",
+        owner: workflowOwner,
+        read: () => (state.active ? "plan" : "work"),
+        next: (value) => (value === "plan" ? "work" : "plan"),
+        format: (value) => value,
+        validate: () => (host.executing() || gate?.mode === "exec" ? EXEC_GUIDANCE : undefined),
+        apply: (value) => {
+          if (value === "plan") enterLocal(ctx);
+          else exitLocal(ctx);
+          return true;
+        },
+        current: () =>
+          restored &&
+          generation === ownerGeneration &&
+          ctx.sessionManager === hostCtx?.sessionManager &&
+          session === ctx.sessionManager.getSessionId() &&
+          (!anchor || ctx.sessionManager.getBranch().some((entry) => entry.id === anchor)),
+      });
     },
   };
 }

@@ -65,20 +65,21 @@ export function harness(options: { tools?: any[]; exec?: (cmd: string, args: str
   const commands = new Map<string, any>();
   const shortcuts = new Map<string, any>();
   const entries: Array<{ customType: string; data: unknown }> = [];
+  const renderers = new Map<string, (...args: any[]) => any>();
   const messages: any[] = [];
   let thinking = "high";
   const thinkingChanges: string[] = [];
   const pi = {
     on: (event: string, handler: Handler) => {
       handlers.set(event, [...(handlers.get(event) ?? []), handler]);
-      return () => undefined;
+      return () => { handlers.set(event, (handlers.get(event) ?? []).filter((item) => item !== handler)); };
     },
     registerCommand: (name: string, options: any) => commands.set(name, options),
     registerShortcut: (key: string, options: any) => shortcuts.set(key, options),
     registerTool: () => undefined,
     registerFlag: () => undefined,
     registerMessageRenderer: () => undefined,
-    registerEntryRenderer: () => undefined,
+    registerEntryRenderer: (type: string, renderer: (...args: any[]) => any) => renderers.set(type, renderer),
     getFlag: () => undefined,
     getAllTools: () => options.tools ?? [],
     exec: async (cmd: string, args: string[]) => options.exec?.(cmd, args) ?? { code: 1, stdout: "", stderr: "", killed: false },
@@ -97,7 +98,7 @@ export function harness(options: { tools?: any[]; exec?: (cmd: string, args: str
       },
       on: (channel: string, listener: (data: unknown) => void) => {
         listeners.set(channel, [...(listeners.get(channel) ?? []), listener]);
-        return () => undefined;
+        return () => { listeners.set(channel, (listeners.get(channel) ?? []).filter((item) => item !== listener)); };
       },
     },
     setModel: async (model: any) => {
@@ -110,7 +111,10 @@ export function harness(options: { tools?: any[]; exec?: (cmd: string, args: str
   };
   async function emit(event: string, payload: any, ctx?: any) {
     let result: unknown;
-    for (const handler of handlers.get(event) ?? []) result = (await handler(payload, ctx ?? lastCtx)) ?? result;
+    for (const handler of handlers.get(event) ?? []) {
+      const value = handler(payload, ctx ?? lastCtx);
+      result = (value instanceof Promise ? await value : value) ?? result;
+    }
     return result;
   }
   let lastCtx: any;
@@ -137,13 +141,15 @@ export function harness(options: { tools?: any[]; exec?: (cmd: string, args: str
       mode: "tui",
       ui,
       signal: undefined,
-      sessionManager: { getBranch: () => [], getSessionId: () => "session-1" },
+      sessionManager: { getBranch: () => [], getSessionId: () => "session-1", getLeafId: () => null },
       modelRegistry: undefined,
       ...overrides,
     };
+    lastCtx.sessionManager.getSessionId ??= () => "session-1";
+    lastCtx.sessionManager.getLeafId ??= () => null;
     return lastCtx;
   }
-  return { pi: pi as any, handlers, commands, shortcuts, entries, messages, events, modelChanges, emit, ctx, thinkingChanges, get thinking() { return thinking; } };
+  return { pi: pi as any, handlers, commands, shortcuts, entries, renderers, messages, events, modelChanges, emit, ctx, thinkingChanges, get thinking() { return thinking; } };
 }
 
 export function userEntry(text: string) {

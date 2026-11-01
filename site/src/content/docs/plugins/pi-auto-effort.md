@@ -53,6 +53,8 @@ The current `effortUpdates.models` defaults are `openai-codex/gpt-6-astra`, `ope
 | `/auto-effort off` | Disable it for this session and restore your manual level. |
 | `/auto-effort bounds free` / `ceiling` | Set the bounds for this session. |
 
+The optional footer toggle previews rapid changes for 400 ms and applies only the final choice; its active state remains effective-only during the preview. Manual reasoning cycling can join the same preview: turning auto off with a changed manual target applies that target directly, without briefly restoring the old manual level. Explicit on, off and bounds commands cancel a pending preview and apply immediately; status and limits only inspect.
+
 Configuration merges in this order: `~/.config/agents/auto-effort.json`, `~/.pi/agent/auto-effort.json`, `<project>/.agents/auto-effort.json`, then `<project>/.pi/auto-effort.json`. `$XDG_CONFIG_HOME` relocates the shared user directory. Objects merge; other values replace earlier ones.
 
 For example, this project `.pi/auto-effort.json` keeps prompt assessments but disables mid-run assessments and subscription-pressure reductions:

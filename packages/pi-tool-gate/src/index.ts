@@ -123,6 +123,7 @@ import { FLOW_CHANNEL, FLOW_ENTRY, type FlowRequest, type FlowTransitionResult }
 import { FLOW_BUSY, FLOW_RECOVERY, FLOW_TRANSITION, ROLE_MODEL_READY, ProviderFlowController } from "./provider-flows.ts";
 import { FOOTER_ACTIONS_CHANNEL, queryFooterActions, type FooterActionsRequest } from "./footer-actions.ts";
 import { installModelGuard } from "./model-guard.ts";
+import { settingsCycles } from "./settings-cycle.ts";
 
 /** A declined call's result (Block). */
 export const DECLINED = "The user declined this call. Do not retry it; continue without it, or ask the user how to proceed.";
@@ -426,6 +427,7 @@ export function judgeStateOf(branch: readonly unknown[], call: Omit<JudgeInput, 
 }
 
 export default function toolGate(pi: ExtensionAPI) {
+  const settings = settingsCycles(pi);
   registerWorkflowRenderer(pi);
   // A message on a declined call is the user's words: pi-sticky-last-prompt pins it like a prompt.
   // Any tool can be declined, and blocked calls never reach tool_result, so read the result text.
@@ -567,12 +569,12 @@ export default function toolGate(pi: ExtensionAPI) {
   const emit = (name: string, data: unknown) => {
     try { pi.events.emit(name, data); } catch { /* A listener's failure is its own. */ }
   };
-  const broadcastWorkflow = (source: WorkflowSource, previous?: WorkflowMode) => {
+  const broadcastWorkflow = (source: WorkflowSource, previous?: WorkflowMode, announce = true) => {
     const mode = effectiveWorkflow();
     emit(WORKFLOW_CHANGED, {
       mode, ...(previous ? { previous } : {}), cycle: cycle(), ...(shortcut ? { key: shortcut } : {}), source,
     });
-    if (source === "transition" && previous && previous !== mode) sendWorkflowTransition(pi, previous, mode);
+    if (announce && source === "transition" && previous && previous !== mode) sendWorkflowTransition(pi, previous, mode);
   };
   // Query destination state directly: neither the cached branch nor lifecycle listener order is authoritative.
   pi.events.on(WORKFLOW_QUERY, (data) => {
@@ -591,17 +593,18 @@ export default function toolGate(pi: ExtensionAPI) {
   const persist = (entry: string, mode: string) => {
     try { pi.appendEntry(entry, { version: 1, mode }); } catch { /* No session yet. */ }
   };
-  const changeWorkflow = (next: BaseWorkflowMode, ctx: ExtensionContext | undefined = hostCtx, userInitiated = false): Promise<FlowTransitionResult> => {
+  const changeWorkflow = (next: BaseWorkflowMode, ctx: ExtensionContext | undefined = hostCtx, userInitiated = false, announce = true, fromCycle = false): Promise<FlowTransitionResult> => {
+    if (!fromCycle) settings.cancel("Workflow selected explicitly.");
     const result = (error?: string) => Promise.resolve({ ok: !error, snapshot: flows.snapshot(), ...(error ? { error } : {}) });
     const refused = (error: string) => { ctx?.ui.notify(error, "warning"); return result(error); };
     if (execActive) return refused(EXEC_GUIDANCE);
     if (next === "plan" && !planProvider) return refused("Plan mode needs pi-plan-mode.");
     const flow = flows.snapshot();
     if (flow.blocked) return refused(flow.blocked);
+    // The committed workflow stays unchanged during activation, so even a request
+    // for that same workflow must refuse rather than report a stale no-op success.
+    if (flow.transitioning) return refused(FLOW_TRANSITION);
     const linked = flow.operatingMode === "linked";
-    // Initial Linked activation is still durably Independent until the setter
-    // succeeds. Its pending state must not take the synchronous Independent path.
-    if (!linked && flow.transitioning) return refused(FLOW_TRANSITION);
     if (linked && userInitiated && !ctx?.isIdle()) return refused(FLOW_BUSY);
     if (next === workflow) return result();
     const commit = () => {
@@ -611,7 +614,7 @@ export default function toolGate(pi: ExtensionAPI) {
       if (linked) pi.appendEntry(WORKFLOW_ENTRY, { version: 1, mode: workflow });
       else persist(WORKFLOW_ENTRY, workflow);
       status(ctx);
-      broadcastWorkflow("transition", previous);
+      broadcastWorkflow("transition", previous, announce);
       tellChatNow(ctx);
     };
     // Preserve Independent's synchronous mid-run semantics for legacy fire-and-forget callers.
@@ -623,7 +626,8 @@ export default function toolGate(pi: ExtensionAPI) {
   };
   const setWorkflow = (next: BaseWorkflowMode, ctx: ExtensionContext | undefined = hostCtx, userInitiated = false) =>
     changeWorkflow(next, ctx, userInitiated).then(result => result.ok);
-  const setApproval = (next: ApprovalMode, ctx: ExtensionContext | undefined = hostCtx) => {
+  const setApproval = (next: ApprovalMode, ctx: ExtensionContext | undefined = hostCtx, fromCycle = false) => {
+    if (!fromCycle) settings.cancel("Approvals selected explicitly.");
     if (approval === next) return;
     const previous = approval;
     approval = next;
@@ -650,9 +654,47 @@ export default function toolGate(pi: ExtensionAPI) {
     } catch { return; }
     markChatTold();
   };
-  const cycleWorkflow = (ctx: ExtensionContext | undefined = hostCtx, userInitiated = false): Promise<boolean> => {
-    if (execActive) { ctx?.ui.notify(EXEC_GUIDANCE, "warning"); return Promise.resolve(false); }
-    return setWorkflow(nextWorkflow(workflow, planProvider) as BaseWorkflowMode, ctx, userInitiated);
+  const workflowOwner = {};
+  const approvalOwner = {};
+  // Journal entries advance the leaf themselves; ownership follows ancestry, not leaf equality.
+  const cycleCurrent = (ctx: ExtensionContext) => {
+    const generation = sessionGeneration;
+    const session = ctx.sessionManager.getSessionId?.();
+    const anchor = ctx.sessionManager.getLeafId?.();
+    return () => sessionReady && generation === sessionGeneration && ctx.sessionManager === hostCtx?.sessionManager
+      && session === ctx.sessionManager.getSessionId?.()
+      && (!anchor || ctx.sessionManager.getBranch().some(entry => entry.id === anchor));
+  };
+  const workflowRefusal = (ctx: ExtensionContext, userInitiated: boolean) => {
+    if (execActive) return EXEC_GUIDANCE;
+    const flow = flows.snapshot();
+    if (flow.blocked) return flow.blocked;
+    if (flow.transitioning) return FLOW_TRANSITION;
+    if (flow.operatingMode === "linked" && userInitiated && !ctx.isIdle()) return FLOW_BUSY;
+    return undefined;
+  };
+  const stageWorkflow = (ctx: ExtensionContext | undefined = hostCtx, userInitiated = false): Promise<boolean> => {
+    if (!ctx || ctx.mode !== "tui" || !ctx.hasUI)
+      return setWorkflow(nextWorkflow(workflow, planProvider) as BaseWorkflowMode, ctx, userInitiated);
+    return settings.stage(ctx, {
+      key: "workflow", owner: workflowOwner,
+      read: () => workflow,
+      next: value => nextWorkflow(value, planProvider) as BaseWorkflowMode,
+      format: value => value,
+      validate: () => workflowRefusal(ctx, userInitiated),
+      apply: value => changeWorkflow(value, ctx, userInitiated, false, true).then(result => result.ok),
+      current: cycleCurrent(ctx),
+    });
+  };
+  const stageApproval = (ctx: ExtensionContext | undefined = hostCtx): Promise<boolean> => {
+    if (!ctx || ctx.mode !== "tui" || !ctx.hasUI) { setApproval(nextApproval(approval), ctx); return Promise.resolve(true); }
+    return settings.stage(ctx, {
+      key: "approvals", owner: approvalOwner,
+      read: () => approval, next: nextApproval,
+      format: value => MODE_NAMES[value], validate: () => undefined,
+      apply: value => { setApproval(value, ctx, true); return true; },
+      current: cycleCurrent(ctx),
+    });
   };
   pi.events.on(WORKFLOW_SET, (data) => {
     const request = data as { mode?: unknown; result?: Promise<boolean> } | undefined;
@@ -662,16 +704,21 @@ export default function toolGate(pi: ExtensionAPI) {
     });
   });
   pi.events.on(WORKFLOW_CYCLE, (data) => {
-    const result = cycleWorkflow().catch(error => { hostCtx?.ui.notify(`Workflow transition failed: ${String(error)}`, "warning"); return false; });
+    const userInitiated = (data as { userInitiated?: unknown } | undefined)?.userInitiated === true;
+    const result = stageWorkflow(hostCtx, userInitiated).catch(error => { hostCtx?.ui.notify(`Workflow transition failed: ${String(error)}`, "warning"); return false; });
     if (data && typeof data === "object") (data as { result?: Promise<boolean> }).result = result;
   });
   pi.events.on(MODE_SET, (data) => {
     const next = parseApproval((data as { mode?: unknown } | undefined)?.mode);
     if (next) setApproval(next);
   });
-  pi.events.on(MODE_CYCLE, () => setApproval(nextApproval(approval)));
+  pi.events.on(MODE_CYCLE, data => {
+    const result = stageApproval();
+    if (data && typeof data === "object") (data as { result?: Promise<boolean> }).result = result;
+  });
   const commitExecution = (active: boolean) => {
     if (active === execActive) return;
+    settings.cancel("Execution changed.");
     const previous = effectiveWorkflow();
     execActive = active;
     if (!active) {
@@ -706,13 +753,13 @@ export default function toolGate(pi: ExtensionAPI) {
   if (shortcut) {
     pi.registerShortcut(shortcut as never, {
       description: "Cycle workflow (work, chat, plan)",
-      handler: async (ctx) => { await cycleWorkflow(ctx, true); },
+      handler: async (ctx) => { void stageWorkflow(ctx, true); },
     });
   }
   if (approvalShortcut && !duplicateShortcut) {
     pi.registerShortcut(approvalShortcut as never, {
       description: "Toggle approvals (auto, yolo)",
-      handler: async (ctx) => { setApproval(nextApproval(approval), ctx); },
+      handler: async (ctx) => { void stageApproval(ctx); },
     });
   }
 
@@ -745,6 +792,7 @@ export default function toolGate(pi: ExtensionAPI) {
       });
     } else if (request.kind === "execution") {
       if (!["begin", "finish", "stop"].includes(request.phase) || typeof request.commit !== "function" || typeof request.planFile !== "string" || !Number.isSafeInteger(request.expectedRevision)) return;
+      settings.cancel("Execution requested.");
       invalidate();
       request.result = flowResult(flows.runExecutionTransition(request, ctx, () => {
         executionCommitting = true;
@@ -1180,6 +1228,7 @@ export default function toolGate(pi: ExtensionAPI) {
     // Adopt that branch-local metadata before its first prompt, including the Exec overlay.
     const record = branchFlowRecord(ctx);
     if (record !== undefined && record !== flowRecordSeen) {
+      settings.cancel("Branch settings restored.");
       invalidate();
       const restored = restoreBranchModes(ctx.sessionManager.getBranch(), defaults(config));
       workflow = restored.workflow;
@@ -1539,12 +1588,14 @@ export default function toolGate(pi: ExtensionAPI) {
     else ctx.ui.notify(EXEC_GUIDANCE, "info");
   };
   const selectProvider = async (provider: string, ctx: ExtensionContext) => {
+    settings.cancel("Provider selected.");
     if (!ctx.isIdle()) { ctx.ui.notify(FLOW_BUSY, "warning"); return; }
     if (execActive) { ctx.ui.notify("Provider changes and entering Linked are unavailable during Exec. " + EXEC_GUIDANCE, "warning"); return; }
     invalidate();
     await flowResult(flows.selectProvider(provider, ctx), ctx);
   };
   const independent = async (ctx: ExtensionContext) => {
+    settings.cancel("Operating mode selected.");
     if (flows.snapshot().operatingMode === "linked" && !ctx.isIdle()) { ctx.ui.notify(FLOW_BUSY, "warning"); return; }
     invalidate();
     await flowResult(flows.setIndependent(ctx), ctx);
@@ -1566,6 +1617,7 @@ export default function toolGate(pi: ExtensionAPI) {
     ].join("\n"), "info");
   };
   const showFlowPicker = async (ctx: ExtensionContext) => {
+    settings.cancel("Flow picker opened.");
     if (!ctx.hasUI) { await showFlowStatus(ctx); return; }
     const snapshot = flows.snapshot();
     const blockedQuestion = snapshot.operatingMode === "linked" && snapshot.blocked
@@ -1588,6 +1640,7 @@ export default function toolGate(pi: ExtensionAPI) {
     ]);
   };
   const showModePicker = async (ctx: ExtensionContext) => {
+    settings.cancel("Workflow picker opened.");
     const flow = flows.snapshot();
     const linked = flow.operatingMode === "linked";
     if (!ctx.hasUI) {
@@ -1618,6 +1671,7 @@ export default function toolGate(pi: ExtensionAPI) {
   };
   const openFlowControl = (ctx: ExtensionContext) => flows.snapshot().operatingMode === "linked" ? showModePicker(ctx) : showFlowPicker(ctx);
   const showApprovals = async (ctx: ExtensionContext) => {
+    settings.cancel("Approvals picker opened.");
     if (!ctx.hasUI) { ctx.ui.notify(`Approvals: ${MODE_NAMES[approval]}. Usage: /approvals [auto|yolo].`, "info"); return; }
     const selected = await pick(ctx, "Approvals", ["Auto", "Yolo"]);
     if (selected) setApproval(selected === "Auto" ? "auto" : "bypassPermissions", ctx);
@@ -1683,7 +1737,7 @@ export default function toolGate(pi: ExtensionAPI) {
       if (!sessionReady || generation !== sessionGeneration || ctx.sessionManager !== hostCtx?.sessionManager || session !== ctx.sessionManager.getSessionId?.()) return;
       await run();
     };
-    request.actions["workflow.cycle"] = { label: execActive ? "Execution status" : "Cycle workflow", ...(shortcut && !execActive ? { key: shortcut } : {}), run: guarded(() => execActive ? executionStatus(ctx) : cycleWorkflow(ctx, true)) };
+    request.actions["workflow.cycle"] = { label: execActive ? "Execution status" : "Cycle workflow", ...(shortcut && !execActive ? { key: shortcut } : {}), run: guarded(async () => { if (execActive) await executionStatus(ctx); else void stageWorkflow(ctx, true); }) };
     request.actions["workflow.open"] = { label: "Workflow", run: guarded(() => showModePicker(ctx)) };
     request.actions["flow.open"] = { label: "Operating mode", run: guarded(() => openFlowControl(ctx)) };
     request.actions["approvals.open"] = { label: "Approvals", ...(!duplicateShortcut && approvalShortcut ? { key: approvalShortcut } : {}), run: guarded(() => showApprovals(ctx)) };

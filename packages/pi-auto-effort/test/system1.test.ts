@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import { queryFooterActions } from "../src/footer-actions.ts";
 import autoEffort from "../src/index.ts";
 import * as jevModule from "../src/jev.ts";
+import { settingsCycles } from "../src/settings-cycle.ts";
 import { SYSTEM1_CHANGED, resolveSystem1Target } from "../src/system1.js";
 import { answers, harness } from "./harness.ts";
 
@@ -343,5 +344,7 @@ test("a footer action captured before a change event cannot toggle the session",
   expect(s.ctx.ui.notes).toEqual([]);
   expect(queryFooterActions(s.h.pi.events)["effort.toggle"]?.active).toBe(true);
   await queryFooterActions(s.h.pi.events)["effort.toggle"]!.run();
+  expect(queryFooterActions(s.h.pi.events)["effort.toggle"]?.active).toBe(true);
+  await settingsCycles(s.h.pi).flush();
   expect(queryFooterActions(s.h.pi.events)["effort.toggle"]?.active).toBe(false);
 });

@@ -17,6 +17,7 @@ import {
   EXIT_TOOL,
   INLINE_ENTRY,
   MODE_CHANGED,
+  MODE_CYCLE,
   MODE_SET,
   NOTICE_TYPE,
   PLAN_PROVIDER,
@@ -24,6 +25,7 @@ import {
 } from "../src/inline-plan.js";
 import * as planFiles from "../src/plan-file.js";
 import { PlanNameInput } from "../src/plan-name-input.js";
+import { settingsCycles } from "../src/settings-cycle.js";
 import { createCustomSelectorHarness, createMockContext, createMockPi } from "./shared/support.js";
 
 const opus = { provider: "anthropic", id: "claude-opus-5-5", name: "Claude Opus 5.5", reasoning: true };
@@ -578,13 +580,15 @@ function setupWorkflowLifecycle() {
   const mock = createMockPi();
   const context = createMockContext({ hasUI: true });
   const ctx = context.ctx as ExtensionContext;
+  Object.assign(ctx.sessionManager, { getLeafId: () => null });
   let executing = false;
   const approved = vi.fn();
   const compactHere = vi.fn();
   const handoff = vi.fn();
   const implementHere = vi.fn(() => "");
+  const plansDirectory = vi.fn(() => mkdtempSync(join(tmpdir(), "workflow-plan-")));
   const inline = registerInlinePlanMode(mock.pi, {
-    plansDirectory: () => mkdtempSync(join(tmpdir(), "workflow-plan-")),
+    plansDirectory,
     safeSubcommands: () => undefined,
     executing: () => executing,
     toggleKey: () => undefined,
@@ -601,8 +605,212 @@ function setupWorkflowLifecycle() {
     executing = active;
     mock.eventBus.emit("workflow-mode:exec", { active, source });
   };
-  return { mock, context, ctx, inline, emit, exec, approved, compactHere, handoff, implementHere };
+  return { mock, context, ctx, inline, emit, exec, approved, compactHere, handoff, implementHere, plansDirectory };
 }
+
+test("standalone toggles preview without allocation and apply only the final local selection", async () => {
+  vi.useFakeTimers();
+  try {
+    const h = setupWorkflowLifecycle();
+    await h.emit("session_start");
+    const pending = h.inline.toggle(h.ctx);
+    assert.equal(h.inline.active, false);
+    assert.equal(h.inline.planFile, undefined);
+    assert.equal(h.plansDirectory.mock.calls.length, 0);
+    assert.equal(h.mock.entries.filter((entry) => entry.customType === INLINE_ENTRY).length, 0);
+    assert.deepEqual(workflowTransitions(h.mock), []);
+    assert.equal(settingsCycles(h.mock.pi).snapshot()?.phase, "pending");
+    await vi.advanceTimersByTimeAsync(399);
+    assert.equal(h.inline.active, false);
+    await vi.advanceTimersByTimeAsync(1);
+    assert.equal(await pending, true);
+    assert.equal(h.inline.active, true);
+    assert.ok(h.inline.planFile);
+    assert.equal(h.plansDirectory.mock.calls.length, 1);
+    assert.deepEqual(workflowTransitions(h.mock), [], "the settings journal replaces the cycle badge");
+    assert.equal(h.mock.entries.filter((entry) => entry.customType === "settings:cycle").length, 1);
+    const leaving = h.inline.toggle(h.ctx);
+    await vi.advanceTimersByTimeAsync(400);
+    assert.equal(await leaving, true);
+    assert.equal(h.inline.active, false);
+    assert.deepEqual(workflowTransitions(h.mock), []);
+    await h.inline.enter(h.ctx);
+    assert.equal(workflowTransitions(h.mock).length, 1, "an explicit entry still presents its normal badge");
+  } finally {
+    vi.useRealTimers();
+  }
+});
+
+test("standalone Plan round trips are true no-ops with one journal anchor and no plan allocation", async () => {
+  vi.useFakeTimers();
+  try {
+    const h = setupWorkflowLifecycle();
+    await h.emit("session_start");
+    const first = h.inline.toggle(h.ctx);
+    await vi.advanceTimersByTimeAsync(300);
+    const second = h.inline.toggle(h.ctx);
+    await vi.advanceTimersByTimeAsync(399);
+    assert.equal(h.inline.active, false);
+    assert.equal(h.plansDirectory.mock.calls.length, 0);
+    await vi.advanceTimersByTimeAsync(1);
+    assert.deepEqual(await Promise.all([first, second]), [true, true]);
+    assert.equal(h.inline.active, false);
+    assert.equal(h.inline.planFile, undefined);
+    assert.equal(h.plansDirectory.mock.calls.length, 0);
+    assert.equal(settingsCycles(h.mock.pi).snapshot()?.phase, "unchanged");
+    assert.equal(h.mock.entries.filter((entry) => entry.customType === INLINE_ENTRY).length, 0);
+    assert.equal(h.mock.entries.filter((entry) => entry.customType === "settings:cycle").length, 1);
+    assert.deepEqual(h.mock.sentMessages, []);
+  } finally {
+    vi.useRealTimers();
+  }
+});
+
+test("a delegated Plan user cycle reuses the gate's settled promise and single shared timer", async () => {
+  vi.useFakeTimers();
+  try {
+    const h = setupWorkflowLifecycle();
+    await h.emit("session_start");
+    let workflow = "work";
+    const owner = {};
+    const service = settingsCycles(h.mock.pi);
+    h.mock.eventBus.emit(MODE_CHANGED, { mode: workflow, cycle: ["work", "chat", "plan"], source: "restore" });
+    const requests: Array<{ userInitiated?: boolean; result?: Promise<boolean> }> = [];
+    h.mock.eventBus.on(MODE_CYCLE, (data) => {
+      const request = data as (typeof requests)[number];
+      requests.push(request);
+      request.result = service.stage(h.ctx, {
+        key: "workflow",
+        owner,
+        read: () => workflow,
+        next: (value) => (value === "work" ? "chat" : value === "chat" ? "plan" : "work"),
+        format: (value) => value,
+        validate: () => undefined,
+        apply: (value) => {
+          workflow = value;
+          h.mock.eventBus.emit(MODE_CHANGED, { mode: value, source: "transition" });
+          return true;
+        },
+        current: () => true,
+      });
+    });
+    const first = h.inline.toggle(h.ctx);
+    const second = h.inline.toggle(h.ctx);
+    assert.equal(requests.length, 2);
+    assert.ok(requests.every((request) => request.userInitiated === true && request.result instanceof Promise));
+    assert.equal(vi.getTimerCount(), 1);
+    assert.equal(h.inline.active, false);
+    assert.equal(h.plansDirectory.mock.calls.length, 0);
+    assert.equal(h.mock.entries.filter((entry) => entry.customType === "settings:cycle").length, 1);
+    await vi.advanceTimersByTimeAsync(400);
+    assert.deepEqual(await Promise.all([first, second]), [true, true]);
+    assert.equal(workflow, "plan");
+    assert.equal(h.inline.active, true);
+    assert.equal(h.plansDirectory.mock.calls.length, 1);
+    assert.deepEqual(workflowTransitions(h.mock), []);
+  } finally {
+    vi.useRealTimers();
+  }
+});
+
+for (const explicit of ["enter", "work", "execution", "restore"] as const) {
+  test(`explicit ${explicit} cancels a standalone preview without delaying the transition`, async () => {
+    vi.useFakeTimers();
+    try {
+      const h = setupWorkflowLifecycle();
+      await h.emit("session_start");
+      const pending = h.inline.toggle(h.ctx);
+      if (explicit === "enter") await h.inline.enter(h.ctx);
+      else if (explicit === "work") await h.inline.work(h.ctx);
+      else if (explicit === "execution") h.inline.commitExecution(h.ctx);
+      else await h.emit("session_tree");
+      assert.equal(await pending, false);
+      assert.equal(h.inline.active, explicit === "enter");
+      await vi.advanceTimersByTimeAsync(400);
+      assert.equal(h.inline.active, explicit === "enter");
+      assert.equal(h.plansDirectory.mock.calls.length, explicit === "enter" ? 1 : 0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+}
+
+test("explicit Plan entry tools cancel pending cycling and allocate immediately", async () => {
+  vi.useFakeTimers();
+  try {
+    const h = await setup({ toggleShortcut: "alt+p" });
+    const ctx = h.context.ctx as ExtensionContext;
+    ctx.mode = "tui";
+    const shortcut = h.mock.shortcuts.get("alt+p");
+    assert.ok(shortcut);
+    const pending = shortcut.handler(ctx);
+    // The command wrapper first awaits its lifecycle readiness before calling inline.toggle.
+    await Promise.resolve();
+    await Promise.resolve();
+    assert.equal(settingsCycles(h.mock.pi).snapshot()?.phase, "pending");
+    assert.equal(h.inline(), undefined);
+    await h.tool(ENTER_TOOL).execute("explicit", {}, undefined, undefined, ctx);
+    await pending;
+    assert.equal(h.inline().active, true);
+    assert.ok(h.inline().planFile);
+    assert.equal(settingsCycles(h.mock.pi).snapshot()?.phase, "cancelled");
+    await vi.advanceTimersByTimeAsync(400);
+    assert.equal(h.inline().active, true);
+  } finally {
+    vi.useRealTimers();
+  }
+});
+
+test("a Plan review cancels an exit preview and still waits for explicit approval", async () => {
+  vi.useFakeTimers();
+  try {
+    const h = await setup({ toggleShortcut: "alt+p", select: ["No, keep planning"] });
+    const ctx = h.context.ctx as ExtensionContext;
+    await h.mock.commands.get("plan")?.handler("", ctx);
+    writeFileSync(h.inline().planFile, "# Review this plan\n\nDo not approve on a timer.\n");
+    ctx.mode = "tui";
+    const shortcut = h.mock.shortcuts.get("alt+p");
+    assert.ok(shortcut);
+    const pending = shortcut.handler(ctx);
+    await Promise.resolve();
+    await Promise.resolve();
+    assert.equal(settingsCycles(h.mock.pi).snapshot()?.phase, "pending");
+    assert.equal(h.inline().active, true);
+    // Use the RPC review fallback, avoiding an interactive dialog in this offline test.
+    ctx.mode = "rpc";
+    const review = await h.tool(EXIT_TOOL).execute("review", {}, undefined, undefined, ctx);
+    await pending;
+    assert.equal(review.details.outcome, "kept");
+    assert.equal(h.inline().active, true);
+    assert.equal(h.mock.thinkingLevels.length, 0);
+    assert.equal(settingsCycles(h.mock.pi).snapshot()?.phase, "cancelled");
+    await vi.advanceTimersByTimeAsync(400);
+    assert.equal(h.inline().active, true);
+    assert.equal(h.mock.thinkingLevels.length, 0);
+  } finally {
+    vi.useRealTimers();
+  }
+});
+
+test("non-TUI Plan toggles retain immediate local transitions without a journal or timer", async () => {
+  vi.useFakeTimers();
+  try {
+    const h = setupWorkflowLifecycle();
+    await h.emit("session_start");
+    h.ctx.mode = "rpc";
+    const pending = h.inline.toggle(h.ctx);
+    assert.equal(h.inline.active, true);
+    assert.equal(await pending, true);
+    assert.equal(vi.getTimerCount(), 0);
+    assert.equal(
+      h.mock.entries.some((entry) => entry.customType === "settings:cycle"),
+      false,
+    );
+    assert.deepEqual(workflowTransitions(h.mock), [transition("work", "plan", "research and plan only")]);
+  } finally {
+    vi.useRealTimers();
+  }
+});
 
 test("standalone workflow badges describe work/plan/exec transitions once without triggering turns", async () => {
   const h = await setup({ models: true, select: ["Yes, hand off to Claude Sonnet 5.5 (high)"] });

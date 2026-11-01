@@ -4,6 +4,7 @@ import path from "node:path";
 import { afterEach, describe, expect, test, vi } from "vitest";
 import * as configModule from "../src/config.ts";
 import { FOOTER_ACTIONS_CHANNEL, queryFooterActions } from "../src/footer-actions.ts";
+import { SETTINGS_REASONING_COMMITTED, settingsCycles } from "../src/settings-cycle.ts";
 import autoEffort, { LEGACY_QUESTIONS, QUESTIONS, effortState, thinkingPinned } from "../src/index.ts";
 import { answers, assistantEntry, fakeJev, harness, userEntry } from "./harness.ts";
 
@@ -213,6 +214,34 @@ test.each(["session_start", "session_tree"])("%s restores a manual level chosen 
   expect(h.entries.at(-1)?.data).toMatchObject({ ceiling: "medium" });
 });
 
+describe("commit-only manual level restoration", () => {
+  const assessment = { type: "custom", customType: "auto-effort:state", data: { ceiling: "xhigh", level: "low", reason: "down" } };
+  const commit = (level: string, version = 1) => ({ type: "custom", customType: "auto-effort:manual-level", data: { version, level } });
+  const native = (thinkingLevel: string) => ({ type: "thinking_level_change", thinkingLevel });
+
+  test.each([
+    { name: "commit after native", branch: [assessment, native("medium"), commit("high")], cap: "high" },
+    { name: "native after commit", branch: [assessment, commit("high"), native("medium")], cap: "medium" },
+    { name: "assessment after commit", branch: [commit("medium"), assessment], cap: "xhigh" },
+    { name: "commit without assessment", branch: [commit("medium")], cap: "medium" },
+    { name: "latest commit", branch: [assessment, commit("medium"), commit("high")], cap: "high" },
+    { name: "invalid level", branch: [assessment, commit("arbitrary")], cap: "xhigh" },
+    { name: "unknown version", branch: [assessment, commit("medium", 2)], cap: "xhigh" },
+    { name: "missing version", branch: [assessment, { type: "custom", customType: "auto-effort:manual-level", data: { level: "medium" } }], cap: "xhigh" },
+  ])("replays $name in chronological order", async ({ branch, cap }) => {
+    const { h, ctx, jev } = setup([3]);
+    ctx.sessionManager.getBranch = () => branch;
+    await h.emit("session_start", {}, ctx);
+    await h.commands.get("auto-effort").handler("status", ctx);
+    expect(ctx.ui.notes.at(-1)!.message).toContain(`low to ${cap}, your last manual level`);
+    expect(h.entries).toEqual([]);
+    expect(h.thinkingChanges).toEqual([]);
+    expect(jev.calls).toEqual([]);
+    await h.emit("before_agent_start", { prompt: "hard" }, ctx);
+    expect(h.entries.at(-1)?.data).toMatchObject({ ceiling: cap, level: cap });
+  });
+});
+
 describe.each(["prompt", "run"])("stale %s assessment", (phase) => {
   function pending() {
     const h = harness();
@@ -240,8 +269,11 @@ describe.each(["prompt", "run"])("stale %s assessment", (phase) => {
       await h.commands.get("auto-effort").handler("off", ctx);
       await h.commands.get("auto-effort").handler("on", ctx);
     } else if (change === "footer off/on") {
+      vi.useFakeTimers();
       await queryFooterActions(h.pi.events)["effort.toggle"]!.run();
-      await queryFooterActions(h.pi.events)["effort.toggle"]!.run();
+      await vi.advanceTimersByTimeAsync(400);
+      await h.commands.get("auto-effort").handler("on", ctx);
+      vi.useRealTimers();
     } else if (change === "new prompt") {
       // Even a blank prompt supersedes an assessment of the previous run.
       await h.emit("before_agent_start", { prompt: " " }, ctx);
@@ -254,7 +286,7 @@ describe.each(["prompt", "run"])("stale %s assessment", (phase) => {
     finish();
     await assessment;
     expect(h.thinkingChanges).toEqual(before);
-    expect(h.entries).toEqual([]);
+    expect(h.entries.filter((entry) => entry.customType === "auto-effort:state")).toEqual([]);
   });
 
   test("uses the captured operation signal even if the context's signal changes", async () => {
@@ -414,7 +446,7 @@ test("the footer detail never contains parentheses, so pi-status-footer can pars
 });
 
 describe("optional footer action", () => {
-  afterEach(() => vi.restoreAllMocks());
+  afterEach(() => { vi.useRealTimers(); vi.restoreAllMocks(); });
 
   test("publishes only its own action synchronously, once the session is ready", async () => {
     const { h, ctx } = setup([]);
@@ -456,6 +488,7 @@ describe("optional footer action", () => {
   });
 
   test("off/on matches the command, restores the ceiling and keeps the off control available", async () => {
+    vi.useFakeTimers();
     const clicked = setup([0]);
     const commanded = setup([0]);
     for (const { h, ctx } of [clicked, commanded]) {
@@ -465,18 +498,226 @@ describe("optional footer action", () => {
     }
     for (const enabled of [false, true]) {
       await queryFooterActions(clicked.h.pi.events)["effort.toggle"]!.run();
+      expect(queryFooterActions(clicked.h.pi.events)["effort.toggle"]?.active).toBe(!enabled);
+      await vi.advanceTimersByTimeAsync(400);
       await commanded.h.commands.get("auto-effort").handler(enabled ? "on" : "off", commanded.ctx);
       expect(queryFooterActions(clicked.h.pi.events)["effort.toggle"]?.active).toBe(enabled);
       expect(clicked.h.thinking).toBe("high");
       expect(clicked.h.thinkingChanges).toEqual(commanded.h.thinkingChanges);
-      expect(clicked.ctx.ui.notes).toEqual(commanded.ctx.ui.notes);
+      expect(clicked.ctx.ui.notes).toEqual([]);
       expect(clicked.ctx.ui.status).toEqual(commanded.ctx.ui.status);
-      expect(clicked.h.entries).toHaveLength(1);
+      expect(clicked.h.entries.filter((entry) => entry.customType === "auto-effort:state")).toHaveLength(1);
       expect(commanded.h.entries).toHaveLength(1);
       expect(clicked.h.modelChanges).toEqual([]);
       expect(clicked.jev.calls).toHaveLength(1);
     }
   });
+
+  test("a round trip is preview-only and explicit commands cancel a pending toggle", async () => {
+    vi.useFakeTimers();
+    const { h, ctx } = setup([]);
+    await h.emit("session_start", {}, ctx);
+    const toggle = queryFooterActions(h.pi.events)["effort.toggle"]!;
+    await toggle.run();
+    const anchor = h.entries.find((entry) => entry.customType === "settings:cycle")!;
+    const renderer = h.renderers.get("settings:cycle")!(anchor, {}, { fg: (_color: string, text: string) => text });
+    expect(renderer.render(120)[0]).toContain("Auto off");
+    await h.commands.get("auto-effort").handler("status", ctx);
+    await h.commands.get("auto-effort").handler("limits", ctx);
+    await vi.advanceTimersByTimeAsync(200);
+    await toggle.run();
+    expect(renderer.render(120)[0]).toContain("Auto on");
+    expect(queryFooterActions(h.pi.events)["effort.toggle"]?.active).toBe(true);
+    await vi.advanceTimersByTimeAsync(400);
+    expect(queryFooterActions(h.pi.events)["effort.toggle"]?.active).toBe(true);
+    expect(h.thinkingChanges).toEqual([]);
+    await toggle.run();
+    await h.commands.get("auto-effort").handler("on", ctx);
+    await vi.advanceTimersByTimeAsync(400);
+    expect(queryFooterActions(h.pi.events)["effort.toggle"]?.active).toBe(true);
+    expect(ctx.ui.notes.at(-1)?.message).toContain("auto-effort on");
+  });
+
+  test("an unrelated assessment generation does not invalidate the pending toggle", async () => {
+    vi.useFakeTimers();
+    const { h, ctx } = setup([]);
+    await h.emit("session_start", {}, ctx);
+    await queryFooterActions(h.pi.events)["effort.toggle"]!.run();
+    await h.emit("model_select", {}, ctx);
+    await vi.advanceTimersByTimeAsync(400);
+    expect(queryFooterActions(h.pi.events)["effort.toggle"]?.active).toBe(false);
+  });
+
+  test("a changed reasoning target avoids restoring the old manual level", async () => {
+    vi.useFakeTimers();
+    const { h, ctx } = setup([0]);
+    await h.emit("session_start", {}, ctx);
+    await h.emit("before_agent_start", { prompt: "trivial" }, ctx);
+    expect(h.thinking).toBe("low");
+    await queryFooterActions(h.pi.events)["effort.toggle"]!.run();
+    void settingsCycles(h.pi).stage(ctx, {
+      key: "reasoning", owner: "test-reasoning", read: () => h.thinking,
+      next: () => "medium", format: (level) => level, validate: () => undefined,
+      current: () => true,
+      apply: (level) => { h.pi.setThinkingLevel(level); h.pi.events.emit(SETTINGS_REASONING_COMMITTED, { level: h.thinking }); return true; },
+    });
+    await vi.advanceTimersByTimeAsync(400);
+    expect(h.thinkingChanges).toEqual(["low", "medium"]);
+    expect(queryFooterActions(h.pi.events)["effort.toggle"]?.active).toBe(false);
+    await h.commands.get("auto-effort").handler("status", ctx);
+    expect(ctx.ui.notes.at(-1)?.message).toContain("low to medium, your last manual level");
+  });
+
+  test("an automatic assessment cancels a touched reasoning preview", async () => {
+    vi.useFakeTimers();
+    const { h, ctx } = setup([0]);
+    ctx.model = { provider: "anthropic", id: "managed", compat: { supportsMidConvoEffort: true } };
+    await h.emit("session_start", {}, ctx);
+    const result = settingsCycles(h.pi).stage(ctx, {
+      key: "reasoning", owner: "test-reasoning", read: () => h.thinking,
+      next: () => "medium", format: (level) => level, validate: () => undefined,
+      current: () => true, apply: (level) => { h.pi.setThinkingLevel(level); return true; },
+    });
+    await h.emit("turn_end", { turnIndex: 0, message: { stopReason: "toolUse" }, toolResults: [{ isError: true }] }, ctx);
+    expect(await result).toBe(false);
+    await vi.advanceTimersByTimeAsync(400);
+    expect(h.thinking).toBe("low");
+    expect(h.thinkingChanges).toEqual(["low"]);
+  });
+
+  test("a clamped no-op manual commit survives reload and stays on its branch", async () => {
+    vi.useFakeTimers();
+    const { h, ctx, jev } = setup([]);
+    const assessment = {
+      type: "custom", customType: "auto-effort:state",
+      data: { ceiling: "xhigh", level: "high", reason: "hold", theta: 0.6, need: { low: 1, medium: 0.9, high: 0.8, xhigh: 0.1 } },
+    };
+    ctx.sessionManager.getBranch = () => [assessment];
+    ctx.model = { provider: "test", id: "xhigh-capable", reasoning: true };
+    await h.emit("session_start", {}, ctx);
+    let workflow = "work";
+    const cycles = settingsCycles(h.pi);
+    const workflowCommit = cycles.stage(ctx, {
+      key: "workflow", owner: "test-workflow", read: () => workflow,
+      next: () => "plan", format: (value) => value, validate: () => undefined, current: () => true,
+      apply: (value) => { workflow = value; ctx.model = { provider: "test", id: "high-only", reasoning: true }; return true; },
+    });
+    // Native capability clamping to the already-effective high writes no thinking entry
+    // and emits no thinking_level_select. The final commit notification is all we get.
+    const nativeSetter = vi.spyOn(h.pi, "setThinkingLevel").mockImplementation(() => {
+      expect(ctx.model.id).toBe("high-only");
+    });
+    const reasoningCommit = cycles.stage(ctx, {
+      key: "reasoning", owner: "test-reasoning", read: () => h.thinking,
+      next: () => "xhigh", format: (value) => value, validate: () => undefined, current: () => true,
+      apply: (value) => { h.pi.setThinkingLevel(value); h.pi.events.emit(SETTINGS_REASONING_COMMITTED, { level: h.thinking }); return true; },
+    });
+    await vi.advanceTimersByTimeAsync(400);
+    expect(await workflowCommit).toBe(true);
+    expect(await reasoningCommit).toBe(true);
+    h.pi.events.emit(SETTINGS_REASONING_COMMITTED, { level: "high" }); // Duplicate is not another manual change.
+    expect(h.entries.filter((entry) => entry.customType === "auto-effort:manual-level")).toEqual([
+      { customType: "auto-effort:manual-level", data: { version: 1, level: "high" } },
+    ]);
+    expect(h.entries.filter((entry) => entry.customType === "auto-effort:state")).toEqual([]);
+    expect(nativeSetter).toHaveBeenCalledExactlyOnceWith("xhigh");
+    expect(h.thinkingChanges).toEqual([]);
+    expect(jev.calls).toEqual([]);
+    await h.commands.get("auto-effort").handler("status", ctx);
+    const reconciled = ctx.ui.notes.at(-1)!.message;
+    expect(reconciled).toContain("low to high, your last manual level");
+    expect(reconciled).toContain("last decision: hold");
+
+    const persisted = [assessment, ...h.entries.map((entry) => ({ type: "custom", ...entry }))];
+    const original = structuredClone(persisted);
+    await h.emit("session_shutdown", {}, ctx);
+    const restored = setup([]);
+    restored.ctx.model = { ...ctx.model };
+    let branch = persisted;
+    restored.ctx.sessionManager.getBranch = () => branch;
+    await restored.h.emit("session_start", {}, restored.ctx);
+    await restored.h.commands.get("auto-effort").handler("status", restored.ctx);
+    expect(restored.ctx.ui.notes.at(-1)!.message).toBe(reconciled);
+    expect(restored.h.thinkingChanges).toEqual([]);
+    expect(restored.jev.calls).toEqual([]);
+    expect(restored.h.entries).toEqual([]);
+
+    branch = [assessment]; // Sibling branch never received the manual choice.
+    await restored.h.emit("session_tree", {}, restored.ctx);
+    await restored.h.commands.get("auto-effort").handler("status", restored.ctx);
+    expect(restored.ctx.ui.notes.at(-1)!.message).toContain("low to xhigh, your last manual level");
+    branch = persisted;
+    await restored.h.emit("session_tree", {}, restored.ctx);
+    await restored.h.commands.get("auto-effort").handler("status", restored.ctx);
+    expect(restored.ctx.ui.notes.at(-1)!.message).toBe(reconciled);
+    expect(restored.h.thinkingChanges).toEqual([]);
+    expect(restored.jev.calls).toEqual([]);
+    expect(restored.h.entries).toEqual([]);
+    expect(persisted).toEqual(original);
+  });
+
+  test("a native manual change needs no extra commit-only entry", async () => {
+    const { h, ctx } = setup([]);
+    await h.emit("session_start", {}, ctx);
+    h.pi.setThinkingLevel("medium");
+    h.pi.events.emit(SETTINGS_REASONING_COMMITTED, { level: "medium" });
+    expect(h.entries).toEqual([]);
+    await h.commands.get("auto-effort").handler("status", ctx);
+    expect(ctx.ui.notes.at(-1)?.message).toContain("low to medium, your last manual level");
+  });
+
+  test.each([undefined, {}, { level: null }, { level: 3 }, { level: "arbitrary" }, { level: "medium" }])(
+    "ignores an invalid or non-current commit notification %j", async (data) => {
+      const { h, ctx } = setup([]);
+      ctx.sessionManager.getBranch = () => [{ type: "custom", customType: "auto-effort:state", data: { ceiling: "xhigh", level: "high" } }];
+      await h.emit("session_start", {}, ctx);
+      h.pi.events.emit(SETTINGS_REASONING_COMMITTED, data);
+      // Even an arbitrary string returned by a bad adapter is not a native level.
+      vi.spyOn(h.pi, "getThinkingLevel").mockReturnValue("arbitrary");
+      h.pi.events.emit(SETTINGS_REASONING_COMMITTED, { level: "arbitrary" });
+      expect(h.entries).toEqual([]);
+      expect(h.thinkingChanges).toEqual([]);
+      await h.commands.get("auto-effort").handler("status", ctx);
+      expect(ctx.ui.notes.at(-1)?.message).toContain("low to xhigh, your last manual level");
+    },
+  );
+
+  test.each(["before start", "session_before_switch", "session_before_fork", "session_before_tree", "session_shutdown", "session id", "branch"])(
+    "ignores commit notifications with stale context: %s", async (change) => {
+      const { h, ctx } = setup([]);
+      let branch = [{ type: "custom", id: "assessment", customType: "auto-effort:state", data: { ceiling: "xhigh", level: "high" } }];
+      ctx.sessionManager.getBranch = () => branch;
+      ctx.sessionManager.getLeafId = () => branch.at(-1)?.id ?? null;
+      if (change !== "before start") await h.emit("session_start", {}, ctx);
+      if (change === "session id") ctx.sessionManager.getSessionId = () => "another-session";
+      else if (change === "branch") branch = [{ ...branch[0]!, id: "sibling" }];
+      else if (change !== "before start") await h.emit(change, {}, ctx);
+      h.pi.events.emit(SETTINGS_REASONING_COMMITTED, { level: "high" });
+      expect(h.entries).toEqual([]);
+      expect(h.thinkingChanges).toEqual([]);
+    },
+  );
+
+  test.each(["session_before_switch", "session_before_fork", "session_before_tree"])(
+    "a cancelled %s does not poison later valid manual commits", async event => {
+      vi.useFakeTimers();
+      const { h, ctx } = setup([]);
+      ctx.sessionManager.getBranch = () => [{ type: "custom", customType: "auto-effort:state", data: { ceiling: "xhigh", level: "high" } }];
+      await h.emit("session_start", {}, ctx);
+      await h.emit(event, {}, ctx); // Another extension cancels; no navigation/restoration follows.
+      const settled = settingsCycles(h.pi).stage(ctx, {
+        key: "reasoning", owner: "test-reasoning", read: () => h.thinking,
+        next: () => "xhigh", format: value => value, validate: () => undefined, current: () => true,
+        apply: () => { h.pi.events.emit(SETTINGS_REASONING_COMMITTED, { level: h.thinking }); return true; },
+      });
+      await vi.advanceTimersByTimeAsync(400);
+      expect(await settled).toBe(true);
+      expect(h.entries.filter(entry => entry.customType === "auto-effort:manual-level")).toEqual([
+        { customType: "auto-effort:manual-level", data: { version: 1, level: "high" } },
+      ]);
+      expect(h.thinkingChanges).toEqual([]);
+    },
+  );
 
   test("active describes effective settings rather than sessionOn or callability", async () => {
     const { h, ctx } = setup([], { enabled: false });
@@ -511,7 +752,7 @@ describe("optional footer action", () => {
     expect(h.thinkingChanges).toEqual([]);
   });
 
-  test.each(["session_start", "session_tree", "session_shutdown", "model_select", "thinking_level_select", "new prompt", "bounds", "toggle", "session id"])(
+  test.each(["session_start", "session_tree", "session_shutdown", "session id"])(
     "captured callbacks do nothing after %s",
     async (change) => {
       const { h, ctx } = setup([]);
@@ -539,6 +780,7 @@ describe("optional footer action", () => {
   );
 
   test("off clears quota pressure without assessment or changing the model", async () => {
+    vi.useFakeTimers();
     const h = harness();
     const now = Date.UTC(2026, 0, 1);
     autoEffort(h.pi, { now: () => now });
@@ -552,6 +794,7 @@ describe("optional footer action", () => {
     await h.emit("before_agent_start", { prompt: "trivial" }, ctx);
     expect(h.events.filter((e) => e.channel === "quota:pressure").at(-1)?.data.tier).toBe("critical");
     await queryFooterActions(h.pi.events)["effort.toggle"]!.run();
+    await vi.advanceTimersByTimeAsync(400);
     expect(h.events.filter((e) => e.channel === "quota:pressure").at(-1)?.data).toEqual({ provider: "anthropic", tier: "none", p: 0 });
     expect(h.thinking).toBe("high");
     expect(ctx.ui.status.get("auto-effort")).toBeUndefined();

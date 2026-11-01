@@ -398,7 +398,9 @@ export default function (pi) {
   notice = deferred();
   native.editor.handleInput('\u001b[Z');
   assert.equal((await deadline(notice.promise, 'native reasoning cycle while Linked')).kind, 'status');
-  assert.notEqual(subject.session.thinkingLevel, 'high', 'reasoning remains directly cyclable while Linked');
+  assert.notEqual(subject.session.thinkingLevel, 'high', 'reasoning remains directly cyclable while Linked without the footer');
+  assert.equal(subject.manager.getEntries().some(entry => entry.type === 'custom' && entry.customType === 'settings:cycle'), false,
+    'a guard-only runtime leaves stock native reasoning immediate and creates no cycling journal');
   assert.equal(subject.session.model, reasoningModel);
   assert.equal(subject.policy.linked, true, 'reasoning does not unlink the flow');
   subject.session.setThinkingLevel('high');
@@ -638,7 +640,7 @@ export default function (pi) {
       writeFileSync(resolve(agents, `${role}.md`), `---\nname: ${role}\ndescription: Local ${role}\nmodels:\n  ${provider}: ${provider}/${id}:${effort}\n  linked-other: linked-other/work:${effort}\n---\nLocal role fixture.\n`);
     }
   }
-  async function flowFixture(label, names, { same = false, seed, tui = false, nativeTui = false, compaction, newSession, review = false } = {}) {
+  async function flowFixture(label, names, { same = false, seed, tui = false, nativeTui = false, compaction, newSession, review = false, planShortcut } = {}) {
     const dir = resolve(temp, label);
     mkdirSync(dir, { recursive: true });
     process.chdir(dir);
@@ -647,7 +649,7 @@ export default function (pi) {
     writeFileSync(resolve(temp, 'subagents.json'), JSON.stringify({ jev: { enabled: false }, widget: 'off', fleetView: false }));
     writeFileSync(resolve(temp, 'pi-plan-mode.json'), JSON.stringify({
       thinkingLevel: 'inherit', plansDirectory: resolve(dir, 'plans'), completionReview: review,
-      renderedPlans: false, jevToolSelection: false,
+      renderedPlans: false, jevToolSelection: false, ...(planShortcut ? { toggleShortcut: planShortcut } : {}),
     }));
     const test = { dir, names, same, notes: [], errors: [], dialogs: [], choices: [], requests: [], script: [], statuses: new Map(), generations: [] };
     const create = async ({ sessionManager, sessionStartEvent }) => {
@@ -779,6 +781,72 @@ export default function (pi) {
     catch (error) { failures.push(error); console.error(`FAIL actual Pi linked flow: ${label}: ${error.stack}`); }
     finally { authHook = undefined; }
   }
+
+  await scenario('TUI cycles share settlement; explicit commands and Linked role commits stay authoritative', async () => {
+    const test = await flowFixture('settings-cycle-settlement', orderings[3], { tui: true, planShortcut: 'alt+o' });
+    try {
+      await test.command(`/flow linked ${provider}`);
+      const current = test.current();
+      const entries = () => current.sessionManager.getBranch();
+      const anchors = () => entries().filter(entry => entry.type === 'custom' && entry.customType === 'settings:cycle');
+      const cycle = channel => {
+        const request = { userInitiated: true };
+        test.record.pi.events.emit(channel, request);
+        assert.ok(request.result instanceof Promise, 'cycle result is attached synchronously, not merely scheduled');
+        return request.result;
+      };
+      const effective = structuredClone(test.flow());
+      const records = structuredClone(customRecords(current));
+      const modelsBefore = test.record.models.length;
+      const workflowsBefore = test.record.workflows.length;
+      const transitionsBefore = visibleTransitions(current).length;
+      const first = cycle('workflow-mode:cycle');
+      const second = cycle('workflow-mode:cycle');
+      const approvals = cycle('permission-mode:cycle');
+      assert.deepEqual(test.flow(), effective, 'flow queries continue reporting committed Work, not pending Plan');
+      assert.equal(current.model.id, 'work', 'preview does not activate a Linked planner');
+      assert.deepEqual(customRecords(current), records, 'preview does not persist ordinary workflow/inline/flow state');
+      assert.equal(test.record.models.length, modelsBefore);
+      assert.equal(test.record.workflows.length, workflowsBefore);
+      assert.equal(anchors().length, 1, 'mixed owner previews share one UI-only anchor');
+      assert.match(test.statuses.get('permission-mode'), /auto/u, 'pending relaxed approvals are not already protection');
+      assert.deepEqual(await deadline(Promise.all([first, second, approvals]), 'shared cycle settlement'), [true, true, true]);
+      assert.equal(test.flow().workflow, 'plan');
+      assert.equal(current.model.id, 'plan');
+      assert.equal(test.record.models.length, modelsBefore + 1, 'one final Linked role activation');
+      assert.equal(test.record.workflows.length, workflowsBefore + 1, 'one final workflow publication');
+      assert.equal(visibleTransitions(current).length, transitionsBefore, 'journal replaces legacy cycle transition markers');
+      assert.match(test.statuses.get('permission-mode'), /yolo/u);
+
+      await test.command('/mode work');
+      assert.equal(test.flow().workflow, 'work', 'explicit /mode remains immediate');
+      await test.command('/approvals auto');
+      assert.match(test.statuses.get('permission-mode'), /auto/u, 'explicit approvals remain immediate');
+      const shortcuts = current.extensionRunner.getShortcuts(keybindings.getResolvedBindings());
+      assert.ok(shortcuts.has('alt+o'), 'configured Plan key is registered');
+      const anchorsBeforeForward = anchors().length;
+      const forwarded = shortcuts.get('alt+o').handler(current.extensionRunner.createContext());
+      assert.equal(test.flow().workflow, 'work', 'forwarded Plan shortcut only previews');
+      await deadline(forwarded, 'forwarded Plan settlement');
+      assert.equal(test.flow().workflow, 'chat', 'forwarded Plan callback awaits the real final settlement');
+      assert.equal(anchors().length, anchorsBeforeForward + 1, 'forwarded Plan key adds no separate timer or anchor');
+      await test.command('/mode work');
+      const noOp = structuredClone({ records: customRecords(current), flow: test.flow(),
+        models: test.record.models, workflows: test.record.workflows });
+      const roundTrip = [cycle('workflow-mode:cycle'), cycle('workflow-mode:cycle'), cycle('workflow-mode:cycle')];
+      assert.deepEqual(await deadline(Promise.all(roundTrip), 'round-trip cycle'), [true, true, true]);
+      assert.deepEqual({ records: customRecords(current), flow: test.flow(), models: test.record.models,
+        workflows: test.record.workflows }, noOp, 'round trip invokes no model setter, workflow event or ordinary persistence');
+      assert.equal(entries().filter(entry => entry.customType === 'settings:cycle-state').at(-1).data.phase, 'unchanged');
+
+      // An entered failing Linked role setter must not allow a later permission relaxation.
+      authHook = async () => { throw new Error('Local final role activation refused'); };
+      const failed = [cycle('workflow-mode:cycle'), cycle('workflow-mode:cycle'), cycle('permission-mode:cycle')];
+      assert.deepEqual(await deadline(Promise.all(failed), 'failed role cycle'), [false, false, false]);
+      assert.match(test.statuses.get('permission-mode'), /auto/u, 'failed role activation never relaxes approvals');
+      assert.deepEqual(test.errors, []);
+    } finally { authHook = undefined; await test.dispose(); }
+  });
 
   for (const names of orderings) for (const same of [false, true]) {
     const label = `${names.join('+')}-${same ? 'same-model' : 'distinct-worker'}`;

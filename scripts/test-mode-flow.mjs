@@ -225,9 +225,11 @@ export default function (pi) {
         assert.equal(workflow(), mode, `${label}: workflow status`);
         const visible = transitions();
         const changed = checkedMode !== undefined && checkedMode !== mode && !restoring;
+        // RPC cycles remain immediate and retain their normal transition feedback;
+        // the coalesced TUI journal is covered by test-footer-controls instead.
         const path = changed ? [checkedMode, ...intermediate, mode] : [];
         assert.equal(visible.length, checkedTransitions + Math.max(0, path.length - 1),
-          `${label}: exactly one visible marker per live transition, none for startup, no-op, approvals or restore`);
+          `${label}: one marker per live RPC transition, none for startup, no-op, approvals or restore`);
         for (let i = 1; i < path.length; i++) {
           const marker = visible[checkedTransitions + i - 1];
           assert.equal(marker.display, true, 'workflow transitions are visible independently of agent reminders');
@@ -288,7 +290,7 @@ export default function (pi) {
       api.events.emit('permission-mode:set', { mode: 'auto' });
       check('work', 'auto'); // No-op setters must not create transcript markers.
       if (hasGate) {
-        api.events.emit('permission-mode:cycle', {});
+        await emitWorkflow(api, 'permission-mode:cycle', {});
         check('work');
         await emitWorkflow(api, 'workflow-mode:cycle', {});
         check('chat');
@@ -350,9 +352,9 @@ export default function (pi) {
         if (hasGate) {
           assert.deepEqual(workflowEvents.at(-1)?.cycle, ['work', 'chat', 'plan']);
           const before = manager.getBranch().length;
-          api.events.emit('permission-mode:cycle', {});
+          await emitWorkflow(api, 'permission-mode:cycle', {});
           check('plan', 'auto');
-          api.events.emit('permission-mode:cycle', {});
+          await emitWorkflow(api, 'permission-mode:cycle', {});
           check('plan');
           assert.equal(manager.getBranch().slice(before).some(entry => entry.customType === 'plan-mode:inline'), false, 'approval changes do not exit or reenter plan');
         }
@@ -424,9 +426,9 @@ export default function (pi) {
           await emitWorkflow(api, 'workflow-mode:set', { mode: 'work' });
           check('exec');
           assert(notifications.some(message => message.includes('/plan-exec stop')));
-          api.events.emit('permission-mode:cycle', {});
+          await emitWorkflow(api, 'permission-mode:cycle', {});
           check('exec', 'auto');
-          api.events.emit('permission-mode:cycle', {});
+          await emitWorkflow(api, 'permission-mode:cycle', {});
         }
         await session.prompt('/plan');
         check('exec');

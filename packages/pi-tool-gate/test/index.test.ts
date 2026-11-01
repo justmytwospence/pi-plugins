@@ -6,7 +6,8 @@ import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import { AgentSession } from "@earendil-works/pi-coding-agent";
 import { downloadsOf } from "../src/downloads.ts";
 import toolGate, { blockedBy, CLASSIFIER_UNAVAILABLE, DECLINED, DECLINED_WITH_MESSAGE, DECLINED_WITH_MESSAGE_END, DEFAULT_CONFIG, judgeStateOf, scriptOfCall } from "../src/index.ts";
-import { APPROVAL_ENTRY, WORKFLOW_ENTRY, WORKFLOW_SET, PLAN_PROVIDER } from "../src/modes.ts";
+import { APPROVAL_ENTRY, WORKFLOW_ENTRY, WORKFLOW_SET, WORKFLOW_CYCLE, MODE_CYCLE, MODE_CHANGED, MODE_SET, PLAN_PROVIDER } from "../src/modes.ts";
+import { settingsCycles } from "../src/settings-cycle.ts";
 import { FLOW_ENTRY, queryFlow, requestExecution, requestWorkflow, type FlowState } from "../src/flow-contract.ts";
 import { queryFooterActions } from "../src/footer-actions.ts";
 import * as modelGuard from "../src/model-guard.ts";
@@ -22,6 +23,7 @@ beforeEach(() => {
   vi.stubEnv("PI_CODING_AGENT_DIR", path.join(configDir, "pi"));
 });
 afterEach(() => {
+  vi.useRealTimers();
   vi.unstubAllEnvs();
   rmSync(configDir, { recursive: true, force: true });
 });
@@ -50,12 +52,14 @@ function setup(answers: any, ctxOverrides: Record<string, unknown> = {}) {
   mkdirSync(cwd, { recursive: true });
   const h = harness({ nonGitCwd: cwd });
   toolGate(h.pi);
+  // Coordinator discovery occurs during registration, before any tested interaction.
+  h.events.length = 0;
   const branch: any[] = [userEntry("Fix the failing test"), assistantEntry("I'll rerun the tests.")];
   const jev = fakeJev((questions) => (questions.workaround ? workaround : answers));
   const ctx = h.ctx({
     cwd,
     modelRegistry: jev.registry,
-    sessionManager: { getBranch: () => branch },
+    sessionManager: { getBranch: () => branch, getSessionId: () => "session-1", getLeafId: () => null },
     ...ctxOverrides,
   });
   return { h, jev, ctx, branch };
@@ -261,6 +265,150 @@ describe("System 1 selection", () => {
     expect(ctx.ui.notes.at(-1).message).toContain(backend === "jev" ? "System 1: jev (typesafe/jev-latest)"
       : backend === "openai-decisions" ? "System 1: openai-decisions (system1-openai/gpt-6-luna)" : "System 1: unavailable");
     expect(jev.calls).toHaveLength(0);
+  });
+});
+
+describe("settings cycle safety", () => {
+  const cycle = (s: ReturnType<typeof setup>, key: "workflow" | "approval") => {
+    const request: { result?: Promise<boolean> } = {};
+    s.h.pi.events.emit(key === "workflow" ? WORKFLOW_CYCLE : MODE_CYCLE, request);
+    expect(request.result).toBeInstanceOf(Promise);
+    return request.result!;
+  };
+
+  test.each(["workflow", "approval"] as const)("%s preview preserves a finishing classifier until the 400ms commit", async key => {
+    vi.useFakeTimers();
+    const s = setup(safe);
+    await s.h.emit("session_start", {}, s.ctx);
+    const entered = deferred<void>();
+    const result = deferred<any>();
+    (s.jev.registry as any).classify = async () => { entered.resolve(); return result.promise; };
+    const pending = s.h.emit("tool_call", call("bash", { command: "npm test" }), s.ctx);
+    await entered.promise;
+    const settled = cycle(s, key);
+    expect(settingsCycles(s.h.pi).snapshot()?.phase).toBe("pending");
+    await vi.advanceTimersByTimeAsync(399);
+    expect(s.h.entries.filter(e => e.customType === WORKFLOW_ENTRY || e.customType === APPROVAL_ENTRY)).toHaveLength(0);
+    result.resolve({ model: "jev-latest", stopReason: "stop", answers: safe, usage: usage(300) });
+    expect(await pending).toBeUndefined();
+    await vi.advanceTimersByTimeAsync(1);
+    expect(await settled).toBe(true);
+    expect(s.h.entries.filter(e => e.customType === (key === "workflow" ? WORKFLOW_ENTRY : APPROVAL_ENTRY))).toHaveLength(1);
+  });
+
+  test.each(["workflow", "approval"] as const)("%s preview preserves a user approval that finishes before commit", async key => {
+    vi.useFakeTimers();
+    const s = setup(safe);
+    await s.h.emit("session_start", {}, s.ctx);
+    await s.h.commands.get("approvals").handler("manual", s.ctx);
+    const entered = deferred<void>();
+    const result = deferred<string>();
+    s.ctx.ui.select = async () => { entered.resolve(); return result.promise; };
+    const pending = s.h.emit("tool_call", call("bash", { command: "npm test" }), s.ctx);
+    await entered.promise;
+    const settled = cycle(s, key);
+    await vi.advanceTimersByTimeAsync(399);
+    result.resolve("Allow once");
+    expect(await pending).toBeUndefined();
+    expect(settingsCycles(s.h.pi).snapshot()?.phase).toBe("pending");
+    await vi.advanceTimersByTimeAsync(1);
+    expect(await settled).toBe(true);
+  });
+
+  test.each(["workflow", "approval"] as const)("%s final commit rejects an older classifier result", async key => {
+    vi.useFakeTimers();
+    const s = setup(safe);
+    await s.h.emit("session_start", {}, s.ctx);
+    const entered = deferred<void>();
+    const result = deferred<any>();
+    (s.jev.registry as any).classify = async () => { entered.resolve(); return result.promise; };
+    const pending = s.h.emit("tool_call", call("bash", { command: "npm test" }), s.ctx);
+    await entered.promise;
+    const settled = cycle(s, key);
+    await vi.advanceTimersByTimeAsync(400);
+    expect(await settled).toBe(true);
+    result.resolve({ model: "jev-latest", stopReason: "stop", answers: safe, usage: usage(300) });
+    expect(await pending).toMatchObject({ block: true, reason: expect.stringMatching(/modes changed.*reevaluated/su) });
+    expect(s.h.entries.filter(e => e.customType === "tool-gate:decision")).toHaveLength(0);
+  });
+
+  test.each(["workflow", "approval"] as const)("%s final commit rejects an older user approval and cannot save its rule", async key => {
+    vi.useFakeTimers();
+    const s = setup(safe);
+    await s.h.emit("session_start", {}, s.ctx);
+    await s.h.commands.get("approvals").handler("manual", s.ctx);
+    const entered = deferred<void>();
+    const result = deferred<string>();
+    s.ctx.ui.select = async () => { entered.resolve(); return result.promise; };
+    const pending = s.h.emit("tool_call", call("bash", { command: "npm test" }), s.ctx);
+    await entered.promise;
+    const settled = cycle(s, key);
+    await vi.advanceTimersByTimeAsync(399);
+    expect(settingsCycles(s.h.pi).snapshot()?.phase).toBe("pending");
+    await vi.advanceTimersByTimeAsync(1);
+    expect(await settled).toBe(true);
+    result.resolve("Allow rule for this session");
+    expect(await pending).toMatchObject({ block: true, reason: expect.stringMatching(/modes changed.*reevaluated/su) });
+    await s.h.commands.get("mode").handler("work", s.ctx);
+    await s.h.commands.get("approvals").handler("manual", s.ctx);
+    const select = vi.fn(async () => "Block");
+    s.ctx.ui.select = select;
+    expect(await s.h.emit("tool_call", call("bash", { command: "npm test" }, "fresh"), s.ctx)).toMatchObject({ block: true });
+    expect(select).toHaveBeenCalledOnce();
+  });
+
+  test.each(["workflow setter", "approval setter", "exec"] as const)("%s cancels a pending cycle without replay", async transition => {
+    vi.useFakeTimers();
+    const s = setup(safe);
+    await s.h.emit("session_start", {}, s.ctx);
+    const settled = cycle(s, "workflow");
+    if (transition === "workflow setter") await s.h.commands.get("mode").handler("chat", s.ctx);
+    else if (transition === "approval setter") await s.h.commands.get("approvals").handler("yolo", s.ctx);
+    else s.h.pi.events.emit("workflow-mode:exec", { active: true, source: "transition" });
+    expect(await settled).toBe(false);
+    const entries = structuredClone(s.h.entries);
+    await vi.advanceTimersByTimeAsync(400);
+    expect(s.h.entries).toEqual(entries);
+    expect(settingsCycles(s.h.pi).snapshot()?.phase).toBe("cancelled");
+  });
+
+  test.each(["command", "event"] as const)("an explicit approval %s re-entering its cycle callback cancels the burst", async source => {
+    vi.useFakeTimers();
+    const s = setup(safe);
+    await s.h.emit("session_start", {}, s.ctx);
+    const settings = settingsCycles(s.h.pi);
+    const explicit = vi.fn();
+    s.h.pi.events.on(MODE_CHANGED, (event: { mode: string }) => {
+      if (event.mode !== "bypassPermissions") return;
+      expect(settings.isCommitting("approvals")).toBe(true);
+      explicit();
+      if (source === "command") void s.h.commands.get("approvals").handler("auto", s.ctx);
+      else s.h.pi.events.emit(MODE_SET, { mode: "auto" });
+    });
+    const settled = cycle(s, "approval");
+    await vi.advanceTimersByTimeAsync(400);
+    expect(await settled).toBe(false);
+    expect(explicit).toHaveBeenCalledOnce();
+    expect(settings.snapshot()).toMatchObject({ phase: "interrupted", reason: "Approvals selected explicitly." });
+    expect(s.ctx.ui.status.get("permission-mode")).toContain("auto");
+    expect(s.h.entries.filter(entry => entry.customType === APPROVAL_ENTRY).map(entry => entry.data)).toEqual([
+      { version: 1, mode: "bypassPermissions" }, { version: 1, mode: "auto" },
+    ]);
+    const entries = structuredClone(s.h.entries);
+    await vi.advanceTimersByTimeAsync(800);
+    expect(s.h.entries).toEqual(entries);
+  });
+
+  test("Exec refuses workflow cycling without scheduling a preview", async () => {
+    vi.useFakeTimers();
+    const s = setup(safe);
+    await s.h.emit("session_start", {}, s.ctx);
+    s.h.pi.events.emit("workflow-mode:exec", { active: true, source: "transition" });
+    expect(await cycle(s, "workflow")).toBe(false);
+    expect(settingsCycles(s.h.pi).snapshot()).toBeUndefined();
+    expect(s.ctx.ui.notes.at(-1)?.message).toContain("Exec");
+    await vi.advanceTimersByTimeAsync(400);
+    expect(s.h.entries.some(e => e.customType === "settings:cycle")).toBe(false);
   });
 });
 
@@ -617,6 +765,8 @@ describe("awaited Linked gate transitions", () => {
       const notes = [...s.ctx.ui.notes];
       const shutdown = s.h.emit("session_shutdown", {}, s.ctx);
       const completion = shutdown.then(settled);
+      // The harness awaits the coordinator's earlier shutdown hook before the gate hook.
+      await Promise.resolve();
       expect(queryFlow(s.h.pi.events)).toBeUndefined();
       expect(queryFooterActions(s.h.pi.events)).toEqual({});
       expect(lease.available).toBe(true);
@@ -652,6 +802,87 @@ describe("awaited Linked gate transitions", () => {
       await Promise.all([pending, queued]);
       await s.h.emit("session_shutdown", {}, s.ctx);
       guard.mockRestore();
+    }
+  });
+  test("Linked busy user cycles are refused before preview and revalidated at commit", async () => {
+    vi.useFakeTimers();
+    const s = await linkedStart();
+    s.ctx.isIdle = () => false;
+    const refused: { userInitiated: boolean; result?: Promise<boolean> } = { userInitiated: true };
+    s.h.pi.events.emit(WORKFLOW_CYCLE, refused);
+    expect(await refused.result).toBe(false);
+    expect(settingsCycles(s.h.pi).snapshot()).toBeUndefined();
+    expect(s.ctx.ui.notes.at(-1)?.message).toMatch(/Wait for the current turn/u);
+    s.ctx.isIdle = () => true;
+    const pending: { userInitiated: boolean; result?: Promise<boolean> } = { userInitiated: true };
+    s.h.pi.events.emit(WORKFLOW_CYCLE, pending);
+    await vi.advanceTimersByTimeAsync(399);
+    expect(queryFlow(s.h.pi.events)?.workflow).toBe("work");
+    s.ctx.isIdle = () => false;
+    await vi.advanceTimersByTimeAsync(1);
+    expect(await pending.result).toBe(false);
+    expect(queryFlow(s.h.pi.events)?.workflow).toBe("work");
+    expect(settingsCycles(s.h.pi).snapshot()?.phase).toBe("failed");
+    await s.h.emit("session_shutdown", {}, s.ctx);
+  });
+  test.each(["command", "flow request", "workflow event"] as const)("an explicit same-original-workflow %s cancels an activating mixed burst", async source => {
+    vi.useFakeTimers();
+    const s = await linkedStart();
+    const settings = settingsCycles(s.h.pi);
+    const entered = deferred<void>();
+    const release = deferred<void>();
+    try {
+      await s.h.commands.get("mode").handler("chat", s.ctx);
+      s.setModel.mockClear();
+      const native = s.setModel.getMockImplementation()!;
+      s.setModel.mockImplementationOnce(async model => { entered.resolve(); await release.promise; return native(model); });
+      const workflow: { result?: Promise<boolean> } = {};
+      const approvals: { result?: Promise<boolean> } = {};
+      s.h.pi.events.emit(WORKFLOW_CYCLE, workflow);
+      s.h.pi.events.emit(MODE_CYCLE, approvals);
+      await vi.advanceTimersByTimeAsync(400);
+      await entered.promise;
+      expect(settings.snapshot()).toMatchObject({ phase: "applying", settings: [
+        { key: "workflow", baseline: "chat", target: "plan" },
+        { key: "approvals", baseline: "auto", target: "bypassPermissions" },
+      ] });
+      expect(queryFlow(s.h.pi.events)).toMatchObject({ workflow: "chat", transitioning: true });
+      if (source === "command") await s.h.commands.get("mode").handler("chat", s.ctx);
+      else if (source === "flow request") expect(await requestWorkflow(s.h.pi.events, "chat")).toMatchObject({ ok: false, error: FLOW_TRANSITION });
+      else {
+        const request: { mode: string; result?: Promise<boolean> } = { mode: "chat" };
+        s.h.pi.events.emit(WORKFLOW_SET, request);
+        expect(await request.result).toBe(false);
+      }
+      expect(s.ctx.ui.notes.at(-1)).toEqual({ message: FLOW_TRANSITION, type: "warning" });
+      expect(await workflow.result).toBe(false);
+      expect(await approvals.result).toBe(false);
+      expect(settings.snapshot()).toMatchObject({ phase: "interrupted", reason: "Workflow selected explicitly." });
+      expect(s.ctx.ui.status.get("permission-mode")).toContain("auto");
+      const journal = settings.snapshot();
+      const workflows = s.h.entries.filter(entry => entry.customType === WORKFLOW_ENTRY);
+      // Cancellation fences later settings, not a native model setter already entered.
+      const drained = settings.flush();
+      release.resolve();
+      expect(await drained).toBe(false);
+      expect(queryFlow(s.h.pi.events)).toMatchObject({ workflow: "plan", transitioning: false });
+      expect(s.ctx.model.id).toBe("planner");
+      expect(s.setModel).toHaveBeenCalledOnce();
+      expect(s.h.entries.filter(entry => entry.customType === WORKFLOW_ENTRY)).toEqual([
+        ...workflows, { customType: WORKFLOW_ENTRY, data: { version: 1, mode: "plan" } },
+      ]);
+      expect(s.h.entries.filter(entry => entry.customType === APPROVAL_ENTRY)).toEqual([]);
+      expect(s.ctx.ui.status.get("permission-mode")).toContain("auto");
+      expect(settings.snapshot()).toEqual(journal);
+      const entries = structuredClone(s.h.entries);
+      await vi.advanceTimersByTimeAsync(800);
+      expect(s.h.entries).toEqual(entries);
+      expect(s.setModel).toHaveBeenCalledOnce();
+      expect(s.jev.calls).toEqual([]);
+    } finally {
+      release.resolve();
+      await settings.flush();
+      await s.h.emit("session_shutdown", {}, s.ctx);
     }
   });
   test("tool-owned Plan entry is awaited mid-run, preserving approvals and effort; user controls require idle", async () => {

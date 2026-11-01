@@ -101,6 +101,8 @@ export interface FooterActionControllerOptions {
   getPromptDepth(): number;
   isIdle(): boolean;
   isLinked(): boolean;
+  cycleReasoning(): void;
+  cancelSettings(reason: string): void;
   /** Read an already-discovered snapshot. Never emit a capability query from render. */
   getActions(): FooterActionsRequest["actions"];
   notify(message: string, type: "warning" | "error"): void;
@@ -146,7 +148,8 @@ export function createFooterActionController(options: FooterActionControllerOpti
       if (typeof native !== "function") return undefined;
       // The model click and its native key hint must share the same usable entry,
       // including in Linked; a provider alone cannot supply native keyboard routing.
-      return action === "model.open" && options.isLinked() ? provider("flow.open") : native;
+      if (action === "reasoning.cycle") return options.cycleReasoning;
+      return options.isLinked() ? provider("flow.open") : native;
     }
     return provider(action);
   };
@@ -183,7 +186,9 @@ export function createFooterActionController(options: FooterActionControllerOpti
     const token = {};
     opening = token;
     try {
-      await run();
+      if (["model.open", "workflow.open", "flow.open", "approvals.open"].includes(action)) options.cancelSettings("opened settings picker");
+      const result = run();
+      if (result) await result;
     } catch (error) {
       if (current(owner)) options.notify(`Footer action failed: ${error instanceof Error ? error.message : String(error)}`, "error");
     } finally {
@@ -204,19 +209,28 @@ export function createFooterActionController(options: FooterActionControllerOpti
       // Do not interpret keys here. Vim, explicit history, shortcuts and autocomplete keep
       // their original precedence, including nested redispatch by modal editors.
       const handlers = editor.actionHandlers;
-      const native = typeof handlers?.get === "function" ? handlers.get("app.model.select") : undefined;
-      if (routing || !current(owner) || !options.isLinked() || typeof handlers?.set !== "function" || typeof native !== "function") {
+      if (routing || !current(owner) || typeof handlers?.get !== "function" || typeof handlers?.set !== "function") {
         original.call(this, data);
         return;
       }
-      const linked = () => { void activate("model.open"); };
+      const model = handlers.get("app.model.select");
+      const thinking = handlers.get("app.thinking.cycle");
+      const select = () => {
+        if (!ready(owner)) return;
+        options.cancelSettings("opened settings picker");
+        if (options.isLinked()) void activate("model.open");
+        else model?.();
+      };
+      const cycle = () => { void activate("reasoning.cycle"); };
       routing = true;
-      handlers.set("app.model.select", linked);
+      if (model) handlers.set("app.model.select", select);
+      if (thinking) handlers.set("app.thinking.cycle", cycle);
       try {
         original.call(this, data);
       } finally {
-        // A native callback or another wrapper may have replaced this entry while handling input.
-        if (handlers.get("app.model.select") === linked) handlers.set("app.model.select", native);
+        // Another owner may have replaced an entry while handling input.
+        if (model && handlers.get("app.model.select") === select) handlers.set("app.model.select", model);
+        if (thinking && handlers.get("app.thinking.cycle") === cycle) handlers.set("app.thinking.cycle", thinking);
         routing = false;
       }
     }

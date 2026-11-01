@@ -15,13 +15,25 @@ const originalEnv = Object.fromEntries(['HOME', 'PI_CODING_AGENT_DIR', 'XDG_CONF
 process.env.HOME = temp;
 process.env.PI_CODING_AGENT_DIR = temp;
 process.env.XDG_CONFIG_HOME = resolve(temp, 'xdg');
+// The first participating extension owns one runtime-shared coordinator. Normalize
+// only those known hooks, and assert its ownership separately rather than weakening
+// per-component registration parity for ordinary handlers.
+const cycleParticipants = new Set(['pi-plan-mode', 'pi-tool-gate', 'pi-auto-effort', 'pi-status-footer']);
+const cycleEvents = new Set(['session_start', 'session_tree', 'session_before_switch', 'session_before_fork',
+  'session_before_tree', 'session_before_compact', 'ui_prompt_start', 'session_shutdown', 'before_agent_start',
+  'model_select', 'thinking_level_select', 'input']);
+const ownsCycles = extension => extension.entryRenderers?.has('settings:cycle') === true;
 function signature(extension) {
+  const shared = ownsCycles(extension);
+  if (shared) for (const event of cycleEvents) assert.ok(extension.handlers.get(event)?.length, `cycle owner registers ${event}`);
   return {
     tools: [...extension.tools.keys()].sort(),
     commands: [...extension.commands.keys()].sort(),
     flags: [...extension.flags.keys()].sort(),
     shortcuts: [...extension.shortcuts.keys()].sort(),
-    handlers: [...extension.handlers].map(([event, handlers]) => [event, handlers.length]).sort(),
+    entryRenderers: [...(extension.entryRenderers?.keys() ?? [])].filter(type => type !== 'settings:cycle').sort(),
+    handlers: [...extension.handlers].map(([event, handlers]) => [event, handlers.length - Number(shared && cycleEvents.has(event))])
+      .filter(([, count]) => count > 0).sort(),
   };
 }
 async function load(packages, noSkills = true) {
@@ -38,6 +50,8 @@ try {
   const all = await load([root]);
   assert.equal(all.length, plugins.length);
   assert.deepEqual(all.map(e => e.path), manifest.pi.extensions.map(p => resolve(root, p)));
+  assert.equal(all.filter(ownsCycles).length, 1, 'suite registers exactly one shared settings coordinator');
+  assert.ok(cycleParticipants.has(plugins[all.findIndex(ownsCycles)].name), 'a participating plugin owns it');
   const seen = { tools: new Set(), commands: new Set(), flags: new Set(), shortcuts: new Set() };
   for (const extension of all) {
     for (const kind of Object.keys(seen)) for (const key of extension[kind].keys()) {
@@ -50,6 +64,8 @@ try {
     const selected = await load([{ source: root, extensions: manifest.pi.extensions.slice(i, i + 1).map(p => p.replace(/^\.\//, '')), skills: [], prompts: [], themes: [] }]);
     assert.equal(standalone.length, 1);
     assert.equal(selected.length, 1);
+    assert.equal(ownsCycles(standalone[0]), cycleParticipants.has(plugin.name), `${plugin.name} standalone coordinator ownership`);
+    assert.equal(ownsCycles(selected[0]), cycleParticipants.has(plugin.name), `${plugin.name} filtered coordinator ownership`);
     assert.deepEqual(signature(selected[0]), signature(standalone[0]));
     assert.deepEqual(signature(selected[0]), signature(all[i]));
     const isolated = resolve(temp, `isolated-${plugin.name}`, plugin.name);
@@ -61,6 +77,7 @@ try {
     if (existsSync(dependencies)) symlinkSync(dependencies, resolve(isolated, 'node_modules'), 'dir');
     const isolatedExtensions = await load([isolated]);
     assert.equal(isolatedExtensions.length, 1);
+    assert.equal(ownsCycles(isolatedExtensions[0]), cycleParticipants.has(plugin.name), `${plugin.name} isolated coordinator ownership`);
     assert.deepEqual(signature(isolatedExtensions[0]), signature(all[i]));
     console.log(`PASS ${plugin.name}: isolated, standalone, filtered, suite registrations match`);
   }

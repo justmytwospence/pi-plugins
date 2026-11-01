@@ -8,6 +8,12 @@ pi-cc-render's estimated-context strip sits above the chat. It is display-only, 
 
 Regression fixtures for the actual splash + editor/footer should render at 46, 120 and 180 columns, with Sidebar absent/open and the native MCP manager open/closed. Feed each frame to **both** client parsers: each must identify only the real editor, preserve normal idle composition, and expose no false input/send target in the map. Check draft/focus restoration on manager close. Do not add remote-client exceptions for the chart or report client validation until these fixtures and `npm run check:clients` pass.
 
+## Settings-cycle history
+
+Rapid workflow/standalone Plan, reasoning, auto-effort and approval cycles share a 400 ms trailing preview. The main transcript has one combined, UI-only settings anchor backed by hidden append-only snapshots; neither it nor pending/applying footer values are an editor, phone composer or send target. Previews are not effective settings or protection. The existing footer rows and 13-status-row budget do not grow; blocked and other-session read-only views must not advertise draft controls.
+
+Exercise pending, applying and restored history with both client parsers at 46, 120 and 180 columns, including blocked and read-only views. Interrupted previews restore as cancelled or interrupted, never replay; compaction need not retain old history lines. Do not add client allowances.
+
 ## Footer controls and provider flows
 
 Independent remains the default and keeps model/reasoning and workflow on two rows. Linked combines workflow, provider, physical model and reasoning into one row. Approvals stays on its own row in either mode, including Exec. Reasoning and auto effort remain independently adjustable. Context owns usage, cache state/timer, MCP and skills; cold and unknown cache states must stay explicit.

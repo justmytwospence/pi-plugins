@@ -18,7 +18,7 @@ import { existsSync, mkdtempSync, readdirSync, writeFileSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import path from 'node:path';
 import { createJiti } from 'jiti';
-import { initTheme } from '@earendil-works/pi-coding-agent';
+import { createEventBus, initTheme } from '@earendil-works/pi-coding-agent';
 import { stripVTControlCharacters } from 'node:util';
 import { Container, Spacer, setKeybindings, visibleWidth } from '@earendil-works/pi-tui';
 const { TuiBase } = await import(new URL('./tui.js', import.meta.resolve('@earendil-works/pi-tui')));
@@ -50,6 +50,7 @@ const { PlanNameInput } = await jiti.import('../packages/pi-plan-mode/src/plan-n
 const { registerExec, FINISH_MESSAGE_TYPE } = await jiti.import('../packages/pi-plan-mode/src/exec.ts');
 const { createNegotiation } = await jiti.import('../packages/pi-plan-mode/src/negotiation.ts');
 const { renderFooter, layoutFooter, absorbStatuses } = await jiti.import('../packages/pi-status-footer/src/index.ts');
+const { settingsCycles } = await jiti.import('../packages/pi-status-footer/src/settings-cycle.ts');
 const { renderPill } = await jiti.import('../packages/pi-bg/src/pill.ts');
 const { WORKFLOW_EXPLANATIONS } = await jiti.import('../packages/pi-status-footer/src/workflow-ui.ts');
 const { choiceMenu, coldTitle } = await jiti.import('../packages/pi-cache-guard/src/index.ts');
@@ -97,7 +98,7 @@ const flowSnapshot = (workflow, blocked) => ({
   ...(blocked ? { blocked } : {}),
 });
 const activity = width => [...renderPill({ label: '1 task' }, false, width, theme), ''];
-function statusFooter(width, statuses, { compact = false, phase = 'idle', flow, autoEffort, providerUsage, providerUsageMore } = {}) {
+function statusFooter(width, statuses, { compact = false, phase = 'idle', flow, autoEffort, providerUsage, providerUsageMore, settingsCycle, readOnly = false } = {}) {
   const absorbed = absorbStatuses(statuses, { claudeRow: false });
   const actions = {
     'model.open': {}, 'reasoning.cycle': {},
@@ -112,16 +113,20 @@ function statusFooter(width, statuses, { compact = false, phase = 'idle', flow, 
     git: { project: 'pi-plugins', branch: 'main' },
     totals: { input: 23000, output: 1500, cacheRead: 90000, cacheWrite: 400, cost: 1.24, compactions: 1, started: NOW - 60000 },
     quotas: [], now: NOW, queued: false, borderGauge: true, phase,
-    ...absorbed, statuses: absorbed.rest, compact, flow, actions, providerUsage, providerUsageMore,
+    ...absorbed, statuses: absorbed.rest, compact, flow, actions, providerUsage, providerUsageMore, settingsCycle, readOnly,
     primaryKeys: { model: kb.getKeys('app.model.select')[0], workflow: absorbed.workflow?.key, approvals: absorbed.mode?.key },
   };
   const layout = layoutFooter(snapshot, width, theme);
   const lines = renderFooter(snapshot, width, theme);
   assert.deepEqual(lines, layout.lines, 'client frames must use the actual footer layout');
   assert.ok(lines.every(line => visibleWidth(line) <= width), `footer rows fit ${width} columns`);
+  if (readOnly) assert.deepEqual(layout.hits, [], 'other-session chrome must remain read-only despite a main preview');
   const plain = lines.map(stripVTControlCharacters);
-  const linked = flow?.operatingMode === 'linked';
-  const kind = absorbed.exec !== undefined ? 'exec' : absorbed.workflow?.kind;
+  const linked = !readOnly && flow?.operatingMode === 'linked';
+  const effectiveKind = absorbed.exec !== undefined ? 'exec' : absorbed.workflow?.kind;
+  const preview = !compact && !readOnly && ['pending', 'applying'].includes(settingsCycle?.phase) ? settingsCycle : undefined;
+  const kind = effectiveKind && effectiveKind !== 'exec'
+    ? preview?.settings.find(item => item.key === 'workflow')?.target ?? effectiveKind : effectiveKind;
   const badge = kind?.toUpperCase();
   assert.doesNotMatch(plain.join('\n'), /workflow: (work|chat|plan|exec)/iu, 'raw provider status must not leak into the footer');
   if (compact) {
@@ -137,7 +142,8 @@ function statusFooter(width, statuses, { compact = false, phase = 'idle', flow, 
       assert.ok(workflow[0].includes(badge), 'workflow row uses the uppercase mode badge');
       assert.ok(!workflow[0].includes('Approvals'), 'approvals stay separate from workflow');
       // Hints yield before critical state at narrow widths; Sidebar also probes smaller widths.
-      if (!linked && !absorbed.exec && width >= (kind === 'exec' ? 120 : 46)) assert.ok(workflow[0].includes(WORKFLOW_EXPLANATIONS[kind]), `workflow row explains ${kind} when space permits: ${workflow[0]}`);
+      if (!preview && !linked && !absorbed.exec && width >= (kind === 'exec' ? 120 : 46)) assert.ok(workflow[0].includes(WORKFLOW_EXPLANATIONS[kind]), `workflow row explains ${kind} when space permits: ${workflow[0]}`);
+      if (preview && width >= 46) assert.ok(workflow[0].includes(preview.phase), 'draft workflow must explicitly say pending/applying, not look effective');
       if (!linked && kind === 'exec' && width >= 46) assert.match(workflow[0], /\/plan-exec\s*$/u, 'Independent Exec offers status, never a workflow cycle');
       if (linked && !absorbed.exec && !flow.blocked && width >= 120) assert.match(workflow[0], /anthropic/u, 'Linked combines provider and workflow on one row');
     }
@@ -147,7 +153,7 @@ function statusFooter(width, statuses, { compact = false, phase = 'idle', flow, 
       if (flow.blocked && width >= 46) assert.match(plain.join('\n'), /blocked/iu, 'an unavailable Linked flow must not look healthy');
     }
     // At full width each effective key follows its content directly, not a padded rail.
-    if (width >= 120) {
+    if (width >= 120 && !readOnly) {
       const controls = [[linked ? workflow[0] : plain.find(line => line.includes('reasoning')), snapshot.primaryKeys.model]];
       if (!linked && workflow.length) controls.push([workflow[0], kind === 'exec' ? '/plan-exec' : snapshot.primaryKeys.workflow]);
       if (approvals.length) controls.push([approvals[0], snapshot.primaryKeys.approvals]);
@@ -503,7 +509,11 @@ const DIALOGS = [
     herdr: { options: spec.labels.length, multi: false, labels: spec.labels },
     collie: { kind: 'prompt-select', options: spec.labels.length + 1, labels: spec.labels, wraps: spec.labels },
   })),
-  ...await gatePickerDialogs({ toolGate, ExtensionSelectorComponent }),
+  ...await gatePickerDialogs({
+    // Read-only picker capture does not display history, but its extension API
+    // still supports registration of the shared public custom-entry renderer.
+    toolGate: pi => toolGate({ ...pi, registerEntryRenderer() {} }), ExtensionSelectorComponent,
+  }),
   ...await system1Dialogs({ ExtensionSelectorComponent }),
   ...['tree-fork', 'fork-here'].map(command => ({
     name: `/${command} destination`, lines: w => treeForkLines(w, 'destination', 'default', command), question: FORK_TITLE,
@@ -612,6 +622,38 @@ for (const width of [46, 120, 180]) {
   assert.equal(blocked.length, 1);
   assert.doesNotMatch(stripVTControlCharacters(blocked[0]), /Google|OpenAI|\+3 more/u);
 }
+// Match the real helper's JSON-only snapshot contract. Rendering is delegated to its
+// registered public entry renderer, not a lookalike Text or a second settings formatter.
+const cycleSnapshot = phase => ({
+  id: 'remote-client-settings-burst', phase,
+  settings: [
+    { key: 'workflow', baseline: 'work', target: 'plan', actual: 'work', label: 'plan' },
+    { key: 'reasoning', baseline: 'high', target: 'medium', actual: 'high', label: 'medium' },
+    { key: 'auto-effort', baseline: false, target: true, actual: false, label: 'on' },
+    { key: 'approvals', baseline: 'auto', target: 'bypassPermissions', actual: 'auto', label: 'yolo' },
+  ],
+  ...(phase === 'cancelled' ? { reason: 'interrupted' } : phase === 'interrupted' ? { reason: 'check current settings' } : {}),
+});
+function cycleHistory(phase) {
+  const renderers = new Map();
+  settingsCycles({ events: createEventBus(), on() {},
+    registerEntryRenderer: (type, renderer) => renderers.set(type, renderer),
+  });
+  assert.equal(renderers.has('settings:cycle-state'), false, 'state snapshots never render independent history rows');
+  const renderer = renderers.get('settings:cycle');
+  assert.ok(renderer, 'use the actual helper entry renderer');
+  return renderer({ type: 'custom', customType: 'settings:cycle', data: { version: 1, ...cycleSnapshot(phase) } }, {}, theme);
+}
+for (const width of [46, 120, 180]) for (const phase of ['pending', 'applying']) {
+  for (const compact of [false, true]) {
+    const guarded = statusFooter(width, modeStatuses('work', 'auto'), {
+      ...(compact ? { compact: true, phase: 'waiting' } : { readOnly: true }),
+      flow: flowSnapshot('work'), settingsCycle: cycleSnapshot(phase),
+    });
+    assert.doesNotMatch(guarded.map(stripVTControlCharacters).join('\n'), /pending|applying/u,
+      'blocked and other-session chrome must not advertise main preview values');
+  }
+}
 const FOOTERS = [
   ...['work', 'chat', 'plan', 'exec'].flatMap(workflow => ['auto', 'yolo'].map(approval => ({
     name: `${workflow}/${approval}`, statuses: modeStatuses(workflow, approval, workflow === 'exec' ? 'implementing' : undefined),
@@ -640,6 +682,11 @@ const FOOTERS = [
   { name: 'Linked Exec paused', statuses: modeStatuses('exec', 'auto', 'waiting for answer'), flow: flowSnapshot('exec') },
   { name: 'Linked unavailable', statuses: modeStatuses('plan', 'auto'), flow: flowSnapshot('plan', 'Assigned model is unavailable. Use /flow independent.') },
   { name: 'Linked high status count', statuses: modeStatuses('plan', 'yolo'), flow: flowSnapshot('plan'), highStatus: true },
+  ...['pending', 'applying', 'cancelled', 'interrupted'].flatMap(phase => [false, true].map(linked => ({
+    name: `${linked ? 'Linked' : 'Independent'} settings ${phase}`,
+    statuses: modeStatuses('work', 'auto'), ...(linked ? { flow: flowSnapshot('work') } : {}),
+    autoEffort: false, settingsCycle: cycleSnapshot(phase), history: cycleHistory(phase), highStatus: true,
+  }))),
 ];
 function idleFooter(width, fixture, activityRows = 0) {
   if (!fixture.highStatus) return statusFooter(width, fixture.statuses, fixture);
@@ -679,7 +726,16 @@ for (const width of [46, 120, 180]) {
       const baseline = screens.length;
       for (const [under, options] of IDLE) {
         const rows = w => withActivity ? [...activity(w), ...idleFooter(w, fixture, 2)] : idleFooter(w, fixture);
-        const { lines: screen } = sidebarScreen({ width, height: HEIGHT, dock: (w) => editor.render(w), footer: rows, ...options });
+        const { lines: screen } = sidebarScreen({ width, height: HEIGHT,
+          ...(fixture.history ? { transcript: fixture.history } : {}),
+          dock: (w) => editor.render(w), footer: rows, ...options });
+        if (fixture.history) {
+          const history = fixture.history.render(width);
+          assert.equal(history.length, 1, 'settings history stays a single content row');
+          assert.ok(visibleWidth(history[0]) <= width, 'narrow settings history truncates without wrapping');
+          const visible = screen.map(stripVTControlCharacters).filter(line => line.includes(`Settings ${fixture.settingsCycle.phase}`));
+          assert.equal(visible.length, 1, 'real editor layout contains exactly one settings history anchor');
+        }
         screens.push({ name: `idle editor ${fixture.name}${withActivity ? ' + activity' : ''}`, width, under, idle: baseline, ansi: screen.join('\n') });
       }
     }

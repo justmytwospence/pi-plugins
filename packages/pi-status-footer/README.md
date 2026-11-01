@@ -231,6 +231,14 @@ labeled.
 
 Other providers get the common session rows, without invented quota information.
 
+## Settings-cycle preview
+
+Workflow (including standalone Plan), native reasoning, auto-effort and approval cycles share a trailing 400 ms pause. Repeated or mixed cycles update one combined, UI-only transcript line, backed by hidden append-only snapshots; preview text is not model context. For example: `Settings pending · Workflow plan · Effort high`. Pending and applying values reuse their existing footer rows, without increasing the row budget. They are not yet effective: a pending restrictive mode does not protect tools. Only final changed settings apply; a full round trip ends `Settings unchanged` without changing settings.
+
+With the custom footer active, the native reasoning key and footer click use the same staging in Independent and Linked; without it, native reasoning retains stock behavior. Native model cycling is unchanged. Explicit picker, command and tool choices remain immediate; plan and tool approvals still require confirmation.
+
+Submitting an ordinary prompt flushes the preview first. If application fails, the message is not sent; interactive text is recoverable from native prompt history, without replacing a newer editor draft. Focus changes, dialogs/selectors, external model or relevant setting changes, session/branch navigation, compaction and shutdown/reload cancel pending previews. Restored interrupted history never reapplies them; compaction is not guaranteed to retain old lines.
+
 ## Performance and lifecycle
 
 Rendering performs no filesystem, subprocess or network operations. Git is read

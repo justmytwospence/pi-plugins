@@ -1,4 +1,5 @@
-// Regression fixture for the real interactive footer input route. No agent turn is started.
+// Regression fixture for the real interactive footer input route and UI-only settings journal.
+// Only an explicitly scripted in-process stream may start a turn; no external inference is allowed.
 // Select another host with PI_TEST_SDK_ROOT=/absolute/path/to/pi-coding-agent.
 import assert from 'node:assert/strict';
 import childProcess from 'node:child_process';
@@ -85,6 +86,9 @@ function hostDependency(name) {
   return pathToFileURL(resolve(dirname(manifestPath), manifest.exports?.['.']?.import ?? manifest.main));
 }
 const tuiUrl = hostDependency('@earendil-works/pi-tui');
+const aiUrl = hostDependency('@earendil-works/pi-ai');
+const { createAssistantMessageEventStream } = await import(aiUrl.href);
+const { getSupportedThinkingLevels } = await import(new URL('./compat.js', aiUrl).href);
 const sdk = await import(sdkUrl.href);
 const tui = await import(tuiUrl.href);
 const { InteractiveMode } = await import(new URL('./modes/interactive/interactive-mode.js', sdkUrl));
@@ -94,6 +98,40 @@ const { KeybindingsManager } = await import(new URL('./core/keybindings.js', sdk
 const { createEventBus, createAgentSessionServices, createAgentSessionFromServices, AgentSessionRuntime,
   ModelRuntime, SessionManager, SettingsManager } = sdk;
 const { Container, TuiAltScreen, getKeybindings, setKeybindings } = tui;
+// Use the real package helper through the selected host's loader. Its snapshot schema
+// and discovery protocol must not be reimplemented by the fixture.
+const cycleFixture = join(temp, 'settings-cycle-fixture.ts');
+writeFileSync(cycleFixture, `
+import { settingsCycles } from ${JSON.stringify(resolve(root, 'packages/pi-status-footer/src/settings-cycle.ts'))};
+export default function (pi) {
+  const cycles = settingsCycles(pi);
+  const owner = {};
+  const values = { workflow: 'work', 'auto-effort': false, approvals: 'auto' };
+  const applied = [];
+  let ctx, shortcut;
+  pi.registerShortcut('alt+j', { description: 'Fixture approval cycle', handler(context) {
+    const request = { type: 'stage', key: 'approvals', context };
+    pi.events.emit('test:settings-cycle', request);
+    shortcut = { context, result: request.result };
+  } });
+  pi.on('session_start', (_event, context) => { ctx = context; });
+  pi.events.on('test:settings-cycle', request => {
+    if (request.type === 'query') Object.assign(request, { cycles, applied, values, pi, shortcut });
+    if (request.type === 'stage') {
+      const key = request.key;
+      request.result = cycles.stage(request.context ?? ctx, {
+        key, owner, read: () => values[key],
+        next: value => typeof value === 'boolean' ? !value
+          : key === 'workflow' ? ({ work: 'chat', chat: 'plan', plan: 'work' })[value]
+          : value === 'auto' ? 'yolo' : 'auto',
+        format: value => typeof value === 'boolean' ? value ? 'on' : 'off' : value,
+        validate: () => undefined, current: () => true,
+        apply: value => { applied.push({ key, value }); values[key] = value; return true; },
+      });
+    }
+  });
+}
+`);
 const paths = ['pi-vim', 'pi-stash', 'pi-status-footer', 'pi-cc-render', 'pi-sidebar']
   .map(name => resolve(root, `packages/${name}/src/index.ts`));
 const actionsChannel = 'pi-plugins.footer-actions.v1';
@@ -122,11 +160,24 @@ class MemoryTerminal {
   }
 }
 const tick = () => new Promise(resolve => setImmediate(resolve));
+const pause = ms => new Promise(resolve => setTimeout(resolve, ms));
+const until = async (check, label) => {
+  const deadline = Date.now() + 5000;
+  while (!check()) {
+    assert.ok(Date.now() < deadline, `Timed out: ${label}`);
+    await tick();
+  }
+};
+const journalEntries = f => f.runtime.session.sessionManager.getBranch().filter(entry =>
+  entry.type === 'custom' && ['settings:cycle', 'settings:cycle-state'].includes(entry.customType));
+const historyLines = f => f.mode.chatContainer.render(f.terminal.columns).map(plain).filter(line => line.includes('Settings'));
+const screenLines = f => f.mode.renderer.currentLayout.lines.map(plain);
+const settings = f => { const request = { type: 'query' }; f.bus.emit('test:settings-cycle', request); return request; };
+const stage = (f, key) => { const request = { type: 'stage', key }; f.bus.emit('test:settings-cycle', request); return request.result; };
 const plain = value => stripVTControlCharacters(value).replace(/\x1b_pi:[^\x07]*\x07/gu, '');
 
 async function fixture(width, flow, sidebar) {
-  const cwd = join(temp, `project-${width}-${flow}-${sidebar}`);
-  mkdirSync(cwd);
+  const cwd = mkdtempSync(join(temp, `project-${width}-${flow}-${sidebar}-`));
   const bus = createEventBus();
   const calls = [];
   let generation = 0;
@@ -150,15 +201,16 @@ async function fixture(width, flow, sidebar) {
     theme: 'dark', quietStartup: true, showHardwareCursor: false,
     doubleEscapeAction: 'none', terminal: { showTerminalProgress: false },
   });
+  const extensionPaths = [...paths.slice(0, sidebar === 'absent' ? 4 : 5), cycleFixture];
   const services = await createAgentSessionServices({
     cwd, agentDir: process.env.PI_CODING_AGENT_DIR, modelRuntime, settingsManager,
     resourceLoaderOptions: { eventBus: bus, noExtensions: true, noSkills: true,
       noPromptTemplates: true, noThemes: true, noContextFiles: true,
-      additionalExtensionPaths: paths.slice(0, sidebar === 'absent' ? 4 : 5) },
+      additionalExtensionPaths: extensionPaths },
   });
   const loaded = services.resourceLoader.getExtensions();
   assert.deepEqual(loaded.errors, [], 'real loader must accept every extension');
-  assert.deepEqual(loaded.extensions.map(entry => entry.path), paths.slice(0, sidebar === 'absent' ? 4 : 5));
+  assert.deepEqual(loaded.extensions.map(entry => entry.path), extensionPaths);
   const result = await createAgentSessionFromServices({
     services, sessionManager: SessionManager.inMemory(cwd), tools: [],
     model: modelRuntime.getModels().find(model => model.provider === 'anthropic' && model.reasoning && !model.thinkingLevelMap) ?? modelRuntime.getModels().find(model => model.provider === 'anthropic' && model.reasoning), thinkingLevel: 'low',
@@ -194,6 +246,10 @@ async function fixture(width, flow, sidebar) {
     await runtime.session.bindExtensions({ uiContext: mode.createExtensionUIContext(), mode: 'tui',
       onError: error => errors.push(error), shutdownHandler: () => {} });
     mode.setupExtensionShortcuts(runtime.session.extensionRunner);
+    // Exercise appendEntry -> AgentSession.entry_appended -> the actual native transcript,
+    // rather than calling a renderer directly or manually reinserting its anchor.
+    mode.isInitialized = true;
+    mode.subscribeToAgent();
     assert.deepEqual(errors, [], 'session_start must not reject native extension registration');
     mode.ui.setFocus(mode.editor);
     assert.ok(mode.editor.actionHandlers.get('app.model.select'), 'native model action copied to the wrapped editor');
@@ -226,9 +282,12 @@ async function fixture(width, flow, sidebar) {
     mode.renderer.renderNow();
     await tick();
     mode.renderer.renderNow();
-    return { mode, runtime, terminal, calls, mouseEvents, bus, get generation() { return generation; },
+    return { mode, runtime, terminal, calls, mouseEvents, bus, modelRuntime, errors, get generation() { return generation; },
       nextGeneration() { generation++; }, frame: () => mode.renderer.renderNow(),
       async close() {
+        // Drain existing next-timer session_start registrations (cc-render's write
+        // renderer) before tearing down a runtime immediately after native /reload.
+        await pause(5);
         try { await runtime.dispose(); }
         finally { try { mode.stop(); } finally { mode.renderer.stop(); } }
       } };
@@ -290,8 +349,222 @@ function requireOne(f, point, action, release = 0) {
   assert.equal(f.calls.at(-1).action, action);
 }
 
+async function shortcutModelCancellation() {
+  const f = await fixture(120, 'independent', 'absent');
+  try {
+    const original = f.runtime.session.model;
+    f.terminal.send('\x1bj'); // The SDK constructs a real snapshot shortcut context.
+    const shortcut = settings(f).shortcut;
+    assert.ok(shortcut?.result, 'native terminal shortcut stages the preview');
+    assert.equal(shortcut.context.model.id, original.id);
+    await f.modelRuntime.setRuntimeApiKey(original.provider, 'offline-fixture-key');
+    const replacement = f.modelRuntime.getModels().find(model => model.provider === original.provider && model.id !== original.id);
+    assert.ok(replacement, 'fixture needs another built-in physical model');
+    await f.runtime.session.setModel(replacement);
+    assert.equal(shortcut.context.model.id, original.id, 'SDK shortcut context keeps its old snapshot');
+    assert.equal(f.runtime.session.model.id, replacement.id, 'real setter changed the active model');
+    assert.equal(await shortcut.result, false, 'current model_select context cancels the old shortcut burst');
+    assert.equal(settings(f).values.approvals, 'auto');
+    assert.deepEqual(settings(f).applied, []);
+    assert.equal(settings(f).cycles.snapshot().phase, 'cancelled');
+    assert.equal(settings(f).cycles.snapshot().reason, 'model changed');
+    await pause(425);
+    assert.deepEqual(settings(f).applied, [], 'no late permission relaxation after the old deadline');
+    assert.deepEqual(f.errors, []);
+  } finally { await f.close(); }
+}
+
+async function journalCheckpoint() {
+  const f = await fixture(120, 'independent', 'absent');
+  try {
+    const api = settings(f);
+    const beforeContext = structuredClone(f.runtime.session.sessionManager.buildSessionContext().messages);
+    const first = stage(f, 'workflow');
+    const anchor = f.mode.chatContainer.children.find(child => child.render(120).some(line => plain(line).includes('Settings pending')));
+    assert.ok(anchor, 'appendEntry immediately inserts the native visible anchor');
+    await pause(100);
+    const second = stage(f, 'workflow');
+    const mixed = stage(f, 'auto-effort');
+    const lastStaged = Date.now();
+    assert.equal(first, second, 'same-key callers await the same settled burst');
+    assert.equal(second, mixed, 'mixed controls share one settled result');
+    assert.deepEqual(api.applied, [], 'previews call no effective setter');
+    assert.equal(api.values.workflow, 'work');
+    assert.equal(api.values['auto-effort'], false);
+    assert.equal(journalEntries(f).filter(entry => entry.customType === 'settings:cycle').length, 1);
+    assert.ok(journalEntries(f).filter(entry => entry.customType === 'settings:cycle-state').length >= 2,
+      'later previews append hidden snapshots, not replacement entries');
+    await tick(); f.frame();
+    assert.equal(historyLines(f).length, 1, 'one real transcript row for the entire mixed burst');
+    assert.match(historyLines(f)[0], /Settings pending · Workflow plan · Auto on/u);
+    assert.equal(screenLines(f).filter(line => line.includes('Settings pending')).length, 1,
+      'the actual fullscreen frame shows exactly one immediate pending history row');
+    assert.ok(f.mode.chatContainer.children.includes(anchor), 'snapshot appends keep the original anchor component');
+    assert.match(anchor.render(120).map(plain).join('\n'), /Workflow plan · Auto on/u,
+      'an already-created native component renders the latest hidden snapshot');
+    await pause(250);
+    assert.deepEqual(api.applied, [], 'no effective changes before the 400 ms quiet period');
+    assert.equal(await first, true);
+    assert.ok(Date.now() - lastStaged >= 390, 'settlement waits for the quiet period after the latest mixed-control input');
+    assert.deepEqual(api.applied, [{ key: 'workflow', value: 'plan' }, { key: 'auto-effort', value: true }]);
+    assert.equal(historyLines(f).length, 1);
+    assert.match(historyLines(f)[0], /Settings · Workflow plan · Auto on/u);
+    assert.deepEqual(f.runtime.session.sessionManager.buildSessionContext().messages, beforeContext,
+      'neither the anchor nor any hidden snapshot enters model context');
+
+    // A genuine local AgentSession stream drives InteractiveMode's streaming component.
+    // This explicitly scripted transport is the only inference-shaped call allowed here.
+    await f.modelRuntime.setRuntimeApiKey('anthropic', 'local-fixture-placeholder');
+    let stream;
+    let finish;
+    const contexts = [];
+    f.runtime.session.agent.streamFunction = (model, context) => {
+      assert.equal(stream, undefined, 'only one local scripted request');
+      contexts.push(structuredClone(context.messages));
+      stream = createAssistantMessageEventStream();
+      const message = { role: 'assistant', content: [{ type: 'text', text: 'Local streamed reply.' }],
+        api: model.api, provider: model.provider, model: model.id,
+        usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0,
+          cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
+        stopReason: 'stop', timestamp: Date.now() };
+      finish = () => { stream.push({ type: 'done', reason: 'stop', message }); stream.end(message); };
+      queueMicrotask(() => {
+        stream.push({ type: 'start', partial: message });
+        stream.push({ type: 'text_delta', contentIndex: 0, delta: 'Local streamed reply.', partial: message });
+      });
+      return stream;
+    };
+    const turn = f.runtime.session.prompt('Scripted local stream.');
+    try {
+      await until(() => f.runtime.session.isStreaming && f.mode.streamingComponent, 'real streaming transcript');
+      const streaming = f.mode.streamingComponent;
+      const count = historyLines(f).length;
+      const pending = stage(f, 'approvals');
+      assert.equal(f.runtime.session.isStreaming, true);
+      assert.equal(historyLines(f).length, count + 1, 'preview is visible without waiting for the assistant to finish');
+      const streamingAnchor = f.mode.chatContainer.children.find(child => child.render(120).some(line => plain(line).includes('Approvals yolo')));
+      assert.ok(streamingAnchor);
+      assert.ok(f.mode.chatContainer.children.indexOf(streamingAnchor) < f.mode.chatContainer.children.indexOf(streaming),
+        'native entry insertion places the anchor before the active assistant component');
+      const roundTrip = stage(f, 'approvals');
+      await tick(); f.frame();
+      assert.equal(historyLines(f).length, count + 1);
+      assert.match(streamingAnchor.render(120).map(plain).join('\n'), /Approvals auto/u,
+        'hidden snapshot redraws the same anchor during streaming');
+      assert.equal(screenLines(f).filter(line => line.includes('Settings pending')).length, 1,
+        'the real fullscreen stream frame shows only the latest preview, not each snapshot');
+      assert.ok(screenLines(f).some(line => line.includes('Local streamed reply.')), 'the assistant stream remains visible');
+      assert.equal(api.values.approvals, 'auto', 'streaming preview is not an approval grant');
+      api.cycles.cancel('streaming checkpoint complete');
+      assert.equal(await pending, false);
+      assert.equal(await roundTrip, false);
+      assert.doesNotMatch(JSON.stringify(contexts), /settings:cycle|Settings pending/u);
+    } finally { finish?.(); await turn; }
+
+    // Native /reload rebuilds chat before session_start and then reconciles the journal.
+    // An abandoned pending record becomes cancelled; no timer or draft is restored.
+    const pending = stage(f, 'workflow');
+    const savedEntries = structuredClone(journalEntries(f));
+    const appliedBeforeReload = api.applied.length;
+    const draft = f.mode.editor.getExpandedText();
+    await f.mode.handleReloadCommand();
+    assert.equal(await pending, false);
+    await tick(); f.frame();
+    assert.match(historyLines(f).at(-1), /Settings cancelled · interrupted/u);
+    assert.deepEqual(journalEntries(f), savedEntries, 'reload does not rewrite append-only journal data');
+    await pause(450);
+    assert.equal(api.applied.length, appliedBeforeReload, 'retired timer cannot apply after reload');
+    assert.deepEqual(settings(f).applied, [], 'replacement coordinator does not replay the old preview');
+    assert.equal(f.mode.editor.getExpandedText(), draft);
+    assert.equal(f.mode.ui.getFocusedComponent(), f.mode.editor);
+
+    // Persist an interrupted applying snapshot using the helper's actual versioned data.
+    const staged = stage(f, 'workflow');
+    const current = settings(f);
+    const snapshot = current.cycles.snapshot();
+    current.pi.appendEntry('settings:cycle-state', { version: 1, ...snapshot, phase: 'applying' });
+    const applyingEntries = structuredClone(journalEntries(f));
+    await f.mode.handleReloadCommand();
+    assert.equal(await staged, false);
+    await tick(); f.frame();
+    assert.match(historyLines(f).at(-1), /Settings interrupted · check current settings/u);
+    assert.deepEqual(journalEntries(f), applyingEntries, 'reload leaves applying evidence unchanged');
+    assert.deepEqual(settings(f).applied, []);
+
+    // The real footer's commit guard refuses a draft after main loses focus.
+    const effective = f.runtime.session.thinkingLevel;
+    f.terminal.send('\x14');
+    const focusBurst = settings(f).cycles;
+    assert.equal(focusBurst.snapshot()?.phase, 'pending');
+    f.mode.ui.setFocus(new Container());
+    assert.equal(await focusBurst.flush(), false, 'real main-focus guard blocks settlement');
+    assert.equal(f.runtime.session.thinkingLevel, effective);
+    assert.match(historyLines(f).at(-1), /Settings not applied.*main editor/u);
+    f.mode.ui.setFocus(f.mode.editor);
+
+    // Enter uses Pi's actual submit/history route. A failed input flush must not
+    // start inference or replace a newer draft typed while the async hook settles.
+    const release = settings(f).cycles.addGuard(() => 'fixture final validation failed');
+    f.terminal.send('\x14');
+    let submitted;
+    let preflight;
+    const recoverable = 'Recover this failed settings submission.';
+    f.mode.onInputCallback = text => {
+      assert.equal(text, recoverable);
+      submitted = f.runtime.session.prompt(text, { preflightResult: result => { preflight = result; } });
+    };
+    f.mode.editor.setText(recoverable);
+    f.terminal.send('\r');
+    assert.ok(submitted, 'Terminal.start reaches the native main-editor submit callback');
+    f.mode.editor.setText('Newer unsent draft');
+    await submitted;
+    release();
+    assert.equal(preflight, 'handled', 'failed settlement consumes input instead of sending under old settings');
+    assert.equal(contexts.length, 1, 'failed input makes no additional local model request');
+    assert.equal(f.runtime.session.thinkingLevel, effective);
+    assert.equal(f.mode.editor.getExpandedText(), 'Newer unsent draft', 'failed flush never overwrites a newer draft');
+    assert.match(historyLines(f).at(-1), /message not sent.*recover it from prompt history/u);
+    f.mode.editor.setText('');
+    f.terminal.send('\x1b[A');
+    assert.equal(f.mode.editor.getExpandedText(), recoverable, 'native prompt history recovers the unsent message');
+
+    // Successful native submission flushes immediately; inference observes only
+    // the final committed target, never a preview or custom-entry context message.
+    const nextDraft = 'Submit with final settings.';
+    f.runtime.session.agent.streamFunction = (model, context) => {
+      contexts.push(structuredClone(context.messages));
+      assert.equal(f.runtime.session.thinkingLevel, finalReasoning);
+      const local = createAssistantMessageEventStream();
+      const message = { role: 'assistant', content: [{ type: 'text', text: 'Flushed locally.' }],
+        api: model.api, provider: model.provider, model: model.id,
+        usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0,
+          cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
+        stopReason: 'stop', timestamp: Date.now() };
+      queueMicrotask(() => { local.push({ type: 'done', reason: 'stop', message }); local.end(message); });
+      return local;
+    };
+    f.terminal.send('\x14');
+    const finalReasoning = settings(f).cycles.snapshot().settings.find(item => item.key === 'reasoning').target;
+    assert.equal(f.runtime.session.thinkingLevel, effective);
+    f.mode.onInputCallback = text => {
+      assert.equal(text, nextDraft);
+      submitted = f.runtime.session.prompt(text);
+    };
+    f.mode.editor.setText(nextDraft);
+    f.terminal.send('\r');
+    await submitted;
+    assert.equal(settings(f).cycles.snapshot()?.phase, 'applied');
+    assert.equal(contexts.length, 2, 'only the successful native submission starts the next local request');
+    assert.doesNotMatch(JSON.stringify(contexts), /settings:cycle|Settings pending/u);
+    assert.deepEqual(f.errors, [], 'entry notifications, streaming and reload have no swallowed extension errors');
+    console.log(`PASS immediate native settings anchor, hidden snapshots, local streaming and reload (${sdkRoot})`);
+  } finally { await f.close(); }
+}
+
 let failure;
 try {
+  await shortcutModelCancellation();
+  await journalCheckpoint();
   for (const width of [46, 120, 180]) for (const flow of ['independent', 'linked', 'exec']) {
     for (const sidebar of ['absent', 'closed', 'open']) {
       const f = await fixture(width, flow, sidebar);
@@ -335,27 +608,50 @@ try {
           assert.equal(f.mode.ui.getFocusedComponent(), originalFocus, 'Escape restores focus');
           assert.equal(f.mode.editor.getExpandedText(), draft, 'Escape preserves unsent draft');
         }
-        // The native reasoning action is a reversible, idle-only operation; no model turn starts.
+        // Mouse and the configured native action share one final-only reasoning burst.
+        // Dispatch through Terminal.start, including cc-render's viewport and the Vim editor.
         await tick(); f.frame();
         const beforeReasoning = snapshot(f);
+        const levels = getSupportedThinkingLevels(f.runtime.session.model);
+        const nextReasoning = value => levels[(levels.indexOf(value) + 1) % levels.length];
+        const beforeEntries = journalEntries(f).length;
+        const beforeThinking = f.runtime.session.sessionManager.getEntries().filter(entry => entry.type === 'thinking_level_change').length;
+        const beforeAnchors = journalEntries(f).filter(entry => entry.customType === 'settings:cycle').length;
         const reasoningVisible = footerBox(f).lines.some(line => plain(line).includes(`reasoning ${beforeReasoning.thinking}`));
+        let mouseTarget;
         if (reasoningVisible) {
           const reasoning = target(f, beforeReasoning.thinking);
           reasoning.x -= 2; // hit the first cell of the short (three-cell) level
           click(f, reasoning);
-          assert.notEqual(f.runtime.session.thinkingLevel, beforeReasoning.thinking,
-            `reasoning click cycles the real session (${width} ${flow} ${sidebar}, ` +
-            `point=${JSON.stringify(reasoning)}, mouse=${JSON.stringify(f.mouseEvents.slice(-4))}, ` +
-            `diagnostics=${JSON.stringify(f.mode.customFooter.describe?.())}, ` +
-            `footer=${JSON.stringify(f.mode.customFooter.render(width).map(plain))})`);
-          assert.equal(f.calls.length, beforeReasoning.calls, 'native reasoning needs no capability action');
-          assert.equal(f.mode.editor.getExpandedText(), beforeReasoning.draft);
-          assert.equal(f.mode.ui.getFocusedComponent(), beforeReasoning.focus);
-          await tick();
+          assert.equal(f.runtime.session.thinkingLevel, beforeReasoning.thinking, 'mouse preview must not call the native setter');
+          const preview = settings(f).cycles.snapshot();
+          assert.equal(preview?.phase, 'pending', `reasoning click must stage: ${JSON.stringify(f.mode.customFooter.describe?.())}`);
+          mouseTarget = preview.settings.find(item => item.key === 'reasoning')?.target;
+          assert.equal(mouseTarget, nextReasoning(beforeReasoning.thinking), 'mouse uses the native supported-level order');
+          assert.equal(f.calls.length, beforeReasoning.calls, 'reasoning needs no provider capability action');
         } else assert.equal(width, 46, 'only the narrow linked row may omit reasoning');
-        const afterClick = f.runtime.session.thinkingLevel;
-        f.terminal.send('\x14'); // configured ctrl+t, the same native app.thinking.cycle action
-        assert.notEqual(f.runtime.session.thinkingLevel, afterClick, 'keyboard cycles the same native reasoning state');
+        f.terminal.send('\x14'); // configured ctrl+t, not a hardcoded wrapper shortcut
+        assert.equal(f.runtime.session.thinkingLevel, beforeReasoning.thinking, 'keyboard preview also leaves effective reasoning unchanged');
+        const preview = settings(f).cycles.snapshot();
+        assert.equal(preview?.phase, 'pending');
+        const finalTarget = preview.settings.find(item => item.key === 'reasoning')?.target;
+        assert.ok(finalTarget);
+        assert.equal(finalTarget, nextReasoning(mouseTarget ?? beforeReasoning.thinking), 'keyboard advances the pending target in native order, not committed reasoning');
+        assert.equal(journalEntries(f).filter(entry => entry.customType === 'settings:cycle').length, beforeAnchors + 1,
+          'mouse and key share one visible anchor');
+        assert.equal(f.runtime.session.sessionManager.getEntries().filter(entry => entry.type === 'thinking_level_change').length,
+          beforeThinking, 'zero native reasoning changes during preview');
+        await pause(250);
+        assert.equal(f.runtime.session.thinkingLevel, beforeReasoning.thinking, 'reasoning remains effective-only until the quiet period ends');
+        await until(() => settings(f).cycles.snapshot()?.phase !== 'pending', 'native reasoning settlement');
+        await until(() => settings(f).cycles.snapshot()?.phase !== 'applying', 'native reasoning apply');
+        assert.equal(settings(f).cycles.snapshot()?.phase, 'applied');
+        assert.equal(f.runtime.session.thinkingLevel, finalTarget, 'only the final shared reasoning target reaches the native setter');
+        assert.equal(f.runtime.session.sessionManager.getEntries().filter(entry => entry.type === 'thinking_level_change').length,
+          beforeThinking + 1, 'exactly one native reasoning change for the burst');
+        assert.ok(journalEntries(f).length > beforeEntries);
+        assert.equal(f.mode.chatContainer.render(width).map(plain).some(line => line.includes('Thinking level:')), false,
+          'the stock immediate reasoning notification must not duplicate the journal');
         assert.equal(f.mode.editor.getExpandedText(), beforeReasoning.draft);
         assert.equal(f.mode.ui.getFocusedComponent(), beforeReasoning.focus);
         // The wrapper's native keyboard action uses the same routing as its visible model hint.
@@ -415,6 +711,16 @@ try {
         }
         assert.equal(f.mode.editor.getExpandedText(), beforeReasoning.draft);
         assert.equal(f.mode.ui.getFocusedComponent(), f.mode.editor);
+        const restoredReasoning = f.runtime.session.thinkingLevel;
+        f.terminal.send('\x14');
+        assert.equal(f.runtime.session.thinkingLevel, restoredReasoning, 'reloaded reasoning key stages without applying');
+        const restoredTarget = settings(f).cycles.snapshot()?.settings.find(item => item.key === 'reasoning')?.target;
+        assert.ok(restoredTarget, 'new footer owns native reasoning interception after reload');
+        await until(() => settings(f).cycles.snapshot()?.phase === 'applied', 'reloaded reasoning cycle');
+        assert.equal(f.runtime.session.thinkingLevel, restoredTarget);
+        assert.equal(f.mode.editor.getExpandedText(), beforeReasoning.draft);
+        assert.equal(f.mode.ui.getFocusedComponent(), f.mode.editor);
+        assert.deepEqual(f.errors, [], 'native footer input and reload must not swallow extension errors');
         console.log(`PASS footer ${width} ${flow} Sidebar ${sidebar}`);
       } catch (error) { caseFailure = error; }
       finally { try { await f.close(); } catch (error) { caseFailure ??= error; } }

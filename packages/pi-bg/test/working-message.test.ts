@@ -28,7 +28,7 @@ async function setup() {
   const c = fakeCtx("/tmp");
   Object.assign(f.pi, {
     getThinkingLevel: () => "high", getSessionName: () => "", getCommands: () => [], getAllTools: () => [],
-    appendEntry() {},
+    appendEntry() {}, registerEntryRenderer() {},
   });
   Object.assign(c.ctx, {
     model: { provider: "test", id: "test", contextWindow: 1000 },

@@ -13,6 +13,7 @@ import { FAMILY_CHANNEL, type FamilyRequest, type FamilyService, type PreparedAg
 import planMode from "../src/index.js";
 import { INLINE_ENTRY } from "../src/inline-plan.js";
 import type { PlannerSessionFactory, PlannerSessionHandle, PlannerSessionOptions } from "../src/planner/session.js";
+import { settingsCycles } from "../src/settings-cycle.js";
 import { SUBAGENT_PROGRESS_KIND } from "../src/subagent-progress.js";
 import { createCustomSelectorHarness, createMockContext, createMockPi } from "./support.js";
 
@@ -172,15 +173,21 @@ test("factory awaits shortcut settings, and the plan-mode shortcut awaits sessio
   mock.eventBus.on(ACTIVITY_SECTION, () => {
     offers++;
   });
-  const start = mock.events.get("session_start")?.[0]?.({ reason: "startup" }, ctx);
+  const start = Promise.all(
+    (mock.events.get("session_start") ?? []).map((handler) => handler({ reason: "startup" }, ctx)),
+  );
   const pressed = shortcut.handler(ctx);
   await tick();
   mock.eventBus.emit(ACTIVITY_HOST, {});
   assert.equal(offers, 0, "an initializing branch cannot offer its disposed source");
-  assert.equal(context.statuses.get("workflow-mode"), undefined);
+  assert.equal(context.statuses.get("workflow-mode"), "workflow: work (ctrl+alt+p to cycle)");
   resolve(settings);
   await start;
   assert.equal(offers, 1);
+  await tick();
+  assert.equal(context.statuses.get("workflow-mode"), "workflow: work (ctrl+alt+p to cycle)");
+  assert.equal(settingsCycles(mock.pi).snapshot()?.phase, "pending");
+  assert.equal(await settingsCycles(mock.pi).flush(), true);
   await pressed;
   // Without pi-tool-gate, the shortcut toggles plan mode in this conversation.
   assert.equal(context.statuses.get("workflow-mode"), "workflow: plan (ctrl+alt+p to cycle)");

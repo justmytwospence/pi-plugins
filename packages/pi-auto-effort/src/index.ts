@@ -42,6 +42,7 @@ import {
 } from "./policy.ts";
 import { DEFAULT_PREFILTER, type PrefilterConfig, isGoAhead, prefilterConfig } from "./prefilter.ts";
 import { type Counts, countsFromBranch, describeCounts, emptyCounts, tally } from "./stats.ts";
+import { SETTINGS_REASONING_COMMITTED, settingsCycles } from "./settings-cycle.ts";
 import { SYSTEM1_CHANGED, readSystem1Setting, resolveSystem1Target } from "./system1.js";
 import { clip, messageText } from "./transcript.ts";
 import { UNTRUSTED_REPLY } from "./untrusted.ts";
@@ -119,6 +120,9 @@ const NO_PRESSURE: Pressure = { tier: "none" };
 const GO_AHEAD = "go-ahead";
 
 const STATE_ENTRY = "auto-effort:state";
+// A manual commit without a native thinking change is not a classifier assessment.
+const MANUAL_LEVEL_ENTRY = "auto-effort:manual-level";
+const NATIVE_LEVELS = new Set(["off", "minimal", "low", "medium", "high", "xhigh", "max"]);
 const UPDATES_ENTRY = "auto-effort:effort-updates";
 const STATUS_KEY = "auto-effort";
 export const PRESSURE_EVENT = "quota:pressure";
@@ -233,6 +237,9 @@ export function pressureTag(p: Pressure): string {
 }
 
 export default function autoEffort(pi: ExtensionAPI, deps: AutoEffortDeps = {}) {
+  const cycles = settingsCycles(pi);
+  const toggleOwner = "pi-auto-effort";
+  let lifecycle = 0;
   const now = deps.now ?? Date.now;
   let config: EffortConfig = DEFAULT_CONFIG;
   // Your latest manual level: the ceiling in `ceiling` bounds, restored by /auto-effort off.
@@ -252,6 +259,7 @@ export default function autoEffort(pi: ExtensionAPI, deps: AutoEffortDeps = {}) 
   let latestCtx: ExtensionContext | undefined;
   // Only session lifecycle hooks publish a ready context for optional footer controls.
   let footerCtx: ExtensionContext | undefined;
+  let manualContext: { ctx: ExtensionContext; session: string; anchor: string | null } | undefined;
   const poller = new CodexPoller({
     fetch: deps.fetch ?? ((...args) => fetch(...args)),
     now,
@@ -387,8 +395,9 @@ export default function autoEffort(pi: ExtensionAPI, deps: AutoEffortDeps = {}) 
   };
 
   /**
-   * Rebuild the state from the current branch: its last `auto-effort:state` entry and the
-   * effort-update positions. Called at session start and after /tree moves the leaf, since the
+   * Rebuild the state from the current branch: its last assessment, subsequent manual
+   * choices (native changes or commit-only records), and the effort-update positions.
+   * Called at session start and after /tree moves the leaf, since the
    * entries of an abandoned branch describe another history. Fields of older versions (the
    * running average `e`, `dwell`) are ignored.
    */
@@ -413,17 +422,21 @@ export default function autoEffort(pi: ExtensionAPI, deps: AutoEffortDeps = {}) 
     }
     counts = countsFromBranch(branch, STATE_ENTRY);
     pressure = NO_PRESSURE;
-    // Own changes precede their state entry. Later thinking entries are manual choices
-    // that must survive a reload or /tree move even if no new assessment was saved yet.
+    // Own changes precede their state entry. Replay later native and commit-only manual
+    // choices in branch order; a newer assessment already incorporates earlier choices.
     for (const entry of branch.slice(savedIndex + 1)) {
       if (entry.type === "thinking_level_change" && typeof entry.thinkingLevel === "string") manual(entry.thinkingLevel);
+      else if (entry.type === "custom" && entry.customType === MANUAL_LEVEL_ENTRY && isRecord(entry.data)
+        && entry.data.version === 1 && typeof entry.data.level === "string" && NATIVE_LEVELS.has(entry.data.level)) manual(entry.data.level);
     }
+    manualContext = { ctx, session: ctx.sessionManager.getSessionId(), anchor: ctx.sessionManager.getLeafId?.() ?? null };
     const savedUpdates = [...branch].reverse().find((e) => e.type === "custom" && e.customType === UPDATES_ENTRY);
     updates = restoreState(savedUpdates?.data);
     status(ctx);
   };
 
   pi.on("session_start", (_event, ctx) => {
+    lifecycle++;
     subscribeSystem1();
     config = loadConfig("auto-effort", DEFAULT_CONFIG, ctx.cwd);
     restoreFromBranch(ctx);
@@ -433,6 +446,7 @@ export default function autoEffort(pi: ExtensionAPI, deps: AutoEffortDeps = {}) 
 
   // /tree moved the leaf: the branch below it is the history now, with its own last state.
   pi.on("session_tree", (_event, ctx) => {
+    lifecycle++;
     latestCtx = ctx;
     restoreFromBranch(ctx);
     if (footerCtx) footerCtx = ctx;
@@ -467,6 +481,8 @@ export default function autoEffort(pi: ExtensionAPI, deps: AutoEffortDeps = {}) 
     pollCodex(ctx);
   });
   pi.on("session_shutdown", () => {
+    manualContext = undefined;
+    lifecycle++;
     generation++;
     cancelAssessments();
     unsubscribeSystem1?.();
@@ -535,7 +551,11 @@ export default function autoEffort(pi: ExtensionAPI, deps: AutoEffortDeps = {}) 
     lastTheta = decision.theta;
     lastReason = outcome === GO_AHEAD || outcome.ok ? decision.reason : `assessment unavailable: ${outcome.reason}`;
 
-    if (decision.level !== pi.getThinkingLevel()) setLevel(decision.level);
+    if (decision.level !== pi.getThinkingLevel()) {
+      const preview = cycles.snapshot();
+      if (preview?.phase === "pending" && preview.settings.some((item) => item.key === "reasoning")) cycles.cancel("automatic effort changed reasoning");
+      setLevel(decision.level);
+    }
     lastLevel = pi.getThinkingLevel();
     const data = {
       ...extra,
@@ -609,36 +629,66 @@ export default function autoEffort(pi: ExtensionAPI, deps: AutoEffortDeps = {}) 
     await settle(ctx, outcome, judgment(outcome, false), { phase: "run", turn: event.turnIndex });
   });
 
-  const setSessionOn = (enabled: boolean, ctx: ExtensionContext) => {
+  const setSessionOn = (enabled: boolean, ctx: ExtensionContext, options: { notify?: boolean; restoreManual?: boolean } = {}) => {
     refreshTarget(ctx);
     sessionOn = enabled;
     // An assessment in flight must not apply after the gate was switched.
     generation++;
     if (!sessionOn) {
-      if (pi.getThinkingLevel() !== manualLevel) setLevel(manualLevel);
+      if (options.restoreManual !== false && pi.getThinkingLevel() !== manualLevel) setLevel(manualLevel);
       if (pressure.tier !== "none") {
         pressure = NO_PRESSURE;
         emitPressure(ctx.model?.provider);
       }
     }
     status(ctx);
-    ctx.ui.notify(`auto-effort ${enabled ? "on" : "off"} for this session${sessionOn ? "" : `; back to ${pi.getThinkingLevel()}`}`, "info");
+    if (options.notify !== false) ctx.ui.notify(`auto-effort ${enabled ? "on" : "off"} for this session${sessionOn ? "" : `; back to ${pi.getThinkingLevel()}`}`, "info");
   };
+
+  pi.events.on(SETTINGS_REASONING_COMMITTED, (data: unknown) => {
+    const current = manualContext;
+    // Only the active final reasoning callback can publish a manual commit. A
+    // cancelled navigation must not poison the still-current session's context.
+    if (!cycles.isCommitting("reasoning") || !current || !isRecord(data) || typeof data.level !== "string" || !NATIVE_LEVELS.has(data.level)
+      || data.level !== pi.getThinkingLevel() || data.level === manualLevel) return;
+    const { ctx, session, anchor } = current;
+    if (ctx.sessionManager.getSessionId() !== session
+      || (anchor !== null && ctx.sessionManager.getLeafId?.() !== anchor && !ctx.sessionManager.getBranch().some((entry) => entry.id === anchor))) return;
+    manual(data.level);
+    pi.appendEntry(MANUAL_LEVEL_ENTRY, { version: 1, level: data.level });
+    status(ctx);
+  });
 
   pi.events.on(FOOTER_ACTIONS_CHANNEL, (data: unknown) => {
     const ctx = footerCtx;
     if (!ctx?.hasUI || pinned || !isRecord(data) || data.version !== 1 || !isRecord(data.actions)) return;
     const actions = data.actions as FooterActionsRequest["actions"];
-    const mine = generation;
+    const mine = lifecycle;
+    const targetKey = selectionKey;
     const sessionId = ctx.sessionManager.getSessionId();
+    const current = () => footerCtx === ctx && mine === lifecycle && ctx.hasUI && ctx.sessionManager.getSessionId() === sessionId;
     actions["effort.toggle"] = {
       label: "Toggle auto-effort",
       active: active(),
       run: () => {
-        if (footerCtx !== ctx || mine !== generation || !ctx.hasUI || ctx.sessionManager.getSessionId() !== sessionId) return;
+        if (!current()) return;
         refreshTarget(ctx);
-        if (mine !== generation) return;
-        setSessionOn(!active(), ctx);
+        if (selectionKey !== targetKey) return;
+        void cycles.stage(ctx, {
+          key: "auto-effort",
+          owner: toggleOwner,
+          read: () => sessionOn,
+          next: (value) => !value,
+          format: (value) => value ? "on" : "off",
+          validate: () => pinned || !config.enabled ? "auto-effort is disabled" : undefined,
+          current,
+          apply: (value, targets) => {
+            const reasoning = cycles.snapshot()?.settings.find((item) => item.key === "reasoning");
+            const reasoningChanges = reasoning !== undefined && targets.reasoning !== undefined && reasoning.baseline !== targets.reasoning;
+            setSessionOn(value, ctx, { notify: false, restoreManual: !reasoningChanges });
+            return true;
+          },
+        });
       },
     };
   });
@@ -652,11 +702,13 @@ export default function autoEffort(pi: ExtensionAPI, deps: AutoEffortDeps = {}) 
       refreshTarget(ctx);
       const [arg = "", value] = args.trim().split(/\s+/u);
       if (arg === "on" || arg === "off") {
+        cycles.cancel("auto-effort changed explicitly");
         setSessionOn(arg === "on", ctx);
         return;
       }
       if (arg === "bounds") {
         if (value === "ceiling" || value === "free") {
+          cycles.cancel("auto-effort bounds changed explicitly");
           sessionBounds = value;
           generation++;
           status(ctx);

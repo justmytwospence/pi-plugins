@@ -15,6 +15,8 @@ import { homedir } from "node:os";
 import path from "node:path";
 import { stripVTControlCharacters } from "node:util";
 import { CustomEditor, getAgentDir, type ExtensionAPI, type ExtensionContext, type Theme } from "@earendil-works/pi-coding-agent";
+import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
+import { getSupportedThinkingLevels } from "@earendil-works/pi-ai/compat";
 import { hyperlink, truncateToWidth, visibleWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
 import { builtinMcpOwnsCommand, connectedMcpServers, countMcp, McpConfigReader, MCP_STATUS_KEY, type McpCount } from "./mcp.ts";
 import { SHOW_TIMER_AFTER_MS, WORKING_REFRESH_MS, WORKING_STATS_CHANNEL, workingMessage, WorkingStats, workingStatsService, type WorkingStatsRequest } from "./working.ts";
@@ -24,6 +26,7 @@ import { WORKFLOW_EXPLANATIONS, workflowBadge } from "./workflow-ui.ts";
 import { queryFlow, type FlowSnapshot } from "./flow-contract.ts";
 import { queryFooterActions, type FooterAction, type FooterActionId } from "./footer-actions.ts";
 import { querySystem1State, type System1Status } from "./system1-contract.ts";
+import { settingsCycles, SETTINGS_REASONING_COMMITTED, type SettingCycleSnapshot, type SettingKey } from "./settings-cycle.ts";
 import { createFooterActionController, createFooterComponent, type FooterEditor, type FooterTui, type FooterHit, type FooterLayout } from "./interactions.ts";
 import { createProviderUsageCollector, dispatchProviderUsage, isUsageStale, selectGooglePool, type ProviderUsage, type UsageSource } from "./provider-usage.ts";
 
@@ -77,6 +80,7 @@ export interface Snapshot {
   flow?: FlowSnapshot;
   system1?: System1Status;
   actions?: FooterControlState;
+  settingsCycle?: SettingCycleSnapshot;
   primaryKeys?: { model?: string; workflow?: string; approvals?: string };
   /** Other-session chrome is string-only: no inherited controls or primary hints. */
   readOnly?: boolean;
@@ -670,7 +674,7 @@ export function parseGitStatus(output: string | Buffer): GitInfo {
 }
 
 type SegmentHit = Omit<FooterHit, "row">;
-interface Segment { text: string; short?: string; priority: number; separatorAfter?: string; hits?: SegmentHit[]; shortHits?: SegmentHit[] }
+interface Segment { text: string; short?: string; priority: number; separatorAfter?: string; hits?: SegmentHit[]; shortHits?: SegmentHit[]; atomic?: boolean }
 interface Part { text: string; action?: string }
 function partsSegment(parts: Part[], priority: number, short?: Part[]): Segment {
   const compose = (parts: Part[]) => {
@@ -707,7 +711,7 @@ export function fitSegmentLayout(segments: Segment[], width: number, theme: Pain
   const text = join(), limit = Math.max(0, width);
   // Truncation can only remain once a single segment survives. A partial label
   // is not a control (nor is the ellipsis); no stale range extends past it.
-  if (visibleWidth(text) > limit) return { text: truncateToWidth(text, limit, "…"), hits: [] };
+  if (visibleWidth(text) > limit) return { text: items[0]?.atomic ? "" : truncateToWidth(text, limit, "…"), hits: [] };
   let col = 0;
   const hits: SegmentHit[] = [];
   items.forEach((item, i) => {
@@ -999,23 +1003,35 @@ export function layoutFooter(snapshot: Snapshot, width: number, theme: Paint): F
   const branchShort = outsideGit ? "" : `${branchIcon}${theme.fg("muted", truncateToWidth(clean(g.branch ?? ""), 14))}${suffix}`;
   const phaseText = s.phase ? theme.fg(s.phase === "error" ? "error" : "warning", s.phase) : "";
   const model = theme.bold(theme.fg("accent", shortModel(s.model)));
-  const automatic = s.actions?.["effort.toggle"]?.active ?? s.autoEffort;
-  const reasoningParts: Part[] = s.thinking ? [
+  // Preview state is detached from committed provider/action state, main-only and explicit.
+  const draft = !s.readOnly && !s.compact && ["pending", "applying"].includes(s.settingsCycle?.phase ?? "") ? s.settingsCycle : undefined;
+  const pending = (key: SettingKey) => draft?.settings.find(setting => setting.key === key);
+  const pendingText = (key: SettingKey) => pending(key) ? theme.fg("warning", ` ${draft!.phase}`) : "";
+  const thinking = typeof pending("reasoning")?.target === "string" ? pending("reasoning")!.target as string : s.thinking;
+  const automatic = typeof pending("auto-effort")?.target === "boolean" ? pending("auto-effort")!.target : s.actions?.["effort.toggle"]?.active ?? s.autoEffort;
+  const reasoningParts: Part[] = thinking ? [
     { text: `${theme.fg("dim", `${ICONS.reasoning} `)}${theme.fg("muted", "reasoning")} ` },
-    ...(automatic ? [{ text: theme.fg("dim", "auto"), action: action("effort.toggle") }, { text: theme.fg("dim", " → ") }] : []),
-    { text: theme.bold(theme.fg(thinkingColor(s.thinking), clean(s.thinking))), action: action("reasoning.cycle") },
-    ...(!automatic && action("effort.toggle") ? [{ text: sep }, { text: theme.fg("dim", "auto off"), action: action("effort.toggle") }] : []),
+    ...(automatic ? [{ text: theme.fg("dim", "auto") + pendingText("auto-effort"), action: action("effort.toggle") }, { text: theme.fg("dim", " → ") }] : []),
+    { text: theme.bold(theme.fg(thinkingColor(thinking), clean(thinking))) + pendingText("reasoning"), action: action("reasoning.cycle") },
+    ...(!automatic && action("effort.toggle") ? [{ text: sep }, { text: theme.fg("dim", "auto off") + pendingText("auto-effort"), action: action("effort.toggle") }] : []),
   ] : [];
   const reasoning = reasoningParts.map((part) => part.text).join("");
   const identity = `${model}${reasoning ? `${sep}${reasoning}` : ""}`;
-  const modeColor = s.mode ? MODE_COLORS[s.mode.kind] : "muted";
-  const approval = s.mode && s.mode.kind !== "chat" && s.mode.kind !== "plan" ? s.mode : undefined;
+  const rawApprovalTarget = pending("approvals")?.target;
+  const approvalTarget = rawApprovalTarget === "bypassPermissions" ? "bypass" : rawApprovalTarget;
+  const shownMode = s.mode && typeof approvalTarget === "string" && Object.hasOwn(MODE_NAMES, approvalTarget)
+    ? { ...s.mode, kind: approvalTarget as PermissionModeStatus["kind"] } : s.mode;
+  const modeColor = shownMode ? MODE_COLORS[shownMode.kind] : "muted";
+  const approval = shownMode && shownMode.kind !== "chat" && shownMode.kind !== "plan" ? shownMode : undefined;
   // A defined exec detail (even empty) takes precedence over explicit and legacy workflow status.
   const legacyWorkflow = s.mode?.kind === "chat" || s.mode?.kind === "plan" ? { kind: s.mode.kind, key: s.mode.key } : undefined;
   const linked = !s.readOnly && s.flow?.operatingMode === "linked";
   const flowState = linked ? s.flow!.blocked ? "Linked blocked" : !s.flow!.ready || !s.flow!.guardAvailable ? "Linked unavailable" : s.flow!.transitioning ? "Linked changing" : "" : "";
   const flowStateText = flowState ? theme.fg(s.flow!.blocked || !s.flow!.guardAvailable ? "error" : "warning", flowState) : "";
-  const workflow: WorkflowStatus | undefined = linked ? { kind: s.flow!.workflow } : s.exec !== undefined ? { kind: "exec" } : s.workflow ?? legacyWorkflow;
+  const effectiveWorkflow: WorkflowStatus | undefined = linked ? { kind: s.flow!.workflow } : s.exec !== undefined ? { kind: "exec" } : s.workflow ?? legacyWorkflow;
+  const workflowTarget = pending("workflow")?.target;
+  const workflow: WorkflowStatus | undefined = effectiveWorkflow && effectiveWorkflow.kind !== "exec" && (workflowTarget === "work" || workflowTarget === "chat" || workflowTarget === "plan")
+    ? { ...effectiveWorkflow, kind: workflowTarget } : effectiveWorkflow;
   rows.push(row(ICONS.project, (w) => fitSegments([
     { text: project, priority: 60 },
     { text: branch, short: branchShort, priority: g.conflicts ? 110 : 70 },
@@ -1047,7 +1063,7 @@ export function layoutFooter(snapshot: Snapshot, width: number, theme: Paint): F
   const workflowAction = action(workflow?.kind === "exec" ? "execution.status" : "workflow.cycle");
   const identitySegments = [
     partsSegment([{ text: model, action: action("model.open") }], 100),
-    partsSegment(reasoningParts, 65),
+    { ...partsSegment(reasoningParts, 65), atomic: !!pending("reasoning") || !!pending("auto-effort") },
     // Trend is already expressed by auto → effort; retain quota-policy notes
     // independently so they can yield before model/reasoning at narrow widths.
     { text: automatic && s.autoEffortDetail?.includes("limited:") ? theme.fg("dim", clean(s.autoEffortDetail.replace(/^[↑↓→],?\s*/, ""))) : "", priority: 25 },
@@ -1057,7 +1073,7 @@ export function layoutFooter(snapshot: Snapshot, width: number, theme: Paint): F
   if (linked && workflow) {
     const flow = s.flow!;
     controlRow(ICONS.workflow, [
-      partsSegment([{ text: workflowBadge(theme, workflow.kind), action: workflowAction }], 130),
+      { ...partsSegment([{ text: workflowBadge(theme, workflow.kind) + pendingText("workflow"), action: workflowAction }], 130), atomic: !!pending("workflow") },
       { text: flowStateText, priority: 140 },
       partsSegment([{ text: theme.fg("muted", clean(flow.selectedFlow?.provider ?? s.provider)), action: action("model.open") }], 75),
       ...identitySegments,
@@ -1068,16 +1084,16 @@ export function layoutFooter(snapshot: Snapshot, width: number, theme: Paint): F
   } else {
     controlRow(ICONS.model, identitySegments, s.primaryKeys?.model, action("model.open"));
     if (workflow) controlRow(ICONS.workflow, [
-      partsSegment([{ text: workflowBadge(theme, workflow.kind), action: workflowAction }], 130),
+      { ...partsSegment([{ text: workflowBadge(theme, workflow.kind) + pendingText("workflow"), action: workflowAction }], 130), atomic: !!pending("workflow") },
       { text: execPhase ? theme.fg("muted", execPhase) : "", short: theme.fg("muted", execPhase.split(" · ")[0]), priority: 120 },
       { text: theme.fg("muted", execDetail || (execPhase ? "" : WORKFLOW_EXPLANATIONS[workflow.kind])), priority: 70 },
     ], workflow.kind === "exec" ? "/plan-exec" : s.primaryKeys?.workflow ?? workflow.key, workflowAction);
   }
   if (approval) controlRow(ICONS.gate, [
-    partsSegment([
+    { ...partsSegment([
       { text: theme.fg("muted", "Approvals") }, { text: sep },
-      { text: theme.fg(modeColor, MODE_NAMES[approval.kind] + (approval.kind === "manual" || approval.kind === "acceptEdits" ? " (legacy)" : "")), action: action("approvals.open") },
-    ], 120),
+      { text: theme.fg(modeColor, MODE_NAMES[approval.kind] + (approval.kind === "manual" || approval.kind === "acceptEdits" ? " (legacy)" : "")) + pendingText("approvals"), action: action("approvals.open") },
+    ], 120), atomic: !!pending("approvals") },
     { text: gateStatus ? clean(gateStatus) : "", short: gateStatus?.replace(/^Gate (\d+) auto · (\d+) pushed back · (\d+) asked$/u, "Gate $1/$2/$3"), priority: 60 },
   ], s.primaryKeys?.approvals ?? approval.key, action("approvals.open"));
 
@@ -1240,6 +1256,8 @@ function stashedPrompt(): string | undefined {
 }
 
 export default function statusFooter(pi: ExtensionAPI): void {
+  const cycles = settingsCycles(pi);
+  const reasoningOwner = {};
   let ctx: ExtensionContext | undefined;
   let active = false, enabled = true, showAll = false, generation = 0;
   let showWorking = true, showMcp = true;
@@ -1261,12 +1279,45 @@ export default function statusFooter(pi: ExtensionAPI): void {
   let mainEditor: FooterEditor | undefined, mainTui: FooterTui | undefined;
   let mainKeys: { getKeys?(action: "app.model.select"): readonly string[] } | undefined;
   let releaseInput: (() => void) | undefined;
+  let releaseCycleGuard: (() => void) | undefined;
   let promptDepth = 0, interactionGeneration = 0;
   let discoveredActions: ReturnType<typeof queryFooterActions> = {};
   let discoveredFlow: FlowSnapshot | undefined;
   let discoveredSystem1: System1Status | undefined;
   let prepared: Snapshot | undefined;
   let refreshSnapshot: (() => void) | undefined;
+  const stageReasoning = () => {
+    const context = ctx;
+    if (!active || !enabled || !context) return;
+    if (!context.model?.reasoning) { context.ui.notify("Current model does not support thinking", "warning"); return; }
+    const epoch = interactionGeneration, sessionId = context.sessionManager.getSessionId();
+    void cycles.stage(context, {
+      key: "reasoning", owner: reasoningOwner,
+      read: () => pi.getThinkingLevel(),
+      next: value => {
+        const levels = getSupportedThinkingLevels(context.model!);
+        return levels[(levels.indexOf(value) + 1) % levels.length] as ThinkingLevel;
+      },
+      format: value => value,
+      current: () => active && epoch === interactionGeneration && ctx?.sessionManager.getSessionId() === sessionId,
+      validate: () => ctx?.model?.reasoning ? undefined : "Current model does not support thinking",
+      apply: value => {
+        pi.setThinkingLevel(value);
+        pi.events.emit(SETTINGS_REASONING_COMMITTED, { level: pi.getThinkingLevel() });
+        return true;
+      },
+    }).catch(error => context.ui.notify(`Settings change failed: ${String(error)}`, "error"));
+  };
+  const bindCycleGuard = () => {
+    releaseCycleGuard?.();
+    const editor = mainEditor, tui = mainTui, epoch = interactionGeneration;
+    releaseCycleGuard = cycles.addGuard(() => {
+      if (!active || !enabled) return undefined;
+      if (epoch !== interactionGeneration || editor !== mainEditor || tui !== mainTui) return "main editor changed";
+      return editor && tui?.getFocusedComponent?.() === editor && tui?.hasOverlay?.() === false && !promptDepth && !blockedHolds
+        ? undefined : "main editor is not available";
+    });
+  };
   const interactions = createFooterActionController({
     getEditor: () => mainEditor, getTui: () => mainTui, getGeneration: () => interactionGeneration,
     isCurrent: () => active && enabled && !!ctx,
@@ -1280,6 +1331,8 @@ export default function statusFooter(pi: ExtensionAPI): void {
       catch { return true; } // Never turn a failed coordinator query into a free model picker.
     },
     getActions: () => discoveredActions,
+    cycleReasoning: stageReasoning,
+    cancelSettings: reason => cycles.cancel(reason),
     notify: (message, type) => ctx?.ui.notify(message, type),
     refresh: () => requestRender?.(),
   });
@@ -1739,7 +1792,7 @@ export default function statusFooter(pi: ExtensionAPI): void {
       (discoveredFlow?.operatingMode !== "linked" || discoveredActions["flow.open"])) controls["model.open"] = {};
     if (nativeControls && mainEditor?.actionHandlers?.get("app.thinking.cycle")) controls["reasoning.cycle"] = {};
     const main: Snapshot = {
-      flow: discoveredFlow, system1: discoveredSystem1, actions: controls,
+      flow: discoveredFlow, system1: discoveredSystem1, actions: controls, settingsCycle: cycles.snapshot(),
       primaryKeys: {
         model: controls["model.open"] ? mainKeys?.getKeys?.("app.model.select")?.[0] : undefined,
         workflow: discoveredActions["workflow.cycle"] ? discoveredActions["workflow.cycle"].key ?? "" : absorbed.workflow?.key,
@@ -1778,7 +1831,7 @@ export default function statusFooter(pi: ExtensionAPI): void {
     return {
       ...main,
       // Main's mutable controls and policy are not the viewed agent's state.
-      flow: undefined, system1: undefined, actions: undefined, primaryKeys: undefined, readOnly: true,
+      flow: undefined, system1: undefined, actions: undefined, settingsCycle: undefined, primaryKeys: undefined, readOnly: true,
       workflow: undefined, mode: undefined, exec: undefined,
       autoEffort: undefined, autoEffortDetail: undefined, cache: undefined, lean: undefined,
       cwd: session.cwd, provider: session.provider, model: session.model, thinking: session.thinking,
@@ -1888,6 +1941,7 @@ export default function statusFooter(pi: ExtensionAPI): void {
       const editor = previous?.(tui, theme, keybindings) ?? new CustomEditor(tui, theme, keybindings);
       releaseInput?.();
       mainEditor = editor as FooterEditor; mainTui = tui; mainKeys = keybindings;
+      bindCycleGuard();
       releaseInput = typeof editor.handleInput === "function" ? interactions.wrapEditor(mainEditor, tui) : undefined;
       // Pi installs native action-map entries just after this factory returns.
       queueMicrotask(() => {
@@ -1915,6 +1969,8 @@ export default function statusFooter(pi: ExtensionAPI): void {
     const context = ctx, interval = timer, timeout = codexTimeout, controller = codexAbort;
     const footer = releaseFooter, editor = releaseEditor, input = releaseInput, processes = [...children];
     const runInterval = workingTimer, mcpInterval = mcpTimer, shownWorking = workingShown;
+    cycles.cancel("footer closed");
+    releaseCycleGuard?.(); releaseCycleGuard = undefined;
     active = false; generation++; interactionGeneration++;
     ctx = undefined; requestRender = undefined;
     mainEditor = undefined; mainTui = undefined; mainKeys = undefined; releaseInput = undefined;
@@ -1998,6 +2054,7 @@ export default function statusFooter(pi: ExtensionAPI): void {
     // Do not invalidate the session's gauge/factory closures by bumping their epoch.
     interactionGeneration++;
     releaseInput?.();
+    bindCycleGuard();
     releaseInput = mainEditor && mainTui && typeof mainEditor.handleInput === "function"
       ? interactions.wrapEditor(mainEditor, mainTui) : undefined;
     ctx = context; phase = undefined;
@@ -2076,7 +2133,7 @@ export default function statusFooter(pi: ExtensionAPI): void {
           "Provider limits: subscription allowance is distinct from API throttles, balances and cost. Google local OAuth uses its internal read-only quota endpoint; vault custody has no quota capability. Muse CLI usage --json currently exposes availability only; successful window format remains unverified. OpenAI ChatGPT-plan windows are unavailable here.",
           ...accountDetails,
           `Working row: ${showWorking ? "on" : "off"} (streamed output tokens, estimated as chars/4 until the provider reports a count, and elapsed time after ${SHOW_TIMER_AFTER_MS / 1000}s). MCP chip: ${showMcp ? "on" : "off"} (built-in MCP servers with non-hidden tools over servers enabled in mcp.json; approximate, and absent when another extension publishes an mcp status).`,
-          `Controls: ${JSON.stringify({ ...interactions.describe(), ...footerControls?.describe() })}. This in-memory diagnostic records only the last pointer event, not text or account data.`,
+          `Controls: ${JSON.stringify({ ...interactions.describe(), ...footerControls?.describe(), settingsCycle: cycles.snapshot() ? { phase: cycles.snapshot()!.phase, keys: cycles.snapshot()!.settings.map(setting => setting.key) } : undefined })}. This in-memory diagnostic records only the last pointer event, not text or account data.`,
           "/status on: active provider only; /status all: also show configured remote providers (at most two rows, remaining sources in details); /status native: restore Pi footer; /status working on|off, /status mcp on|off. Choices survive reload/resume in this session.",
         ].join("\n"), "info");
         return;
