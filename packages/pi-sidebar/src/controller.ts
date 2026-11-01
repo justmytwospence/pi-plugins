@@ -2,7 +2,7 @@
 // thread stored in main's session.
 import path from "node:path";
 import { getAgentDir, type ExtensionAPI, type ExtensionContext, type Theme } from "@earendil-works/pi-coding-agent";
-import { getKeybindings, matchesKey, type Component, type TUI } from "@earendil-works/pi-tui";
+import { getKeybindings, isKeyRelease, isKeyRepeat, matchesKey, type Component, type TUI } from "@earendil-works/pi-tui";
 import { ago, SidebarAgent, type QuestionCapture, type SidebarEvent } from "./child.ts";
 import { MIN_COLUMNS_ENV, parseMinColumns, parseRatio, PREFS_ENV, RATIO_ENV } from "./config.ts";
 import { canSplit, dividerLines, muteEditorBorders, SplitLayout } from "./layout.ts";
@@ -71,6 +71,7 @@ export const SIDEBAR_HEADSUP_HELP = [
 const PROBE = "pi-sidebar-probe";
 const HERDR_BLOCKED = "herdr:blocked";
 const SIDE_PANEL = "pi-plugins.side-panel.v1";
+const SIDE_PANEL_TOGGLE = "pi-plugins.side-panel-toggle.v1";
 const SIDE_PANEL_ID = "pi-sidebar";
 
 type FocusTui = TUI & { getFocusedComponent?(): Component | null };
@@ -245,7 +246,7 @@ export class SidebarController {
   }
 
   matchesToggle(data: string): boolean {
-    return this.keys.some((key) => matchesKey(data, key as never));
+    return !isKeyRelease(data) && !isKeyRepeat(data) && this.keys.some((key) => matchesKey(data, key as never));
   }
 
   matchesFocusSwitch(data: string): boolean {
@@ -258,7 +259,15 @@ export class SidebarController {
     this.focusSidebar();
   }
 
-  /** Ctrl+' and `/sidebar`: open it (focused), or close it when it is open (the thread is kept). */
+  /** Ctrl+' delegates to the active notebook first; /sidebar always selects Sidebar explicitly. */
+  toggleShortcut(ctx: ExtensionContext): void {
+    if (this.collapsed) return;
+    let claimed = false;
+    this.pi.events?.emit?.(SIDE_PANEL_TOGGLE, { claim: () => { claimed = true; } });
+    if (!claimed) this.toggle(ctx);
+  }
+
+  /** Toggle Sidebar explicitly (its thread is kept). */
   toggle(ctx: ExtensionContext): void {
     if (this.isOpen) this.close();
     else if (this.open(ctx)) this.focusSidebar();
@@ -362,7 +371,12 @@ export class SidebarController {
     this.hostTui = this.probe(ctx) ?? this.hostTui;
     this.ensureViewHost(ctx);
     this.releaseInput = ctx.ui.onTerminalInput((data) => {
-      if (this.matchesToggle(data)) { this.toggle(ctx); return { consume: true }; }
+      if (isKeyRelease(data)) return undefined;
+      if (this.keys.some((key) => matchesKey(data, key as never))) {
+        if (this.collapsed) return undefined;
+        if (!isKeyRepeat(data)) this.toggleShortcut(ctx);
+        return { consume: true };
+      }
       if (!this.viewHost?.hasView && this.headsUp.note.showing && this.headsUp.handleKey(data, this.editorIdle(ctx))) return { consume: true };
       if (this.sidebarTyping()) {
         const prompt = this.injected.observe(data, this.panel!.input.getText() === "", (d) => matchesKey(d, "enter"));

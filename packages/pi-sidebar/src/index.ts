@@ -57,7 +57,7 @@ export default function piSidebar(pi: ExtensionAPI) {
   for (const key of keys) {
     pi.registerShortcut(key as never, {
       description: "Open or close Sidebar, a read-only side chat beside this session",
-      handler: (ctx) => sidebar.toggle(ctx),
+      handler: (ctx) => sidebar.toggleShortcut(ctx),
     });
   }
 

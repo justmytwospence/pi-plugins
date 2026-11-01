@@ -13,7 +13,7 @@ plugin: pi-sidebar
 - **Requirements, cost & privacy:** Requires Pi's fullscreen mode. On main's model, each question reads main's context from main's cache, plus a small new part, and Sidebar asks first when that cache has probably expired. On another model, the first question reads main's transcript uncached once, and later ones read it from that model's own cache. The thread is stored separately for the agent family and is not sent to main's model.
 - **Integrations & limits:** Works with Anthropic Messages, OpenAI Responses (including Codex) and Chat Completions. Sidebar uses main's tools, skills and templates; a guard refuses calls that would change anything, but it is not a sandbox. An optional pi-vim composer is supported. Sidebar steps aside while a dialog waits in main.
 
-`pi-sidebar` splits Pi's fullscreen layout in two. Main's transcript, editor and footer reflow into one half, and Sidebar fills the other: side by side when each half keeps 80 columns, otherwise below main. Sidebar shares the right-hand side with pi-marimo's docked notebook view: opening one closes the other (event `pi-plugins.side-panel.v1`). While pi-marimo has a notebook in use, `ctrl+'` docks that notebook instead of opening Sidebar; `/sidebar` still opens Sidebar.
+`pi-sidebar` splits Pi's fullscreen layout in two. Main's transcript, editor and footer reflow into one half, and Sidebar fills the other: side by side when each half keeps 80 columns, otherwise below main. Sidebar shares the right-hand side with pi-marimo's docked notebook view: opening one closes the other (event `pi-plugins.side-panel.v1`). One physical `ctrl+'` press toggles exactly once: an already-open Sidebar owns the key; otherwise an active notebook docks or closes before Sidebar gets a turn, regardless of which extension registered its listener first. A key held down does not toggle repeatedly, and release does nothing. With no eligible notebook, the key opens Sidebar; `/sidebar` always chooses Sidebar explicitly.
 
 Sidebar is a second agent inside main's Pi process. It sees main's latest state:
 - everything main has committed;
@@ -45,7 +45,7 @@ Use Pi's fullscreen mode (`"tuiMode": "fullscreen"`). In regular mode, the key a
 
 | Control | What it does |
 | --- | --- |
-| Ctrl+' | Opens Sidebar, focused, or closes it from either half. The thread is kept. |
+| Ctrl+' | Toggles the active notebook when one is available and Sidebar is closed; otherwise opens or closes Sidebar. One press toggles once; held repeats and release do nothing. The Sidebar thread is kept. |
 | Herdr `prefix+h/l` (`j/k` when Sidebar is below) | Moves between main and Sidebar as if Sidebar were a Herdr pane. Other moves are Herdr's normal pane moves. |
 | Click | Clicking anywhere in a half focuses it. Clicks on dialogs and the divider do not. |
 | Drag the divider | Resizes the halves, remembered per orientation. A double-click goes back to the default. |

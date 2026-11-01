@@ -65,6 +65,26 @@ describe("registration", () => {
     expect(pi.handlers.has("before_provider_request")).toBe(true);
   });
 
+  it("routes shortcut presses to the notebook while preserving explicit Sidebar toggles", () => {
+    const { pi, controller, ctx } = setup();
+    const claimed: unknown[] = [];
+    pi.events.on("pi-plugins.side-panel-toggle.v1", (request: unknown) => {
+      claimed.push(request);
+      (request as { claim(): void }).claim();
+      (request as { claim(): void }).claim();
+    });
+    controller.toggleShortcut(ctx as never);
+    expect(claimed).toHaveLength(1);
+    expect(controller.isOpen).toBe(false);
+    controller.toggle(ctx as never);
+    expect(controller.isOpen).toBe(true);
+    controller.toggleShortcut(ctx as never);
+    expect(claimed).toHaveLength(2);
+    expect(controller.isOpen).toBe(true);
+    controller.toggle(ctx as never);
+    expect(controller.isOpen).toBe(false);
+  });
+
   it("takes its keys from PI_SIDEBAR_KEYS", () => {
     process.env.PI_SIDEBAR_KEYS = "ctrl+., alt+s";
     const pi = new FakePi();
@@ -232,6 +252,32 @@ describe("opening and focus", () => {
     panel.input.handleInput("\x14"); // ctrl+t, the test's toggle key
     expect(controller.isOpen).toBe(false);
     expect(tui.focused).toBe(mainEditor);
+  });
+
+  it("toggles on one Kitty press, ignoring held repeats and release, and defers to a notebook claim", async () => {
+    const { pi, controller, ctx } = setup();
+    let input: ((data: string) => unknown) | undefined;
+    (ctx.ui as { onTerminalInput?: unknown }).onTerminalInput = (handler: (data: string) => unknown) => { input = handler; return () => {}; };
+    await pi.emit("session_start", { reason: "startup" }, ctx);
+    const press = "\x1b[116;5u", repeat = "\x1b[116;5:2u", release = "\x1b[116;5:3u";
+    pi.events.on("pi-plugins.side-panel-toggle.v1", (request: unknown) => (request as { claim(): void }).claim());
+    expect(input!(press)).toEqual({ consume: true });
+    expect(controller.isOpen).toBe(false);
+    expect(input!(repeat)).toEqual({ consume: true });
+    expect(input!(release)).toBeUndefined();
+    expect(controller.isOpen).toBe(false);
+    // An explicit /sidebar action still opens Sidebar without consulting notebook ownership.
+    controller.toggle(ctx as never);
+    const panel = panelOf(controller);
+    panel.input.setText("saved draft");
+    expect(controller.matchesToggle(repeat)).toBe(false);
+    expect(controller.matchesToggle(release)).toBe(false);
+    expect(panel.input.getText()).toBe("saved draft");
+    pi.events.emit("herdr:blocked", { active: true });
+    expect(input!(press)).toBeUndefined();
+    pi.events.emit("herdr:blocked", { active: false });
+    expect(input!(release)).toBeUndefined();
+    expect(controller.isOpen).toBe(true);
   });
 
   it("moves between main and Sidebar with Herdr's prefix+h/l, and hands other moves to Herdr", async () => {
