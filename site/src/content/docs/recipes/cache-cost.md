@@ -39,7 +39,7 @@ A model switch can also make the cache cold. System/tool changes and other inval
 
 ## Enable classifier features deliberately
 
-Cache guard’s warnings and clock work without Jev. Its optional trimming and fast compaction send tool output or conversation items to a classifier provider. To keep those off, use your Pi-specific `~/.pi/agent/cache-guard.json`:
+Cache guard’s warnings and clock work without a classifier. Its optional trimming and fast compaction send tool output or conversation items to a classifier provider. To keep those off, use your Pi-specific `~/.pi/agent/cache-guard.json`:
 
 ```json
 {
@@ -47,7 +47,7 @@ Cache guard’s warnings and clock work without Jev. Its optional trimming and f
 }
 ```
 
-If you decide to enable Jev, `/cache-guard jev` checks a provider with a **live classifier request**; it is not an offline status-only command. Configure credentials in Pi, not in the site or project docs.
+Use `/system1` to choose the global classifier: Jev is the default; native OpenAI Decisions is the alternative. `/cache-guard jev` remains a compatibility alias for classifier setup and status; opening it does not itself run a paid connectivity probe. Configure credentials in Pi, not in the site or project docs. Decisions requires a separate API key and billing setup; see [Requirements & costs](/guides/requirements/) before selecting it.
 
 Tool trimming runs before results enter context and points to a saved full-output file. Asking for the same output again in the turn can return it untrimmed. Nested codemode calls are not trimmed by this path. A compacted history is still lossy; inspect important exact values before discarding the originals.
 
@@ -57,7 +57,7 @@ Auto-effort keeps your selected model and adjusts effort only. It rates the requ
 
 Mid-run adjustment is limited to models Pi marks compatible or explicitly configured effort-update models. Do not add broad `midRun.models` globs unless you accept the potential cache cost.
 
-`/auto-effort off` stops adaptation for the session and restores your manual level. Classifier failure keeps the current level. Subscription-limit pressure raises how sure Jev must be before a higher level is used; `/auto-effort limits` explains the readings and forecast.
+`/auto-effort off` stops adaptation for the session and restores your manual level. Classifier failure keeps the current level. Subscription-limit pressure raises how sure the classifier must be before a higher level is used; `/auto-effort limits` explains the readings and forecast.
 
 ## Warming belongs to Pi
 

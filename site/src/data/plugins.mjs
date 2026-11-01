@@ -19,7 +19,8 @@ export const groups = [
     { name: "pi-tool-gate", label: "Tool gate", description: "Permission modes after an explicit Shift+Tab remap; classifier-assisted auto mode. Not a sandbox." },
   ] },
   { title: "Context & cost", eyebrow: "03 / Awareness", description: "See what the session is using and choose when to spend more reasoning or context.", plugins: [
-    { name: "pi-cache-guard", label: "Cache guard", description: "Cache-expiry warnings, a cache clock and optional Jev context trimming." },
+    { name: "pi-system1", label: "System 1", description: "Choose the suite's classifier backend and request typed judgments." },
+    { name: "pi-cache-guard", label: "Cache guard", description: "Cache-expiry warnings, a cache clock and optional classifier-guided context trimming." },
     { name: "pi-auto-effort", label: "Auto effort", description: "Classifier-guided reasoning levels, bounded by your manual ceiling." },
     { name: "pi-status-footer", label: "Status footer", description: "Context, Git and provider-aware usage in one responsive footer." },
     { name: "pi-context", label: "Context breakdown", description: "See what fills the context window, part by part, with previews." },

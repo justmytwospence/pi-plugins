@@ -1,5 +1,9 @@
-import { expect, test } from "vitest";
-import { askJev } from "../src/jev.ts";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import path from "node:path";
+import { afterEach, beforeEach, expect, test, vi } from "vitest";
+import { askJev, bool, choice, score } from "../src/jev.ts";
+import { askSystem1, resolveSystem1Target } from "../src/system1.js";
 import { DEFAULT_THRESHOLDS, judgeQuestions, judgeState, verdict } from "../src/judge.ts";
 
 const rules = ["Never deploy without current approval", "Do not send private data"];
@@ -14,7 +18,18 @@ const completeAnswers = () => ({
   "rule::1": { type: "bool", probability: 0 },
 });
 
+let configDir: string;
+beforeEach(() => {
+  configDir = mkdtempSync(path.join(tmpdir(), "pi-tool-gate-jev-"));
+  vi.stubEnv("PI_CODING_AGENT_DIR", configDir);
+});
+afterEach(() => {
+  vi.unstubAllEnvs();
+  rmSync(configDir, { recursive: true, force: true });
+});
+
 const config = { enabled: true, provider: "typesafe", model: "jev-latest", timeoutMs: 10 };
+const questions = { q: { type: "bool", instructions: "Is this safe?", criteria: { true: "Safe", false: "Unsafe" } } } as const;
 const ok = { model: "jev-latest", answers: { q: { type: "bool", probability: 0.9 } }, stopReason: "stop" } as const;
 const timedOut = { model: "jev-latest", answers: {}, stopReason: "error", errorMessage: "Request timed out after 10ms" } as const;
 
@@ -98,25 +113,57 @@ test("judge exposes approved snapshots as subordinate context alongside later wi
 
 test("askJev retries a timed-out request once", async () => {
   const reg = registry([timedOut, ok]);
-  const outcome = await askJev(reg, config, {}, {});
-  expect(outcome).toMatchObject({ ok: true, answers: ok.answers });
-  expect(reg.calls).toEqual([{ timeoutMs: 10 }, { timeoutMs: 10 }]);
+  const outcome = await askJev(reg, config, {}, questions);
+  expect(outcome).toMatchObject({
+    ok: true, answers: ok.answers, backend: "jev", provider: config.provider, model: config.model,
+    selectionKey: resolveSystem1Target(config).key,
+  });
+  expect(reg.calls).toEqual([
+    { timeoutMs: 10, retries: 0, maxRetries: 0, signal: expect.any(AbortSignal) },
+    { timeoutMs: 10, retries: 0, maxRetries: 0, signal: expect.any(AbortSignal) },
+  ]);
 });
 
 test("askJev gives up after the retry also times out", async () => {
   const reg = registry([timedOut, new Error("Request timed out after 10ms")]);
-  expect(await askJev(reg, config, {}, {})).toEqual({ ok: false, reason: "timed out" });
+  expect(await askJev(reg, config, {}, questions)).toMatchObject({ ok: false, reason: "timed out" });
   expect(reg.calls).toHaveLength(2);
 });
 
 test("askJev does not retry other errors or a cancelled request", async () => {
   const failing = registry([{ ...timedOut, errorMessage: "System One API error (400)" }]);
-  expect(await askJev(failing, config, {}, {})).toMatchObject({ ok: false });
+  expect(await askJev(failing, config, {}, questions)).toMatchObject({ ok: false });
   expect(failing.calls).toHaveLength(1);
 
   const controller = new AbortController();
   controller.abort();
   const cancelled = registry([timedOut, ok]);
-  expect(await askJev(cancelled, config, {}, {}, controller.signal)).toEqual({ ok: false, reason: "timed out" });
-  expect(cancelled.calls).toHaveLength(1);
+  expect(await askJev(cancelled, config, {}, questions, controller.signal)).toEqual({ ok: false, reason: "cancelled" });
+  expect(cancelled.calls).toHaveLength(0);
+});
+
+test("compatibility exports retain accessors and use the selected target", async () => {
+  expect(askJev).toBe(askSystem1);
+  expect(bool(ok.answers, "q")).toBe(0.9);
+  expect(choice({ q: { type: "choice", choice: "yes", confidence: 1, probabilities: { yes: 1 } } }, "q")?.choice).toBe("yes");
+  expect(score({ q: { type: "score", score: 1.5, confidence: 0.8 } }, "q")).toEqual({ score: 1.5, confidence: 0.8 });
+  mkdirSync(configDir, { recursive: true });
+  writeFileSync(path.join(configDir, "system1.json"), JSON.stringify({ backend: "openai-decisions" }));
+  const native = { provider: "system1-openai", id: "gpt-6-luna", api: "openai-decisions", baseUrl: "https://api.openai.com/v1" };
+  const reg = {
+    findOfType: vi.fn(() => native),
+    classify: vi.fn(async () => ({ ...ok, model: native.id })),
+  };
+  expect(await askJev(reg, config, {}, questions)).toMatchObject({
+    ok: true, backend: "openai-decisions", provider: native.provider, model: native.id,
+    selectionKey: resolveSystem1Target(config).key,
+  });
+  expect(reg.findOfType).toHaveBeenCalledWith("classifier", native.provider, native.id);
+  expect(reg.classify).toHaveBeenCalledTimes(1);
+});
+
+test("an empty question set fails without touching the registry", async () => {
+  const reg = registry([ok]);
+  expect(await askJev(reg, config, {}, {})).toEqual({ ok: false, reason: "no questions to judge" });
+  expect(reg.calls).toHaveLength(0);
 });

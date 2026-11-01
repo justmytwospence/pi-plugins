@@ -8,6 +8,7 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 import { loadConfig } from "./config.ts";
 import { whileBlocked } from "./herdr.ts";
 import { type JevConfig, askJev } from "./jev.ts";
+import { SYSTEM1_CHANGED, resolveSystem1Target } from "./system1.js";
 import { Picker, type PickerModel } from "./picker.ts";
 import { DEFAULT_RANK, type Judged, type RankSettings, chronological, piecesToJudge, rankQuestions, rankState, readJudgments, suggested } from "./rank.ts";
 import { type Segment, extractSegments, segmentKey } from "./segments.ts";
@@ -39,9 +40,24 @@ export const DEFAULT_CONFIG: CopyConfig = {
 };
 
 export default function piCopy(pi: ExtensionAPI) {
-  // Jev's judgments by piece content, for this session.
+  // Content judgments belong to one effective classifier target, never just a backend label.
   const cache = new Map<string, Judged>();
+  let cacheTarget: string | undefined;
   let config: CopyConfig = DEFAULT_CONFIG;
+  const rankings = new Set<() => void>();
+  const invalidateRankings = () => {
+    cache.clear();
+    for (const invalidate of rankings) invalidate();
+  };
+  const syncTarget = () => {
+    const key = resolveSystem1Target(config.jev).key;
+    if (key !== cacheTarget) {
+      cacheTarget = key;
+      invalidateRankings();
+    }
+    return key;
+  };
+  pi.events.on(SYSTEM1_CHANGED, () => { syncTarget(); });
 
   const open = async (ctx: ExtensionContext) => {
     if (ctx.mode !== "tui") {
@@ -49,6 +65,8 @@ export default function piCopy(pi: ExtensionAPI) {
       return;
     }
     config = loadConfig("copy", DEFAULT_CONFIG, ctx.cwd);
+    const targetKey = syncTarget();
+    const settings = config;
     const branch = ctx.sessionManager.getBranch();
     const segments = extractSegments(branch, config.maxTurns);
     if (!segments.length) {
@@ -56,33 +74,56 @@ export default function piCopy(pi: ExtensionAPI) {
       return;
     }
     const lastTurn = Math.max(...segments.map((s) => s.turn));
+    let valid = true;
+    let open = true;
     const model = (ranking: PickerModel["ranking"]): PickerModel => ({
-      suggested: suggested(segments, cache, config.rank),
+      suggested: suggested(segments, valid ? cache : undefined, settings.rank),
       all: chronological(segments),
       ranking,
       lastTurn,
     });
 
-    const pending = piecesToJudge(segments, config.rank).filter((s) => !cache.has(segmentKey(s)));
+    const pending = piecesToJudge(segments, settings.rank).filter((s) => !cache.has(segmentKey(s)));
     const controller = new AbortController();
     let picker: Picker | undefined;
+    const invalidate = () => {
+      valid = false;
+      controller.abort();
+      if (open) picker?.update(model("unavailable"));
+    };
+    rankings.add(invalidate);
+    const isCurrent = () => {
+      syncTarget();
+      return open && valid && resolveSystem1Target(settings.jev).key === targetKey;
+    };
+    let state: PickerModel["ranking"] = pending.length ? "pending" : cache.size ? "done" : "unavailable";
     const ranking: Promise<PickerModel["ranking"]> = pending.length
-      ? askJev(ctx.modelRegistry, config.jev, rankState(pending, recentUserMessages(branch), config.rank), rankQuestions(pending), controller.signal).then((outcome) => {
-          if (!outcome.ok) return "unavailable";
+      ? askJev(ctx.modelRegistry, settings.jev, rankState(pending, recentUserMessages(branch), settings.rank), rankQuestions(pending), controller.signal).then((outcome) => {
+          if (!isCurrent() || !outcome.ok || outcome.selectionKey !== targetKey) return "unavailable";
           for (const [key, value] of readJudgments(pending, outcome.answers)) cache.set(key, value);
           pi.appendEntry("copy:decision", { pieces: pending.length, latencyMs: outcome.latencyMs, inputTokens: outcome.usage?.input });
           return "done";
         })
-      : Promise.resolve(cache.size ? "done" : "unavailable");
-    void ranking.then((state) => picker?.update(model(state)));
+      : Promise.resolve(state);
+    void ranking.then((next) => {
+      if (!isCurrent()) return;
+      state = next;
+      picker?.update(model(state));
+    });
 
-    const chosen = await whileBlocked(pi.events, "Yank picker", () =>
-      ctx.ui.custom<Segment | undefined>((tui, theme, keybindings, done) => {
-        picker = new Picker(model(pending.length ? "pending" : cache.size ? "done" : "unavailable"), theme as never, () => tui.requestRender(), done, keybindings);
-        return picker;
-      }),
-    );
-    controller.abort();
+    let chosen: Segment | undefined;
+    try {
+      chosen = await whileBlocked(pi.events, "Yank picker", () =>
+        ctx.ui.custom<Segment | undefined>((tui, theme, keybindings, done) => {
+          picker = new Picker(model(valid ? state : "unavailable"), theme as never, () => tui.requestRender(), done, keybindings, () => { syncTarget(); });
+          return picker;
+        }),
+      );
+    } finally {
+      open = false;
+      controller.abort();
+      rankings.delete(invalidate);
+    }
     if (!chosen) return;
     try {
       await copyToClipboard(chosen.text);
@@ -143,12 +184,14 @@ export default function piCopy(pi: ExtensionAPI) {
 
   pi.on("session_shutdown", () => {
     current = undefined;
+    invalidateRankings();
   });
 
   pi.on("session_start", (_event, ctx) => {
     current = ctx;
     config = loadConfig("copy", DEFAULT_CONFIG, ctx.cwd);
-    cache.clear();
+    invalidateRankings();
+    cacheTarget = resolveSystem1Target(config.jev).key;
   });
 
   pi.registerCommand("yank", {

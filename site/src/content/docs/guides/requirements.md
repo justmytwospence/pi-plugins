@@ -24,7 +24,7 @@ The configured SDK test target is **Pi 1.2.0**, covering loader selection, local
 | Herdr worktree children | Git plus the active Herdr socket's worktree create/open operations. No external worktree CLI; normal child tabs share the existing checkout. |
 | Notebook observation | [pi-marimo](https://github.com/justmytwospence/pi-marimo) (a separate package): A running marimo server with the registry/session/SSE interfaces the extension uses. Token-protected servers need `MARIMO_TOKEN`. Editing is a separate marimo-pair workflow. |
 | Status footer | Optional provider quota sources; its row icons are Nerd Font glyphs that need terminal font support. Basic session rows do not require a Claude Code account. |
-| Clipboard picker | Pi’s clipboard support in your terminal environment. Optional Jev ranking. |
+| Clipboard picker | Pi’s clipboard support in your terminal environment. Optional System 1 classifier ranking. |
 | CC render | `@shikijs/cli` is an optional dependency of the component but a regular dependency of the root suite; it supplies diff syntax highlighting; hover, click and wheel need fullscreen mode and SGR mouse reporting. Patches private Pi rendering members. |
 | Markdown extras | `grok-mermaid` (a suite dependency) for diagrams; without it diagram fences pass through unchanged. |
 | Terminal refinements | Relevant TUI hooks and terminal behavior; clear-screen needs fullscreen mode, scrollbar-width only acts inside Herdr. |
@@ -33,28 +33,31 @@ The documentation does **not** assert a Windows compatibility matrix for the who
 
 ## Classifier features are optional, not free
 
-[Jev](https://docs.typesafe.ai) is a classifier model accessed through Pi’s model registry. When enabled and available it receives the data needed for the judgment; requests can be billed by the configured provider.
+System 1 selects a classifier for the suite's classifier features. The global default is [Jev](https://docs.typesafe.ai); `/system1` selects Jev or native OpenAI Decisions. When a feature is enabled and the classifier is available, it sends the data needed for the judgment to the selected external provider. Requests can be billed by that provider.
 
 | Plugin | What the classifier sees | Without it |
 | --- | --- | --- |
 | [Auto effort](/plugins/pi-auto-effort/) | Requests and recent run activity | Keeps the thinking level |
 | [Cache guard](/plugins/pi-cache-guard/) | Tool output or conversation items being trimmed/compacted | Warnings and clock still work; normal Pi compaction remains available |
-| [Tool gate](/plugins/pi-tool-gate/) | Proposed calls, recent user intent and rules | Uses a tool-hint/UI fallback; not equivalent protection |
+| [Tool gate](/plugins/pi-tool-gate/) | Proposed calls, recent user intent and rules | Blocks calls that require a classifier verdict; fixed checks and explicitly allowed/read-only paths retain their ordinary behavior |
 | [Subagents](/plugins/pi-subagents/) | Delegation task and candidate choices | Uses agent configuration and parent/default choices |
 | [Copy picker](/plugins/pi-copy/) | Candidate excerpts and recent messages | Recency ordering |
 | [Next prompt](/plugins/pi-next-prompt/) | Suggested next step and answer | Can show the suggestion without vetting |
 | [Plan mode](/plugins/pi-plan-mode/) | Planning task and available tools | You can select tools manually |
+| [Sidebar](/plugins/pi-sidebar/) | Proposed guarded action | Refuses an unconfirmed call |
 
-For most plugins, `"jev": { "enabled": false }` in the plugin’s own configuration disables classifier use. Plan mode uses `"jevToolSelection": false`. **There is no suite-wide Jev switch.** See the reference pages for filenames and merge precedence.
+The selection is global to the Pi agent directory, not a per-project or per-feature backend switch. For most plugins, `"jev": { "enabled": false }` in the plugin’s own configuration still disables that feature's classifier use; plan mode uses `"jevToolSelection": false`. Jev mode retains existing provider/model settings and discovery; Decisions overrides those targets. See the reference pages for filenames and merge precedence.
 
-The default TypeSafe provider uses Pi’s credentials, such as `TYPESAFE_API_KEY` or `/login typesafe`. Do not put credentials in these docs, a public repository, or a front-end environment variable. Cache guard supports additional provider choices; that does not imply identical fallback discovery in every component.
+The default TypeSafe provider uses Pi’s credentials, such as `TYPESAFE_API_KEY` or `/login typesafe`. OpenAI Decisions instead uses the isolated `system1-openai/gpt-6-luna` classifier via the real OpenAI Decisions API, authenticated only by `/login system1-openai` or `SYSTEM1_OPENAI_API_KEY`. It does not use the ordinary OpenAI chat credential. Do not put credentials in these docs, a public repository, or a front-end environment variable.
+
+Before selecting Decisions, claim the eligible [ChatGPT Pro API credits](https://developers.openai.com/api/docs/guides/chatgpt-api-credits) into an API organization with active included credits, no purchased balance, no auto-recharge and no paid or postpaid continuation. Check those conditions in OpenAI billing; Pi cannot verify entitlement, credit balance or which funds pay for a request, and does not enforce a credits-only spending cap. Keep Jev selected if the prerequisites cannot be established. A failed classifier request does not silently switch providers.
 
 :::caution[Tool gate is not a security boundary]
-Classifier judgments are probabilistic. In particular, when Jev is unavailable and there is no UI, the fallback allows calls that would otherwise need a UI decision. Do not use this gate as your only control over untrusted programs or secrets.
+Classifier judgments are probabilistic, and fallback behavior depends on the feature and context. Do not use this gate as your only control over untrusted programs or secrets.
 :::
 
 ## Read the right number
 
-Footer cost is a reported token-price estimate, not an invoice or a subscription charge. Cache guard uses published model prices where available and an idle-time heuristic where a cache TTL is unknown. Jev latency and savings depend on the workload and provider; benchmark anecdotes are not performance guarantees.
+Footer cost is a reported token-price estimate, not an invoice or a subscription charge. Cache guard uses published model prices where available and an idle-time heuristic where a cache TTL is unknown. Classifier latency and savings depend on the workload and provider; benchmark anecdotes are not performance guarantees.
 
 Quota lookup can make authenticated HTTP requests without making a model call. The status footer’s Claude account reading may belong to a different account from Pi’s model session. [Manage context and cost](/recipes/cache-cost/) explains the distinctions.

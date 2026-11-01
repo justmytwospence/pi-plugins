@@ -3,26 +3,27 @@
 //
 // An eval lives in `packages/<pkg>/eval/<id>.target.ts` as the default export of `defineEval({...})`
 // and is listed in `evals/targets.ts`. The runner (`runner.ts`, `npm run -s eval`) does everything
-// else: choosing targets, skipping without TypeSafe credentials, sampling sessions once per run,
+// else: choosing targets, checking selected-provider configuration, sampling sessions once per run,
 // printing the report and the spend, appending a results record, and the exit code. A target holds
 // only what is specific to it: how many calls it would make (`plan`) and what it measures (`run`).
 //
-// What a target does with Jev is its own: it imports its package's `askJev` and questions and calls
+// What a target judges is its own: it imports its package's compatibility adapter and questions and calls
 // them with `ctx.registry`. It adds every call to `ctx.spend`, as `ctx.spend.addOutcome(outcome)`
-// (the outcome's `usage?.cost?.total`; a failed outcome counts as a call and adds nothing), or merges
+// (the outcome's catalog-estimated `usage?.cost?.total`, including reported failure usage), or merges
 // the Spend of a sub-run in with `ctx.spend.merge(other)`. The runner prints `ctx.spend.line()` and
 // records `ctx.spend.total` and `ctx.spend.calls`. A target never prints the spend line or writes the
 // results history itself.
 import type { pool } from "./pool.ts";
+import type { ClassifierProvenance } from "./results.ts";
 import type { Sample } from "./sessions.ts";
 import type { Spend } from "./spend.ts";
 import type { table } from "./table.ts";
 
-/** In-flight Jev calls per target (the `pool` limit the evals ran with). */
+/** In-flight classifier calls per target (the `pool` limit the evals ran with). */
 export const CONCURRENCY = 8;
-/** Per-call Jev timeout in milliseconds that the evals ran with. */
+/** Per-call classifier timeout in milliseconds that the evals ran with. */
 export const TIMEOUT_MS = 20_000;
-/** A target fails when at least this share of its Jev calls fail (no usable answer). */
+/** A target fails when at least this share of its classifier calls fail (no usable answer). */
 export const MAX_FAILURE_RATE = 0.2;
 
 /** True when `failures` out of `calls` is under the limit; a target that made no call passes. */
@@ -33,7 +34,7 @@ export function withinFailureLimit(failures: number, calls: number, limit = MAX_
 /** `cases`: hand-written examples. `replay`: the user's real sessions (the runner samples them). */
 export type TargetKind = "cases" | "replay";
 
-/** What `plan` returns: the Jev calls a run would make, and a one-line explanation of the count. */
+/** What `plan` returns: the classifier calls a run would make, and a one-line explanation of the count. */
 export interface Plan {
   calls: number;
   notes: string;
@@ -55,8 +56,10 @@ export interface PlanContext {
   log(message: string): void;
 }
 
-/** What a live run adds: the Jev registry and the shared helpers, so a target imports nothing shared. */
+/** What a live run adds: the classifier registry and shared helpers. */
 export interface RunContext extends PlanContext {
+  /** Selected physical classifier, supplied by the CLI; unknown for legacy direct callers. */
+  classifier?: ClassifierProvenance;
   /** Pi's model registry (`installedRegistry`), built once per runner invocation; pass it to the package's `askJev`. */
   registry: unknown;
   /** This target's own accumulator; see the header. */
@@ -65,7 +68,7 @@ export interface RunContext extends PlanContext {
   pool: typeof pool;
   /** `table(rows)`: columns padded to their widest cell. */
   table: typeof table;
-  /** `CONCURRENCY`, the number of Jev calls to keep in flight. */
+  /** `CONCURRENCY`, the number of classifier calls to keep in flight. */
   concurrency: number;
   /** `TIMEOUT_MS`, the per-call timeout to give `askJev`. */
   timeoutMs: number;
@@ -79,7 +82,7 @@ export interface TargetResult {
   compare?: Record<string, number>;
   /** What to print: the tables and text, without the spend line (the runner adds it). */
   report: string;
-  /** Whether the target met its own thresholds (`withinFailureLimit` for the Jev failure rate). */
+  /** Whether the target met its own thresholds (`withinFailureLimit` for the classifier failure rate). */
   pass: boolean;
   /** Calls that gave no usable answer; printed and returned with the run, not recorded in the history. */
   failures?: number;
@@ -98,7 +101,7 @@ export interface EvalTarget {
    * `kind === "replay"`. Set it to false for a replay of something else (a file).
    */
   needsSessions?: boolean;
-  /** The dry run: what a live run would call, without calling Jev (or anything that costs). */
+  /** The dry run: what a live run would call, without calling a classifier (or anything that costs). */
   plan(ctx: PlanContext): Plan | Promise<Plan>;
   /** The live run. Throwing counts as a failed target; the runner reports it and goes on to the next. */
   run(ctx: RunContext): Promise<TargetResult>;

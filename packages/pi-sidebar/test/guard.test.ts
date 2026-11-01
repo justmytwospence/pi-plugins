@@ -1,16 +1,31 @@
-import { describe, expect, it } from "vitest";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { findBlockedCommandSegment } from "../src/bash-policy.ts";
 import { judgeCall, type GuardHost } from "../src/guard.ts";
 
-function host(options: { probability?: number; jev?: boolean; tools?: Record<string, object>; guarded?: boolean } = {}) {
+let agentDir: string;
+beforeEach(() => {
+  agentDir = mkdtempSync(join(tmpdir(), "sidebar-guard-system1-"));
+  vi.stubEnv("PI_CODING_AGENT_DIR", agentDir);
+});
+afterEach(() => {
+  vi.unstubAllEnvs();
+  rmSync(agentDir, { recursive: true, force: true });
+});
+const select = (backend: string) => writeFileSync(join(agentDir, "system1.json"), JSON.stringify({ backend }));
+
+function host(options: { probability?: number; jev?: boolean; tools?: Record<string, object>; guarded?: boolean; failure?: string; missingAnswer?: boolean } = {}) {
   const asked: Array<Record<string, unknown>> = [];
   const registry = options.jev === false
     ? undefined
     : {
-        findOfType: () => ({ id: "jev" }),
+        findOfType: (_type: string, provider: string, id: string) => ({ provider, id, api: provider === "system1-openai" ? "openai-decisions" : "typesafe", baseUrl: "https://api.openai.com/v1" }),
         classify: async (_model: unknown, context: { state: Record<string, unknown> }) => {
           asked.push(context.state);
-          return { answers: { q: { type: "bool", probability: options.probability ?? 0.01 } }, stopReason: "stop" };
+          return { answers: options.missingAnswer ? {} : { q: { type: "bool", probability: options.probability ?? 0.01 } },
+            stopReason: options.failure ? "error" : "stop", ...(options.failure ? { errorMessage: options.failure } : {}) };
         },
       };
   const value: GuardHost = {
@@ -68,6 +83,29 @@ describe("judgeCall", () => {
     const offline = await judgeCall("mcp__notes__search", {}, host({ jev: false }).host);
     expect(offline.allowed).toBe(false);
     if (!offline.allowed) expect(offline.reason).toMatch(/could not be confirmed/);
+  });
+
+  it.each(["jev", "openai-decisions"])("keeps %s fail-closed for invalid and unavailable judgments", async (backend) => {
+    select(backend);
+    for (const options of [{ probability: -0.1 }, { probability: 1.1 }, { probability: NaN }, { missingAnswer: true }, { failure: "429 quota exhausted" }, { jev: false }]) {
+      const verdict = await judgeCall("mcp__unknown__call", {}, host(options).host);
+      expect(verdict.allowed).toBe(false);
+      if (!verdict.allowed) expect(verdict.reason).toMatch(/could not be confirmed/);
+    }
+    expect((await judgeCall("mcp__unknown__call", {}, host({ probability: 0.49 }).host)).allowed).toBe(true);
+    expect((await judgeCall("mcp__unknown__call", {}, host({ probability: 0.5 }).host)).allowed).toBe(false);
+  });
+
+  it("refuses a pending call after the backend changes", async () => {
+    let complete!: (result: unknown) => void;
+    const h = host();
+    h.host.registry = { findOfType: () => ({}), classify: () => new Promise((resolve) => { complete = resolve; }) };
+    const pending = judgeCall("mcp__unknown__call", {}, h.host);
+    select("openai-decisions");
+    complete({ answers: { q: { type: "bool", probability: 0 } }, stopReason: "stop" });
+    const verdict = await pending;
+    expect(verdict.allowed).toBe(false);
+    if (!verdict.allowed) expect(verdict.reason).toMatch(/changed/);
   });
 
   it("refuses process control and workflow authority regardless of hints or Jev", async () => {

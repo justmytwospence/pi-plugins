@@ -8,6 +8,10 @@ import { lastRequest, view } from "../src/clock.ts";
 import * as config from "../src/config.ts";
 import { FOOTER_ACTIONS_CHANNEL, type FooterActionsRequest, queryFooterActions } from "../src/footer-actions.ts";
 import { HerdrReporter, alertHeld, soundFile } from "../src/herdr.ts";
+import { SYSTEM1_CHANGED } from "../src/system1.ts";
+
+const system1File = () => path.join(process.env.PI_CODING_AGENT_DIR!, "system1.json");
+afterEach(() => rmSync(system1File(), { force: true }));
 
 const NOW = Date.parse("2026-10-07T12:00:00Z");
 const opus = {
@@ -508,8 +512,8 @@ describe("choices", () => {
       await h.commands.get("cache-guard").handler(args, h.ctx);
       return h.ui.notes.at(-1) as string;
     };
-    expect(await run("stats")).toBe('/cache-guard: unknown subcommand "stats". Use one of: status, on, off, fresh, compact, jev.');
-    for (const command of ["status", "on", "off", "fresh", "jev"]) {
+    expect(await run("stats")).toBe('/cache-guard: unknown subcommand "stats". Use one of: status, on, off, fresh, compact, system1, jev.');
+    for (const command of ["status", "on", "off", "fresh", "system1", "jev"]) {
       expect(await run(`  ${command}  now  `)).toBe(`/cache-guard ${command} takes no argument (got "now").`);
     }
     expect(h.sessions).toEqual([]);
@@ -990,7 +994,7 @@ describe("jev", () => {
     expect(h.ui.menus[0]).toEqual([
       "Send anyway",
       "Send, and stop asking in this session",
-      "Compact quickly, then send (~1s)",
+      "Compact quickly, then send",
       "Compact with a summary, then send",
       "Start a new session with this prompt",
       "Keep the prompt in the editor",
@@ -1035,31 +1039,36 @@ describe("jev", () => {
     expect(h.sent).toEqual([]);
   });
 
-  test("/cache-guard jev without Jev puts the login in the editor", async () => {
+  test("/cache-guard jev without Jev gives local setup guidance without changing the editor", async () => {
     const h = cold(jevRegistry(keepAll, []));
     await h.emit("session_start", {});
     h.ui.answers = ["Log in to TypeSafe"];
     await h.commands.get("cache-guard").handler("jev", h.ctx);
-    expect(h.ui.titles[0]).toContain("Jev is not set up: no provider with Jev has credentials.");
-    expect(h.ui.editor).toBe("/login typesafe");
+    expect(h.ui.titles[0]).toContain("System 1 is unavailable: no provider with Jev has credentials.");
+    expect(h.ui.titles[0]).toContain("/system1");
+    expect(h.ui.editor).toBe("");
+    expect(h.ui.notes.at(-1)).toContain("/login typesafe");
   });
 
-  test("/cache-guard jev checks Jev answers, and turning it off is saved and drops the tip", async () => {
-    const h = cold();
+  test("/cache-guard jev checks local availability only, and feature toggles still work", async () => {
+    const registry = jevRegistry();
+    const h = cold(registry);
     await h.emit("session_start", {});
-    h.ui.answers = ["Turn Jev off"];
+    h.ui.answers = ["Turn classifier off for cache-guard"];
     await h.commands.get("cache-guard").handler("jev", h.ctx);
-    expect(h.ui.titles[0]).toMatch(/^Jev: typesafe\/jev-latest, answered in \d+ ms\./u);
+    expect(h.ui.titles[0]).toMatch(/^System 1: typesafe\/jev-latest is configured\./u);
+    expect(registry.calls).toEqual([]);
     expect(JSON.parse(readFileSync(userFile(), "utf8"))).toEqual({ jev: { enabled: false } });
     h.ui.answer = undefined;
     await h.emit("input", input("next"));
     expect(h.ui.titles[1]).not.toContain("Tip");
     expect(h.ui.menus[1]).toContain("Compact first, then send");
     // And back on.
-    h.ui.answers = ["Turn Jev on", "Done"];
+    h.ui.answers = ["Turn classifier on for cache-guard", "Done"];
     await h.commands.get("cache-guard").handler("jev", h.ctx);
     expect(JSON.parse(readFileSync(userFile(), "utf8"))).toEqual({ jev: { enabled: true } });
-    expect(h.ui.titles.at(-1)).toMatch(/^Jev: typesafe\/jev-latest, answered/u);
+    expect(h.ui.titles.at(-1)).toMatch(/^System 1: typesafe\/jev-latest is configured/u);
+    expect(registry.calls).toEqual([]);
   });
 
   test("/cache-guard compact runs Jev's compaction with the focus", async () => {
@@ -1078,16 +1087,88 @@ describe("jev", () => {
     await h.emit("session_start", {});
     h.ui.answers = ["Compact with Pi's summary"];
     await h.commands.get("cache-guard").handler("compact", h.ctx);
-    expect(h.ui.titles[0]).toBe("Jev is not set up (no provider with Jev has credentials). Compact with Pi's summary instead?");
+    expect(h.ui.titles[0]).toBe("System 1 is unavailable (no provider with Jev has credentials). Compact with Pi's summary instead?");
     expect(h.ui.compactions).toHaveLength(1);
     expect(await h.emit("session_before_compact", preparation())).toBeUndefined();
   });
 
-  test("status reports Jev", async () => {
+  test("status reports the effective classifier", async () => {
     const h = cold();
     await h.emit("session_start", {});
     await h.commands.get("cache-guard").handler("status", h.ctx);
-    expect(h.ui.notes.at(-1)).toContain("Jev: typesafe/jev-latest; trimming on; Quick compaction from the cold-cache menu and /cache-guard compact; it filters /compact too.");
+    expect(h.ui.notes.at(-1)).toContain("System 1: typesafe/jev-latest; trimming on; Quick compaction from the cold-cache menu and /cache-guard compact; it filters /compact too.");
     expect(existsSync(userFile())).toBe(false);
+  });
+
+  test("system1 setup and legacy jev alias have identical, inference-free behavior", async () => {
+    const registry = jevRegistry();
+    const h = cold(registry);
+    await h.emit("session_start", {});
+    h.ui.answers = ["Done", "Done"];
+    for (const command of ["system1", "jev"]) await h.commands.get("cache-guard").handler(command, h.ctx);
+    expect(h.ui.titles[0]).toBe(h.ui.titles[1]);
+    expect(h.ui.titles[0]).toContain("Use /system1 to manage the global backend");
+    expect(h.ui.titles[0]).not.toMatch(/answered|~1s|about a second/u);
+    expect(h.ui.menus[0]).toEqual(h.ui.menus[1]);
+    expect(registry.calls).toEqual([]);
+    expect(h.sent).toEqual([]);
+    expect(existsSync(userFile())).toBe(false);
+  });
+
+  test.each([true, false])("Decisions setup never discovers or mutates dormant Jev settings (configured: %s)", async (configured) => {
+    writeFileSync(system1File(), JSON.stringify({ backend: "openai-decisions" }));
+    const dormant = { provider: "openrouter", model: "custom-jev" };
+    writeFileSync(userFile(), JSON.stringify({ jev: dormant }));
+    const discovered: string[] = [];
+    const native = { provider: "system1-openai", id: "gpt-6-luna", api: "openai-decisions", baseUrl: "https://api.openai.com/v1" };
+    const registry = {
+      ...jevRegistry(),
+      getAvailableOfType: async (_type: string, provider: string) => {
+        discovered.push(provider);
+        expect(provider).toBe("system1-openai");
+        return configured ? [native] : [];
+      },
+      findOfType: (_type: string, provider: string) => {
+        expect(provider).toBe("system1-openai");
+        return native;
+      },
+    };
+    const h = cold(registry);
+    await h.emit("session_start", {});
+    await h.commands.get("cache-guard").handler("status", h.ctx);
+    expect(h.ui.notes.at(-1)).toContain(configured ? "System 1: system1-openai/gpt-6-luna" : "System 1: unavailable");
+    h.ui.answers = ["Done"];
+    await h.commands.get("cache-guard").handler("jev", h.ctx);
+    expect(h.ui.titles.at(-1)).toContain("/system1");
+    expect(h.ui.menus.at(-1)?.some((item) => /TypeSafe|OpenRouter|Use .* instead|Jev provider/u.test(item))).toBe(false);
+    h.ui.answers = [configured ? "Turn classifier off for cache-guard" : "Turn classifier off (no more tips)"];
+    await h.commands.get("cache-guard").handler("system1", h.ctx);
+    expect(JSON.parse(readFileSync(userFile(), "utf8"))).toEqual({ jev: { ...dormant, enabled: false } });
+    h.ui.answers = ["Turn classifier on for cache-guard", "Done"];
+    await h.commands.get("cache-guard").handler("system1", h.ctx);
+    expect(JSON.parse(readFileSync(userFile(), "utf8"))).toEqual({ jev: { ...dormant, enabled: true } });
+    expect(registry.calls).toEqual([]);
+    expect(discovered.length).toBeGreaterThan(0);
+    expect(h.ui.menus.flat().every((option) => option.length <= OPTION_MAX)).toBe(true);
+  });
+
+  test("a late Jev provider picker cannot edit dormant settings after a backend switch", async () => {
+    const registry = jevRegistry(keepAll, [
+      { provider: "typesafe", id: "jev-latest" },
+      { provider: "openrouter", id: "~typesafe/jev-latest" },
+    ]);
+    const h = cold(registry);
+    await h.emit("session_start", {});
+    h.ui.select = async (title, options) => {
+      h.ui.titles.push(title);
+      h.ui.menus.push(options);
+      writeFileSync(system1File(), JSON.stringify({ backend: "openai-decisions" }));
+      h.pi.events.emit(SYSTEM1_CHANGED, {});
+      return options.find((option) => option.startsWith("Use openrouter"));
+    };
+    await h.commands.get("cache-guard").handler("system1", h.ctx);
+    expect(existsSync(userFile())).toBe(false);
+    expect(registry.calls).toEqual([]);
+    expect(h.ui.menus.flat().every((option) => option.length <= OPTION_MAX)).toBe(true);
   });
 });

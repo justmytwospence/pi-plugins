@@ -66,6 +66,7 @@ import {
 import { type DirGrant, rulesCommand, type RuleStore } from "./rules-command.ts";
 import { whileBlocked } from "./herdr.ts";
 import { type ClassifierUsage, type JevConfig, askJev } from "./jev.ts";
+import { resolveSystem1Target, SYSTEM1_CHANGED } from "./system1.js";
 import {
   DEFAULT_THRESHOLDS,
   type JudgeInput,
@@ -435,9 +436,24 @@ export default function toolGate(pi: ExtensionAPI) {
   let execActive = false;
   let revision = 0;
   const effectiveWorkflow = (): WorkflowMode => execActive ? "exec" : workflow;
-  // A mode change cancels decisions, not the usage of tools already running on this branch.
+  // Mode and classifier changes cancel decisions, not usage of tools already running on this branch.
   const invalidate = () => { revision++; pushedBackThisTurn.clear(); classifierFailures.clear(); };
-  const staleResult = () => ({ block: true, reason: "tool-gate blocked this call: modes changed; the call must be reevaluated." });
+  const staleResult = () => ({ block: true, reason: "tool-gate blocked this call: modes changed or System 1 changed; the call must be reevaluated." });
+  let system1Key = resolveSystem1Target(config.jev).key;
+  const refreshSystem1Target = () => {
+    const target = resolveSystem1Target(config.jev);
+    if (target.key !== system1Key) {
+      system1Key = target.key;
+      invalidate();
+    }
+    return target;
+  };
+  // Read at interaction boundaries too: standalone components have no setting watcher.
+  const decisionStale = (epoch: number) => {
+    refreshSystem1Target();
+    return epoch !== revision;
+  };
+  pi.events.on(SYSTEM1_CHANGED, () => { refreshSystem1Target(); });
   /** pi-plan-mode is installed and offers plan mode; the plan file it may write. */
   let planProvider = false;
   let planFile: string | undefined;
@@ -907,13 +923,13 @@ export default function toolGate(pi: ExtensionAPI) {
   ): Promise<{ block?: boolean; reason?: string } | undefined> => {
     const epoch = revision;
     const run = async () => {
-      if (epoch !== revision) return staleResult();
+      if (decisionStale(epoch)) return staleResult();
       let items = offer ? [...offer.items] : [];
       /** An edit that was not a rule, to show again with what is wrong with it. */
       let draft: string | undefined;
       let problem: string | undefined;
       const view = await callView(q.tool, q.input, ctx.cwd);
-      if (epoch !== revision) return staleResult();
+      if (decisionStale(epoch)) return staleResult();
       // Held only while the dialog is open, so queued approvals do not report blocked early.
       const label = clip(`Allow? ${describeCall(q.tool, q.input)}`.replace(/\s+/gu, " "), 60);
       for (;;) {
@@ -954,7 +970,7 @@ export default function toolGate(pi: ExtensionAPI) {
             editorFactory,
           ),
         );
-        if (epoch !== revision) return staleResult();
+        if (decisionStale(epoch)) return staleResult();
         problem = undefined;
         if (!answer) return { block: true, reason: DECLINED };
         if (answer.choice === ALLOW_ONCE) return undefined;
@@ -1033,6 +1049,7 @@ export default function toolGate(pi: ExtensionAPI) {
     h: {
       toolCallId: string;
       revision: number;
+      selectionKey: string;
       recordUsage: (usage: ClassifierUsage) => void;
       tool: string;
       input: Record<string, unknown>;
@@ -1047,7 +1064,7 @@ export default function toolGate(pi: ExtensionAPI) {
       advice?: string;
     },
   ) => {
-    if (h.revision !== revision) return staleResult();
+    if (decisionStale(h.revision)) return staleResult();
     const exact = `${h.tool}\0${JSON.stringify(h.input)}`;
     if (config.pushBack && !pushedBackThisTurn.has(exact) && !pushedBackThisTurn.has(h.family)) {
       pushedBackThisTurn.add(exact);
@@ -1057,7 +1074,7 @@ export default function toolGate(pi: ExtensionAPI) {
       let ideas: string[] = [];
       if (h.advice === undefined) {
         const suggestion = await askJev(ctx.modelRegistry, config.jev, { ...h.state, held_because: h.reason }, workaroundQuestion(), ctx.signal);
-        if (h.revision !== revision) return staleResult();
+        if (decisionStale(h.revision) || (suggestion.ok && suggestion.selectionKey !== h.selectionKey)) return staleResult();
         ideas = suggestion.ok ? suggestions(suggestion.answers) : [];
         if (suggestion.ok && suggestion.usage) h.recordUsage(suggestion.usage);
       }
@@ -1127,6 +1144,7 @@ export default function toolGate(pi: ExtensionAPI) {
     dialogs = Promise.resolve();
     if (newSession) { auto = 0; held = 0; pushedBack = 0; warnedPolicy = false; }
     await refreshRules(ctx.cwd);
+    refreshSystem1Target();
     if (generation !== sessionGeneration) return;
     const entries = ctx.sessionManager.getBranch();
     const restored = restoreBranchModes(entries, defaults(config));
@@ -1215,6 +1233,7 @@ export default function toolGate(pi: ExtensionAPI) {
     const reason = await prepareFlowRun(ctx);
     if (reason) { pauseFlowRun(ctx, reason); return undefined; }
     await refreshRules(ctx.cwd);
+    refreshSystem1Target();
     pushedBackThisTurn.clear();
     classifierFailures.clear();
     gitInfo = undefined;
@@ -1273,8 +1292,9 @@ export default function toolGate(pi: ExtensionAPI) {
   pi.on("tool_call", async (event, ctx) => {
     const flow = flows.snapshot();
     if (flow.blocked || flow.transitioning) return { block: true, reason: `tool-gate blocked this call: ${flow.blocked ?? "a flow transition is in progress."} ${FLOW_RECOVERY}` };
+    const selectionKey = refreshSystem1Target().key;
     const epoch = revision;
-    const stale = () => epoch !== revision;
+    const stale = () => decisionStale(epoch);
     let callUsage: ClassifierUsage | undefined;
     const recordUsage = (usage: ClassifierUsage) => { callUsage = addUsage(callUsage, usage); };
     const decide = async () => {
@@ -1368,6 +1388,7 @@ export default function toolGate(pi: ExtensionAPI) {
         return hold(ctx, {
           toolCallId: event.toolCallId,
           revision: epoch,
+          selectionKey,
           recordUsage,
           tool,
           input,
@@ -1380,7 +1401,7 @@ export default function toolGate(pi: ExtensionAPI) {
         });
       }
 
-      const exactFailureKey = `${tool}\0${JSON.stringify(input)}`;
+      const exactFailureKey = `${selectionKey}\0${tool}\0${JSON.stringify(input)}`;
       const previousFailure = classifierFailures.get(exactFailureKey);
       if (previousFailure) {
         if (!ctx.hasUI) return { block: true, reason: `${previousFailure}\nBlocked: there is no user to approve it.` };
@@ -1401,13 +1422,14 @@ export default function toolGate(pi: ExtensionAPI) {
       if (stale()) return staleResult();
       const outcome = await askJev(ctx.modelRegistry, config.jev, state, judgeQuestions(rules, { script: script !== undefined }), ctx.signal);
 
-      if (stale()) return staleResult();
+      if (stale() || (outcome.ok && outcome.selectionKey !== selectionKey)) return staleResult();
       if (!outcome.ok) {
         // Expose stable classes, never raw provider messages which may contain credentials.
         const errorClass = outcome.reason === "timed out" ? "ClassifierTimeoutError"
           : outcome.reason === "cancelled" ? "ClassifierCancelledError"
-          : /classifier credentials|invalid API key/u.test(outcome.reason) ? "ClassifierCredentialsError"
-          : /no classifier model|no classifier models/u.test(outcome.reason) ? "ClassifierModelUnavailableError"
+          : /credentials|invalid API key/u.test(outcome.reason) ? "ClassifierCredentialsError"
+          : /no classifier model|OpenAI Decisions is unavailable|requires the native model/u.test(outcome.reason) ? "ClassifierModelUnavailableError"
+          : /invalid answers/u.test(outcome.reason) ? "ClassifierInvalidAnswerError"
           : /off in settings/u.test(outcome.reason) ? "ClassifierDisabledError"
           : "ClassifierUnavailableError";
         return unavailable(errorClass);
@@ -1437,6 +1459,7 @@ export default function toolGate(pi: ExtensionAPI) {
       return hold(ctx, {
         toolCallId: event.toolCallId,
         revision: epoch,
+        selectionKey,
         recordUsage,
         tool,
         input,
@@ -1721,12 +1744,15 @@ export default function toolGate(pi: ExtensionAPI) {
       await refreshRules(ctx.cwd);
       const rules = loadRules(await contextFor(ctx.cwd));
       const counts = (list: RuleList) => allRules.filter((r) => r.list === list).length;
+      const target = refreshSystem1Target();
+      const classifier = !config.jev.enabled ? "off"
+        : target.ok ? `${target.backend} (${target.provider}/${target.model})` : `unavailable (${target.reason})`;
       ctx.ui.notify(
         [
           `Workflow: ${effectiveWorkflow()} (${shortcut || "no key"}). Approvals: ${MODE_NAMES[approval]} (${MODE_DESCRIPTIONS[approval]}) (${duplicateShortcut ? "no key" : approvalShortcut || "no key"}).`,
           `${auto} auto-approved, ${pushedBack} pushed back, ${held} asked this session.`,
-          `Jev: ${config.jev.enabled ? `${config.jev.provider}/${config.jev.model}` : "off"}; push-back ${config.pushBack ? "on" : "off"}.`,
-          `${rules.length} project rule${rules.length === 1 ? "" : "s"} for Jev. Permission rules for ${shown(project)}: ` +
+          `System 1: ${classifier}; push-back ${config.pushBack ? "on" : "off"}.`,
+          `${rules.length} project rule${rules.length === 1 ? "" : "s"} for System 1. Permission rules for ${shown(project)}: ` +
             `${counts("allow")} allow, ${counts("ask")} ask, ${counts("deny")} deny; ${sessionRules.length} from this session; ` +
             `${localDirs.size + sessionDirs.size} folder grant${localDirs.size + sessionDirs.size === 1 ? "" : "s"} (/gate rules; saved in ${shown(await destination(ctx.cwd))}).`,
           config.directories.enabled === false ? "Directory policy: off." : describePolicy(await policyFor(ctx.cwd)),

@@ -1,9 +1,11 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import { fileURLToPath } from "node:url";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { test } from "node:test";
-import { last } from "./results.ts";
+import { last, record } from "./results.ts";
 import { parseArgs, runEval, select, type RunnerDeps } from "./runner.ts";
 import type { Sample } from "./sessions.ts";
 import { type EvalTarget, type RunContext, defineEval } from "./target.ts";
@@ -181,8 +183,8 @@ test("a live run builds the registry and the sample once, gives each target its 
   assert.equal(typeof alpha?.pool, "function");
   assert.equal(typeof alpha?.table, "function");
   const out = f.out.join("\n");
-  assert.match(out, /== alpha: Alpha cases \(pi-one, cases\) ==\nreport of alpha\nspend: \$0\.0030 over 3 calls\nrecorded: .*alpha\.jsonl/u);
-  assert.match(out, /report of gamma\nspend: \$0\.0030 over 3 calls; failures: 2/u);
+  assert.match(out, /== alpha: Alpha cases \(pi-one, cases\) ==\nreport of alpha\nspend: \$0\.0030 over 3 calls \(catalog estimate; not a cash charge or verified credit debit\)\nrecorded: .*alpha\.jsonl/u);
+  assert.match(out, /report of gamma\nspend: \$0\.0030 over 3 calls \(catalog estimate; not a cash charge or verified credit debit\); failures: 2/u);
   assert.match(out, /3\/3 targets passed; total spend: \$0\.0090 over 9 calls/u);
   const [a] = last("alpha", 1, f.env);
   assert.deepEqual([a?.spend, a?.calls, a?.metrics, a?.compare, a?.seed], [0.003, 3, { score: 0.5, n: 3 }, undefined, null]);
@@ -226,7 +228,7 @@ test("a target that throws fails the run, keeps its spend line, records nothing,
   ];
   assert.equal(await runEval(["boom", "alpha"], f.deps), 1);
   assert.match(f.err.join("\n"), /boom: registry exploded/u);
-  assert.match(f.out.join("\n"), /spend: \$0\.0100 over 1 calls\nFAIL boom/u);
+  assert.match(f.out.join("\n"), /spend: \$0\.0100 over 1 calls \(catalog estimate; not a cash charge or verified credit debit\)\nFAIL boom/u);
   assert.deepEqual(last("boom", 1, f.env), []);
   assert.equal(last("alpha", 1, f.env).length, 1);
 });
@@ -244,7 +246,7 @@ test("a registry that cannot be built is an error, not a skip", async () => {
     throw new Error("no pi");
   };
   assert.equal(await runEval(["alpha"], f.deps), 1);
-  assert.match(f.err.join("\n"), /cannot build the Jev registry: no pi/u);
+  assert.match(f.err.join("\n"), /cannot build or configure the Jev registry/u);
   assert.equal(f.runs.length, 0);
 });
 
@@ -264,5 +266,179 @@ test("--last reads the history, with the diff from the run before; no history is
   assert.equal(targets.beta.last, null);
   f.out.length = 0;
   assert.equal(await runEval(["--last", "alpha", "beta"], f.deps), 0);
-  assert.match(f.out.join("\n"), /^alpha: .*\n +previous +last +change\nspend .*\ncalls +3 +3 +0\nscore +0\.5 +0\.5 +0\nn +3 +3 +0\nbeta: no recorded runs/u);
+  assert.match(f.out.join("\n"), /^alpha: .*\nclassifier: legacy\/unknown\nwarning: .*\n +previous +last +change\nspend .*\ncalls +3 +3 +0\nscore +0\.5 +0\.5 +0\nn +3 +3 +0\nbeta: no recorded runs/u);
+});
+
+const DECISIONS = { backend: "openai-decisions", provider: "system1-openai", model: "gpt-6-luna" };
+const JEV = { backend: "jev", provider: "typesafe", model: "jev-latest" };
+function selectedClassifier(f: Fake, configured = true) {
+  let checks = 0;
+  let key = JSON.stringify(Object.values(DECISIONS));
+  f.deps.classifier = {
+    ...DECISIONS, key,
+    currentKey: () => key,
+    configured: async (registry) => {
+      checks++;
+      assert.deepEqual(registry, { fake: "registry" });
+      return configured;
+    },
+  };
+  delete f.deps.hasCredentials;
+  return { checks: () => checks, change: () => { key = "other target"; } };
+}
+
+test("the selected provider predicate replaces the TypeSafe environment gate and records provenance", async () => {
+  const f = fixture();
+  const c = selectedClassifier(f);
+  assert.equal(await runEval(["alpha", "--json"], f.deps), 0);
+  assert.equal(c.checks(), 1);
+  assert.equal(f.registries, 1);
+  assert.deepEqual(json(f.out).classifier, DECISIONS);
+  assert.deepEqual(json(f.out).targets.alpha.classifier, DECISIONS);
+  assert.deepEqual(last("alpha", 1, f.env)[0]?.classifier, DECISIONS);
+  assert.deepEqual(f.runs[0]?.ctx.classifier, DECISIONS);
+  assert.match(f.err.join("\n"), /System 1: openai-decisions \(system1-openai\/gpt-6-luna\)/u);
+});
+
+test("a configured Jev provider also need not use an environment key", async () => {
+  const f = fixture();
+  selectedClassifier(f);
+  Object.assign(f.deps.classifier!, JEV);
+  assert.equal(await runEval(["alpha"], f.deps), 0);
+  assert.equal(f.runs.length, 1);
+});
+
+test("missing selected-provider auth skips without falling back to a TypeSafe env key", async () => {
+  const f = fixture({ env: { TYPESAFE_API_KEY: "fake-unrelated-key" } });
+  const c = selectedClassifier(f, false);
+  assert.equal(await runEval(["alpha", "--json"], f.deps), 0);
+  assert.equal(c.checks(), 1);
+  assert.equal(f.runs.length + f.samples, 0);
+  assert.equal(json(f.out).skipped, true);
+  assert.match(json(f.out).reason, /openai-decisions.*is not configured/u);
+});
+
+test("dry, list and last expose selection without registry, configured-auth or model calls", async () => {
+  for (const mode of ["--dry", "--list", "--last"]) {
+    const f = fixture();
+    const c = selectedClassifier(f);
+    f.deps.registry = async () => { throw new Error("must not construct registry"); };
+    f.deps.classifier!.configured = async () => { throw new Error("must not inspect credentials"); };
+    f.deps.classifier!.currentKey = () => { throw new Error("live-only recheck"); };
+    assert.equal(await runEval(["alpha", mode, "--json"], f.deps), 0);
+    assert.equal(c.checks() + f.registries + f.runs.length, 0);
+    const output = json(f.out);
+    assert.deepEqual(mode === "--list" ? output[0].classifier : output.classifier, DECISIONS);
+  }
+});
+
+test("explicit hasCredentials remains an offline override even with selected-provider injection", async () => {
+  for (const credentials of [false, true]) {
+    const f = fixture();
+    const c = selectedClassifier(f);
+    f.deps.hasCredentials = credentials;
+    assert.equal(await runEval(["alpha"], f.deps), 0);
+    assert.equal(c.checks(), 0);
+    assert.equal(f.runs.length, credentials ? 1 : 0);
+    assert.equal(f.registries, credentials ? 1 : 0);
+  }
+});
+
+test("a selection changed before registry/auth stops safely", async () => {
+  const f = fixture();
+  const c = selectedClassifier(f);
+  c.change();
+  assert.equal(await runEval(["all", "--json"], f.deps), 1);
+  assert.equal(f.registries + c.checks() + f.runs.length, 0);
+  assert.match(json(f.out).stopped, /System 1 changed/u);
+});
+
+test("a selection changed while auth was checked never starts a target", async () => {
+  const f = fixture();
+  const c = selectedClassifier(f);
+  f.deps.classifier!.configured = async () => { c.change(); return true; };
+  assert.equal(await runEval(["all"], f.deps), 1);
+  assert.equal(f.runs.length, 0);
+});
+
+test("selection changes during a target discard its metrics, retain failed-outcome spend, and stop", async () => {
+  const f = fixture();
+  const c = selectedClassifier(f);
+  const first = f.deps.targets[0]!;
+  f.deps.targets = [{ ...first, run: async (ctx) => {
+    ctx.spend.addOutcome({ ok: false, usage: { cost: { total: 0.025 } } });
+    c.change();
+    return { metrics: { score: 1 }, report: "must not present stale success", pass: true };
+  } }, ...f.deps.targets.slice(1)];
+  assert.equal(await runEval(["all", "--json"], f.deps), 1);
+  assert.equal(f.runs.length, 0);
+  const output = json(f.out);
+  assert.equal(output.spend, 0.025);
+  assert.equal(output.calls, 1);
+  assert.equal(output.targets.alpha.discarded, true);
+  assert.deepEqual(output.targets.alpha.metrics, {});
+  assert.equal(output.targets.alpha.pass, false);
+  assert.deepEqual(Object.keys(output.targets), ["alpha"]);
+  assert.deepEqual(last("alpha", 1, f.env), []);
+  assert.doesNotMatch(f.err.join("\n"), /must not present stale success/u);
+});
+
+test("selection is rechecked between targets, after the previous record was saved", async () => {
+  const f = fixture();
+  const c = selectedClassifier(f);
+  const out = f.deps.io!.out;
+  f.deps.io!.out = (line) => { out(line); if (line.startsWith("recorded:")) c.change(); };
+  assert.equal(await runEval(["all"], f.deps), 1);
+  assert.deepEqual(f.runs.map((r) => r.id), ["alpha"]);
+  assert.equal(last("alpha", 1, f.env).length, 1);
+  assert.equal(last("beta", 1, f.env).length, 0);
+});
+
+test("the CLI dry/list/last bootstrap reads the same global backend without loading an SDK or auth", () => {
+  const dir = mkdtempSync(path.join(tmpdir(), "eval-cli-offline-"));
+  try {
+    for (const backend of ["jev", "openai-decisions"]) {
+      writeFileSync(path.join(dir, "system1.json"), JSON.stringify({ backend }));
+      for (const mode of ["--dry", "--list", "--last"]) {
+        const result = spawnSync(process.execPath, [fileURLToPath(new URL("../../scripts/eval.mjs", import.meta.url)), "guard", mode, "--json"], {
+          encoding: "utf8",
+          env: { PATH: process.env.PATH, HOME: dir, PI_CODING_AGENT_DIR: dir, PI_PACKAGE_DIR: path.join(dir, "sdk-must-not-load"), EVAL_RESULTS_DIR: path.join(dir, "results") },
+          timeout: 20_000,
+        });
+        assert.equal(result.status, 0, result.stderr);
+        const output = JSON.parse(result.stdout);
+        const classifier = mode === "--list" ? output[0].classifier : output.classifier;
+        assert.equal(classifier.backend, backend);
+        assert.equal(classifier.provider, backend === "jev" ? "typesafe" : "system1-openai");
+        assert.match(result.stderr, new RegExp(`System 1: ${backend}`, "u"));
+      }
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("credential/bootstrap errors never echo raw provider bodies", async () => {
+  const f = fixture();
+  selectedClassifier(f);
+  f.deps.classifier!.configured = async () => { throw new Error("SECRET provider body"); };
+  assert.equal(await runEval(["alpha"], f.deps), 1);
+  assert.doesNotMatch(f.err.join("\n"), /SECRET/u);
+});
+
+test("last warns and suppresses numeric deltas across backends and legacy/known runs", async () => {
+  for (const classifier of [undefined, JEV, { ...DECISIONS, model: "another-model" }]) {
+    const f = fixture();
+    selectedClassifier(f);
+    record("alpha", { classifier, spend: 1, calls: 2, metrics: { score: 0.1 } }, f.env);
+    record("alpha", { classifier: DECISIONS, spend: 2, calls: 3, metrics: { score: 0.8 } }, f.env);
+    assert.equal(await runEval(["alpha", "--last", "--json"], f.deps), 0);
+    const compared = json(f.out).targets.alpha;
+    assert.deepEqual(compared.diff, {});
+    assert.equal(typeof compared.warning, "string");
+    f.out.length = 0;
+    assert.equal(await runEval(["alpha", "--last"], f.deps), 0);
+    assert.match(f.out.join("\n"), /warning: /u);
+    assert.match(f.out.join("\n"), /score +0\.1 +0\.8 +-\n?/u);
+  }
 });

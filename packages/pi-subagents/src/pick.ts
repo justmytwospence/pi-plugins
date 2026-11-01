@@ -1,6 +1,7 @@
 import { type AgentDef, type ProfileModel, THINKING_LEVELS } from "./agents.ts";
 import { type ClassifierAnswer, type ClassifierQuestion, choice } from "./jev.ts";
 import { type Tier, providerPolicy, routeBuiltinProfile } from "./provider-policy.ts";
+import type { ClassifierProvenance } from "./system1.ts";
 export type { Tier } from "./provider-policy.ts";
 
 /** Tiers and efforts, weakest first: the order the threshold rule climbs. */
@@ -306,6 +307,8 @@ export interface Resolved {
   thinking: string;
   /** Which choices Jev made, for display. */
   byJev: { agent: boolean; model: boolean; thinking: boolean };
+  /** Actual classifier target, independent of the parent and worker chat models. */
+  classifier?: ClassifierProvenance;
   tier?: Tier;
   /** Where each choice came from. */
   source: ChoiceSource;

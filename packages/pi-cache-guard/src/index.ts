@@ -3,8 +3,8 @@
 // row). Keeping the cache warm is Pi's own job: `cacheWarming: "idle"` in settings.json. Its
 // refreshes are `cache_warm` usage entries, which this clock reads as cache activity.
 //
-// With Jev set up (`/cache-guard jev`), it also keeps the context lean (`context.ts`): large tool
-// output is trimmed as it arrives, and a cold cache can be compacted in about a second.
+// With System 1 set up (`/cache-guard system1`), it also keeps the context lean (`context.ts`):
+// large tool output is trimmed as it arrives, and quick compaction uses no generative summary.
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { ImageContent, TextContent } from "@earendil-works/pi-ai";
 import path from "node:path";
@@ -14,7 +14,8 @@ import { loadSettings, saveUserSettings } from "./config.ts";
 import { type Lean, leanContext, trimStatus } from "./context.ts";
 import { FOOTER_ACTIONS_CHANNEL, type FooterActionsRequest } from "./footer-actions.ts";
 import { HerdrReporter, alertHeld, whileBlocked } from "./herdr.ts";
-import { JEV_LOGINS, type JevState, label, probe } from "./jev.ts";
+import { JEV_LOGINS, type JevState, label } from "./jev.ts";
+import { readSystem1Setting, resolveSystem1Target } from "./system1.ts";
 import { JEV_KEY_URL, JEV_PITCH } from "./lean.ts";
 import { type AssistantLike, NOTICE_TYPE, type Notice, detectMiss, noticeLine } from "./notices.ts";
 import { type Wire, cachePolicy, echoedRetention, requestedTtl } from "./policy.ts";
@@ -41,15 +42,15 @@ export { MODEL_CHOICE, MODEL_OFFERS, OFFER_TIMEOUT_MS, type ModelChoice, type Mo
 
 const STATUS_KEY = NAME;
 const TICK_MS = 1_000;
-const SUBCOMMANDS = ["status", "on", "off", "fresh", "compact", "jev"];
+const SUBCOMMANDS = ["status", "on", "off", "fresh", "compact", "system1", "jev"];
 /** The `/cache-guard jev` and `/cache-guard compact` choices. */
 const JEV_DONE = "Done";
-const JEV_ON = "Turn Jev on";
+const JEV_ON = "Turn classifier on for cache-guard";
 const JEV_LEAVE_OFF = "Leave it off";
-const JEV_OFF = "Turn Jev off";
-const JEV_OFF_TIPS = "Turn Jev off (no more tips)";
-const JEV_ANY = "Use any provider that works (clear jev.provider)";
-const JEV_SETUP = "Set up Jev";
+const JEV_OFF = "Turn classifier off for cache-guard";
+const JEV_OFF_TIPS = "Turn classifier off (no more tips)";
+const JEV_ANY = "Use any available Jev provider";
+const JEV_SETUP = "Set up System 1";
 const COMPACT_PI = "Compact with Pi's summary";
 /** The guidance choices after "Compact first". */
 const SUMMARY_DEFAULT = "Default summary";
@@ -132,7 +133,7 @@ export interface MenuItem {
 }
 
 /** Under the cold-cache question while Jev is not set up (and not turned off). */
-export const JEV_TIP = "Tip: /cache-guard jev sets up quick compaction, which compacts in about a second without a summary model reading the history (or turns this tip off).";
+export const JEV_TIP = "Tip: /system1 manages the selected classifier; /cache-guard system1 sets up quick compaction without a generative summary (or turns this tip off).";
 
 /**
  * The widest an option of the cold-cache question may be. Pi's own select wraps a longer option
@@ -169,7 +170,7 @@ export function choiceMenu(
   const switches: MenuItem[] = others.map((offer) => ({ choice: "model", model: offer.model, label: fit("Send with ", offer.label, " instead") }));
   const compactions: MenuItem[] = jev.ready
     ? [
-        { choice: "jev", label: "Compact quickly, then send (~1s)" },
+        { choice: "jev", label: "Compact quickly, then send" },
         { choice: "compact", label: "Compact with a summary, then send" },
       ]
     : [{ choice: "compact", label: "Compact first, then send" }];
@@ -561,7 +562,7 @@ export default function cacheGuard(
     }
   });
 
-  /** `/cache-guard jev`: which Jev is in use and whether it answers; or how to set it up. */
+  /** `/cache-guard system1` (legacy alias: `jev`): local setup, never a paid probe. */
   const jevCommand = async (context: ExtensionContext) => {
     const save = (patch: Record<string, unknown>) => {
       try {
@@ -573,52 +574,51 @@ export default function cacheGuard(
       }
     };
     const current = loadSettings(context.cwd);
+    const management = "Use /system1 to manage the global backend. Availability is local configuration, not a connectivity or billing check.";
+    if (!context.hasUI) {
+      context.ui.notify(`${jevLine(await lean.jev(context), current, lean.savedChars())}\n${management}`, "info");
+      return;
+    }
     if (!current.enabled) {
-      context.ui.notify("cache-guard is off in its settings (\"enabled\": false), Jev included.", "info");
+      context.ui.notify('cache-guard is off in its settings ("enabled": false), classifier included.', "info");
       return;
     }
     if (!current.jev.enabled) {
-      const pick = await context.ui.select(`Jev is off: no trimming, no Jev compaction, no tips.\n${JEV_PITCH}`, [JEV_ON, JEV_LEAVE_OFF]);
+      const pick = await context.ui.select(`System 1 is off for cache-guard: no trimming, quick compaction or tips.\n${JEV_PITCH}\n${management}`, [JEV_ON, JEV_LEAVE_OFF]);
       if (pick !== JEV_ON || !save({ enabled: true })) return;
     }
+    const selection = readSystem1Setting();
+    const mayEditJev = () => selection.ok && selection.backend === "jev" && readSystem1Setting().key === selection.key;
     const state = await lean.refresh(context);
+    const off = async () => {
+      if (!save({ enabled: false })) return;
+      await lean.refresh(context);
+      context.ui.notify("System 1 is off for cache-guard: no trimming, quick compaction or tips. /cache-guard system1 turns it back on.", "info");
+    };
     if (state.kind === "ready") {
-      const answer = await probe(context.modelRegistry, state.target);
-      const head = answer.ok
-        ? `Jev: ${label(state.target)}, answered in ${answer.latencyMs} ms.`
-        : `Jev: ${label(state.target)} did not answer (${answer.reason}).`;
-      const others = state.others.map((target) => ({ target, text: `Use ${label(target)} instead` }));
+      const others = mayEditJev() ? state.others.map((target) => ({ target, text: oneLine(`Use ${label(target)} instead`, OPTION_MAX) })) : [];
       const pick = await context.ui.select(
-        `${head} It trims large tool output and compacts in about a second: the cold-cache menu, /cache-guard compact.`,
+        `System 1: ${label(state.target)} is configured.\n${JEV_PITCH}\n${management}`,
         [JEV_DONE, ...others.map((o) => o.text), JEV_OFF],
       );
       const other = others.find((o) => o.text === pick);
-      if (other && save({ provider: other.target.provider, model: other.target.model })) {
+      if (other && mayEditJev() && save({ provider: other.target.provider, model: other.target.model })) {
         await lean.refresh(context);
-        context.ui.notify(`Jev: ${label(other.target)} from now on.`, "info");
-      } else if (pick === JEV_OFF && save({ enabled: false })) {
-        await lean.refresh(context);
-        context.ui.notify("Jev is off: no trimming, no Jev compaction, no tips. /cache-guard jev turns it back on.", "info");
-      }
+        context.ui.notify(`System 1: ${label(other.target)} in Jev mode from now on.`, "info");
+      } else if (pick === JEV_OFF) await off();
       return;
     }
     if (state.kind === "off") return;
-    const logins = JEV_LOGINS.map((login) => ({ ...login, text: `Log in to ${login.label}` }));
-    const options = [...logins.map((l) => l.text), ...(current.jev.provider ? [JEV_ANY] : []), JEV_OFF_TIPS];
-    const pick = await context.ui.select(
-      `Jev is not set up: ${state.reason}.\n${JEV_PITCH}\nIt needs a TypeSafe API key (${JEV_KEY_URL}; or TYPESAFE_API_KEY in the environment), or a provider that serves Jev: OpenRouter, Vercel AI Gateway, Cloudflare Workers AI, OpenCode.`,
-      options,
-    );
+    const logins = mayEditJev() ? JEV_LOGINS.map((login) => ({ ...login, text: `Log in to ${login.provider === "typesafe" ? "TypeSafe" : "OpenRouter"}` })) : [];
+    const options = [JEV_DONE, ...logins.map((l) => l.text), ...(mayEditJev() && current.jev.provider ? [JEV_ANY] : []), JEV_OFF_TIPS];
+    const hint = mayEditJev() ? `\nJev needs a TypeSafe API key (${JEV_KEY_URL}; or TYPESAFE_API_KEY), or another provider serving Jev.` : "";
+    const pick = await context.ui.select(`System 1 is unavailable: ${state.reason}.\n${JEV_PITCH}\n${management}${hint}`, options);
     const login = logins.find((l) => l.text === pick);
-    if (login) {
-      context.ui.setEditorText(`/login ${login.provider}`);
-      context.ui.notify(`Press Enter to log in to ${login.provider}, then run /cache-guard jev to check.`, "info");
-    } else if (pick === JEV_ANY && save({ provider: "", model: "" })) {
+    if (login && mayEditJev()) {
+      context.ui.notify(`Use /login ${login.provider}, then /cache-guard system1 to check local availability.`, "info");
+    } else if (pick === JEV_ANY && mayEditJev() && save({ provider: "", model: "" })) {
       await jevCommand(context);
-    } else if (pick === JEV_OFF_TIPS && save({ enabled: false })) {
-      await lean.refresh(context);
-      context.ui.notify("Jev is off: no trimming, no Jev compaction, no tips. /cache-guard jev turns it back on.", "info");
-    }
+    } else if (pick === JEV_OFF_TIPS) await off();
   };
 
   /** Jev's compaction, judged against `focus` (or the recent requests). Strict: nothing is spent if Jev fails. */
@@ -640,7 +640,7 @@ export default function cacheGuard(
   const compactCommand = async (focus: string, context: ExtensionContext) => {
     const jev = await lean.jev(context);
     if (jev.kind !== "ready") {
-      const why = jev.kind === "off" ? "Jev is off" : `Jev is not set up (${jev.reason})`;
+      const why = jev.kind === "off" ? "System 1 is off for cache-guard" : `System 1 is unavailable (${jev.reason})`;
       const pick = await context.ui.select(`${why}. Compact with Pi's summary instead?`, [COMPACT_PI, JEV_SETUP]);
       if (pick === JEV_SETUP) await jevCommand(context);
       else if (pick === COMPACT_PI) {
@@ -706,7 +706,7 @@ export default function cacheGuard(
   });
 
   pi.registerCommand(NAME, {
-    description: "Prompt cache and context: status, on, off, fresh, compact [focus], jev",
+    description: "Prompt cache and context: status, on, off, fresh, compact [focus], system1 (alias: jev)",
     getArgumentCompletions: (prefix) => SUBCOMMANDS.filter((v) => v.startsWith(prefix)).map((value) => ({ value, label: value })),
     handler: async (args, context) => {
       const command = args.trim().split(/\s+/u)[0] || "status";
@@ -719,7 +719,7 @@ export default function cacheGuard(
         context.ui.notify(`/${NAME} ${command} takes no argument (got "${rest}").`, "warning");
         return;
       }
-      if (command === "jev") return jevCommand(context);
+      if (command === "jev" || command === "system1") return jevCommand(context);
       if (command === "compact") return compactCommand(rest, context);
       if (command === "fresh") {
         // A new session (linked to this one) that starts with the held prompt, or the editor's text.
@@ -759,11 +759,13 @@ export default function cacheGuard(
 
 /** The Jev line of `/cache-guard status`. */
 export function jevLine(jev: JevState, settings: Settings, savedChars: number): string {
-  if (jev.kind === "off") return "Jev: off (/cache-guard jev turns it on).";
-  if (jev.kind === "missing") return `Jev: not set up (${jev.reason}); /cache-guard jev.`;
+  if (jev.kind === "off") return "System 1: off for cache-guard (/cache-guard system1 turns it on).";
+  if (jev.kind === "missing") return `System 1: unavailable (${jev.reason}); /system1 manages the backend, /cache-guard system1 configures this feature.`;
   const trim = settings.trim.enabled ? `trimming on${savedChars ? ` (${trimStatus(savedChars)?.replace("lean: ", "")} so far)` : ""}` : "trimming off";
   const compaction = `Quick compaction from the cold-cache menu and /cache-guard compact${settings.compact.filter ? "; it filters /compact too" : ""}`;
-  return `Jev: ${label(jev.target)}; ${trim}; ${compaction}.`;
+  const target = resolveSystem1Target(jev.target);
+  if (!target.ok) return `System 1: unavailable (${target.reason}); /system1.`;
+  return `System 1: ${label(target)}; ${trim}; ${compaction}.`;
 }
 
 /** In the new session: the old session's model and thinking level, then the held prompt. */

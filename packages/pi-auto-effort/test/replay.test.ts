@@ -106,7 +106,11 @@ describe("replaySession", () => {
   });
 });
 
-const jev = (depth: number): Assessment => ({ kind: "jev", outcome: { ok: true, answers: {}, model: "m", latencyMs: 100 }, judgment: judgmentOf(depth) });
+const jev = (depth: number): Assessment => ({
+  kind: "jev",
+  outcome: { ok: true, answers: {}, backend: "jev", provider: "typesafe", model: "m", selectionKey: JSON.stringify(["jev", "typesafe", "m"]), latencyMs: 100 },
+  judgment: judgmentOf(depth),
+});
 const failed: Assessment = { kind: "jev", outcome: { ok: false, reason: "timed out" }, judgment: undefined };
 const goAhead: Assessment = { kind: "go-ahead" };
 
@@ -223,7 +227,7 @@ describe("assess", () => {
     const depths = out[0]!.map((a) => (a.kind === "jev" && a.judgment ? Math.round(a.judgment.need.xhigh! * 100) : undefined));
     expect(depths[3]).toBe(70);
     expect(depths[4]).toBe(1);
-    expect(out[0]![7]).toEqual({ kind: "jev", outcome: { ok: false, reason: "boom" }, judgment: undefined });
+    expect(out[0]![7]).toEqual({ kind: "jev", outcome: { ok: false, reason: "classifier request failed" }, judgment: undefined });
   });
 });
 

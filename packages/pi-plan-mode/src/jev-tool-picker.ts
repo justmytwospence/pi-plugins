@@ -1,5 +1,6 @@
 import { basename } from "node:path";
 import type { ModelRegistry } from "@earendil-works/pi-coding-agent";
+import { askSystem1, type ClassifierProvenance } from "./system1.js";
 
 /** One toggle in the planner picker that Jev can preselect. */
 export interface ToolCapability {
@@ -14,7 +15,10 @@ export interface ToolCapability {
 export type JevToolPick =
   | {
       kind: "jev";
+      backend: ClassifierProvenance["backend"];
+      provider: string;
       model: string;
+      selectionKey: string;
       probabilities: Record<string, number>;
       selected: Record<string, boolean>;
     }
@@ -62,7 +66,7 @@ function question(capability: ToolCapability) {
 }
 
 /**
- * Ask Jev (TypeSafe's System One model) which planner capabilities fit the task: one bool question
+ * Ask the selected System 1 classifier which planner capabilities fit the task: one bool question
  * per capability in a single request, through Pi's classifier models. Every failure mode -- no
  * classifier, no credentials, network error, timeout, malformed answer -- resolves to `fallback`
  * with a short reason, never throws.
@@ -75,14 +79,6 @@ export async function pickToolsWithJev(input: PickToolsInput): Promise<JevToolPi
 
   const provider = input.provider?.trim() || DEFAULT_JEV_PROVIDER;
   const modelId = input.model?.trim() || DEFAULT_JEV_MODEL;
-  let model: ReturnType<ClassifierRegistry["findOfType"]>;
-  try {
-    model = input.registry.findOfType("classifier", provider, modelId);
-  } catch {
-    model = undefined;
-  }
-  if (!model) return { kind: "fallback", reason: `no classifier model ${provider}/${modelId}` };
-
   const threshold = input.threshold ?? DEFAULT_JEV_THRESHOLD;
   const questions = Object.fromEntries(
     input.capabilities.map((capability, index) => [
@@ -97,17 +93,14 @@ export async function pickToolsWithJev(input: PickToolsInput): Promise<JevToolPi
   };
 
   try {
-    const result = await input.registry.classify(
-      model,
-      { state, questions },
-      { timeoutMs: input.timeoutMs ?? DEFAULT_TIMEOUT_MS, ...(input.signal ? { signal: input.signal } : {}) },
+    const result = await askSystem1(
+      input.registry,
+      { enabled: true, provider, model: modelId, timeoutMs: input.timeoutMs ?? DEFAULT_TIMEOUT_MS },
+      state,
+      questions,
+      input.signal,
     );
-    if (result.stopReason !== "stop") {
-      return {
-        kind: "fallback",
-        reason: `automatic picking is unavailable (${describeError(result.stopReason, result.errorMessage)})`,
-      };
-    }
+    if (!result.ok) return { kind: "fallback", reason: result.reason };
     const probabilities: Record<string, number> = {};
     const selected: Record<string, boolean> = {};
     for (const [index, capability] of input.capabilities.entries()) {
@@ -119,22 +112,18 @@ export async function pickToolsWithJev(input: PickToolsInput): Promise<JevToolPi
       probabilities[capability.id] = value;
       selected[capability.id] = value >= threshold;
     }
-    return { kind: "jev", model: result.model || modelId, probabilities, selected };
-  } catch (error: unknown) {
     return {
-      kind: "fallback",
-      reason: `automatic picking is unavailable (${describeError("error", error instanceof Error ? error.message : String(error))})`,
+      kind: "jev",
+      backend: result.backend,
+      provider: result.provider,
+      model: result.model,
+      selectionKey: result.selectionKey,
+      probabilities,
+      selected,
     };
+  } catch {
+    return { kind: "fallback", reason: "automatic picking is unavailable" };
   }
-}
-
-function describeError(stopReason: string, message: string | undefined) {
-  if (stopReason === "aborted") return "cancelled";
-  const text = (message ?? "").replace(/\s+/gu, " ");
-  if (/No API key/iu.test(text)) return "no TypeSafe credentials";
-  if (/\b401\b|unauthori[sz]ed/iu.test(text)) return "invalid API key";
-  if (/timed out|timeout/iu.test(text)) return "timed out";
-  return text.slice(0, 120) || "unknown error";
 }
 
 function clip(text: string, max: number) {

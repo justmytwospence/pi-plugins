@@ -1,9 +1,20 @@
-import { readFileSync } from "node:fs";
+import { readFileSync, rmSync, writeFileSync } from "node:fs";
+import path from "node:path";
 import { compact } from "@earendil-works/pi-coding-agent";
-import { expect, test, vi } from "vitest";
+import { afterEach, expect, test, vi } from "vitest";
 
 import { DECISION_TYPE, leanContext } from "../src/context.ts";
-import { JEV_MODELS, resolveJev } from "../src/jev.ts";
+import { JEV_MODELS, askJev, probe, resolveJev } from "../src/jev.ts";
+import { SYSTEM1_CHANGED, resolveSystem1Target } from "../src/system1.ts";
+
+const settingFile = () => path.join(process.env.PI_CODING_AGENT_DIR!, "system1.json");
+const cacheFile = () => path.join(process.env.PI_CODING_AGENT_DIR!, "cache-guard.json");
+const select = (backend: "jev" | "openai-decisions") => writeFileSync(settingFile(), JSON.stringify({ backend }));
+const decisions = { provider: "system1-openai", id: "gpt-6-luna", api: "openai-decisions", baseUrl: "https://api.openai.com/v1" };
+afterEach(() => {
+  rmSync(settingFile(), { force: true });
+  rmSync(cacheFile(), { force: true });
+});
 
 vi.mock("@earendil-works/pi-coding-agent", () => ({
   compact: vi.fn(async (preparation: any, _model: unknown, _key: unknown, _headers: unknown, instructions: unknown) => ({
@@ -20,14 +31,19 @@ type Answerer = (questions: Record<string, any>, state: any) => any;
 
 /** A Pi model registry with Jev (or without, when `available` is empty). */
 function registry(answer: Answerer, available = [{ provider: "typesafe", id: "jev-latest" }]) {
-  const calls: Array<{ state: any; questions: Record<string, any> }> = [];
+  const calls: Array<{ state: any; questions: Record<string, any>; model: any; options: any }> = [];
+  const discovered: string[] = [];
   return {
     calls,
-    getAvailableOfType: async () => available,
-    findOfType: (_type: string, provider: string, id: string) => ({ provider, id }),
-    classify: async (_model: unknown, context: any) => {
-      calls.push(context);
-      const result = answer(context.questions, context.state);
+    discovered,
+    getAvailableOfType: async (_type: string, provider: string) => {
+      discovered.push(provider);
+      return available.filter((m) => m.provider === provider);
+    },
+    findOfType: (_type: string, provider: string, id: string) => provider === decisions.provider ? { ...decisions, id } : { provider, id },
+    classify: async (model: unknown, context: any, options?: any) => {
+      calls.push({ ...context, model, options });
+      const result = await answer(context.questions, context.state);
       if (result && typeof result === "object" && "stopReason" in result) return result;
       return { model: "jev-latest", stopReason: "stop", answers: result, usage: usage(300) };
     },
@@ -38,7 +54,13 @@ function registry(answer: Answerer, available = [{ provider: "typesafe", id: "je
 function setup(answer: Answerer, available?: Array<{ provider: string; id: string }>) {
   const handlers = new Map<string, Array<(event: any, ctx: any) => any>>();
   const entries: Array<{ customType: string; data: any }> = [];
+  const listeners = new Map<string, Array<() => void>>();
+  const events = {
+    on: (name: string, handler: () => void) => listeners.set(name, [...(listeners.get(name) ?? []), handler]),
+    emit: (name: string) => { for (const listener of listeners.get(name) ?? []) listener(); },
+  };
   const pi = {
+    events,
     on: (name: string, handler: any) => handlers.set(name, [...(handlers.get(name) ?? []), handler]),
     appendEntry: (customType: string, data: unknown) => entries.push({ customType, data: data as any }),
   };
@@ -65,7 +87,7 @@ function setup(answer: Answerer, available?: Array<{ provider: string; id: strin
     for (const handler of handlers.get(name) ?? []) result = (await handler(event, ctx)) ?? result;
     return result;
   };
-  return { lean, reg, ctx, emit, entries, notes, status };
+  return { lean, reg, ctx, emit, entries, notes, status, events };
 }
 
 const big = Array.from({ length: 2_000 }, (_, i) => (i === 1_000 ? "Error: expected 3 retries, got 1" : `ok ${i} ${"-".repeat(10)}`)).join("\n");
@@ -174,6 +196,20 @@ const compaction = (reason = "manual", customInstructions?: string) => ({
     fileOps: { read: new Set<string>(), written: new Set<string>(), edited: new Set(["src/cache.ts"]) },
     settings: {},
   },
+});
+
+test("compaction audit records the classifier's actual resolved model", async () => {
+  const { lean, emit, entries } = setup((questions, state) => ({
+    stopReason: "stop",
+    model: "jev-concrete-revision",
+    answers: keepFirstDropSecond(questions, state),
+    usage: usage(300),
+  }));
+  await emit("session_start", {});
+  lean.armJevCompaction({ strict: true });
+  const out: any = await emit("session_before_compact", compaction());
+  expect(out.compaction.details.cacheGuard.mode).toBe("jev");
+  expect(entries.at(-1)?.data.classifier).toEqual({ backend: "jev", provider: "typesafe", model: "jev-concrete-revision" });
 });
 
 const directMarker = "plan-mode-direct:550e8400-e29b-41d4-a716-446655440000";
@@ -287,7 +323,7 @@ test("strict: a Jev failure cancels the compaction and says why; overflow falls 
   await none.emit("session_start", {});
   none.lean.armJevCompaction({ strict: true });
   expect(await none.emit("session_before_compact", compaction())).toEqual({ cancel: true });
-  expect(none.lean.lastFailure()).toBe("Jev is not set up (no provider with Jev has credentials)");
+  expect(none.lean.lastFailure()).toBe("System 1 is unavailable (no provider with Jev has credentials)");
   expect(await none.emit("session_before_compact", compaction())).toBeUndefined();
 });
 
@@ -315,4 +351,228 @@ test("resolveJev: the configured provider, else the most direct one Pi can reach
   expect(await resolveJev({}, { enabled: true, provider: "", model: "" })).toMatchObject({ kind: "missing", reason: expect.stringContaining("classifier") });
   // Only the providers that serve Jev are asked.
   expect(new Set(asked)).toEqual(new Set(["typesafe", "openrouter", "vercel-ai-gateway", "cloudflare-workers-ai", "opencode"]));
+});
+
+const nativeKeep: Answerer = (questions) => Object.fromEntries(Object.keys(questions).map((id) => [id, {
+  type: "choice", choice: "verbatim", probabilities: { verbatim: 1, summarize: 0, drop: 0 }, confidence: 1,
+}]));
+const manyMessages = () => Array.from({ length: 250 }, (_, i) => ({ role: "user", content: `Requirement ${i}` }));
+
+test("Decisions availability checks only its isolated provider, never Jev discovery", async () => {
+  select("openai-decisions");
+  const reg = registry(keepErrors, [decisions]);
+  const found = await resolveJev(reg, { enabled: true, provider: "openrouter", model: "legacy-jev" });
+  expect(found).toEqual({ kind: "ready", target: { provider: decisions.provider, model: decisions.id }, others: [] });
+  expect(reg.discovered).toEqual(["system1-openai"]);
+  expect(reg.calls).toEqual([]);
+  writeFileSync(settingFile(), "{broken");
+  reg.discovered.length = 0;
+  expect(await resolveJev(reg, { enabled: true, provider: "typesafe", model: "jev-latest" })).toMatchObject({ kind: "missing", reason: expect.stringContaining("configuration") });
+  expect(reg.discovered).toEqual([]);
+  expect(await resolveJev(reg, { enabled: false, provider: "typesafe", model: "jev-latest" })).toEqual({ kind: "off" });
+});
+
+test("Decisions missing credentials or adapter stays unavailable without fallback", async () => {
+  select("openai-decisions");
+  for (const reg of [registry(keepErrors), { ...registry(keepErrors, [decisions]), findOfType: () => undefined }]) {
+    expect(await resolveJev(reg, { enabled: true, provider: "", model: "" })).toMatchObject({ kind: "missing", reason: expect.stringContaining("/login system1-openai") });
+    expect(reg.calls).toEqual([]);
+    expect(reg.discovered.every((provider) => provider === "system1-openai")).toBe(true);
+  }
+});
+
+test("legacy askJev/probe follow System 1, report provenance and preserve failure usage", async () => {
+  select("openai-decisions");
+  const reg = registry(keepErrors, [decisions]);
+  const target = { provider: "typesafe", model: "jev-latest" };
+  const result = await probe(reg, target);
+  expect(result).toMatchObject({ ok: true, backend: "openai-decisions", provider: decisions.provider, model: decisions.id, selectionKey: resolveSystem1Target(target).key, usage: usage(300) });
+  expect(reg.calls[0]?.options.retries).toBe(0);
+  const down = registry(() => ({ stopReason: "error", errorMessage: "insufficient_quota", answers: {}, usage: usage(70) }), [decisions]);
+  expect(await askJev(down, target, 5_000, {}, { q: { type: "bool", instructions: "test", criteria: { true: "yes", false: "no" } } })).toMatchObject({ ok: false, reason: expect.stringContaining("quota"), usage: usage(70) });
+  expect(down.calls).toHaveLength(1);
+});
+
+test("trim and compaction recheck selection without waiting for before_agent_start or 60s", async () => {
+  const h = setup(keepErrors, [{ provider: "typesafe", id: "jev-latest" }, decisions]);
+  await h.emit("session_start", {});
+  expect((await h.lean.jev(h.ctx)).kind).toBe("ready");
+  select("openai-decisions");
+  const trimmed: any = await h.emit("tool_result", toolResult());
+  expect(trimmed.content[0].text).toContain("lines omitted");
+  expect(h.reg.calls[0]?.model.provider).toBe("system1-openai");
+  expect(h.reg.calls[0]?.options.retries).toBe(0);
+  expect(h.entries[0]?.data.classifier).toEqual({ backend: "openai-decisions", provider: decisions.provider, model: decisions.id });
+
+  const c = setup(nativeKeep, [{ provider: "typesafe", id: "jev-latest" }, decisions]);
+  await c.emit("session_start", {});
+  select("jev");
+  c.lean.armJevCompaction({ strict: true });
+  const out: any = await c.emit("session_before_compact", compaction());
+  expect(out.compaction.summary).toContain("Use pnpm");
+  expect(c.reg.calls[0]?.model.provider).toBe("typesafe");
+});
+
+test("a System 1 change invalidates cached missing availability immediately", async () => {
+  const h = setup(keepErrors, []);
+  await h.emit("session_start", {});
+  expect((await h.lean.jev(h.ctx)).kind).toBe("missing");
+  const count = h.reg.discovered.length;
+  h.reg.getAvailableOfType = async (_type, provider) => {
+    h.reg.discovered.push(provider);
+    return [{ provider: "typesafe", id: "jev-latest" }].filter((m) => m.provider === provider);
+  };
+  h.events.emit(SYSTEM1_CHANGED);
+  expect((await h.lean.jev()).kind).toBe("ready");
+  expect(h.reg.discovered.length).toBeGreaterThan(count);
+});
+
+test("a pending availability lookup cannot start trimming on its old selection", async () => {
+  const h = setup(keepErrors);
+  let release!: (models: Array<{ provider: string; id: string }>) => void;
+  h.reg.getAvailableOfType = () => new Promise((resolve) => { release = resolve; });
+  await h.emit("session_start", {});
+  const trimming = h.emit("tool_result", toolResult());
+  // Resolve each legacy discovery lookup, after switching the global setting.
+  select("openai-decisions");
+  for (let i = 0; i < 5; i++) {
+    release([{ provider: "typesafe", id: "jev-latest" }]);
+    await Promise.resolve();
+  }
+  expect(await trimming).toBeUndefined();
+  expect(h.reg.calls).toEqual([]);
+});
+
+test.each([false, true])("pending trim output is discarded after a backend change (event: %s)", async (emitEvent) => {
+  let release!: (answers: any) => void;
+  let started!: () => void;
+  const called = new Promise<void>((resolve) => { started = resolve; });
+  const h = setup((q, state) => {
+    started();
+    return new Promise((resolve) => { release = () => resolve(keepErrors(q, state)); });
+  }, [{ provider: "typesafe", id: "jev-latest" }, decisions]);
+  await h.emit("session_start", {});
+  const pending = h.emit("tool_result", toolResult());
+  await called;
+  select("openai-decisions");
+  if (emitEvent) h.events.emit(SYSTEM1_CHANGED);
+  release({});
+  const out: any = await pending;
+  expect(out?.content).toBeUndefined();
+  expect(h.entries).toEqual([]);
+  expect(h.lean.savedChars()).toBe(0);
+  if (emitEvent) expect(h.reg.calls[0]?.options.signal.aborted).toBe(true);
+  else expect(out.usage.input).toBe(300);
+});
+
+test.each([true, false])("failed later compaction batches retain usage and existing fallback (strict: %s)", async (strict) => {
+  writeFileSync(cacheFile(), JSON.stringify({ compact: { concurrency: 1 } }));
+  let calls = 0;
+  const h = setup((q) => ++calls === 2 ? { stopReason: "error", errorMessage: "401 Unauthorized", answers: {}, usage: usage(80) } : nativeKeep(q, {}));
+  await h.emit("session_start", {});
+  if (strict) h.lean.armJevCompaction({ strict: true });
+  const event = compaction(strict ? "manual" : "overflow");
+  event.preparation.messagesToSummarize = manyMessages() as any;
+  vi.mocked(compact).mockClear();
+  expect(await h.emit("session_before_compact", event)).toEqual(strict ? { cancel: true } : undefined);
+  expect(h.reg.calls).toHaveLength(2);
+  expect(compact).not.toHaveBeenCalled();
+  expect(h.entries.at(-1)?.data).toMatchObject({ kind: "compact", failed: true, usage: usage(380) });
+  if (!strict) expect(h.notes.at(-1)).toContain("using Pi's compaction");
+});
+
+test.each([false, true])("multi-batch compaction never mixes backend selections (event: %s)", async (emitEvent) => {
+  writeFileSync(cacheFile(), JSON.stringify({ compact: { concurrency: 1 } }));
+  let calls = 0;
+  const h = setup((q) => {
+    calls++;
+    if (calls === 1) {
+      select("openai-decisions");
+      if (emitEvent) h.events.emit(SYSTEM1_CHANGED);
+    }
+    return nativeKeep(q, {});
+  }, [{ provider: "typesafe", id: "jev-latest" }, decisions]);
+  await h.emit("session_start", {});
+  h.lean.armJevCompaction({ strict: true });
+  const event = compaction();
+  event.preparation.messagesToSummarize = manyMessages() as any;
+  expect(await h.emit("session_before_compact", event)).toEqual({ cancel: true });
+  expect(h.reg.calls).toHaveLength(1);
+  expect(h.lean.lastFailure()).toMatch(/cancelled|System 1 changed/u);
+  expect(h.entries.every((entry) => entry.data.failed)).toBe(true);
+});
+
+test("strict quick compaction cancels an already-aborted request without spending or summarizing", async () => {
+  const h = setup(nativeKeep);
+  await h.emit("session_start", {});
+  h.lean.armJevCompaction({ strict: true });
+  const controller = new AbortController();
+  controller.abort();
+  vi.mocked(compact).mockClear();
+  expect(await h.emit("session_before_compact", { ...compaction(), signal: controller.signal })).toEqual({ cancel: true });
+  expect(h.reg.calls).toEqual([]);
+  expect(compact).not.toHaveBeenCalled();
+});
+
+test.each([false, true])("a switch during a later compaction batch cancels and retains earlier usage (event: %s)", async (emitEvent) => {
+  writeFileSync(cacheFile(), JSON.stringify({ compact: { concurrency: 1 } }));
+  let calls = 0;
+  let started!: () => void;
+  const secondStarted = new Promise<void>((resolve) => { started = resolve; });
+  let release!: () => void;
+  const h = setup((q) => {
+    if (++calls !== 2) return nativeKeep(q, {});
+    started();
+    return new Promise((resolve) => { release = () => resolve(nativeKeep(q, {})); });
+  }, [{ provider: "typesafe", id: "jev-latest" }, decisions]);
+  await h.emit("session_start", {});
+  h.lean.armJevCompaction({ strict: true });
+  const event = compaction();
+  event.preparation.messagesToSummarize = manyMessages() as any;
+  const pending = h.emit("session_before_compact", event);
+  await secondStarted;
+  select("openai-decisions");
+  if (emitEvent) h.events.emit(SYSTEM1_CHANGED);
+  release();
+  vi.mocked(compact).mockClear();
+  expect(await pending).toEqual({ cancel: true });
+  expect(h.reg.calls).toHaveLength(2);
+  expect(h.reg.calls.every((call) => call.model.provider === "typesafe")).toBe(true);
+  expect(h.entries.at(-1)?.data).toMatchObject({ failed: true, usage: { input: emitEvent ? 300 : 600 } });
+  if (emitEvent) expect(h.reg.calls[1]?.options.signal.aborted).toBe(true);
+  expect(compact).not.toHaveBeenCalled();
+});
+
+test("all batches of a successful Decisions compaction retain the selected target and usage", async () => {
+  select("openai-decisions");
+  const h = setup(nativeKeep, [decisions]);
+  await h.emit("session_start", {});
+  h.lean.armJevCompaction({ strict: true });
+  const event = compaction();
+  event.preparation.messagesToSummarize = manyMessages() as any;
+  const out: any = await h.emit("session_before_compact", event);
+  expect(out.compaction.usage).toEqual(usage(900));
+  expect(h.reg.calls).toHaveLength(3);
+  expect(h.reg.calls.every((call) => call.model.provider === "system1-openai")).toBe(true);
+  expect(h.entries.at(-1)?.data.classifier).toEqual({ backend: "openai-decisions", provider: decisions.provider, model: decisions.id });
+});
+
+test("failed trimming retains classifier usage without changing the tool content", async () => {
+  select("openai-decisions");
+  const h = setup(() => ({ stopReason: "error", errorMessage: "invalid answer", answers: {}, usage: usage(80) }), [decisions]);
+  await h.emit("session_start", {});
+  expect(await h.emit("tool_result", { ...toolResult(), usage: usage(20) })).toEqual({ usage: usage(100) });
+  expect(h.lean.savedChars()).toBe(0);
+  expect(h.entries).toEqual([]);
+});
+
+test("Decisions quick compaction keeps the existing deterministic summary", async () => {
+  select("openai-decisions");
+  const h = setup(nativeKeep, [decisions]);
+  await h.emit("session_start", {});
+  h.lean.armJevCompaction({ strict: true });
+  const out: any = await h.emit("session_before_compact", compaction());
+  expect(out.compaction.details.cacheGuard).toEqual({ mode: "jev", verbatim: 3, summarize: 0, drop: 0 });
+  expect(out.compaction.usage).toEqual(usage(300));
+  expect(h.reg.discovered).toEqual(["system1-openai"]);
 });

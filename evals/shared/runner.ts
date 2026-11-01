@@ -3,11 +3,11 @@
 //
 //   npm run -s eval -- [<id|package|all>...] [--package <pkg>] [--dry | --list | --last] [--json]
 //
-//   (default)  live run: skipped with exit 0 when TYPESAFE_API_KEY is unset; else the selected targets
+//   (default)  live run: skipped with exit 0 when the selected classifier is unconfigured; else targets
 //              one after another (each target's own concurrency is its `ctx.pool`): the report, then
 //              `spend: $X over N calls`, then a record in evals/results/<id>.jsonl. Exit 1 when any
 //              target's `pass` is false (or it threw). A live run must name what to run.
-//   --dry      what each target would call, without Jev: samples sessions once for the targets that
+//   --dry      what each target would call, without inference: samples sessions once for targets that
 //              need them, then each `plan()`, and a spend estimate.
 //   --list     the targets (id, title, package, kind).
 //   --last     the last recorded run of each target and its numeric difference from the one before.
@@ -18,8 +18,7 @@
 // sampler), EVAL_COMPARE=1, EVAL_COST_PER_CALL, EVAL_RESULTS_DIR, and whatever else a target reads.
 // Exit codes: 0 done or skipped, 1 a target failed, 2 a usage error (including an unknown id).
 import path from "node:path";
-import { installedRegistry } from "./registry.ts";
-import { diffRecords, last, record, resultsDir, type ResultRecord } from "./results.ts";
+import { comparisonWarning, diffRecords, last, record, resultsDir, type ClassifierProvenance, type ResultRecord } from "./results.ts";
 import { pool } from "./pool.ts";
 import { type Sample, sampleSessions, summarizeSession } from "./sessions.ts";
 import { Spend, estimate } from "./spend.ts";
@@ -33,12 +32,21 @@ export interface RunnerIO {
 
 export interface RunnerDeps {
   targets: readonly EvalTarget[];
-  /** Builds the Jev registry once per run (default: `installedRegistry`, Pi's own). */
+  /** Builds the classifier registry once per live run (default: `installedRegistry`, Pi's own). */
   registry?: () => Promise<unknown>;
   /** Default `process.env`; the EVAL_* variables, TYPESAFE_API_KEY and EVAL_RESULTS_DIR are read from it. */
   env?: NodeJS.ProcessEnv;
-  /** Default: whether `env.TYPESAFE_API_KEY` is set. */
+  /** Explicit offline/backwards-compatible override; otherwise use classifier.configured or TYPESAFE_API_KEY. */
   hasCredentials?: boolean;
+  /** Injected by the CLI, never imported from a component here. Omit for legacy direct runner use. */
+  classifier?: ClassifierProvenance & {
+    key: string;
+    configured(registry: unknown): Promise<boolean>;
+    /** Re-read the effective global target, without auth or inference; checked around every target. */
+    currentKey?(): string;
+    /** Safe explanation for an unavailable setting/capability. */
+    reason?: string;
+  };
   /** Default: `sampleSessions({ env, log })`. */
   sample?: (log: (line: string) => void) => Sample;
   /** Default: `console.log` and `console.error`. */
@@ -46,8 +54,8 @@ export interface RunnerDeps {
 }
 
 const USAGE = `usage: npm run -s eval -- [<id|package|all>...] [--package <pkg>] [--dry | --list | --last] [--json]
-  (default) run the selected targets live against Jev (paid); skipped without TYPESAFE_API_KEY
-  --dry     what they would call, without calling Jev, and a spend estimate
+  (default) run targets live against the global System 1 backend (API usage); skipped without configured auth
+  --dry     what they would call, without inference or auth, and a catalog-cost estimate
   --list    the targets
   --last    the last recorded run of each target and its change from the one before
   --json    one JSON object on stdout; text for humans goes to stderr`;
@@ -143,6 +151,7 @@ export async function runEval(argv: readonly string[], deps: RunnerDeps): Promis
     const selected = select(deps.targets, options.selectors.length || options.packages.length ? options.selectors : ["all"], options.packages);
     const say = options.json ? io.err : io.out;
     const ctx = { options, selected, io, say, env, deps };
+    if (deps.classifier) say(`System 1: ${classifierLabel(deps.classifier)}${deps.classifier.reason ? `; unavailable: ${deps.classifier.reason}` : ""}`);
     if (options.mode === "list") return list(ctx);
     if (options.mode === "last") return lastRuns(ctx);
     return options.mode === "dry" ? await dry(ctx) : await live(ctx);
@@ -162,8 +171,23 @@ interface Ctx {
   deps: RunnerDeps;
 }
 
-function list({ options, selected, io }: Ctx): number {
-  if (options.json) io.out(JSON.stringify(selected.map(({ id, title, package: pkg, kind }) => ({ id, title, package: pkg, kind }))));
+const classifierProvenance = (deps: RunnerDeps): ClassifierProvenance | undefined => {
+  const c = deps.classifier;
+  return c ? { backend: c.backend, provider: c.provider, model: c.model } : undefined;
+};
+const classifierLabel = (c: ClassifierProvenance) => `${c.backend} (${c.provider}/${c.model})`;
+const classifierJSON = (deps: RunnerDeps) => deps.classifier ? { classifier: classifierProvenance(deps) } : {};
+const selectionChanged = (deps: RunnerDeps): boolean => {
+  try {
+    return deps.classifier?.currentKey !== undefined && deps.classifier.currentKey() !== deps.classifier.key;
+  } catch {
+    return true;
+  }
+};
+const CHANGED = "System 1 changed during the eval; stopped to avoid mixing classifiers. Retry the run.";
+
+function list({ options, selected, io, deps }: Ctx): number {
+  if (options.json) io.out(JSON.stringify(selected.map(({ id, title, package: pkg, kind }) => ({ id, title, package: pkg, kind, ...classifierJSON(deps) }))));
   else io.out(text([["id", "title", "package", "kind"], ...selected.map((t) => [t.id, t.title, t.package, t.kind])]));
   return 0;
 }
@@ -210,36 +234,58 @@ async function dry(ctx: Ctx): Promise<number> {
   const cost = estimate(totalCalls, env);
   say(`${cost.note}: $${cost.usd.low.toFixed(4)} to $${cost.usd.high.toFixed(4)}`);
   const sample = sampled.peek();
-  if (options.json) io.out(JSON.stringify({ seed: sample?.seed ?? null, sessions: sample?.sessions.map(summarizeSession) ?? [], targets, totalCalls, estimate: cost }));
+  if (options.json) io.out(JSON.stringify({ ...classifierJSON(ctx.deps), seed: sample?.seed ?? null, sessions: sample?.sessions.map(summarizeSession) ?? [], targets, totalCalls, estimate: cost }));
   return failed ? 1 : 0;
 }
 
 async function live(ctx: Ctx): Promise<number> {
   const { options, selected, io, say, env, deps } = ctx;
-  const credentials = deps.hasCredentials ?? Boolean(env.TYPESAFE_API_KEY?.trim());
-  if (!credentials) {
-    const reason = "TYPESAFE_API_KEY is not set; the evals call Jev live, so nothing ran";
+  const skip = (reason: string) => {
     say(`skipped: ${reason} (${selected.map((t) => t.id).join(", ")})`);
-    if (options.json) io.out(JSON.stringify({ skipped: true, reason, targets: {} }));
+    if (options.json) io.out(JSON.stringify({ ...classifierJSON(deps), skipped: true, reason, targets: {} }));
     return 0;
-  }
+  };
+  const stop = () => {
+    io.err(CHANGED);
+    if (options.json) io.out(JSON.stringify({ ...classifierJSON(deps), pass: false, stopped: CHANGED, spend: 0, calls: 0, targets: {} }));
+    return 1;
+  };
+  if (selectionChanged(deps)) return stop();
+  // Preserve the old no-registry fast path for direct callers and explicit test overrides.
+  const credentials = deps.hasCredentials ?? (deps.classifier ? undefined : Boolean(env.TYPESAFE_API_KEY?.trim()));
+  if (credentials === false) return skip(deps.classifier
+    ? `${classifierLabel(deps.classifier)} is not configured; nothing ran`
+    : "TYPESAFE_API_KEY is not set; the evals call Jev live, so nothing ran");
   let registry: unknown;
   try {
-    registry = await (deps.registry ?? installedRegistry)();
-  } catch (error) {
-    io.err(`cannot build the Jev registry: ${message(error)}`);
+    registry = await (deps.registry ?? (async () => (await import("./registry.ts")).installedRegistry()))();
+    if (selectionChanged(deps)) return stop();
+    if (credentials === undefined && deps.classifier && !await deps.classifier.configured(registry)) {
+      if (selectionChanged(deps)) return stop();
+      return skip(`${classifierLabel(deps.classifier)} is not configured${deps.classifier.reason ? `: ${deps.classifier.reason}` : ""}; nothing ran`);
+    }
+  } catch {
+    // Provider/auth exceptions may contain credential material; do not echo their bodies.
+    io.err(`cannot build or configure the ${deps.classifier ? classifierLabel(deps.classifier) : "Jev"} registry`);
     return 1;
   }
+  if (selectionChanged(deps)) return stop();
   const sampled = sampler(ctx);
   if (selected.some(needsSessions)) sampled.get();
   const outcomes: Record<string, unknown> = {};
   const failed: string[] = [];
   const total = new Spend();
+  let stopped: string | undefined;
   for (const target of selected) {
+    if (selectionChanged(deps)) {
+      stopped = CHANGED;
+      io.err(stopped);
+      break;
+    }
     say(`\n== ${target.id}: ${target.title} (${target.package}, ${target.kind}) ==`);
     const used = { sample: false };
     const spend = new Spend();
-    const runContext: RunContext = { ...planContext(ctx, sampled, used), registry, spend, pool, table, concurrency: CONCURRENCY, timeoutMs: TIMEOUT_MS };
+    const runContext: RunContext = { ...planContext(ctx, sampled, used), ...classifierJSON(deps), registry, spend, pool, table, concurrency: CONCURRENCY, timeoutMs: TIMEOUT_MS };
     let result;
     let error: string | undefined;
     try {
@@ -248,15 +294,18 @@ async function live(ctx: Ctx): Promise<number> {
       error = message(thrown);
     }
     total.merge(spend);
-    if (result) say(result.report);
+    if (selectionChanged(deps)) {
+      stopped = CHANGED;
+      error = stopped;
+    }
+    if (result && !stopped) say(result.report);
     say(`${spend.line()}${result?.failures !== undefined ? `; failures: ${result.failures}` : ""}`);
-    let recorded: ResultRecord | undefined;
-    if (result) {
+    if (result && !stopped) {
       const metrics = finite(result.metrics) ?? {};
       const compare = finite(result.compare);
       const seed = used.sample || needsSessions(target) ? (sampled.peek()?.seed ?? null) : null;
       try {
-        recorded = record(target.id, { seed, spend: spend.total, calls: spend.calls, metrics, ...(compare ? { compare } : {}) }, env);
+        record(target.id, { ...classifierJSON(deps), seed, spend: spend.total, calls: spend.calls, metrics, ...(compare ? { compare } : {}) }, env);
         say(`recorded: ${path.join(resultsDir(env), `${target.id}.jsonl`)}`);
       } catch (thrown) {
         error = `could not record the run: ${message(thrown)}`;
@@ -269,42 +318,49 @@ async function live(ctx: Ctx): Promise<number> {
       say(`FAIL ${target.id}`);
     }
     outcomes[target.id] = {
+      ...classifierJSON(deps),
+      ...(stopped ? { discarded: true } : {}),
       kind: target.kind,
       pass,
       ...(result?.failures !== undefined ? { failures: result.failures } : {}),
       spend: spend.total,
       calls: spend.calls,
-      metrics: result?.metrics ?? {},
-      ...(result?.compare ? { compare: result.compare } : {}),
+      metrics: stopped ? {} : result?.metrics ?? {},
+      ...(!stopped && result?.compare ? { compare: result.compare } : {}),
       ...(error ? { error } : {}),
     };
+    if (stopped) break;
   }
-  if (selected.length > 1) say(`\n${selected.length - failed.length}/${selected.length} targets passed${failed.length ? ` (failed: ${failed.join(", ")})` : ""}; total ${total.line()}`);
-  if (options.json) io.out(JSON.stringify({ seed: sampled.peek()?.seed ?? null, pass: !failed.length, spend: total.total, calls: total.calls, targets: outcomes }));
-  return failed.length ? 1 : 0;
+  if (selected.length > 1) say(`\n${Object.keys(outcomes).length - failed.length}/${selected.length} targets passed${failed.length ? ` (failed: ${failed.join(", ")})` : ""}; total ${total.line()}`);
+  if (options.json) io.out(JSON.stringify({ ...classifierJSON(deps), ...(stopped ? { stopped } : {}), seed: sampled.peek()?.seed ?? null, pass: !failed.length && !stopped, spend: total.total, calls: total.calls, targets: outcomes }));
+  return failed.length || stopped ? 1 : 0;
 }
 
-function lastRuns({ options, selected, io, env }: Ctx): number {
-  const found: Record<string, { runs: number; last: ResultRecord | null; previous: ResultRecord | null; diff: unknown }> = {};
+function lastRuns({ options, selected, io, env, deps }: Ctx): number {
+  const found: Record<string, { runs: number; last: ResultRecord | null; previous: ResultRecord | null; diff: unknown; warning?: string }> = {};
   for (const target of selected) {
     const records = last(target.id, 2, env);
     const next = records.at(-1) ?? null;
     const prev = records.length > 1 ? (records[0] ?? null) : null;
-    found[target.id] = { runs: records.length, last: next, previous: prev, diff: next && prev ? diffRecords(prev, next) : null };
+    const warning = next && prev ? comparisonWarning(prev, next) : undefined;
+    found[target.id] = { runs: records.length, last: next, previous: prev, diff: next && prev ? diffRecords(prev, next) : null, ...(warning ? { warning } : {}) };
   }
   if (options.json) {
-    io.out(JSON.stringify({ targets: found }));
+    io.out(JSON.stringify({ ...classifierJSON(deps), targets: found }));
     return 0;
   }
-  for (const [id, { runs, last: next, previous: prev }] of Object.entries(found)) {
+  for (const [id, { runs, last: next, previous: prev, warning }] of Object.entries(found)) {
     if (!next) {
       io.out(`${id}: no recorded runs`);
       continue;
     }
     io.out(`${id}: ${next.at}, commit ${next.commit}${next.dirty ? " (dirty)" : ""}, seed ${next.seed ?? "-"}, ${runs} run${runs === 1 ? "" : "s"} kept for the comparison`);
+    io.out(`classifier: ${next.classifier ? classifierLabel(next.classifier) : "legacy/unknown"}`);
+    if (warning) io.out(`warning: ${warning}`);
+    const comparable = prev && Object.keys(diffRecords(prev, next)).length > 0;
     const rows: (string | number)[][] = [["", ...(prev ? ["previous"] : []), "last", ...(prev ? ["change"] : [])]];
     const add = (label: string, a: number | undefined, b: number | undefined) =>
-      rows.push([label, ...(prev ? [a ?? "-"] : []), b ?? "-", ...(prev ? [a !== undefined && b !== undefined ? Math.round((b - a) * 1e9) / 1e9 : "-"] : [])]);
+      rows.push([label, ...(prev ? [a ?? "-"] : []), b ?? "-", ...(prev ? [comparable && a !== undefined && b !== undefined ? Math.round((b - a) * 1e9) / 1e9 : "-"] : [])]);
     add("spend", prev?.spend, next.spend);
     add("calls", prev?.calls, next.calls);
     for (const key of Object.keys(next.metrics)) add(key, prev?.metrics[key], next.metrics[key]);

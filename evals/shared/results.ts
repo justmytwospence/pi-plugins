@@ -1,21 +1,28 @@
 // The history of live eval runs, one JSON line per run in `evals/results/<target>.jsonl` (git-ignored).
 // Node builtins only, no imports from any package.
 //
-// A record: `{ at, commit, dirty, seed, params, spend, calls, metrics, compare? }`
+// A record: `{ at, commit, dirty, seed, params, spend, calls, metrics, compare?, classifier? }`
 //   at       ISO time of the run
 //   commit   `git rev-parse --short HEAD` of the repository, "unknown" outside a checkout
 //   dirty    true when the working tree has uncommitted changes
 //   seed     the EVAL_SEED the run printed
 //   params   every EVAL_* variable that was set
-//   spend    USD reported by the classifier (see spend.ts); calls = number of classifier calls
+//   spend    catalog-estimated USD reported by the classifier (see spend.ts); calls = number of classifier calls
 //   metrics  the numbers the eval prints, a flat object of numbers
 //   compare  the same for the old behaviour, with EVAL_COMPARE=1
+//   classifier  actual backend, provider and model; absent on legacy records
 import { execFileSync } from "node:child_process";
 import { appendFileSync, mkdirSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 export type Metrics = Record<string, number>;
+
+export interface ClassifierProvenance {
+  backend: string;
+  provider: string;
+  model: string;
+}
 
 export interface ResultRecord {
   at: string;
@@ -27,6 +34,7 @@ export interface ResultRecord {
   calls: number;
   metrics: Metrics;
   compare?: Metrics;
+  classifier?: ClassifierProvenance;
 }
 
 /** What an eval supplies; `at`, `commit`, `dirty` and `params` are filled in when omitted. */
@@ -121,8 +129,19 @@ export function diff(prev: unknown, next: unknown): Delta {
   return out;
 }
 
-/** What `npm run -s eval -- --last` compares between two records: the numbers, not the stamps. */
+/** Warn when provenance is unknown or differs; unknown records are never assumed to use a particular classifier. */
+export function comparisonWarning(prev: ResultRecord, next: ResultRecord): string | undefined {
+  const a = prev.classifier;
+  const b = next.classifier;
+  if (!a || !b) return "Classifier provenance is legacy/unknown; comparison may not be meaningful.";
+  const mismatches = (["backend", "provider", "model"] as const).filter((key) => a[key] !== b[key]);
+  if (mismatches.length) return `Classifier provenance differs (${mismatches.map((key) => `${key}: ${a[key]} vs ${b[key]}`).join(", ")}); numeric comparison suppressed.`;
+  return undefined;
+}
+
+/** Compare numbers only for matching classifiers or two legacy records. */
 export function diffRecords(prev: ResultRecord, next: ResultRecord): Delta {
+  if ((prev.classifier || next.classifier) && comparisonWarning(prev, next)) return {};
   const pick = (r: ResultRecord) => ({ spend: r.spend, calls: r.calls, metrics: r.metrics, ...(r.compare ? { compare: r.compare } : {}) });
   return diff(pick(prev), pick(next));
 }

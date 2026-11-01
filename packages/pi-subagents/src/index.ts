@@ -25,6 +25,7 @@ import { Conversation, type Message, messageText, readTranscript, transcriptWrit
 import { type Mode, type OwedResult, type Parcel, type ParkedCall, adopt, isParked, park, sessionKey } from "./handoff.ts";
 import { discoverFamily } from "./family-contract.ts";
 import { type JevConfig, askJev } from "./jev.ts";
+import { type ClassifierProvenance, SYSTEM1_CHANGED, resolveSystem1Target } from "./system1.ts";
 import { runLabel, taskLabel } from "./label.ts";
 import { type AvailableModel, type ChoiceSource, DEFAULT_THRESHOLD, DEFAULT_TIER_DESCRIPTIONS, type Given, type Resolved, type Threshold, type Tier, fixedAgentDefaults, pickQuestions, providerTiers, readPicks, resolve } from "./pick.ts";
 import { REFERENCE_TYPE, type RunRef, compactTranscript, referenceContext, runAutocomplete } from "./references.ts";
@@ -229,6 +230,8 @@ export interface RunView {
   model: string;
   thinking: string;
   byJev: Resolved["byJev"];
+  /** Actual classifier target; absent on old records or deterministic fallback. */
+  classifier?: ClassifierProvenance;
   /** Where the model and thinking came from; absent on records from before it was kept. */
   source?: ChoiceSource;
   /** The quota pressure Jev's model or effort pick was made under, when above 0. */
@@ -290,6 +293,7 @@ function view(run: Run, withOutput = false): RunView {
     model: s.model ?? run.model,
     thinking: run.thinking,
     byJev: run.byJev,
+    ...(run.classifier ? { classifier: run.classifier } : {}),
     ...(run.source ? { source: run.source } : {}),
     ...(run.pressure ? { pressure: run.pressure } : {}),
     ...(run.note ? { note: run.note } : {}),
@@ -341,6 +345,7 @@ export function recordedRun(v: RecordedRun): Run {
     model: v.model,
     thinking: v.thinking,
     byJev: v.byJev ?? { agent: false, model: false, thinking: false },
+    ...(v.classifier ? { classifier: v.classifier } : {}),
     ...(v.source ? { source: v.source } : {}),
     ...(typeof v.pressure === "number" && v.pressure > 0 ? { pressure: v.pressure } : {}),
     ...(typeof v.note === "string" && v.note ? { note: v.note } : {}),
@@ -425,6 +430,28 @@ export default function subagents(pi: ExtensionAPI) {
   if (subagentDepth() >= initial.maxDepth) return;
   const runs = new Map<string, Run>();
   let config: SubagentsConfig = initial;
+  let selectionKey = resolveSystem1Target(config.jev).key;
+  let selectionGeneration = 0;
+  const pendingPicks = new Set<AbortController>();
+  const invalidatePicks = () => {
+    selectionKey = resolveSystem1Target(config.jev).key;
+    selectionGeneration++;
+    for (const controller of pendingPicks) controller.abort();
+    pendingPicks.clear();
+  };
+  // Correct even without pi-system1's watcher: reread the effective target at every pick/use.
+  const currentSelection = () => {
+    const key = resolveSystem1Target(config.jev).key;
+    if (key !== selectionKey) invalidatePicks();
+    return selectionKey;
+  };
+  pi.events.on(SYSTEM1_CHANGED, () => { currentSelection(); });
+  const pickedTargets = new WeakMap<Resolved, { key: string; generation: number; fallback: Resolved }>();
+  const currentPick = (resolved: Resolved): Resolved => {
+    const key = currentSelection();
+    const pick = pickedTargets.get(resolved);
+    return pick && (pick.key !== key || pick.generation !== selectionGeneration) ? pick.fallback : resolved;
+  };
   /** The latest quota pressure per provider (pi-auto-effort's `quota:pressure`); none known is 0. */
   const pressures = new Map<string, QuotaPressure>();
   pi.events.on(QUOTA_PRESSURE, (data) => {
@@ -883,15 +910,32 @@ export default function subagents(pi: ExtensionAPI) {
         const named = item.agent ? agents.find((a) => a.name === item.agent) : undefined;
         const fixed = fixedAgentDefaults(named, parent.model, available);
         const questions = pickQuestions({ ...fixed, ...given }, agents, tiers, askTier);
+        const key = currentSelection();
+        const generation = selectionGeneration;
         let picks: ReturnType<typeof readPicks> | undefined;
+        let classifier: ClassifierProvenance | undefined;
         if (Object.keys(questions).length) {
-          const outcome = await askJev(ctx.modelRegistry, config.jev, { task: clip(item.task, 6_000), parent_request: parentRequest || "(none)", role: given.agent ?? "auto" }, questions, signal);
-          if (outcome.ok) picks = readPicks(outcome.answers, { pressure: pressureFor(parent.model.split("/")[0]!), threshold: config.jev.threshold, tiers: Object.keys(questions.tier?.criteria ?? {}) as Tier[] });
+          const controller = new AbortController();
+          pendingPicks.add(controller);
+          try {
+            const outcome = await askJev(ctx.modelRegistry, config.jev, { task: clip(item.task, 6_000), parent_request: parentRequest || "(none)", role: given.agent ?? "auto" }, questions, signal ? AbortSignal.any([signal, controller.signal]) : controller.signal);
+            if (outcome.ok && currentSelection() === key && generation === selectionGeneration && outcome.selectionKey === key && !controller.signal.aborted) {
+              picks = readPicks(outcome.answers, { pressure: pressureFor(parent.model.split("/")[0]!), threshold: config.jev.threshold, tiers: Object.keys(questions.tier?.criteria ?? {}) as Tier[] });
+              classifier = { backend: outcome.backend, provider: outcome.provider, model: outcome.model };
+            }
+          } finally {
+            pendingPicks.delete(controller);
+          }
         }
         const resolved = resolve(given, agents, picks, tiers, parent, { available, context });
         if ("error" in resolved) return resolved;
         if (!resolved.model) return { error: "No model: the session has no model selected; pass `model`." };
-        return resolved;
+        if (classifier) {
+          resolved.classifier = classifier;
+          const fallback = resolve(given, agents, undefined, tiers, parent, { available, context });
+          if (!("error" in fallback)) pickedTargets.set(resolved, { key, generation, fallback });
+        }
+        return currentPick(resolved);
       }),
     );
   };
@@ -955,6 +999,7 @@ export default function subagents(pi: ExtensionAPI) {
       prepared?.dispose();
       return undefined;
     }
+    resolved = currentPick(resolved);
     const outputPath = path.join(agentDir(), "subagents", id, "output.md");
     const link: RunLink = { done: Promise.resolve() };
     const child = new Child({
@@ -986,6 +1031,7 @@ export default function subagents(pi: ExtensionAPI) {
       model: resolved.model,
       thinking: resolved.thinking,
       byJev: resolved.byJev,
+      ...(resolved.classifier ? { classifier: resolved.classifier } : {}),
       source: resolved.source,
       ...(resolved.pressure ? { pressure: resolved.pressure } : {}),
       ...(resolved.tier ? { tier: resolved.tier } : {}),

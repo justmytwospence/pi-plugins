@@ -17,6 +17,8 @@ Restored idle planners attach for observation without resuming paid work. Scouts
 
 Sidebar is read-only and adds no planning authority; the human's primary-view controls remain unchanged. In Sidebar, `/agents` opens the roster, `/transcript [agent-id]` views a transcript and `/context [agent-id]` attaches it to the next question, including when codemode is unavailable. Transcript pages are capped at 64 KiB, automatic reads at 32 KiB per question; missing or truncated coverage is explicit. See the pi-sidebar README for scope and limits.
 
+**System 1 backend.** `/system1` selects Jev (the default) or native OpenAI Decisions for the suite; `/system1 jev` selects Jev and `/system1 openai` asks for billing confirmation. The selection is shared by sessions using the same agent directory. Jev works standalone; Decisions requires the `pi-system1` component and its isolated `/login system1-openai` API key (or `SYSTEM1_OPENAI_API_KEY`), not subscription OAuth or the ordinary OpenAI credential. Before selecting Decisions, claim eligible [ChatGPT Pro API credits](https://developers.openai.com/api/docs/guides/chatgpt-api-credits) in an API organization with no purchased balance, auto-recharge or paid continuation. Pi cannot verify entitlement or which funds pay for a request. Classifier requests may be billed; failures do not switch backend. Legacy `jev` settings remain: the local enable flag, thresholds and timeouts apply to either backend, while provider/model overrides apply only to Jev.
+
 ## Install
 
 Install the suite and select only this component. Merge this object into the `packages` array of `~/.pi/agent/settings.json` (or a trusted project's `.pi/settings.json`):
@@ -142,7 +144,7 @@ Changes are saved as your defaults in `~/.pi/agent/pi-plan-mode.json`.
 
 ### 2. Tools
 
-What the planners may use: Shell (read-only commands and any command grants), Subagents, your toolsets (for example web research), MCP servers and their tools, and **Other tools** from your other Pi extensions. When Jev tool selection is on and a Jev classifier is available, Jev scores every tool for the task while you look and preselects the ones that would make the plan better informed; your own changes win. Tools in `alwaysOffer` (by default web research, Context7 docs and Jev judgments, where you have them) are always preselected and marked `always`: Jev scores them but never turns them off.
+What the planners may use: Shell (read-only commands and any command grants), Subagents, your toolsets (for example web research), MCP servers and their tools, and **Other tools** from your other Pi extensions. When classifier tool selection is on and a classifier is available, the classifier scores every tool for the task while you look and preselects the ones that would make the plan better informed; your own changes win. Tools in `alwaysOffer` (by default web research, Context7 docs and System 1 judgments, where you have them) are always preselected and marked `always`: the classifier scores them but never turns them off.
 
 Keys: Up/Down (`k`/`j`, Ctrl+P/Ctrl+N, Ctrl+K/Ctrl+J) move, Ctrl+U/Ctrl+D move ten rows, `g`/Home and `G`/End jump to the ends, Space or `x` toggles, Tab opens or closes a group, Right/`l` opens a group or steps into it, Left/`h` closes it or goes up, `a` selects all, `n` selects none, Esc goes back. Enter asks `Start planning with N planners?`; Enter or `y` starts, Esc or `n` keeps editing.
 
@@ -272,7 +274,7 @@ Planner sessions are stored under `~/.pi/agent/plan-mode/planners/`; runs are sa
   "commandGrants": {
     "jev": {
       "label": "Jev judgments",
-      "description": "Ask TypeSafe's Jev for fast typed judgments mid-research: rank or filter many files or search hits, classify items, check claims against a source, triage long output.",
+      "description": "Ask the selected System 1 classifier for fast typed judgments mid-research: rank or filter many files or search hits, classify items, check claims against a source, triage long output.",
       "commands": ["~/.local/bin/jev-ask"],
       "skills": ["~/.agents/skills/jev-judgments"],
       "enabled": false
@@ -296,7 +298,7 @@ Planner sessions are stored under `~/.pi/agent/plan-mode/planners/`; runs are sa
 - `defaultPlanExportPath`: the export path (default `PLAN.md`, relative to the project).
 - `toggleShortcut`: a key that toggles plan mode (with pi-tool-gate, it cycles the gate's modes instead, like the gate's own Shift+Tab); none by default. Do not set it to the gate's key. It changes after `/reload`.
 - `plansDirectory`: where plan mode writes plan files (default `~/.pi/agent/plans`; `~` is expanded).
-- `alwaysOffer`: tools planners always get, whatever Jev scores: a toolset, command grant, MCP server, or Other tool by id or name (`web`, `jev`, `context7`), or one tool of a group (`web/web_search`, `context7/query-docs`). Unset, it is `["web", "web_search", "fetch_content", "context7", "jev"]` (names your setup lacks are ignored); set it to replace that, or to `[]` to leave every tool to Jev.
+- `alwaysOffer`: tools planners always get, whatever the classifier scores: a toolset, command grant, MCP server, or Other tool by id or name (`web`, `jev`, `context7`), or one tool of a group (`web/web_search`, `context7/query-docs`). Unset, it is `["web", "web_search", "fetch_content", "context7", "jev", "system1_judge"]` (names your setup lacks are ignored); set it to replace that, or to `[]` to leave every tool to the classifier.
 - `plannerToolsets`: named bundles of extensions and tools; `mcp: true` expands into your MCP servers. `commandGrants`: extra commands bash may run (one per call), with skills that explain them.
 - `renderedPlans` (default `true`): finished plans as rendered pages in their lanes (see Planning and Review).
 - `completionReview` (boolean, default `true`): targeted completion review after handoff; an unavailable planner pauses when review is enabled. Turning it off produces **Completed without review**. Review costs are separate from consultation costs.
@@ -310,7 +312,7 @@ Planner sessions are stored under `~/.pi/agent/plan-mode/planners/`; runs are sa
 
 - Pi 0.99 or newer and its interactive terminal UI.
 - Planners, their subagents and M make ordinary model requests on the models you pick, through your session's providers, billed as those providers bill them. Each planner and each subagent is a separate session, so two planners with subagents can use several times the tokens of one agent. The planning screen shows tokens and cost per planner.
-- Jev tool selection makes an optional classifier request through Pi's classifier models (default `typesafe/jev-latest`, which needs Pi's credentials for it, such as `TYPESAFE_API_KEY`); it can be billed. Without a classifier the Tools step uses its fallback preselection.
+- Classifier tool selection makes an optional classifier request through Pi's classifier models (default `typesafe/jev-latest`, which needs Pi's credentials for it, such as `TYPESAFE_API_KEY`); it can be billed. Without a classifier the Tools step uses its fallback preselection.
 - Your agent plans on your session's model. An enabled completion review with a planner on call adds a separate model turn over its seeded planning context.
 - On disk: it reads and writes `~/.pi/agent/pi-plan-mode.json`, writes plan mode's plan files under `~/.pi/agent/plans/` (or `plansDirectory`), appends plan-mode state entries and hidden notices to your session, stores planner sessions under `~/.pi/agent/plan-mode/planners/`, appends run entries and plan messages to your session, writes exported plans where you choose, and writes a temporary plan file for `planCompleteCommand`.
 

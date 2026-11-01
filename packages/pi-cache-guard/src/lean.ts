@@ -19,7 +19,7 @@ export type Answer =
 
 /** One line for setup hints: what Jev adds. */
 export const JEV_PITCH =
-  "Jev, TypeSafe's judgment model, trims large tool output to what the agent needs and compacts a conversation in about a second, without an LLM summary.";
+  "The selected System 1 classifier trims large tool output and selects conversation units for quick compaction without a generative summary.";
 
 /** Where to get a key for Jev's own API (TYPESAFE_API_KEY). */
 export const JEV_KEY_URL = "https://console.typesafe.ai/keys";

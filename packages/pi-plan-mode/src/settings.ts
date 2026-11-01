@@ -127,7 +127,7 @@ export interface PlanModeSettings {
   plannerToolsets?: Record<string, PlannerToolset>;
   /** Commands Plan mode's read-only bash policy lets through when granted (e.g. marimo-pair's scripts). */
   commandGrants?: Record<string, CommandGrant>;
-  /** Let Jev pick tools from the task, for planners and for Plan mode itself (default true; needs a Jev classifier in Pi, e.g. TYPESAFE_API_KEY). */
+  /** Let the selected System 1 classifier pick tools from the task (default true; legacy key). */
   jevToolSelection?: boolean;
   /** /planners: a finished plan's lane shows it as a rendered page (terminal-browser embed); default true. */
   renderedPlans?: boolean;
@@ -896,10 +896,17 @@ export function configuredImplementationContext(settings: PlanModeSettings): Imp
 }
 
 /**
- * Research tools planners almost always want: web research, library docs (Context7), and Jev
- * judgments. Names that match nothing in your setup are ignored.
+ * Research tools planners almost always want: web research, library docs (Context7), and System 1
+ * judgments (including the legacy Jev shell capability). Unmatched names are ignored.
  */
-export const DEFAULT_ALWAYS_OFFER: readonly string[] = ["web", "web_search", "fetch_content", "context7", "jev"];
+export const DEFAULT_ALWAYS_OFFER: readonly string[] = [
+  "web",
+  "web_search",
+  "fetch_content",
+  "context7",
+  "jev",
+  "system1_judge",
+];
 
 export function configuredAlwaysOffer(settings: PlanModeSettings): readonly string[] {
   return settings.alwaysOffer ?? DEFAULT_ALWAYS_OFFER;

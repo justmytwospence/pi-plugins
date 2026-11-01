@@ -23,6 +23,7 @@ import { SESSION_CHROME_CHANNEL, type SessionChromeOverrides, type SessionChrome
 import { WORKFLOW_EXPLANATIONS, workflowBadge } from "./workflow-ui.ts";
 import { queryFlow, type FlowSnapshot } from "./flow-contract.ts";
 import { queryFooterActions, type FooterAction, type FooterActionId } from "./footer-actions.ts";
+import { querySystem1State, type System1Status } from "./system1-contract.ts";
 import { createFooterActionController, createFooterComponent, type FooterEditor, type FooterTui, type FooterHit, type FooterLayout } from "./interactions.ts";
 import { createProviderUsageCollector, dispatchProviderUsage, isUsageStale, selectGooglePool, type ProviderUsage, type UsageSource } from "./provider-usage.ts";
 
@@ -74,6 +75,7 @@ export type FooterControlId = FooterActionId | "model.open" | "reasoning.cycle";
 export type FooterControlState = Partial<Record<FooterControlId, Pick<FooterAction, "key" | "active">>>;
 export interface Snapshot {
   flow?: FlowSnapshot;
+  system1?: System1Status;
   actions?: FooterControlState;
   primaryKeys?: { model?: string; workflow?: string; approvals?: string };
   /** Other-session chrome is string-only: no inherited controls or primary hints. */
@@ -1094,6 +1096,9 @@ export function layoutFooter(snapshot: Snapshot, width: number, theme: Paint): F
   const skillsText = s.skills ? inline(ICONS.skills, `${theme.fg("muted", "Skills")} ${s.skills}`) : "";
   controlRow(ICONS.context, [
     partsSegment([...ctxParts, { text: `${context === null ? "" : theme.fg("dim", " used")}${context === null || s.borderGauge ? "" : ` ${gauge(theme, context)}`}` }], 100, ctxParts),
+    partsSegment(s.system1 ? [
+      { text: theme.fg(s.system1.availability === "unavailable" ? "warning" : "muted", `S1 ${s.system1.availability === "unavailable" ? "unavailable" : s.system1.availability === "unknown" ? "unknown" : s.system1.label}`), action: action("system1.open") },
+    ] : [], 35),
     { text: s.lean ? theme.fg("muted", `Lean ${clean(s.lean)}`) : "", priority: 20 },
     partsSegment([{ text: cache ? `${theme.fg("muted", "Cache")} ${theme.fg(cacheValue === "unknown" ? "muted" : cacheValue === "cold" ? "warning" : "success", cacheValue)}` : "", action: action("cache.status") }], 30),
     { text: cacheNote ? theme.fg("dim", cacheNote) : "", priority: 10 },
@@ -1259,6 +1264,7 @@ export default function statusFooter(pi: ExtensionAPI): void {
   let promptDepth = 0, interactionGeneration = 0;
   let discoveredActions: ReturnType<typeof queryFooterActions> = {};
   let discoveredFlow: FlowSnapshot | undefined;
+  let discoveredSystem1: System1Status | undefined;
   let prepared: Snapshot | undefined;
   let refreshSnapshot: (() => void) | undefined;
   const interactions = createFooterActionController({
@@ -1733,7 +1739,7 @@ export default function statusFooter(pi: ExtensionAPI): void {
       (discoveredFlow?.operatingMode !== "linked" || discoveredActions["flow.open"])) controls["model.open"] = {};
     if (nativeControls && mainEditor?.actionHandlers?.get("app.thinking.cycle")) controls["reasoning.cycle"] = {};
     const main: Snapshot = {
-      flow: discoveredFlow, actions: controls,
+      flow: discoveredFlow, system1: discoveredSystem1, actions: controls,
       primaryKeys: {
         model: controls["model.open"] ? mainKeys?.getKeys?.("app.model.select")?.[0] : undefined,
         workflow: discoveredActions["workflow.cycle"] ? discoveredActions["workflow.cycle"].key ?? "" : absorbed.workflow?.key,
@@ -1772,7 +1778,7 @@ export default function statusFooter(pi: ExtensionAPI): void {
     return {
       ...main,
       // Main's mutable controls and policy are not the viewed agent's state.
-      flow: undefined, actions: undefined, primaryKeys: undefined, readOnly: true,
+      flow: undefined, system1: undefined, actions: undefined, primaryKeys: undefined, readOnly: true,
       workflow: undefined, mode: undefined, exec: undefined,
       autoEffort: undefined, autoEffortDetail: undefined, cache: undefined, lean: undefined,
       cwd: session.cwd, provider: session.provider, model: session.model, thinking: session.thinking,
@@ -1798,6 +1804,7 @@ export default function statusFooter(pi: ExtensionAPI): void {
       const refresh = (clock = true) => {
         if (!current()) return;
         discoveredFlow = queryFlow(pi.events, true);
+        discoveredSystem1 = querySystem1State(pi.events);
         discoveredActions = queryFooterActions(pi.events);
         const next = snapshot(branch, footerData.getExtensionStatuses());
         if (!clock && prepared) next.now = prepared.now;
@@ -1911,7 +1918,7 @@ export default function statusFooter(pi: ExtensionAPI): void {
     active = false; generation++; interactionGeneration++;
     ctx = undefined; requestRender = undefined;
     mainEditor = undefined; mainTui = undefined; mainKeys = undefined; releaseInput = undefined;
-    refreshSnapshot = undefined; prepared = undefined; discoveredActions = {}; discoveredFlow = undefined;
+    refreshSnapshot = undefined; prepared = undefined; discoveredActions = {}; discoveredFlow = undefined; discoveredSystem1 = undefined;
     promptDepth = 0; blockedHolds = 0;
     timer = undefined; codexTimeout = undefined; codexAbort = undefined;
     workingTimer = undefined; mcpTimer = undefined; runStarted = 0; workingShown = undefined; working.reset();

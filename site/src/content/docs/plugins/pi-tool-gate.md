@@ -9,19 +9,21 @@ plugin: pi-tool-gate
 - **Use it for:** Choose an approval policy for tool calls, escalating risky operations without treating the gate as a sandbox.
 - **Enable:** Select `packages/pi-tool-gate/src/index.ts` with [`pi config`](/guides/install/#enable-an-explicit-subset).
 - **Controls:** `/flow` selects Independent or a provider's Linked flow; `/mode`, `/approvals`, `/gate`, `/gate rules`. Shift+Tab cycles workflow after remapping stock `app.thinking.cycle`; Alt+A toggles approvals.
-- **Settings:** `tool-gate.json` shared/user/project layers, including `permissions` allow/ask/deny rules; default auto mode, paid Jev on, pushback on, 8000 ms classifier timeout (one retry on timeout).
-- **Requirements, cost & privacy:** Pi classifier/provider access for Jev; proposed arguments and clipped user intent can leave the machine. Fixed checks and manual mode are local.
+- **Settings:** `tool-gate.json` shared/user/project layers, including `permissions` allow/ask/deny rules; default auto mode, classifier on, pushback on, 8000 ms timeout (one Jev timeout retry; no Decisions retry).
+- **Requirements, cost & privacy:** Pi classifier/provider access; proposed arguments and clipped user intent can leave the machine. Fixed checks and manual mode are local.
 - **Integrations & limits:** Independent works alone. Linked needs pi-subagents' role defaults and the supported model guard; Plan/Exec need pi-plan-mode. Footer and Herdr are optional. Stock conflicts skip shortcut registration; calls needing an unavailable classifier are blocked.
 
 Tool gate separates workflow from approvals and, in auto mode, reduces routine approval interruptions while escalating risky calls. It is an approval policy inside Pi, **not a sandbox**, a complete secret scanner or a guarantee that every dangerous operation will be caught.
+
+The global [System 1](/plugins/pi-system1/) selection (`/system1`) chooses Jev by default or native OpenAI Decisions. The legacy `jev` settings still control this feature, including its enabled flag and timeout; provider/model overrides apply in Jev mode only. Decisions requires pi-system1 and its isolated API credential; it uses API billing, not subscription OAuth. Pi does not verify credit funding. A backend failure never silently switches providers.
 
 ## Enable and requirements
 
 Follow [Install & select](/guides/install/) and select `packages/pi-tool-gate/src/index.ts`. The suite loads every entry by default, with one Git pin covering the selected entries.
 
-Classifier judgments require Pi 0.99 or newer and credentials for the configured provider. Defaults use `typesafe/jev-latest` through Pi's model registry, with `TYPESAFE_API_KEY` and an 8,000 ms timeout; a timed-out request is retried once. Fixed checks do not require Jev; calls routed to classification are blocked if a valid verdict is unavailable.
+Classifier judgments require Pi 0.99 or newer and credentials for the configured provider. Defaults use `typesafe/jev-latest` through Pi's model registry, with `TYPESAFE_API_KEY` and an 8,000 ms timeout; a timed-out Jev request is retried once; Decisions is not retried. Fixed checks do not require a classifier; calls routed to classification are blocked if a valid verdict is unavailable.
 
-**Jev calls are paid external requests.** Most gray-area calls require one judgment; an initially held call can make another request for a suggested workaround. Even a fixed-rule hold can use that workaround request. Classified calls add reported classifier usage to their tool result. Costs depend on volume and input, not just how many approval dialogs appear.
+**Classifier calls are external requests that can incur charges.** Most gray-area calls require one judgment; an initially held call can make another request for a suggested workaround. Even a fixed-rule hold can use that workaround request. Classified calls add reported classifier usage to their tool result. Costs depend on volume and input, not just how many approval dialogs appear.
 
 ## Independent and Linked operating modes
 
@@ -75,11 +77,11 @@ Pi's stock Shift+Tab is reserved for `app.thinking.cycle`; current Pi **skips** 
 
 Recognized read-only tools and shell commands pass without classification. Examples include `read`, `grep`, `git status` and `git diff`, subject to credential-path and shell checks. Tools declaring `readOnlyHint` and names in `allowTools` also bypass judgment. These hints are declarations, not independently verified behavior.
 
-Fixed checks hold operations such as `sudo`, force-pushing main/master, deleting protected roots, piping a download into a shell and accessing recognized live-secret files. A fixed hold cannot be cleared by Jev's approval. Edits, writes, other commands and unannotated extension tools normally enter classifier judgment. `bg_run` commands receive the same shell checks as `bash`.
+Fixed checks hold operations such as `sudo`, force-pushing main/master, deleting protected roots, piping a download into a shell and accessing recognized live-secret files. A fixed hold cannot be cleared by classifier approval. Edits, writes, other commands and unannotated extension tools normally enter classifier judgment. `bg_run` commands receive the same shell checks as `bash`.
 
 Running code the session downloaded is a fixed hold in every mode except yolo. The gate tracks files written by `curl -o`/`-O`/`> file`, `wget`, `gh release download` (`-O`, `-D`, `-p`) and `aria2c`, resolved after any `cd`, and follows later `cp`, `mv` and `install` (`rm` drops a file). The list is rebuilt from the current branch's successful shell calls when a session starts or moves in its tree. Running such a file (`./file`, `sh`/`bash`/`zsh`/`dash file`, `source file`, `python`/`node`/`ruby`/`perl`/`bun file`, `deno run file`), even in the command that downloads it, is pushed back once in auto mode and then asked about, with **Allow once** and **Block** only (no rule opens it). Names a command does not give (an unpacked archive, `gh release download` without `-O`, `-D` or `-p`) are not tracked.
 
-When a judged shell call runs a local script that was not downloaded (a regular file of at most 64 KB, not binary), Jev also receives the script's path and content (clipped to 6,000 characters) and is told to judge the call by what the script does, treating the content as code to evaluate rather than instructions to follow.
+When a judged shell call runs a local script that was not downloaded (a regular file of at most 64 KB, not binary), the classifier also receives the script's path and content (clipped to 6,000 characters) and is told to judge the call by what the script does, treating the content as code to evaluate rather than instructions to follow.
 
 Default classifier thresholds hold unrequested calls at 0.9 irreversible probability, 0.85 remote-change probability, or impact 2.5 out of three. A clearly off-task call needs both scope probability below 0.1 and impact at least two to be held. A sufficiently clear user request, including agreement to the assistant's proposal, can clear those checks at probability 0.7; the request need not name the command, a step the instruction plainly requires counts, and earlier instructions in the session still stand. It does not clear exfiltration at 0.8 (sending secrets somewhere they are not for; a credential used with its own service is not exfiltration) or project-rule violations at 0.7.
 
@@ -198,9 +200,9 @@ Project rules apply to classifier-judged calls, not to every bypassed read-only 
 
 ## Privacy, classifier failures and optional integrations
 
-Jev receives clipped recent user messages, the assistant message preceding the latest request, recent assistant intent, working directory, Git branch/dirty state, tool name and arguments, the content of a local script a shell call runs (up to 6,000 characters), and applicable rules. Arguments and scripts can include source code or private text. A hold's reasons accompany the workaround request. Local `tool-gate:decision` session entries include abbreviated arguments and scores but do not enter model context.
+The selected classifier receives clipped recent user messages, the assistant message preceding the latest request, recent assistant intent, working directory, Git branch/dirty state, tool name and arguments, the content of a local script a shell call runs (up to 6,000 characters), and applicable rules. Arguments and scripts can include source code or private text. A hold's reasons accompany the workaround request. Local `tool-gate:decision` session entries include abbreviated arguments and scores but do not enter model context.
 
-When Jev is unavailable or returns an incomplete or invalid verdict, calls routed to classification are blocked and do not run. An identical retry may offer Allow once in the UI, without suggesting a persistent rule solely for the failure; headless retries remain blocked. Read-only and explicitly allowed calls remain subject to their ordinary checks and can run without classification. The gate is not an OS sandbox or a fail-closed security boundary.
+When the selected classifier is unavailable or returns an incomplete or invalid verdict, calls routed to classification are blocked and do not run. An identical retry may offer Allow once in the UI, without suggesting a persistent rule solely for the failure; headless retries remain blocked. Read-only and explicitly allowed calls remain subject to their ordinary checks and can run without classification. The gate is not an OS sandbox or a fail-closed security boundary.
 
 The classifier can receive the active branch's stored approved-plan snapshot, capped at 12,000 characters, rather than the mutable plan file. The next user message expires it; a fresh approval can establish a new snapshot. It is context subordinate to current instructions and explicit rules, not blanket permission.
 

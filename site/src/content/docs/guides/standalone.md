@@ -5,7 +5,7 @@ description: Select one component, understand its native fallbacks, and test it 
 
 ## One feature, one entry
 
-The suite contains 34 independently selectable extensions. They share a Git revision, not runtime dependencies. Install the suite and choose entries with `pi config`, or use an [explicit resource selection](/guides/install/#enable-an-explicit-subset).
+The suite contains independently selectable extensions. They share a Git revision, not runtime dependencies. Install the suite and choose entries with `pi config`, or use an [explicit resource selection](/guides/install/#enable-an-explicit-subset).
 
 From a local checkout, Pi can load a component's own package manifest:
 
@@ -22,6 +22,8 @@ PI_CODING_AGENT_DIR="$(mktemp -d)" pi --offline --no-extensions --no-skills \
 ```
 
 This example is for input and startup checks without credentials. A model-driven feature still needs its own model or classifier configuration. Do not copy credentials into a public reproduction.
+
+Standalone classifier features work with Jev without loading `pi-system1`. The global System 1 selection defaults to Jev; use `/system1` when `pi-system1` is loaded to select a backend. OpenAI Decisions requires that component's isolated `system1-openai` provider registration and its own API key (`/login system1-openai` or `SYSTEM1_OPENAI_API_KEY`). If Decisions is selected but the component is absent, classification fails visibly rather than falling back to Jev. See [Requirements & costs](/guides/requirements/) for the Pro-credit billing prerequisites.
 
 ## Optional composition
 

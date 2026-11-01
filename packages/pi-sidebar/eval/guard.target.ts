@@ -1,8 +1,8 @@
 // The guard's agreement with its own rules, as an eval target (`npm run -s eval -- guard`, or
 // `--package pi-sidebar`). The shell commands in your sampled sessions that the read-only policy
-// settles are the answer key (cleared as read-only, or plainly writing; see eval/guard.ts); Jev is
+// settles are the answer key (cleared as read-only, or plainly writing; see eval/guard.ts); System 1 is
 // asked the guard's question about each, up to 150 per label. `pass` is only the failure rate (under
-// 20% of the Jev requests); the rest is a report with the worst examples of each kind.
+// 20% of the classifier requests); the rest is a report with the worst examples of each kind.
 import { defineEval, withinFailureLimit } from "../../../evals/shared/target.ts";
 import { CHANGE_THRESHOLD } from "../src/guard.ts";
 import { PER_LABEL, countRequests, scoreCommands, selectCommands, summarize, worst, type Scored } from "./guard.ts";
@@ -16,7 +16,7 @@ const lines = (examples: Scored[]) => examples.map((s) => `  ${fixed(s.probabili
 
 export default defineEval({
   id: "guard",
-  title: "Guard agreement: Jev's change probability against the read-only policy's own verdicts",
+  title: "Guard agreement: classifier change probability against the read-only policy's own verdicts",
   package: "pi-sidebar",
   kind: "replay",
 
@@ -38,19 +38,21 @@ export default defineEval({
     const summary = summarize(scored);
     const refused = worst(scored, "readonly");
     const cleared = worst(scored, "writes");
+    const classifiers = [...new Set(scored.flatMap((s) => s.classifier ? [`${s.classifier.backend} (${s.classifier.provider}/${s.classifier.model})`] : []))];
     const report = [
-      `sidebar guard: EVAL_SEED=${seed}, ${sessions.length} sessions, refuses at ${CHANGE_THRESHOLD} or more; askJevBool reports no cost, so the spend line counts calls only`,
+      `sidebar guard: EVAL_SEED=${seed}, ${sessions.length} sessions, refuses at ${CHANGE_THRESHOLD} or more; reported usage includes failed outcomes`,
+      `classifier: ${classifiers.join(", ") || (ctx.classifier ? `${ctx.classifier.backend} (${ctx.classifier.provider}/${ctx.classifier.model})` : "legacy/unknown")}`,
       ctx.table([
-        ["rules say", "n", "of those Jev disagrees"],
+        ["rules say", "n", "of those classifier disagrees"],
         ["read-only (should be cleared)", summary.readonlyN, `${summary.readonlyWronglyRefused} refused (${fixed(summary.readonlyRefusedRate)})`],
         ["writes (should be refused)", summary.writesN, `${summary.writesWronglyCleared} cleared (${fixed(summary.writesClearedRate)})`],
       ]),
-      `agreement: ${fixed(summary.agreementRate)}; Jev failures: ${failures}/${commands.length}`,
-      refused.length ? `\nread-only commands Jev would refuse most firmly (probability of a change):` : "",
+      `agreement: ${fixed(summary.agreementRate)}; classifier failures: ${failures}/${commands.length}`,
+      refused.length ? `\nread-only commands the classifier would refuse most firmly (probability of a change):` : "",
       ...lines(refused),
-      cleared.length ? `\nwriting commands Jev would clear most readily:` : "",
+      cleared.length ? `\nwriting commands the classifier would clear most readily:` : "",
       ...lines(cleared),
-      !withinFailureLimit(failures, commands.length) ? `Jev failures ${failures}/${commands.length}, at or above the 20% limit` : "",
+      !withinFailureLimit(failures, commands.length) ? `classifier failures ${failures}/${commands.length}, at or above the 20% limit` : "",
     ].filter(Boolean).join("\n");
     return { metrics: { ...summary }, report, pass: withinFailureLimit(failures, commands.length), failures };
   },

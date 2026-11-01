@@ -1,10 +1,12 @@
 # pi-cache-guard
 
-A Pi extension that asks before a prompt would re-cache a large conversation, shows how long the prompt cache has left, and, with [Jev](https://docs.typesafe.ai) (TypeSafe's judgment model, through Pi's classifier models), keeps the context lean: large tool output is trimmed to what the agent needs, and a conversation can be compacted without an LLM summary. Everything but the Jev parts works without Jev.
+A Pi extension that asks before a prompt would re-cache a large conversation, shows how long the prompt cache has left, and, with the selected System 1 classifier (through Pi's classifier models), keeps the context lean: large tool output is trimmed to what the agent needs, and a conversation can be compacted without an LLM summary. Everything but the classifier parts works without the classifier.
 
-It is the Pi member of the cache-guard family: [claude-cache-guard](https://github.com/justmytwospence/claude-cache-guard), [opencode-cache-guard](https://github.com/justmytwospence/opencode-cache-guard) and [codex-cache-guard](https://github.com/justmytwospence/codex-cache-guard) share its core (`src/core.ts`: the clock, costs and settings), its Jev logic (`src/lean.ts`: trimming and compaction, with no harness imports) and its shared settings file. It replaces pi-lean-context.
+It is the Pi member of the cache-guard family: [claude-cache-guard](https://github.com/justmytwospence/claude-cache-guard), [opencode-cache-guard](https://github.com/justmytwospence/opencode-cache-guard) and [codex-cache-guard](https://github.com/justmytwospence/codex-cache-guard) share its core (`src/core.ts`: the clock, costs and settings), its the classifier logic (`src/lean.ts`: trimming and compaction, with no harness imports) and its shared settings file. It replaces pi-lean-context.
 
 Part of [Pi Plugins](https://github.com/justmytwospence/pi-plugins). Reference: <https://pi-plugins.vercel.app/plugins/pi-cache-guard/>.
+
+**System 1 backend.** `/system1` selects Jev (the default) or native OpenAI Decisions for the suite; `/system1 jev` selects Jev and `/system1 openai` asks for billing confirmation. The selection is shared by sessions using the same agent directory. Jev works standalone; Decisions requires the `pi-system1` component and its isolated `/login system1-openai` API key (or `SYSTEM1_OPENAI_API_KEY`), not subscription OAuth or the ordinary OpenAI credential. Before selecting Decisions, claim eligible [ChatGPT Pro API credits](https://developers.openai.com/api/docs/guides/chatgpt-api-credits) in an API organization with no purchased balance, auto-recharge or paid continuation. Pi cannot verify entitlement or which funds pay for a request. Classifier requests may be billed; failures do not switch backend. Legacy `jev` settings remain: the local enable flag, thresholds and timeouts apply to either backend, while provider/model overrides apply only to Jev.
 
 ## Install
 
@@ -48,7 +50,7 @@ Prompt cache miss. The prompt cache expired 10m ago: this prompt re-caches 601k 
 Sending re-caches 601k tokens on any model; a summary reads up to 601k, a quick compaction none; a new session starts empty.
 -> Send anyway
    Send, and stop asking in this session
-   Compact quickly, then send (~1s)
+   Compact quickly, then send
    Compact with a summary, then send
    Start a new session with this prompt
    Keep the prompt in the editor
@@ -66,7 +68,7 @@ Recommended: Claude Sonnet 5.5 (routine change).
    Send with Claude Opus 5.5
    Send, and stop asking in this session
    Send with Claude Haiku 5.5 instead
-   Compact quickly, then send (~1s)
+   Compact quickly, then send
    Compact with a summary, then send
    Start a new session with this prompt
    Keep the prompt in the editor
@@ -75,9 +77,9 @@ Recommended: Claude Sonnet 5.5 (routine change).
 The token counts, in the question, are the conversation the miss re-sends uncached: sending writes it to the cache again, a summary reads it once and continues on a small context, a quick compaction needs no summary model, and a new session starts empty.
 
 - **Send anyway**, or **Send, and stop asking in this session.** Sending is first, so Enter sends as if nothing had asked (or on the recommended model, below). The second turns the question off for this session; the clock and the Herdr token keep running.
-- **Send with another model** (only when another extension offers models). A miss re-caches the whole conversation whatever the model, so switching now loses no warm cache. An offer marked recommended comes first, as `Send with <model> (recommended)`, so Enter takes it, and **Send anyway** becomes `Send with <current model>`; every other offer follows the mute line as `Send with <model> instead`. The reason (the offer's note) is a `Recommended:` line of the question. Taking one sends the prompt as **Send anyway** does; the extension that made the offer switches the model, cache-guard does not. The question waits for offers at most 2.5 s, while it looks for Jev. Without offers it is exactly as above (see [Optional integrations](#optional-integrations)).
-- **Compact quickly** (when Jev is set up). Jev judges every message and tool call against the held prompt, and the summary is written in code from its choices: no LLM reads the history. If Jev fails, nothing is compacted and the prompt goes back in the editor with the reason.
-- **Compact with a summary** (labeled **Compact first** without Jev). Asks what the summary should keep: Pi's default summary, a summary focused on the held prompt (keep what it needs, drop the rest), or your own guidance. It then runs Pi's compaction and sends the prompt onto the small context. Compacting reads the history once, uncached, then continues on a small context; with Jev filtering on (`compact.filter`), Pi's summarizer reads only what Jev did not drop, so the token count shown is an upper bound. If compaction fails (for example the session is too small), the prompt goes back in the editor.
+- **Send with another model** (only when another extension offers models). A miss re-caches the whole conversation whatever the model, so switching now loses no warm cache. An offer marked recommended comes first, as `Send with <model> (recommended)`, so Enter takes it, and **Send anyway** becomes `Send with <current model>`; every other offer follows the mute line as `Send with <model> instead`. The reason (the offer's note) is a `Recommended:` line of the question. Taking one sends the prompt as **Send anyway** does; the extension that made the offer switches the model, cache-guard does not. The question waits for offers at most 2.5 s, while it looks for the classifier. Without offers it is exactly as above (see [Optional integrations](#optional-integrations)).
+- **Compact quickly** (when the classifier is set up). The classifier judges every message and tool call against the held prompt, and the summary is written in code from its choices: no LLM reads the history. If the classifier fails, nothing is compacted and the prompt goes back in the editor with the reason.
+- **Compact with a summary** (labeled **Compact first** without the classifier). Asks what the summary should keep: Pi's default summary, a summary focused on the held prompt (keep what it needs, drop the rest), or your own guidance. It then runs Pi's compaction and sends the prompt onto the small context. Compacting reads the history once, uncached, then continues on a small context; with the classifier filtering on (`compact.filter`), Pi's summarizer reads only what the classifier did not drop, so the token count shown is an upper bound. If compaction fails (for example the session is too small), the prompt goes back in the editor.
 - **Start a new session.** Opens a new session linked to this one (as its parent), on the same model and thinking level, and sends the prompt there, images included. Also available as `/cache-guard fresh`, which takes the editor's text.
 - **Keep the prompt in the editor.** Esc does the same, and spends nothing. Images attached to the held prompt are not put back.
 
@@ -85,7 +87,7 @@ When the question holds a prompt it says so out loud, so a prompt you sent just 
 
 The question only ever opens in answer to a prompt you sent: nothing pops up on its own while you are away, so keys and remote clients (herdr-web-ui, Collie) never type into a dialog they did not expect. The `❄` status and Herdr token show a cold cache ahead of time; `/cache-guard compact` and `/cache-guard fresh` act on it before you type.
 
-When Jev is not set up (and not turned off), the question ends with a tip: `/cache-guard jev` sets up quick compaction, or turns it (and the tip) off.
+When the classifier is not set up (and not turned off), the question ends with a tip: `/cache-guard jev` sets up quick compaction, or turns it (and the tip) off.
 
 It also asks when the selected model differs from the one the conversation was cached for (each model has its own cache). Past a typical lifetime, or `warn.idleMinutes` without one, the question is worded as a likelihood.
 
@@ -95,30 +97,30 @@ Never held: commands (`/...`), shell input (`!...`), steering and follow-ups whi
 
 The `cache-guard` status reads `cache 4:12` (time left), `cache ~4:12` (estimated time left, without a guaranteed minimum), `cache cold`, `cache cold (model)` or `cache cold?` (probably cold: a typical lifetime passed, or a long idle without one). It updates every second. pi-status-footer folds it into its context row.
 
-## Trimming tool output (Jev)
+## Trimming tool output (classifier)
 
 Large text results are trimmed before they enter the context, so the prompt cache is never disturbed: over `trim.minChars` (12,000) characters from `bash`, `grep`, `find`, `ls`, final `codemode` output (not intermediate nested results), MCP tools (`mcp__*`) and tools whose name contains `web`, `fetch`, `search` or `content`; over `trim.readMinChars` (50,000) from `read`. `edit` and `write` results are never trimmed.
 
-Jev reads your last request, what the agent last said, the tool call and the output, split into at most `trim.maxBlocks` (150) blocks, and says which blocks hold what the agent needs: errors, failures, warnings, requested values, results. The kept blocks plus the first `trim.headLines` (5) and last `trim.tailLines` (20) lines stay, in order, with `[… N lines omitted …]` markers, and a footer points at the full output saved under `~/.pi/agent/cache-guard/tool-output/<session>/<toolCallId>.txt`, to read with `offset`/`limit`.
+The classifier reads your last request, what the agent last said, the tool call and the output, split into at most `trim.maxBlocks` (150) blocks, and says which blocks hold what the agent needs: errors, failures, warnings, requested values, results. The kept blocks plus the first `trim.headLines` (5) and last `trim.tailLines` (20) lines stay, in order, with `[… N lines omitted …]` markers, and a footer points at the full output saved under `~/.pi/agent/cache-guard/tool-output/<session>/<toolCallId>.txt`, to read with `offset`/`limit`.
 
-Output too large for one Jev request (`trim.stateBudgetChars`) is pre-filtered in code first: head, tail, every line that looks like an error or warning with two lines of context, and an even sample. Nothing is trimmed when:
+Output too large for one classifier request (`trim.stateBudgetChars`) is pre-filtered in code first: head, tail, every line that looks like an error or warning with two lines of context, and an even sample. Nothing is trimmed when:
 
-- Jev thinks the agent wants the whole output (`trim.needsAllThreshold`);
+- the classifier thinks the agent wants the whole output (`trim.needsAllThreshold`);
 - more than `trim.maxKeptShare` (70%) of lines would be kept;
 - the same call (tool and arguments) was already trimmed this turn, so asking again returns everything;
 - the call is nested inside another tool call (for example from a codemode script);
-- Jev is unavailable, fails or times out (`jev.timeoutMs`), or the full output cannot be saved.
+- the classifier is unavailable, fails or times out (`jev.timeoutMs`), or the full output cannot be saved.
 
-Jev's token usage is added to the tool result. The `lean-context` status (`lean: −12k tok`, an estimate of the tokens kept out so far) is what pi-status-footer shows on its context row.
+The classifier's token usage is added to the tool result. The `lean-context` status (`lean: −12k tok`, an estimate of the tokens kept out so far) is what pi-status-footer shows on its context row.
 
-## Compacting with Jev
+## Compacting with the classifier
 
-Jev sorts every message and tool call being compacted into *verbatim* (requirements, decisions, exact values, open errors), *summarize*, or *drop* (superseded or noise), in batches of up to 120, with `compact.concurrency` requests in flight. Anything Jev does not answer is summarized.
+The classifier sorts every message and tool call being compacted into *verbatim* (requirements, decisions, exact values, open errors), *summarize*, or *drop* (superseded or noise), in batches of up to 120, with `compact.concurrency` requests in flight. Anything the classifier does not answer is summarized.
 
-- **The cold-cache menu, `/cache-guard compact [focus]` and context-overflow recovery** write the summary in code, with no LLM: the earlier summary, your requests, the verbatim items, one-line notes for the rest, and the files read and modified. The menu and the command cancel when Jev fails; overflow recovery falls back to Pi's compaction with a warning.
+- **The cold-cache menu, `/cache-guard compact [focus]` and context-overflow recovery** write the summary in code, with no LLM: the earlier summary, your requests, the verbatim items, one-line notes for the rest, and the files read and modified. The menu and the command cancel when the classifier fails; overflow recovery falls back to Pi's compaction with a warning.
 - **`/compact` and automatic compaction** run Pi's own summarizer on the conversation with dropped items removed and summarized ones shortened, then append the verbatim items under `## Kept verbatim`. `"compact": { "filter": false }` leaves them to Pi alone. Any failure falls back to Pi's normal compaction.
 
-A Jev summary is assembled, not written: Pi's summary reads better when the history needs explaining.
+A quick-compaction summary is assembled, not written: Pi's summary reads better when the history needs explaining.
 
 ## Transcript notices
 
@@ -128,9 +130,9 @@ After a turn that re-billed a significant part of the conversation (from 20k tok
 
 Pi does that itself: set `"cacheWarming": "idle"` in `~/.pi/agent/settings.json` (a global-only setting), and `/session` shows its next decision. Pi records those refreshes as `cache_warm` usage entries; this extension's clock counts the ones that hit the cache.
 
-## Setting up Jev
+## Setting up the classifier
 
-Jev runs through Pi's classifier models, so Pi holds the credentials. Any of these works; with no provider configured, the first one Pi can reach is used:
+In Jev mode, Pi holds the credentials. With no Jev provider configured, the first available provider is used:
 
 | Provider | Model | Pi credentials |
 |---|---|---|
@@ -140,13 +142,13 @@ Jev runs through Pi's classifier models, so Pi holds the credentials. Any of the
 | `cloudflare-workers-ai` | `typesafe/jev` | `CLOUDFLARE_API_KEY` and `CLOUDFLARE_ACCOUNT_ID` |
 | `opencode` | `jev-1.13` | `OPENCODE_API_KEY` |
 
-`/cache-guard jev` shows which one is in use and checks that it answers (for example `Jev: typesafe/jev-latest, answered in 312 ms.`), offers the others it found, and can turn Jev off. With none set up it explains the choices and puts `/login typesafe` (or `/login openrouter`) in the editor; run `/cache-guard jev` again afterwards to check. Its choices are saved to `~/.pi/agent/cache-guard.json` (`jev.provider`, `jev.model`, `jev.enabled`). A missing Jev is looked for again, at most once a minute, the next time it is needed (for example after a `/login`).
+`/cache-guard jev` is the compatibility command for classifier setup and status; opening it does not send a connectivity probe. It can enable or disable this feature and manage Jev provider choices in Jev mode. Use `/system1` to change the suite backend. Local choices are saved to `~/.pi/agent/cache-guard.json` (`jev.provider`, `jev.model`, `jev.enabled`); the Jev provider settings remain dormant in Decisions mode.
 
 ## Commands
 
-- `/cache-guard` or `/cache-guard status`: the last request, TTL, time left or why it is cold, whether the next prompt will ask, and which Jev is in use.
-- `/cache-guard compact [focus]`: a Jev compaction now, judged against the focus (or your last requests). Without Jev it offers Pi's summary instead, or Jev setup.
-- `/cache-guard jev`: set up, check, switch or turn off Jev.
+- `/cache-guard` or `/cache-guard status`: the last request, TTL, time left or why it is cold, whether the next prompt will ask, and which the classifier is in use.
+- `/cache-guard compact [focus]`: a classifier compaction now, judged against the focus (or your last requests). Without the classifier it offers Pi's summary instead, or the classifier setup.
+- `/cache-guard jev`: classifier setup/status and feature enablement; change the suite backend with `/system1`.
 - `/cache-guard fresh`: a new linked session that starts with the editor's text.
 - `/cache-guard on`, `/cache-guard off`: the warning, the clock, the Herdr token and the transcript lines, for this session. Trimming and compaction follow the settings.
 
@@ -175,14 +177,14 @@ Pi reads every setting except `warm` and `warn.confirmSeconds`, which are for po
 
 - `warn.minTokens` is the cold-cache question's threshold for every model; `0` asks on every cold cache. Pi ignores `warn.minCost` (the other ports still use it when they know prices). The Herdr `cache` and `cache_expires` tokens use the same threshold.
 - `herdr.expiringMinutes` is how long before expiry an idle session shows `⧗` in the `cache` token and reports `cache_expires`; `0` turns that token off.
-- An empty `jev.provider` picks the first provider that works; an empty `jev.model` uses that provider's default from the table.
-- `trim.keepThreshold` is the probability at which a block is kept. `compact.timeoutMs` is per Jev request.
-- `"enabled": false` turns everything off, Jev included; `"jev": { "enabled": false }` turns off only the Jev parts (and the tips).
+- In Jev mode, an empty `jev.provider` picks the first available provider; an empty `jev.model` uses that provider's default from the table.
+- `trim.keepThreshold` is the probability at which a block is kept. `compact.timeoutMs` is per the classifier request.
+- `"enabled": false` turns everything off, the classifier included; `"jev": { "enabled": false }` turns off only the classifier parts (and the tips).
 
 ## Requirements and costs
 
 - The warning, clock and notices need nothing external. They use Pi's model metadata and OpenAI's documented cache lifetimes for TTLs; the transcript notices' costs are estimates at API list prices.
-- Jev is optional. It needs a Pi with classifier models (Pi 0.99 or newer) and credentials for one of the providers above. Each trim makes one classifier request, each Jev compaction one request per batch, and `/cache-guard jev` sends a one-question probe. These requests can be billed.
+- Classification is optional and needs Pi's classifier API and credentials for the selected backend. Each trim makes one classifier request and each quick compaction one request per batch; these requests can be billed. Opening `/cache-guard jev` makes no classifier request.
 - Filtered `/compact` and automatic compaction still call your current model through Pi's summarizer, as Pi's compaction does.
 - On disk: it reads the settings files above; writes full tool output under `~/.pi/agent/cache-guard/tool-output/` when it trims; and writes `~/.pi/agent/cache-guard.json` only from `/cache-guard jev`. In the session it appends `cache-guard:jev` decision entries and `cache-guard-notice` entries (never sent to the model).
 
@@ -207,7 +209,7 @@ rows = [["state_icon", "workspace", { token = "$cache", fg = "#5f87d7", rules = 
 - The clock is the API's guaranteed minimum, measured from each request's start; entries are deleted soon after it, not exactly at it. OpenAI keeps entries at least that long but may keep them longer. Where OpenAI guarantees nothing (`prompt_cache_retention`), entries can also go early, for example when a request lands on another machine. Other invalidations (tool or system prompt changes, an MCP server reconnecting) are not visible to it.
 - After a compaction or branch summary there is no cached request to track until the next response.
 - The warning needs an interactive UI; prompts sent without one are never held.
-- The question is Pi's own select, which wraps a long option onto the next row with no gutter, which Collie cannot read. Every option fits 42 characters (`OPTION_MAX`, the 46-column phone width less the cursor), and the token counts and Jev's reason are in the question, so herdr-web-ui and Collie read it at every width.
+- The question is Pi's own select, which wraps a long option onto the next row with no gutter, which Collie cannot read. Every option fits 42 characters (`OPTION_MAX`, the 46-column phone width less the cursor), and the token counts and the classifier's reason are in the question, so herdr-web-ui and Collie read it at every width.
 
 ## Development
 
@@ -217,7 +219,7 @@ npm ci
 npm run check
 ```
 
-`npm run check` runs `tsc --noEmit` and the Vitest unit tests (`vitest run`). `npm run eval` makes live, paid classifier requests; run it only with explicit authorization. It runs the package's eval target through the repository's one runner (`scripts/eval.mjs --package pi-cache-guard`; the target shape and the runner are in `evals/shared/`) against Jev through the Pi installation on `PATH` (or `PI_PACKAGE_DIR`), and it is skipped without `TYPESAFE_API_KEY`. The `lean` target (`eval/lean.target.ts`) trims ten long, realistic tool logs (build, test, install and migration output) and compacts one conversation with Jev. Every line that carries a failure must survive the trim, a trim may keep at most 70% of its lines, and the compaction keeps the requirements verbatim and drops the routine exploration. It makes 11 requests and passes when every call answers and every check holds. Run it alone from the repository root with `npm run -s eval -- lean`; the runner prints `spend: $X over N calls`, appends a record to `evals/results/lean.jsonl` (git-ignored), and `npm run -s eval -- --dry lean` counts the requests without making any (`--list` shows every target). For the full suite, the repository root's `npm run check` runs every component's check after the root loader test.
+`npm run check` runs `tsc --noEmit` and the Vitest unit tests (`vitest run`). `npm run eval` makes live, paid classifier requests; run it only with explicit authorization. It runs the package's eval target through the repository's one runner (`scripts/eval.mjs --package pi-cache-guard`; the target shape and the runner are in `evals/shared/`) against the selected System 1 backend through the Pi installation on `PATH` (or `PI_PACKAGE_DIR`), and skips when its authentication is not configured. The `lean` target (`eval/lean.target.ts`) trims ten long, realistic tool logs (build, test, install and migration output) and compacts one conversation with the selected classifier. Every line that carries a failure must survive the trim, a trim may keep at most 70% of its lines, and the compaction keeps the requirements verbatim and drops the routine exploration. It makes 11 requests and passes when every call answers and every check holds. Run it alone from the repository root with `npm run -s eval -- lean`; the runner prints `spend: $X over N calls` (a catalog estimate, not an invoice or verified credit debit), appends a record to `evals/results/lean.jsonl` (git-ignored), and `npm run -s eval -- --dry lean` counts the requests without making any (`--list` shows every target). For the full suite, the repository root's `npm run check` runs every component's check after the root loader test.
 
 ## License
 

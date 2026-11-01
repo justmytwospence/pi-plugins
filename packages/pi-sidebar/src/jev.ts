@@ -1,62 +1,34 @@
-// Jev through Pi's own classifier models (`modelRegistry.findOfType("classifier", …)` and
-// `modelRegistry.classify()`), for one yes/no judgment. A trimmed copy of
-// packages/pi-tool-gate/src/jev.ts (same suite), so pi-sidebar has no sibling imports.
+// Compatibility adapter for Sidebar's single yes/no judgment. Transport follows the global
+// System 1 selection; an unavailable or invalid answer never permits a guarded call.
+import { askSystem1, type ClassifierProvenance, type ClassifierUsage } from "./system1.ts";
 
 export const JEV = { provider: "typesafe", model: "jev-latest", timeoutMs: 5_000 } as const;
 
-type Answer = { type: "bool"; probability: number } | { type: string };
+export type JevBool =
+  | ({ ok: true; probability: number; selectionKey: string; latencyMs: number; usage?: ClassifierUsage } & ClassifierProvenance)
+  | { ok: false; reason: string; usage?: ClassifierUsage };
 
-interface ClassifierRegistry {
-  findOfType(type: "classifier", provider: string, modelId: string): unknown;
-  classify(
-    model: never,
-    context: { state: Record<string, unknown>; questions: Record<string, unknown> },
-    options?: { signal?: AbortSignal; timeoutMs?: number },
-  ): Promise<{ answers: Record<string, Answer>; stopReason: string; errorMessage?: string }>;
-}
-
-export type JevBool = { ok: true; probability: number } | { ok: false; reason: string };
-
-/** The probability that `question` is true of `state`. Never throws. A timed-out attempt is retried once. */
+/** The probability that `question` is true of `state`. Never throws; no backend fallback. */
 export async function askJevBool(
   registry: unknown,
   state: Record<string, unknown>,
   question: { instructions: string; criteria: { true: string; false: string } },
   signal?: AbortSignal,
 ): Promise<JevBool> {
-  const reg = registry as Partial<ClassifierRegistry> | undefined;
-  if (typeof reg?.findOfType !== "function" || typeof reg.classify !== "function") {
-    return { ok: false, reason: "this Pi has no classifier models" };
+  const outcome = await askSystem1(registry, { enabled: true, ...JEV }, state, { q: { type: "bool", ...question } }, signal);
+  if (!outcome.ok) return outcome;
+  const answer = outcome.answers.q;
+  if (answer?.type !== "bool" || !Number.isFinite(answer.probability) || answer.probability < 0 || answer.probability > 1) {
+    return { ok: false, reason: "no valid answer", ...(outcome.usage ? { usage: outcome.usage } : {}) };
   }
-  let model: unknown;
-  try {
-    model = reg.findOfType("classifier", JEV.provider, JEV.model);
-  } catch {
-    model = undefined;
-  }
-  if (!model) return { ok: false, reason: `no classifier model ${JEV.provider}/${JEV.model}` };
-  const first = await attempt(reg as ClassifierRegistry, model, state, question, signal);
-  if (first.ok || !/timed out|timeout/iu.test(first.reason) || signal?.aborted) return first;
-  return attempt(reg as ClassifierRegistry, model, state, question, signal);
-}
-
-async function attempt(
-  reg: ClassifierRegistry,
-  model: unknown,
-  state: Record<string, unknown>,
-  question: { instructions: string; criteria: { true: string; false: string } },
-  signal?: AbortSignal,
-): Promise<JevBool> {
-  try {
-    const result = await reg.classify(model as never, { state, questions: { q: { type: "bool", ...question } } }, {
-      timeoutMs: JEV.timeoutMs,
-      ...(signal ? { signal } : {}),
-    });
-    if (result.stopReason !== "stop") return { ok: false, reason: (result.errorMessage ?? result.stopReason).slice(0, 160) };
-    const answer = result.answers.q as { type: string; probability?: number } | undefined;
-    if (answer?.type !== "bool" || !Number.isFinite(answer.probability)) return { ok: false, reason: "no answer" };
-    return { ok: true, probability: answer.probability! };
-  } catch (error) {
-    return { ok: false, reason: (error instanceof Error ? error.message : String(error)).slice(0, 160) };
-  }
+  return {
+    ok: true,
+    probability: answer.probability,
+    backend: outcome.backend,
+    provider: outcome.provider,
+    model: outcome.model,
+    selectionKey: outcome.selectionKey,
+    latencyMs: outcome.latencyMs,
+    ...(outcome.usage ? { usage: outcome.usage } : {}),
+  };
 }

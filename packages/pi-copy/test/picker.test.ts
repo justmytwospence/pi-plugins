@@ -48,6 +48,15 @@ test("ranking updates keep the cursor on the same piece; Esc clears then closes"
   expect(chosen()).toBeUndefined();
 });
 
+test("a late prose filter cannot remove the piece the user selected", () => {
+  const { picker, chosen } = make();
+  picker.handleInput("\x1b[B");
+  picker.update({ suggested: [c, a], all: [c, b, a], ranking: "done", lastTurn: 2 });
+  expect(picker.items()[picker.cursor]?.id).toBe("S2");
+  picker.handleInput("\r");
+  expect(chosen()).toEqual(b);
+});
+
 test("every rendered line fits the supplied width after resize", () => {
   const { picker } = make();
   picker.handleInput(" ");

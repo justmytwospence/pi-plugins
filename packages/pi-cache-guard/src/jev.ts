@@ -3,7 +3,8 @@
 // for its `typesafe` provider; OpenRouter, Vercel AI Gateway, Cloudflare and OpenCode serve Jev
 // too), applies the timeout and abort signal, and reports token usage. The registry types are
 // mirrored structurally, so this type-checks against older Pi type packages as well.
-import type { Answer, Question } from "./lean.ts";
+import type { Question } from "./lean.ts";
+import { askSystem1, readSystem1Setting, resolveSystem1Target, type System1Outcome } from "./system1.ts";
 
 export interface ClassifierUsage {
   input: number;
@@ -16,7 +17,7 @@ export interface ClassifierUsage {
 
 interface ClassifierResult {
   model: string;
-  answers: Record<string, Answer>;
+  answers: Record<string, unknown>;
   usage?: ClassifierUsage;
   stopReason: "stop" | "error" | "aborted";
   errorMessage?: string;
@@ -67,20 +68,40 @@ export type JevState =
  */
 export async function resolveJev(registry: unknown, settings: { enabled: boolean; provider: string; model: string }): Promise<JevState> {
   if (!settings.enabled) return { kind: "off" };
+  // Read the global selection before any Jev discovery or credential lookup.
+  const selection = readSystem1Setting();
+  if (!selection.ok) return { kind: "missing", reason: selection.reason };
   const reg = registry as Partial<ClassifierRegistry> | undefined;
   if (typeof reg?.classify !== "function" || typeof reg.getAvailableOfType !== "function") {
     return { kind: "missing", reason: "this Pi has no classifier models (needs Pi 0.99 or newer)" };
+  }
+  if (selection.backend === "openai-decisions") {
+    const target = resolveSystem1Target(settings, selection);
+    const reason = "OpenAI Decisions is unavailable; enable pi-system1 and configure /login system1-openai";
+    if (!target.ok) return { kind: "missing", reason: target.reason };
+    try {
+      const model = reg.findOfType?.("classifier", target.provider, target.model) as { api?: string; provider?: string; id?: string; baseUrl?: string } | undefined;
+      if (model?.api !== "openai-decisions" || model.provider !== target.provider || model.id !== target.model || model.baseUrl !== "https://api.openai.com/v1") return { kind: "missing", reason };
+      const available = await reg.getAvailableOfType("classifier", target.provider);
+      if (!available.some((m) => m.provider === target.provider && m.id === target.model)) return { kind: "missing", reason };
+      if (readSystem1Setting().key !== selection.key) return { kind: "missing", reason: "System 1 changed while checking availability" };
+      return { kind: "ready", target: { provider: target.provider, model: target.model }, others: [] };
+    } catch {
+      return { kind: "missing", reason };
+    }
   }
   // Only the providers that serve Jev are asked, so no other provider's credentials are resolved.
   const providers = [...new Set([...(settings.provider ? [settings.provider] : []), ...JEV_MODELS.map((t) => t.provider)])];
   const available: { provider: string; id: string }[] = [];
   for (const provider of providers) {
+    if (readSystem1Setting().key !== selection.key) return { kind: "missing", reason: "System 1 changed while checking availability" };
     try {
       available.push(...(await reg.getAvailableOfType("classifier", provider)));
     } catch {
       // A provider whose credentials fail to resolve does not serve Jev here.
     }
   }
+  if (readSystem1Setting().key !== selection.key) return { kind: "missing", reason: "System 1 changed while checking availability" };
   const has = (t: JevTarget) => available.some((m) => m.provider === t.provider && m.id === t.model);
   const found = JEV_MODELS.filter(has);
   if (settings.provider) {
@@ -94,9 +115,7 @@ export async function resolveJev(registry: unknown, settings: { enabled: boolean
   return { kind: "ready", target: first, others };
 }
 
-export type JevOutcome =
-  | { ok: true; answers: Record<string, Answer>; usage?: ClassifierUsage; latencyMs: number }
-  | { ok: false; reason: string };
+export type JevOutcome = System1Outcome;
 
 /** Ask Jev one request. Never throws: every failure is `{ ok: false, reason }`. */
 export async function askJev(
@@ -107,25 +126,7 @@ export async function askJev(
   questions: Record<string, Question>,
   signal?: AbortSignal,
 ): Promise<JevOutcome> {
-  const reg = registry as Partial<ClassifierRegistry> | undefined;
-  if (typeof reg?.findOfType !== "function" || typeof reg.classify !== "function") {
-    return { ok: false, reason: "this Pi has no classifier models (needs Pi 0.99 or newer)" };
-  }
-  let model: unknown;
-  try {
-    model = reg.findOfType("classifier", target.provider, target.model);
-  } catch {
-    model = undefined;
-  }
-  if (!model) return { ok: false, reason: `no classifier model ${label(target)}` };
-  const started = Date.now();
-  try {
-    const result = await reg.classify(model as never, { state, questions }, { timeoutMs, ...(signal ? { signal } : {}) });
-    if (result.stopReason !== "stop") return { ok: false, reason: describe(result.stopReason, result.errorMessage) };
-    return { ok: true, answers: result.answers, ...(result.usage ? { usage: result.usage } : {}), latencyMs: Date.now() - started };
-  } catch (error) {
-    return { ok: false, reason: describe("error", error instanceof Error ? error.message : String(error)) };
-  }
+  return askSystem1(registry, { enabled: true, ...target, timeoutMs }, state, questions, signal);
 }
 
 /** A one-question request, to check that Jev answers with the credentials Pi has. */
@@ -133,15 +134,6 @@ export function probe(registry: unknown, target: JevTarget, timeoutMs = 10_000):
   return askJev(registry, target, timeoutMs, { message: "The tests pass now, thanks." }, {
     approved: { type: "bool", instructions: "Is the user satisfied?", criteria: { true: "Satisfied", false: "Not satisfied" } },
   });
-}
-
-function describe(stopReason: string, message: string | undefined) {
-  if (stopReason === "aborted") return "cancelled";
-  const text = (message ?? "").replace(/\s+/gu, " ");
-  if (/No API key/iu.test(text)) return "no credentials";
-  if (/\b401\b|unauthori[sz]ed/iu.test(text)) return "invalid API key";
-  if (/timed out|timeout/iu.test(text)) return "timed out";
-  return text.slice(0, 160) || "unknown error";
 }
 
 export function addUsage(a: ClassifierUsage | undefined, b: ClassifierUsage | undefined): ClassifierUsage | undefined {

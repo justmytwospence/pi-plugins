@@ -40,6 +40,7 @@ const { DEFAULT_MIN_COLUMNS, DEFAULT_RATIO } = await jiti.import('../packages/pi
 const { sidebarScreen, sidebarFamilyScreens } = await import('./remote-clients/sidebar.mjs');
 const { startupSplashScreens } = await import('./remote-clients/startup-splash.mjs');
 const { gatePickerDialogs } = await import('./remote-clients/workflow-pickers.mjs');
+const { system1Dialogs } = await import('./remote-clients/system1.mjs');
 const { subagentScreens } = await import('./remote-clients/subagents.mjs');
 const { TerminalPanel } = await jiti.import('../packages/pi-interactive-shell/src/panel.ts');
 const { HistoryPicker } = await jiti.import('../packages/pi-history-search/src/picker.ts');
@@ -503,6 +504,7 @@ const DIALOGS = [
     collie: { kind: 'prompt-select', options: spec.labels.length + 1, labels: spec.labels, wraps: spec.labels },
   })),
   ...await gatePickerDialogs({ toolGate, ExtensionSelectorComponent }),
+  ...await system1Dialogs({ ExtensionSelectorComponent }),
   ...['tree-fork', 'fork-here'].map(command => ({
     name: `/${command} destination`, lines: w => treeForkLines(w, 'destination', 'default', command), question: FORK_TITLE,
     herdr: { options: FORK_DESTINATIONS.length, multi: false, labels: FORK_DESTINATIONS },

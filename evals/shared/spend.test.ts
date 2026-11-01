@@ -7,19 +7,19 @@ test("Spend adds costs and counts every call, even without a cost", () => {
   spend.add(0.001).add(undefined).add(Number.NaN).add(0.0025);
   assert.equal(spend.calls, 4);
   assert.ok(Math.abs(spend.total - 0.0035) < 1e-12);
-  assert.equal(spend.line(), "spend: $0.0035 over 4 calls");
+  assert.equal(spend.line(), "spend: $0.0035 over 4 calls (catalog estimate; not a cash charge or verified credit debit)");
   assert.deepEqual(JSON.parse(JSON.stringify(spend)), { spend: 0.0035, calls: 4 });
 });
 
 test("addOutcome reads usage.cost.total from an askJev outcome and counts failures", () => {
   const spend = new Spend();
-  spend.addOutcome({ ok: true, usage: { cost: { total: 0.002 } } }).addOutcome({ ok: true }).addOutcome({ ok: false, reason: "timeout" }).addOutcome(undefined);
-  assert.equal(spend.calls, 4);
-  assert.equal(spend.total, 0.002);
+  spend.addOutcome({ ok: true, usage: { cost: { total: 0.002 } } }).addOutcome({ ok: true }).addOutcome({ ok: false, reason: "timeout", usage: { cost: { total: 0.003 } } }).addOutcome({ ok: false, reason: "unavailable" }).addOutcome(undefined);
+  assert.equal(spend.calls, 5);
+  assert.equal(spend.total, 0.005);
 });
 
 test("an empty Spend", () => {
-  assert.equal(new Spend().line(), "spend: $0.0000 over 0 calls");
+  assert.equal(new Spend().line(), "spend: $0.0000 over 0 calls (catalog estimate; not a cash charge or verified credit debit)");
 });
 
 test("merge folds two accumulators", () => {

@@ -11,6 +11,7 @@ import { askJevBool, type JevBool } from "../src/jev.ts";
 import { pool } from "../../../evals/shared/pool.ts";
 import { branchOf, shuffle, type Session } from "../../../evals/shared/sessions.ts";
 import { Spend } from "../../../evals/shared/spend.ts";
+import type { ClassifierProvenance } from "../../../evals/shared/results.ts";
 
 /** At most this many commands per label. */
 export const PER_LABEL = 150;
@@ -107,9 +108,11 @@ export const countRequests = (selection: Selection): number => selection.readonl
 
 export interface Scored {
   command: Command;
-  /** Jev's probability that running it changes something; undefined when Jev gave no answer. */
+  /** Classifier probability that running it changes something; undefined without a usable answer. */
   probability?: number;
   reason?: string;
+  /** Actual successful classifier, when the adapter reports it (old records/fakes may omit it). */
+  classifier?: ClassifierProvenance;
 }
 
 /** Asks the guard's question for every command, as `judgeCall` would for a call the rules cannot settle. */
@@ -123,9 +126,12 @@ export async function scoreCommands(
   const scored: Scored[] = new Array(commands.length);
   await pool(commands, options.concurrency, async (command, index) => {
     const answer = await ask(registry, changeState(command.tool, undefined, { command: command.command }, command.cwd), CHANGE_QUESTION);
-    // askJevBool reports no usage, so these count as calls without a cost.
+    // Include reported catalog cost even when the adapter returned an unusable answer.
     spend.addOutcome(answer);
-    scored[index] = { command, ...(answer.ok ? { probability: answer.probability } : { reason: answer.reason }) };
+    const source = answer as Partial<ClassifierProvenance>;
+    const classifier = typeof source.backend === "string" && typeof source.provider === "string" && typeof source.model === "string"
+      ? { backend: source.backend, provider: source.provider, model: source.model } : undefined;
+    scored[index] = { command, ...(answer.ok ? { probability: answer.probability, ...(classifier ? { classifier } : {}) } : { reason: answer.reason }) };
   });
   return { scored, failures: scored.filter((s) => s.probability === undefined).length, spend };
 }

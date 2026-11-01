@@ -2,8 +2,12 @@ import { expect, test } from "vitest";
 
 import { trimFloor, trimStatus } from "../src/context.ts";
 import { DEFAULT_SETTINGS } from "../src/core.ts";
-import { type Keep, assemble, batches, blocksFor, codeSummary, keepAnswers, keepQuestions, makeBlocks, prefilter, trimQuestions, trimVerdict } from "../src/lean.ts";
+import { JEV_PITCH, type Keep, assemble, batches, blocksFor, codeSummary, keepAnswers, keepQuestions, makeBlocks, prefilter, trimQuestions, trimVerdict } from "../src/lean.ts";
 import { extractUnits, filterMessages, lastUserMessages, recentTexts } from "../src/units.ts";
+
+test("legacy JEV_PITCH describes the selected classifier without a fixed latency promise", () => {
+  expect(JEV_PITCH).toBe("The selected System 1 classifier trims large tool output and selects conversation units for quick compaction without a generative summary.");
+});
 
 const TRIM = DEFAULT_SETTINGS.trim;
 const log = Array.from({ length: 3_000 }, (_, i) => (i === 1_500 ? "FAIL test/parser.test.ts > parses empty input" : `  ✓ test ${i} passed`));

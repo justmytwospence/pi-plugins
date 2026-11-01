@@ -9,6 +9,7 @@ import { type KeyId, type TUI, isKeyRelease, matchesKey, truncateToWidth, visibl
 import { Type } from "typebox";
 import { loadConfig } from "./config.ts";
 import { type ClassifierQuestion, type JevConfig, askJev, bool } from "./jev.ts";
+import { SYSTEM1_CHANGED, resolveSystem1Target } from "./system1.js";
 import { INSTRUCTION, INTERACTIVE_INSTRUCTION, PROMPT_OFFER_INSTRUCTION, extractNext } from "./tag.ts";
 import { clip, clipTail, messageText } from "./transcript.ts";
 
@@ -96,9 +97,9 @@ export function vetState(pending: Pending): Record<string, unknown> {
 }
 
 /** Jev's vote on a suggestion. Shown when Jev is off or unavailable: the model already abstains on its own. */
-export async function vet(registry: unknown, config: NextPromptConfig["jev"], pending: Pending): Promise<Verdict> {
+export async function vet(registry: unknown, config: NextPromptConfig["jev"], pending: Pending, signal?: AbortSignal): Promise<Verdict> {
   if (!config.enabled) return { show: true, reason: "judge off" };
-  const outcome = await askJev(registry, config, vetState(pending), QUESTIONS);
+  const outcome = await askJev(registry, config, vetState(pending), QUESTIONS, signal);
   if (!outcome.ok) return { show: true, reason: `judge unavailable (${outcome.reason}), shown anyway` };
   const p = bool(outcome.answers, "useful");
   if (p === undefined) return { show: true, reason: "judge gave no answer, shown anyway" };
@@ -195,6 +196,8 @@ export default function nextPrompt(pi: ExtensionAPI) {
   // A turn is running: offers from other extensions wait for the user's next idle moment.
   let busy = false;
   let generation = 0;
+  let vetting: { generation: number; key: string; controller: AbortController } | undefined;
+  let automaticOffer: { generation: number; key: string } | undefined;
   type Surface = "ghost" | "widget";
   type OfferKind = "prompt" | "terminal";
   type OfferDetails = { status: "displayed" | "queued" | "blocked"; kind?: OfferKind; text?: string; reason?: string; surface?: Surface; acceptAfterTurn?: boolean };
@@ -344,8 +347,29 @@ export default function nextPrompt(pi: ExtensionAPI) {
     }
     offered = undefined;
     offerSource = undefined;
+    automaticOffer = undefined;
     conceal(reason);
   };
+
+  // Events are an optimization: interactions and delayed completion always reread the target.
+  // Only the automatic offer/request that owns this generation may be invalidated.
+  const syncSystem1 = () => {
+    if (!vetting && !automaticOffer) return;
+    const key = resolveSystem1Target(config.jev).key;
+    if (vetting && vetting.key !== key) {
+      const stale = vetting;
+      vetting = undefined;
+      stale.controller.abort();
+      if (generation === stale.generation) {
+        generation++;
+        vetState = "discarded (System 1 changed)";
+      }
+    }
+    if (automaticOffer && automaticOffer.key !== key && automaticOffer.generation === generation && !explicit && offerSource === undefined) {
+      hide("System 1 changed");
+    }
+  };
+  pi.events.on(SYSTEM1_CHANGED, syncSystem1);
 
   const queued = (offer: ExplicitOffer): OfferDetails => ({
     status: "queued", kind: offer.kind, text: offer.text,
@@ -359,6 +383,7 @@ export default function nextPrompt(pi: ExtensionAPI) {
     explicit.finish?.(queued(explicit));
   };
   const reconcileVisibility = () => {
+    syncSystem1();
     if (!active() || !ui || offered === undefined) return;
     const editor = mainFocused();
     if (editor) bindEditorChanges(editor);
@@ -481,6 +506,8 @@ export default function nextPrompt(pi: ExtensionAPI) {
     record("reset", reason);
     hide(reason);
     generation++;
+    vetting?.controller.abort();
+    vetting = undefined;
     pending = undefined;
     outcome = undefined;
     settled = false;
@@ -560,6 +587,7 @@ export default function nextPrompt(pi: ExtensionAPI) {
       return failDetails("identical explicit offer is still awaiting render acknowledgement");
     }
     visibilityToken = undefined;
+    automaticOffer = undefined;
     const offer: ExplicitOffer = { id: ++generation, kind, text, acknowledged: false, queued: false };
     explicit = offer;
     beforeSettlement = undefined;
@@ -668,6 +696,7 @@ export default function nextPrompt(pi: ExtensionAPI) {
   });
 
   const onKey = (data: string) => {
+    syncSystem1();
     const focused = mainFocused();
     if (focused) bindEditorChanges(focused);
     if (explicit) {
@@ -717,6 +746,7 @@ export default function nextPrompt(pi: ExtensionAPI) {
   // Optional pi-stash integration: Ctrl+S on an empty main editor with nothing stashed
   // takes the suggestion on screen into the stash, as if it were the draft.
   pi.events.on("prompt:take-next", (data) => {
+    syncSystem1();
     const request = data as { text?: string } | undefined;
     if (!request || request.text !== undefined || shown === undefined || !ui) return;
     if (ui.getEditorText() !== "" || !mainFocused() || (explicit && !explicit.acknowledged)) return;
@@ -820,6 +850,7 @@ export default function nextPrompt(pi: ExtensionAPI) {
     visibilityToken = undefined;
     generation++;
     record("create", "external");
+    automaticOffer = undefined;
     show(text);
     offerSource = source;
   });
@@ -863,9 +894,15 @@ export default function nextPrompt(pi: ExtensionAPI) {
     if (explicitTakenThisTurn) return;
     if (!candidate || outcome !== "completed" || !active() || !ui) return;
     const mine = ++generation;
+    const request = { generation: mine, key: resolveSystem1Target(config.jev).key, controller: new AbortController() };
+    vetting?.controller.abort();
+    vetting = request;
     vetState = "pending";
-    const verdict = await vet(ctx.modelRegistry, config.jev, candidate);
-    if (mine !== generation || !ui) return;
+    const verdict = await vet(ctx.modelRegistry, config.jev, candidate, request.controller.signal);
+    if (mine !== generation || vetting !== request || !ui) return;
+    syncSystem1();
+    if (mine !== generation || vetting !== request) return;
+    vetting = undefined;
     vetState = !verdict.show ? "vetoed" : verdict.reason === "judge off" ? "disabled (shown)"
       : verdict.reason.startsWith("judge unavailable") ? "unavailable (shown)"
       : verdict.reason.startsWith("judge gave no answer") ? "no answer (shown)" : "approved";
@@ -874,6 +911,7 @@ export default function nextPrompt(pi: ExtensionAPI) {
     // A draft in the editor: keep the suggestion on offer, out of sight, so it appears once the
     // editor is empty again (the draft stashed with pi-stash's Ctrl+S, or deleted).
     offerSource = undefined;
+    automaticOffer = { generation: mine, key: request.key };
     show(candidate.suggestion);
   });
 

@@ -1,15 +1,17 @@
 ---
 title: pi-copy
-description: Pick messages, Markdown fragments, commands, paths, and URLs to copy, with optional paid Jev ranking.
+description: Pick messages, Markdown fragments, commands, paths, and URLs to copy, with optional classifier ranking.
 plugin: pi-copy
 ---
+
+The global [System 1](/plugins/pi-system1/) selection (`/system1`) chooses Jev by default or native OpenAI Decisions. The legacy `jev` settings still control this feature, including its enabled flag and timeout; provider/model overrides apply in Jev mode only. Decisions requires pi-system1 and its isolated API credential; it uses API billing, not subscription OAuth. Pi does not verify credit funding. A backend failure never silently switches providers.
 
 ## Quick reference
 
 - **Use it for:** Copy a message fragment, code block, command, path or URL instead of a whole response.
 - **Enable:** Select `packages/pi-copy/src/index.ts` with [`pi config`](/guides/install/#enable-an-explicit-subset).
 - **Controls:** `/yank`, Ctrl+Shift+X; `/copy-mode`, Alt+S (or `/` `?` in pi-vim Normal mode) for vim-style copy mode over the whole transcript. Pi `/copy` remains separate.
-- **Settings:** `copy.json` user/project layers; last 30 turns, 120-piece ceiling, paid Jev ranking on when available; `shortcut` registers at load.
+- **Settings:** `copy.json` user/project layers; last 30 turns, 120-piece ceiling, classifier ranking on when available; `shortcut` registers at load.
 - **Requirements, cost & privacy:** TUI and Pi clipboard support. Local recency/filtering is free; optional ranking sends candidate excerpts and recent requests externally.
 - **Integrations & limits:** Optional Herdr blocked state; handles Ctrl+J/K itself. No judgments means recency; clipboard success cannot prove OSC 52 delivery.
 
@@ -46,7 +48,7 @@ Outside fullscreen mode (`tuiMode: "regular"`, where the terminal's own scrollba
 
 ## Requirements, privacy, and costs
 
-Extraction, filtering, and recency ordering happen locally. **Jev ranking is optional and paid**, and is enabled by default when the configured classifier and credentials are available. The default is Pi's `typesafe` provider with `jev-latest`. Pi resolves credentials, including `TYPESAFE_API_KEY` for that provider. Classifier integration requires Pi 0.99 or newer; that component requirement is not a compatibility promise for every other suite entry.
+Extraction, filtering, and recency ordering happen locally. **Classifier ranking is optional and can incur charges**, and is enabled by default when the configured classifier and credentials are available. The Jev default is Pi's `typesafe` provider with `jev-latest`. Pi resolves credentials, including `TYPESAFE_API_KEY` for that provider. Classifier integration requires Pi 0.99 or newer; that component requirement is not a compatibility promise for every other suite entry.
 
 Opening the picker can send candidate text and recent user messages to the classifier before you select anything. By default, each candidate is clipped to 600 characters for ranking; the last three nonempty user messages are clipped to 500 characters each. Candidates are limited by both a piece count and a character-budget estimate. Treat this as external processing of session content, not merely a local clipboard operation. Disable ranking before opening sensitive sessions if you do not want those requests.
 
@@ -88,16 +90,16 @@ To avoid classifier requests, use this partial override:
 
 Settings are reread when the picker opens, except that the shortcut is registered when the extension loads. **Source/README discrepancy:** the README describes the shortcut as global-only, but the implementation calls the merged loader with `process.cwd()` at registration. A project file present in that startup directory can therefore affect registration. A later working-directory change does not re-register the key. Set the shortcut globally for a predictable baseline and check startup project overrides when diagnosing conflicts.
 
-The picker opens without waiting for ranking. Suggested combines likelihood and recency, with default weights of 0.6 and 0.4; prose below the copyability threshold is excluded only from Suggested. All stays newest-first. Judgments are cached by content within the session and cleared on session start. The 120-piece limit is a ceiling, not a promise: the estimated 60,000-character budget can select fewer. Disabling new requests does not explicitly clear already cached judgments in the running session.
+The picker opens without waiting for ranking. Suggested combines likelihood and recency, with default weights of 0.6 and 0.4; prose below the copyability threshold is excluded only from Suggested. All stays newest-first. Judgments are cached by content and effective classifier target within the session and cleared on session start. The 120-piece limit is a ceiling, not a promise: the estimated 60,000-character budget can select fewer. Disabling new requests does not explicitly clear already cached judgments in the running session.
 
 ## Interactions and troubleshooting
 
-If a wanted item is missing from Suggested, switch to All before changing extraction settings. Jev may have judged prose unsuitable for pasting, but that does not remove it from All. If it is absent there too, check the current branch, the `maxTurns` window, and parser boundaries. Repeated identical pieces are deduplicated. Short standalone prose and introductory lines are not always separate pieces; templated URLs such as `http://127.0.0.1:<port>/x` are deliberately skipped. Copy the whole reply when an exact fragment is not offered.
+If a wanted item is missing from Suggested, switch to All before changing extraction settings. The classifier may have judged prose unsuitable for pasting, but that does not remove it from All. If it is absent there too, check the current branch, the `maxTurns` window, and parser boundaries. Repeated identical pieces are deduplicated. Short standalone prose and introductory lines are not always separate pieces; templated URLs such as `http://127.0.0.1:<port>/x` are deliberately skipped. Copy the whole reply when an exact fragment is not offered.
 
 A missing classifier, absent credentials, timeout, or classification error does not prevent opening the picker. Without judgments it uses recency ordering; existing cached judgments can still influence Suggested. Closing the picker aborts the outstanding ranking request. Ranking updates preserve a piece you navigated to if it remains in the list; an untouched cursor stays at the top of the newly ordered results.
 
 While open, the picker emits paired `herdr:blocked` events with the label `Yank picker`. Herdr integration is optional; without a listener these events are inert. `pi-select-nav` is also optional: the picker handles Ctrl+J/Ctrl+K itself and declares a filter input context, so select-nav leaves its keys alone and literal letters reach the search field.
 
-`Nothing to copy yet` means extraction found no pieces. `Copy failed: ...` is a clipboard-backend error, not a Jev failure. Investigate display access, backend availability, and terminal clipboard permissions. A success notification confirms the helper returned, but an OSC 52 route cannot confirm the destination clipboard actually changed. No paid live evaluation is needed to use local recency mode.
+`Nothing to copy yet` means extraction found no pieces. `Copy failed: ...` is a clipboard-backend error, not a classifier failure. Investigate display access, backend availability, and terminal clipboard permissions. A success notification confirms the helper returned, but an OSC 52 route cannot confirm the destination clipboard actually changed. No paid live evaluation is needed to use local recency mode.
 
 [GitHub source](https://github.com/justmytwospence/pi-plugins/tree/main/packages/pi-copy)

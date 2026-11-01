@@ -1,10 +1,12 @@
 # pi-tool-gate
 
-A Pi extension that auto-approves tool calls, so you are only pulled in when a call is risky and the agent could not find a way around it. Fixed rules settle the clear cases without a model call (read-only calls run, a short list of dangerous calls is always held); [Jev](https://docs.typesafe.ai), through Pi's own classifier models, judges the gray zone. A held call is first blocked with an explanation and a suggested workaround for the agent; only if the agent retries it, or another held call of the same family, are you asked. Your own [permission rules](#permission-rules), in Claude Code's syntax (`Bash(git push:*)`, `Edit(src/**)`), allow, always ask about or deny specific calls, for the session, the project or everywhere.
+A Pi extension that auto-approves tool calls, so you are only pulled in when a call is risky and the agent could not find a way around it. Fixed rules settle the clear cases without a model call (read-only calls run, a short list of dangerous calls is always held); the selected System 1 classifier, through Pi's own classifier models, judges the gray zone. A held call is first blocked with an explanation and a suggested workaround for the agent; only if the agent retries it, or another held call of the same family, are you asked. Your own [permission rules](#permission-rules), in Claude Code's syntax (`Bash(git push:*)`, `Edit(src/**)`), allow, always ask about or deny specific calls, for the session, the project or everywhere.
 
 That is **auto approval**, independent of the current workflow (see [Workflow and approvals](#workflow-and-approvals)). It acts on every tool call (the `tool_call` event) and is not a sandbox: see [Limitations](#limitations).
 
 Part of [Pi Plugins](https://github.com/justmytwospence/pi-plugins). Reference: <https://pi-plugins.vercel.app/plugins/pi-tool-gate/>.
+
+**System 1 backend.** `/system1` selects Jev (the default) or native OpenAI Decisions for the suite; `/system1 jev` selects Jev and `/system1 openai` asks for billing confirmation. The selection is shared by sessions using the same agent directory. Jev works standalone; Decisions requires the `pi-system1` component and its isolated `/login system1-openai` API key (or `SYSTEM1_OPENAI_API_KEY`), not subscription OAuth or the ordinary OpenAI credential. Before selecting Decisions, claim eligible [ChatGPT Pro API credits](https://developers.openai.com/api/docs/guides/chatgpt-api-credits) in an API organization with no purchased balance, auto-recharge or paid continuation. Pi cannot verify entitlement or which funds pay for a request. Classifier requests may be billed; failures do not switch backend. Legacy `jev` settings remain: the local enable flag, thresholds and timeouts apply to either backend, while provider/model overrides apply only to Jev.
 
 ## Install
 
@@ -53,16 +55,16 @@ These run without a judgment:
 
   Arguments are checked where they can make a "reading" program write or execute: `sed -i` or a `w`/`e` command, `find -delete`/`-exec`, `sort -o`, `awk` with `system()` or redirects, `fd -x`, `rg --pre`, `git -c ...`, `git branch <name>`, `curl -o`/`-d`/`-X POST`, `date -s` and so on. Leading assignments to variables that change what runs (`PATH`, `LD_*`, `GIT_*`, `PAGER`, `EDITOR`, `NODE_OPTIONS`, ...) and `env -S` make a command non-read-only. Wrappers such as `time`, `nice`, `env`, `nohup` and `timeout` are looked through.
 
-These are always held, whatever Jev says:
+These are always held, whatever the classifier says:
 
 - `sudo` or `doas`.
 - `rm`, `rmdir` or `trash` of `/`, a top-level directory, your home directory, the project directory, or a parent of either.
 - A force-push (`-f`, `--force`, `--force-with-lease`, `--mirror`, or a `+` refspec) to `main` or `master`, named or as the current branch.
 - `curl` or `wget` piped into a shell.
 - Running a file this session downloaded (below), in every mode but yolo.
-- Touching files that hold live secrets: `.env` and `.env.*` (but not `*.example`, `*.sample`, `*.template`, `*.dist`, `*.default(s)`), `auth.json`, private SSH keys (`id_rsa`, `id_ed25519`, `id_ecdsa`, `id_dsa`), `.aws/credentials`, `.netrc`, `credentials`/`credentials.json`, and `*.pem`, `*.key`, `*.p12`, `*.pfx`. This covers `edit`/`write`/`read` of such a path and shell commands naming one, except programs that only name a file without reading or moving it (`ls`, `stat`, `chmod`, `touch`, ...), `git status`/`rm`/`restore`/..., and an unforced `git add` of a file git ignores. SSH config, public keys and `.npmrc` are left to Jev.
+- Touching files that hold live secrets: `.env` and `.env.*` (but not `*.example`, `*.sample`, `*.template`, `*.dist`, `*.default(s)`), `auth.json`, private SSH keys (`id_rsa`, `id_ed25519`, `id_ecdsa`, `id_dsa`), `.aws/credentials`, `.netrc`, `credentials`/`credentials.json`, and `*.pem`, `*.key`, `*.p12`, `*.pfx`. This covers `edit`/`write`/`read` of such a path and shell commands naming one, except programs that only name a file without reading or moving it (`ls`, `stat`, `chmod`, `touch`, ...), `git status`/`rm`/`restore`/..., and an unforced `git add` of a file git ignores. SSH config, public keys and `.npmrc` are left to the classifier.
 
-Commands nested in `sh -c '...'` (and other shells) and `eval` are checked against the same always-held rules. Writes and deletes outside the project that match none of these go to Jev.
+Commands nested in `sh -c '...'` (and other shells) and `eval` are checked against the same always-held rules. Writes and deletes outside the project that match none of these go to the classifier.
 
 #### Downloaded code
 
@@ -70,30 +72,30 @@ The gate keeps a list of the files the session downloaded: `curl -o f`/`--output
 
 A command that runs one is always held: `./f` or any path naming it as the program, `sh`/`bash`/`zsh`/`dash f`, `source f` or `. f`, `python`/`python3`/`node`/`ruby`/`perl`/`bun f`, `deno run f`, also behind `sudo`, wrappers, `sh -c`, `eval` and substitutions, and also when the same command downloads it first (`curl -o x url && sh x`). Auto mode pushes it back once with the reason `runs <f>, downloaded in this session`, then asks you; manual and accept-edits modes ask at once. The dialog offers Allow once and Block only: no rule, not even an exact one, opens it.
 
-### 2. Jev for the gray zone
+### 2. The classifier for the gray zone
 
-Edits, writes, other shell commands, and MCP or extension tools without a read-only hint go to Jev in one request. Calls are allowed by default. Unless you asked for the action, or said yes when the agent offered it (`requested` >= 0.7; "open a PR" asks for the push and `gh pr create`, "request Sam as reviewer" for the `gh pr edit`, and an instruction from an earlier message still counts), a call is held when Jev judges that:
+Edits, writes, other shell commands, and MCP or extension tools without a read-only hint go to the classifier in one request. Calls are allowed by default. Unless you asked for the action, or said yes when the agent offered it (`requested` >= 0.7; "open a PR" asks for the push and `gh pr create`, "request Sam as reviewer" for the `gh pr edit`, and an instruction from an earlier message still counts), a call is held when the classifier judges that:
 
 - it cannot be undone (>= 0.9);
 - it does something other people see or depend on (>= 0.85: deploy, publish, send a message, open or merge a PR, change a shared or cloud resource). Pushing commits to a git branch and maintaining your own machines over ssh do not count;
 - its impact if unwanted is 2.5 or more of 3 (lost data, leaked secrets, broken production);
 - or it is clearly unrelated to your request (in scope < 0.1) and its impact is 2 or more.
 
-Whatever you said, a call is held when it would send secrets or private data somewhere they are not for (>= 0.8; using an API key with its own API is normal use) or break a project rule (>= 0.7). Doubt about scope alone never holds a call. Jev sees your last five messages, the agent message your newest one replies to (so "yes" to "Want me to push?" counts as asking for the push), the agent's recent text, the working directory, the git branch and whether it is dirty, the call, and the project rules. An incomplete or invalid verdict blocks the call. The design follows Claude Code's auto mode in allowing valid low-risk judgments by default, but is not complete Claude Code parity. An eligible approved-plan snapshot may also be sent as context, as described under [optional integrations](#optional-integrations).
+Whatever you said, a call is held when it would send secrets or private data somewhere they are not for (>= 0.8; using an API key with its own API is normal use) or break a project rule (>= 0.7). Doubt about scope alone never holds a call. The classifier sees your last five messages, the agent message your newest one replies to (so "yes" to "Want me to push?" counts as asking for the push), the agent's recent text, the working directory, the git branch and whether it is dirty, the call, and the project rules. An incomplete or invalid verdict blocks the call. The design follows Claude Code's auto mode in allowing valid low-risk judgments by default, but is not complete Claude Code parity. An eligible approved-plan snapshot may also be sent as context, as described under [optional integrations](#optional-integrations).
 
-A shell call that runs a local script (`./deploy.sh`, `bash x.sh`, `python3 x.py`, the same forms as [downloaded code](#downloaded-code)) is judged by what the script does: the first such file that is a regular file of at most 64 KB, with no NUL byte in its first 8 KB and not downloaded in this session, goes to Jev as `script: { path, content }` (the path with `~`, the content clipped to 6,000 characters). Every question then tells Jev to judge the call by the script's content, read as code to evaluate and never as instructions to follow. The `tool-gate:decision` entry records the script's path.
+A shell call that runs a local script (`./deploy.sh`, `bash x.sh`, `python3 x.py`, the same forms as [downloaded code](#downloaded-code)) is judged by what the script does: the first such file that is a regular file of at most 64 KB, with no NUL byte in its first 8 KB and not downloaded in this session, goes to the classifier as `script: { path, content }` (the path with `~`, the content clipped to 6,000 characters). Every question then tells the classifier to judge the call by the script's content, read as code to evaluate and never as instructions to follow. The `tool-gate:decision` entry records the script's path.
 
 ### 3. Push-back, then you
 
-A held call is blocked automatically the first time. The agent sees why (which checks failed and how sure Jev is, plus any quoted rules) and a suggested workaround, which Jev picks in a second request made only for held calls: preview it with a dry run, narrow it, make it reversible, keep it local, follow the project rule, skip it, or "no workaround, this is the user's call". The agent then does the job another way, drops the call, or makes its case in a short visible message and repeats the identical call.
+A held call is blocked automatically the first time. The agent sees why (which checks failed and how sure the classifier is, plus any quoted rules) and a suggested workaround, which the classifier picks in a second request made only for held calls: preview it with a dry run, narrow it, make it reversible, keep it local, follow the project rule, skip it, or "no workaround, this is the user's call". The agent then does the job another way, drops the call, or makes its case in a short visible message and repeats the identical call.
 
 That retry, or another held call of the same family (same program and subcommand, or same folder) in the same user turn, is put to you with the hold reasons and the agent's case: Allow once, the rule that names the call for this session, this project or everywhere (or Edit the rule), Block, or Block with a message (always-held calls offer only Allow once and the blocks; see [the approval dialog](#the-approval-dialog)). A message goes to the agent with the refusal, for example what to do instead, and the agent is told to follow it rather than to stop and ask you. Without a UI (print and JSON modes) the retry is blocked. Set `"pushBack": false` to be asked on the first hold.
 
 Dialogs are shown one at a time. In Pi's terminal UI the dialog shows the call itself, highlighted: a long one-line shell command laid out one step per line (only whitespace changes), an edit or overwrite as a diff against the file, a new file in its language, any other tool's input as JSON. Below it are why it was held and the agent's case, rendered as Markdown. Long parts are clamped; Pi's `app.tools.expand` key (Ctrl+O by default) expands them. The choices end as Pi's own select does (a one-line question, the rows, Pi's key hint), so herdr-web-ui shows them as a chat card. `j`/`k`, Ctrl+J/Ctrl+K and the arrow keys move, Enter selects, Esc blocks, and `n` (or the Block with a message row) opens a `›` message field under the choices, laid out as Pi's text input: Enter blocks with it, Esc goes back to the choices. The field uses an editor provider such as pi-vim when one answers on the suite's editor-factory channel, as pi-ask-user-question's fields do. In other UI modes (RPC clients, and subagent dialogs forwarded by pi-subagents) the question is a plain select with a one-line summary, followed by a text input when you pick Block with a message.
 
-### Jev unavailable
+### Classifier unavailable
 
-When Jev cannot produce a complete valid verdict (including when disabled, missing credentials or a model, or after a timeout or error), a call routed to classification is blocked and does not run. An identical retry may offer Allow once in the UI, but no persistent rule is suggested solely because classification failed; headless retries remain blocked. Deterministically read-only and explicitly allowed calls still run, subject to other checks.
+When the classifier cannot produce a complete valid verdict (including when disabled, missing credentials or a model, or after a timeout or error), a call routed to classification is blocked and does not run. An identical retry may offer Allow once in the UI, but no persistent rule is suggested solely because classification failed; headless retries remain blocked. Deterministically read-only and explicitly allowed calls still run, subject to other checks.
 
 ## Permission rules
 
@@ -102,8 +104,8 @@ Rules settle specific calls, in Claude Code's syntax and with its order: `deny` 
 | List | A matching call |
 | --- | --- |
 | `deny` | Is blocked without asking you. The agent is told which rule it matched and that you forbade it, and not to look for a way around it. |
-| `ask` | Always asks you, in every mode but yolo, even in auto mode: no Jev call, no push-back. The dialog offers Allow once, Block and Block with a message. |
-| `allow` | Runs without a Jev call (and in manual mode without asking), when the rule covers it. |
+| `ask` | Always asks you, in every mode but yolo, even in auto mode: no classifier call, no push-back. The dialog offers Allow once, Block and Block with a message. |
+| `allow` | Runs without a classifier call (and in manual mode without asking), when the rule covers it. |
 
 A deny rule applies in every mode, yolo and chat mode included. An allow rule never overrides a deny or an ask rule, the [always-held calls](#1-clear-cases-no-model-call) (below), or the [directory policy](#directories) for a shell command. In chat mode a rule does not make a command read-only, so it stays blocked; an ask rule asks only about calls that read there.
 
@@ -232,14 +234,14 @@ Different:
 
 ## Directories
 
-Pi has no directory boundary of its own, so the gate keeps one. In auto, manual and accept-edits modes (and for reads in chat and plan mode), a call is held when it touches a path outside its project's directories, before any Jev call. Auto mode pushes it back once, as with any held call, and then asks you. The dialog's **Allow folder for this session** and **in this project** grant that folder (listed by `/gate rules` beside the rules): a folder under a private root (`~/Projects/other`), the private root itself for a file directly in it (`~/Downloads/shot.png` grants `~/Downloads`), else the file's directory, or the directory itself when the write is to an existing one (a writing command's working directory: `cd ~ && chezmoi apply` grants `~`, not `/Users`).
+Pi has no directory boundary of its own, so the gate keeps one. In auto, manual and accept-edits modes (and for reads in chat and plan mode), a call is held when it touches a path outside its project's directories, before any the classifier call. Auto mode pushes it back once, as with any held call, and then asks you. The dialog's **Allow folder for this session** and **in this project** grant that folder (listed by `/gate rules` beside the rules): a folder under a private root (`~/Projects/other`), the private root itself for a file directly in it (`~/Downloads/shot.png` grants `~/Downloads`), else the file's directory, or the directory itself when the write is to an existing one (a writing command's working directory: `cd ~ && chezmoi apply` grants `~`, not `/Users`).
 
 - The project (the git checkout of the working directory, and the main checkout of a worktree) is always readable and writable.
 - Private roots (`directories.private`: `~/Projects`, `~/Documents`, `~/Desktop`, `~/Downloads`, iCloud Drive) are neither read nor written outside the project and its grants.
 - Other paths (system and toolchain directories, `~/.config`) can be read. They can be written only under `alwaysWrite` (temp and cache directories) or a `write` grant.
 - `directories.read` grants extra readable directories (`["*"]` reads anywhere). `directories.write` grants extra directories to read and write. Paths take `~` and globs (`~/Projects/herdr-*`). Relative paths are relative to the project.
-- `directories.derived` lists paths generated from a source elsewhere: a deployed config file, a build output or a generated client. A write to one outside the project is held even when a grant covers it, and the agent is told the entry's `hint` (word for word) instead of a Jev workaround, so it edits the source instead. Entries are `{ "path": "...", "hint": "..." }` or a bare path.
-- `directories.exemptCommands` lists commands whose paths the policy does not check, typically the one that regenerates the derived paths from their source. An entry is a program and its leading words (`make install`, `stow`), matched by the program's base name and its first non-option arguments. Jev and the always-held rules still judge the command; redirects and other commands in the same line are still checked.
+- `directories.derived` lists paths generated from a source elsewhere: a deployed config file, a build output or a generated client. A write to one outside the project is held even when a grant covers it, and the agent is told the entry's `hint` (word for word) instead of a classifier workaround, so it edits the source instead. Entries are `{ "path": "...", "hint": "..." }` or a bare path.
+- `directories.exemptCommands` lists commands whose paths the policy does not check, typically the one that regenerates the derived paths from their source. An entry is a program and its leading words (`make install`, `stow`), matched by the program's base name and its first non-option arguments. The classifier and the always-held rules still judge the command; redirects and other commands in the same line are still checked.
 
 ```json
 {
@@ -271,15 +273,15 @@ This is a heuristic over arguments. Paths a program builds at runtime are not se
 
 - `/mode [work|chat|plan]`: select workflow; without an argument, open the picker. Exec is entered only through a handoff.
 - `/approvals [auto|yolo]`: select approvals; without an argument, open the picker. Legacy `manual` and `accept-edits` arguments remain supported.
-- `/gate` or `/gate status`: both axes and keys, counts, Jev model, push-back setting, project rules, permission rules and folder grants.
+- `/gate` or `/gate status`: both axes and keys, counts, the classifier model, push-back setting, project rules, permission rules and folder grants.
 - `/gate rules [list | add | remove]`: [permission rules](#gate-rules) and folder grants: list them, pick one to remove it, or add one. `/gate grants` is the same.
 - `/gate on`, `/gate off`: auto mode, or yolo mode.
 
-Separate `workflow-mode` and `permission-mode` statuses show the axes and their keys; the gate also reports `gate: N auto · P pushed back · M asked`. Every call Jev judges is recorded in the session as a `tool-gate:decision` custom entry (tool, clipped arguments, scores, failures, action, latency, input tokens), for tuning thresholds. Jev's token usage is added to the gated tool's result.
+Separate `workflow-mode` and `permission-mode` statuses show the axes and their keys; the gate also reports `gate: N auto · P pushed back · M asked`. Every call the classifier judges is recorded in the session as a `tool-gate:decision` custom entry (tool, clipped arguments, scores, failures, action, latency, input tokens), for tuning thresholds. The classifier's token usage is added to the gated tool's result.
 
 ## Project rules
 
-These are guidance for Jev, not [permission rules](#permission-rules). Each top-level bullet (`-`, `*`, `+` or `1.`; indented lines continue it) in these files is a rule, checked on every judged call:
+These are guidance for the classifier, not [permission rules](#permission-rules). Each top-level bullet (`-`, `*`, `+` or `1.`; indented lines continue it) in these files is a rule, checked on every judged call:
 
 1. `<project>/.agents/tool-gate-rules.md`
 2. `<project>/.pi/tool-gate-rules.md`
@@ -351,9 +353,9 @@ The `agents` locations are shared with the opencode and Claude Code ports of thi
 
 ## Requirements and costs
 
-- Jev runs through Pi's classifier models (`ctx.modelRegistry.classify`), which needs Pi 0.99 or newer, and Pi's credentials for the provider (`TYPESAFE_API_KEY` for the default `typesafe` provider). Without them calls requiring classification are blocked.
-- Each gray-zone call makes one Jev request; each held call makes one more for the workaround (also for always-held calls). These requests can be billed by the provider.
-- It runs `git branch --show-current`, `git status --porcelain`, `git check-ignore` and `git rev-parse --show-toplevel --git-common-dir` in the working directory, reads the target file of an edit or write to show a diff, and reads a local script a judged shell call runs (up to 64 KB) to send its content to Jev. It also writes `tool-gate:decision` entries in the Pi session and saves rules or folder grants when selected.
+- The classifier runs through Pi's classifier models (`ctx.modelRegistry.classify`), which needs Pi 0.99 or newer, and Pi's credentials for the provider (`TYPESAFE_API_KEY` for the default `typesafe` provider). Without them calls requiring classification are blocked.
+- Each gray-zone call makes one classifier request; each held call makes one more for the workaround (also for always-held calls). These requests can be billed by the provider.
+- It runs `git branch --show-current`, `git status --porcelain`, `git check-ignore` and `git rev-parse --show-toplevel --git-common-dir` in the working directory, reads the target file of an edit or write to show a diff, and reads a local script a judged shell call runs (up to 64 KB) to send its content to the classifier. It also writes `tool-gate:decision` entries in the Pi session and saves rules or folder grants when selected.
 
 ## Optional integrations
 
@@ -365,7 +367,7 @@ The `agents` locations are shared with the opencode and Claude Code ports of thi
 
 ## Limitations
 
-- It is not a sandbox. It inspects tool names and arguments before a call; it does not confine what a command does once it runs. The read-only command rules are a parser's best effort over shell syntax, and Jev's judgment is probabilistic.
+- It is not a sandbox. It inspects tool names and arguments before a call; it does not confine what a command does once it runs. The read-only command rules are a parser's best effort over shell syntax, and the classifier's judgment is probabilistic.
 - Tools in `allowTools` are never inspected. `codemode` is on the default list because the tools its scripts call are expected to be gated on their own; if they are not in your setup, remove it.
 - Classifier failure blocks calls routed to classification, but bypasses and explicit rules still apply; this is not an OS security boundary.
 - Downloaded code is found by the forms above. Files whose names the command does not give (`gh release download` without `-O`, `-D` or `-p`, `curl -J`), files unpacked from a downloaded archive, downloads by other programs or tools, and a downloaded program run by bare name from `PATH` are not tracked.
@@ -384,11 +386,11 @@ npm run check
 
 `npm run check` runs `tsc --noEmit` and the vitest unit tests. For the full suite, the repository root's `npm run check` runs every component's check after the root loader test.
 
-`npm run eval` makes live, paid classifier requests; run it only with explicit authorization. It runs the package's eval targets through the repository's one runner (`scripts/eval.mjs --package pi-tool-gate`; the target shape and the runner are in `evals/shared/`) through the Pi installation on `PATH` (or `PI_PACKAGE_DIR`), and is skipped without `TYPESAFE_API_KEY`. The runner prints each target's report and `spend: $X over N calls`, appends a record (commit, seed, `EVAL_*` parameters, spend, calls and the numbers) to `evals/results/<id>.jsonl` in the repository (git-ignored), and exits non-zero when a target fails. From the repository root, `npm run -s eval -- --list` shows every target, `--dry <id>` counts the Jev calls a run would make without calling Jev, and `--last <id>` prints the last record with its difference from the one before. Targets, run by id (`npm run -s eval -- gate`) or all together (`npm run -s eval -- tool-gate`):
+`npm run eval` makes live, paid classifier requests; run it only with explicit authorization. It runs the package's eval targets through the repository's one runner (`scripts/eval.mjs --package pi-tool-gate`; the target shape and the runner are in `evals/shared/`) through the Pi installation on `PATH` (or `PI_PACKAGE_DIR`), and is skipped when the selected System 1 backend's authentication is not configured. The runner prints each target's report and `spend: $X over N calls` (a catalog estimate, not an invoice or verified credit debit), appends a record (commit, seed, `EVAL_*` parameters, spend, calls and the numbers) to `evals/results/<id>.jsonl` in the repository (git-ignored), and exits non-zero when a target fails. From the repository root, `npm run -s eval -- --list` shows every target, `--dry <id>` counts classifier calls without making them, and `--last <id>` prints the last record with its difference from the one before. Targets, run by id (`npm run -s eval -- gate`) or all together (`npm run -s eval -- tool-gate`):
 
-- `gate` (`eval/gate.target.ts`) judges 38 hand-written labeled calls, each with the verdict it should get (allow, hold, or either), and asks Jev for the workaround of each call it holds. It passes when no verdict misses its label and fewer than 20% of the Jev calls fail.
-- `sessions` (`eval/sessions.target.ts`, planning in `eval/plans.ts`) replays real sessions from `~/.pi/agent/sessions` (`evals/shared/sessions.ts`, shared with pi-auto-effort: `EVAL_RECENT`, `EVAL_SAMPLE`, `EVAL_SEED`, `EVAL_MIN_PROMPTS`, `EVAL_MIN_TOOLS`). It plans each tool call of each sampled branch as the gate does in auto mode (`planCall`, with this machine's settings, rules and project grants), counts the clear cases and the downloaded-code holds, and asks Jev about the judged calls with the conversation as it stood then, 8 at a time. A call that ran counts as allowed and one you blocked as held; it reports Jev's holds on allowed calls (extra prompts) and allows on held calls (misses), and with `EVAL_COMPARE=1` judges each call that runs a script again without its content (recorded as the `compare` numbers). It costs one request per judged call: a default sample can hold thousands (`--dry sessions` counts them with `collect` and `countCalls`). It passes when fewer than 20% of the Jev calls fail; the rest is a report.
-- `replay-file` (`eval/replay-file.target.ts`) replays recorded decisions from a JSON file, `GATE_REPLAY=decisions.json npm run -s eval -- replay-file` (each record has `users`, optional `prior`, `intent`, `tool`, `args` and an optional `label`). Without `GATE_REPLAY` it makes no call and passes. It passes when at most 5% of the verdicts are wrong and fewer than 20% of the Jev calls fail.
+- `gate` (`eval/gate.target.ts`) judges 38 hand-written labeled calls, each with the verdict it should get (allow, hold, or either), and asks the classifier for the workaround of each call it holds. It passes when no verdict misses its label and fewer than 20% of classifier calls fail.
+- `sessions` (`eval/sessions.target.ts`, planning in `eval/plans.ts`) replays real sessions from `~/.pi/agent/sessions` (`evals/shared/sessions.ts`, shared with pi-auto-effort: `EVAL_RECENT`, `EVAL_SAMPLE`, `EVAL_SEED`, `EVAL_MIN_PROMPTS`, `EVAL_MIN_TOOLS`). It plans each tool call of each sampled branch as the gate does in auto mode (`planCall`, with this machine's settings, rules and project grants), counts the clear cases and the downloaded-code holds, and asks the classifier about the judged calls with the conversation as it stood then, 8 at a time. A call that ran counts as allowed and one you blocked as held; it reports the classifier's holds on allowed calls (extra prompts) and allows on held calls (misses), and with `EVAL_COMPARE=1` judges each call that runs a script again without its content (recorded as the `compare` numbers). It costs one request per judged call: a default sample can hold thousands (`--dry sessions` counts them with `collect` and `countCalls`). It passes when fewer than 20% of classifier calls fail; the rest is a report.
+- `replay-file` (`eval/replay-file.target.ts`) replays recorded decisions from a JSON file, `GATE_REPLAY=decisions.json npm run -s eval -- replay-file` (each record has `users`, optional `prior`, `intent`, `tool`, `args` and an optional `label`). Without `GATE_REPLAY` it makes no call and passes. It passes when at most 5% of the verdicts are wrong and fewer than 20% of classifier calls fail.
 
 ## License
 

@@ -35,6 +35,7 @@ import {
   verbatimSection,
 } from "./lean.ts";
 import { extractUnits, filterMessages, lastUserMessages, recentTexts } from "./units.ts";
+import { SYSTEM1_CHANGED, resolveSystem1Target, type ClassifierProvenance } from "./system1.ts";
 
 /** Session entries recording each Jev decision (never sent to the model). */
 export const DECISION_TYPE = "cache-guard:jev";
@@ -89,10 +90,43 @@ export function leanContext(pi: ExtensionAPI): Lean {
   let failure: string | undefined;
   let saved = 0;
   const trimmedThisTurn = new Set<string>();
-
-  const keyOf = (s: Settings) => JSON.stringify([s.enabled, s.jev]);
+  const pending = new Set<AbortController>();
+  let generation = 0;
+  let lastContext: ExtensionContext | undefined;
+  const changed = "System 1 changed while judging; retry the request";
+  const invalidate = () => {
+    generation++;
+    for (const controller of pending) controller.abort();
+    pending.clear();
+    current = undefined;
+    jevKey = "";
+    jevState = Promise.resolve({ kind: "missing", reason: "not checked yet" });
+  };
+  const keyOf = (s: Settings) => JSON.stringify([s.enabled, s.jev, resolveSystem1Target(s.jev).key]);
+  const operation = (ctx: ExtensionContext, target: { provider: string; model: string }, signal?: AbortSignal) => {
+    const controller = new AbortController();
+    const owner = generation;
+    const key = keyOf(settings);
+    const selectionKey = resolveSystem1Target(target).key;
+    const abort = () => controller.abort();
+    if (signal?.aborted) abort();
+    else signal?.addEventListener("abort", abort, { once: true });
+    pending.add(controller);
+    return {
+      signal: controller.signal,
+      valid: () => owner === generation && !controller.signal.aborted && keyOf(loadSettings(ctx.cwd)) === key && resolveSystem1Target(target).key === selectionKey,
+      selectionKey,
+      dispose: () => {
+        pending.delete(controller);
+        signal?.removeEventListener("abort", abort);
+      },
+    };
+  };
   const refresh = (ctx: ExtensionContext) => {
-    jevKey = keyOf(settings);
+    lastContext = ctx;
+    const nextKey = keyOf(settings);
+    if (jevKey && jevKey !== nextKey) invalidate();
+    jevKey = nextKey;
     checkedAt = Date.now();
     const next = resolveJev(ctx.modelRegistry, { ...settings.jev, enabled: settings.enabled && settings.jev.enabled });
     jevState = next;
@@ -103,11 +137,24 @@ export function leanContext(pi: ExtensionAPI): Lean {
   };
   /** New settings, or a Jev that was missing a minute ago (credentials may have arrived): look again. */
   const reload = (ctx: ExtensionContext) => {
+    lastContext = ctx;
     settings = loadSettings(ctx.cwd);
     if (keyOf(settings) !== jevKey || (current?.kind === "missing" && Date.now() - checkedAt >= RECHECK_MS)) void refresh(ctx);
   };
 
+  pi.events?.on(SYSTEM1_CHANGED, () => {
+    invalidate();
+    if (lastContext) {
+      settings = loadSettings(lastContext.cwd);
+      void refresh(lastContext);
+    }
+  });
+  pi.on("session_shutdown", () => {
+    invalidate();
+    lastContext = undefined;
+  });
   pi.on("session_start", (_event, ctx) => {
+    invalidate();
     settings = loadSettings(ctx.cwd);
     current = undefined;
     saved = 0;
@@ -121,6 +168,7 @@ export function leanContext(pi: ExtensionAPI): Lean {
   });
 
   pi.on("tool_result", async (event, ctx) => {
+    reload(ctx);
     if (!settings.enabled || !settings.trim.enabled) return undefined;
     // Nested calls return to a script (codemode), not to the context.
     if ((event as { parentToolCallId?: string }).parentToolCallId) return undefined;
@@ -132,47 +180,55 @@ export function leanContext(pi: ExtensionAPI): Lean {
     // The agent asked again for something already trimmed this turn: give it everything.
     const key = `${event.toolName}:${JSON.stringify(event.input)}`;
     if (trimmedThisTurn.has(key)) return undefined;
+    const availabilityKey = jevKey;
     const jev = await jevState;
-    if (jev.kind !== "ready") return undefined;
-
-    const { lines, blocks } = blocksFor(text, settings.trim);
-    const texts = recentTexts(ctx.sessionManager.getBranch());
-    const state = trimState({ user_request: texts.user, agent_said: texts.assistant, tool: event.toolName, arguments: JSON.stringify(event.input) }, blocks);
-    const outcome = await askJev(ctx.modelRegistry, jev.target, settings.jev.timeoutMs, state, trimQuestions(blocks), ctx.signal);
-    if (!outcome.ok) return undefined;
-    const usage = addUsage(event.usage as ClassifierUsage | undefined, outcome.usage);
-    const fullPath = savePath(ctx, event.toolCallId);
-    const verdict = trimVerdict(lines, blocks, outcome.answers, settings.trim, fullPath);
-    pi.appendEntry(DECISION_TYPE, {
-      kind: "trim",
-      tool: event.toolName,
-      lines: verdict.totalLines,
-      kept: verdict.trim ? verdict.keptLines : verdict.totalLines,
-      needsAll: verdict.needsAll,
-      blocks: blocks.length,
-      latencyMs: outcome.latencyMs,
-      inputTokens: outcome.usage?.input,
-    });
-    const passUsage = usage ? { usage: usage as never } : undefined;
-    if (!verdict.trim) return passUsage;
+    if (jev.kind !== "ready" || keyOf(loadSettings(ctx.cwd)) !== availabilityKey || jevKey !== availabilityKey) return undefined;
+    const op = operation(ctx, jev.target, ctx.signal);
     try {
-      mkdirSync(path.dirname(fullPath), { recursive: true });
-      writeFileSync(fullPath, text);
-    } catch {
-      return passUsage;
+      const { lines, blocks } = blocksFor(text, settings.trim);
+      const texts = recentTexts(ctx.sessionManager.getBranch());
+      const state = trimState({ user_request: texts.user, agent_said: texts.assistant, tool: event.toolName, arguments: JSON.stringify(event.input) }, blocks);
+      if (!op.valid()) return undefined;
+      const outcome = await askJev(ctx.modelRegistry, jev.target, settings.jev.timeoutMs, state, trimQuestions(blocks), op.signal);
+      const usage = addUsage(event.usage as ClassifierUsage | undefined, outcome.usage);
+      const passUsage = usage ? { usage: usage as never } : undefined;
+      if (!outcome.ok || !op.valid() || outcome.selectionKey !== op.selectionKey) return passUsage;
+      const fullPath = savePath(ctx, event.toolCallId);
+      const verdict = trimVerdict(lines, blocks, outcome.answers, settings.trim, fullPath);
+      pi.appendEntry(DECISION_TYPE, {
+        kind: "trim",
+        tool: event.toolName,
+        lines: verdict.totalLines,
+        kept: verdict.trim ? verdict.keptLines : verdict.totalLines,
+        needsAll: verdict.needsAll,
+        blocks: blocks.length,
+        latencyMs: outcome.latencyMs,
+        inputTokens: outcome.usage?.input,
+        classifier: { backend: outcome.backend, provider: outcome.provider, model: outcome.model },
+      });
+      if (!verdict.trim) return passUsage;
+      try {
+        mkdirSync(path.dirname(fullPath), { recursive: true });
+        writeFileSync(fullPath, text);
+      } catch {
+        return passUsage;
+      }
+      trimmedThisTurn.add(key);
+      saved += text.length - verdict.text.length;
+      if (ctx.hasUI) ctx.ui.setStatus(TRIM_STATUS_KEY, trimStatus(saved));
+      return {
+        content: [...content.filter((b) => b.type !== "text"), { type: "text", text: verdict.text }] as never,
+        ...(passUsage ?? {}),
+      };
+    } finally {
+      op.dispose();
     }
-    trimmedThisTurn.add(key);
-    saved += text.length - verdict.text.length;
-    if (ctx.hasUI) ctx.ui.setStatus(TRIM_STATUS_KEY, trimStatus(saved));
-    return {
-      content: [...content.filter((b) => b.type !== "text"), { type: "text", text: verdict.text }] as never,
-      ...(passUsage ?? {}),
-    };
   });
 
   pi.on("session_before_compact", async (event, ctx) => {
     // Plan-mode owns this deterministic compaction; preserve quick-compaction state too.
     if (/^plan-mode-direct:[\da-fA-F]{8}-[\da-fA-F]{4}-[\da-fA-F]{4}-[\da-fA-F]{4}-[\da-fA-F]{12}(?![\s\S])/u.test(event.customInstructions ?? "")) return undefined;
+    reload(ctx);
     const request = armed;
     armed = undefined;
     failure = undefined;
@@ -183,9 +239,12 @@ export function leanContext(pi: ExtensionAPI): Lean {
       if (jevOnly && ctx.hasUI) ctx.ui.notify(`Quick compaction: ${reason}; using Pi's compaction.`, "warning");
       return undefined;
     };
-    if (!settings.enabled || (!jevOnly && !settings.compact.filter)) return undefined;
+    if (!settings.enabled) return request?.strict ? fail("cache-guard is off") : undefined;
+    if (!jevOnly && !settings.compact.filter) return undefined;
+    const availabilityKey = jevKey;
     const jev = await jevState;
-    if (jev.kind !== "ready") return jevOnly ? fail(jev.kind === "off" ? "Jev is off" : `Jev is not set up (${jev.reason})`) : undefined;
+    if (keyOf(loadSettings(ctx.cwd)) !== availabilityKey || jevKey !== availabilityKey) return fail(changed);
+    if (jev.kind !== "ready") return jevOnly ? fail(jev.kind === "off" ? "System 1 is off for cache-guard" : `System 1 is unavailable (${jev.reason})`) : undefined;
     const prep = event.preparation;
     const main = extractUnits(prep.messagesToSummarize, "U");
     const prefix = extractUnits(prep.turnPrefixMessages, "P");
@@ -193,72 +252,102 @@ export function leanContext(pi: ExtensionAPI): Lean {
     if (!units.length) return jevOnly ? fail("nothing to judge") : undefined;
 
     const goal = request?.goal?.trim() || event.customInstructions?.trim() || lastUserMessages(event.branchEntries, 2);
-    const judged = await judgeUnits(ctx, jev.target, units, goal, event.signal);
-    if (!judged.ok) return fail(judged.reason);
-    const { keep, usage } = judged;
-    const counts = keepCounts(keep);
-    pi.appendEntry(DECISION_TYPE, { kind: "compact", jevOnly, units: units.length, ...counts, latencyMs: judged.latencyMs });
-
-    if (jevOnly) {
-      const summary = codeSummary({ units, keep, previousSummary: prep.previousSummary, fileOps: prep.fileOps, instructions: event.customInstructions });
-      return {
-        compaction: {
-          summary,
-          firstKeptEntryId: prep.firstKeptEntryId,
-          tokensBefore: prep.tokensBefore,
-          details: { cacheGuard: { mode: "jev", ...counts } },
-          ...(usage ? { usage: usage as never } : {}),
-        },
-      };
-    }
-
-    const model = ctx.model;
-    if (!model) return undefined;
+    const op = operation(ctx, jev.target, event.signal);
     try {
-      const auth = (await ctx.modelRegistry.getApiKeyAndHeaders(model)) as { ok: boolean; apiKey?: string; headers?: Record<string, string>; env?: Record<string, string> };
-      if (!auth.ok) return undefined;
-      const filtered = {
-        ...prep,
-        messagesToSummarize: filterMessages(prep.messagesToSummarize, main, keep),
-        turnPrefixMessages: filterMessages(prep.turnPrefixMessages, prefix, keep),
-      } as typeof prep;
-      const result = await compact(filtered, model, auth.apiKey, auth.headers, event.customInstructions, event.signal, undefined, undefined, auth.env);
-      const verbatim = verbatimSection(units, keep);
-      const resultUsage = (result as { usage?: ClassifierUsage }).usage;
-      const total = addUsage(resultUsage, usage);
-      return {
-        compaction: {
-          ...result,
-          summary: verbatim ? `${result.summary}\n\n${verbatim}` : result.summary,
-          details: { ...(isRecord(result.details) ? result.details : {}), cacheGuard: { mode: "filtered", ...counts } },
-          ...(total ? { usage: total as never } : {}),
-        },
+      const recordFailure = (reason: string, usage?: ClassifierUsage) => {
+        // A cancelled/failed compaction has no usage-bearing compaction entry. Retain all
+        // attempted classifier usage in the decision audit entry, including failed batches.
+        if (usage) pi.appendEntry(DECISION_TYPE, { kind: "compact", failed: true, reason, usage });
+        return fail(reason);
       };
-    } catch {
-      return undefined;
+      const judged = await judgeUnits(ctx, jev.target, units, goal, op);
+      if (!judged.ok) return recordFailure(judged.reason, judged.usage);
+      if (!op.valid()) return recordFailure(event.signal.aborted ? "cancelled" : changed, judged.usage);
+      const { keep, usage } = judged;
+      const counts = keepCounts(keep);
+      const recordSuccess = () => pi.appendEntry(DECISION_TYPE, { kind: "compact", jevOnly, units: units.length, ...counts, latencyMs: judged.latencyMs, usage, classifier: judged.classifier });
+
+      if (jevOnly) {
+        recordSuccess();
+        const summary = codeSummary({ units, keep, previousSummary: prep.previousSummary, fileOps: prep.fileOps, instructions: event.customInstructions });
+        return {
+          compaction: {
+            summary,
+            firstKeptEntryId: prep.firstKeptEntryId,
+            tokensBefore: prep.tokensBefore,
+            details: { cacheGuard: { mode: "jev", ...counts } },
+            ...(usage ? { usage: usage as never } : {}),
+          },
+        };
+      }
+
+      const model = ctx.model;
+      if (!model) return recordFailure("no summary model", usage);
+      try {
+        const auth = (await ctx.modelRegistry.getApiKeyAndHeaders(model)) as { ok: boolean; apiKey?: string; headers?: Record<string, string>; env?: Record<string, string> };
+        if (!auth.ok) return recordFailure("summary credentials unavailable", usage);
+        if (!op.valid()) return recordFailure(event.signal.aborted ? "cancelled" : changed, usage);
+        const filtered = {
+          ...prep,
+          messagesToSummarize: filterMessages(prep.messagesToSummarize, main, keep),
+          turnPrefixMessages: filterMessages(prep.turnPrefixMessages, prefix, keep),
+        } as typeof prep;
+        const result = await compact(filtered, model, auth.apiKey, auth.headers, event.customInstructions, op.signal, undefined, undefined, auth.env);
+        const resultUsage = (result as { usage?: ClassifierUsage }).usage;
+        const total = addUsage(resultUsage, usage);
+        if (!op.valid()) return recordFailure(event.signal.aborted ? "cancelled" : changed, total);
+        const verbatim = verbatimSection(units, keep);
+        recordSuccess();
+        return {
+          compaction: {
+            ...result,
+            summary: verbatim ? `${result.summary}\n\n${verbatim}` : result.summary,
+            details: { ...(isRecord(result.details) ? result.details : {}), cacheGuard: { mode: "filtered", ...counts } },
+            ...(total ? { usage: total as never } : {}),
+          },
+        };
+      } catch {
+        return recordFailure(op.signal.aborted ? "cancelled or System 1 changed" : "Pi's compaction failed", usage);
+      }
+    } finally {
+      op.dispose();
     }
   });
 
-  async function judgeUnits(ctx: ExtensionContext, target: { provider: string; model: string }, units: Unit[], goal: string, signal: AbortSignal) {
+  async function judgeUnits(ctx: ExtensionContext, target: { provider: string; model: string }, units: Unit[], goal: string, op: ReturnType<typeof operation>) {
     const started = Date.now();
     const keep = new Map<string, Keep>();
     let usage: ClassifierUsage | undefined;
     const queue = batches(units);
     let reason: string | undefined;
+    let classifier: ClassifierProvenance | undefined;
+    const timeoutMs = settings.compact.timeoutMs;
+    const concurrency = settings.compact.concurrency;
     const worker = async () => {
       for (let batch = queue.shift(); batch && !reason; batch = queue.shift()) {
-        const outcome = await askJev(ctx.modelRegistry, target, settings.compact.timeoutMs, keepState(goal, batch), keepQuestions(batch), signal);
-        if (!outcome.ok) {
-          reason = outcome.reason;
+        // One captured selection owns every batch. Never start a later batch on a
+        // newly-selected backend, even if a file change arrived without an event.
+        if (!op.valid()) {
+          reason ??= op.signal.aborted ? "cancelled or System 1 changed" : changed;
           return;
         }
+        const outcome = await askJev(ctx.modelRegistry, target, timeoutMs, keepState(goal, batch), keepQuestions(batch), op.signal);
         usage = addUsage(usage, outcome.usage);
+        if (!op.valid() || (outcome.ok && outcome.selectionKey !== op.selectionKey)) {
+          reason ??= "cancelled or System 1 changed";
+          return;
+        }
+        if (!outcome.ok) {
+          reason ??= outcome.reason;
+          return;
+        }
+        classifier = { backend: outcome.backend, provider: outcome.provider, model: outcome.model };
         keepAnswers(batch, outcome.answers, keep);
       }
     };
-    await Promise.all(Array.from({ length: Math.max(1, settings.compact.concurrency) }, worker));
-    if (reason) return { ok: false as const, reason: `classification failed (${reason})` };
-    return { ok: true as const, keep, usage, latencyMs: Date.now() - started };
+    await Promise.all(Array.from({ length: Math.max(1, concurrency) }, worker));
+    if (reason) return { ok: false as const, reason: `classification failed (${reason})`, usage };
+    return { ok: true as const, keep, usage, classifier, latencyMs: Date.now() - started };
   }
 
   return {

@@ -3,7 +3,7 @@ import { appendFileSync, mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { test } from "node:test";
-import { diff, diffRecords, evalParams, gitState, last, record, type ResultRecord } from "./results.ts";
+import { comparisonWarning, diff, diffRecords, evalParams, gitState, last, record, type ResultRecord } from "./results.ts";
 
 const env = () => ({ EVAL_RESULTS_DIR: mkdtempSync(path.join(tmpdir(), "eval-results-")), EVAL_SEED: "7", EVAL_SAMPLE: "3", OTHER: "x" });
 
@@ -55,6 +55,37 @@ test("diffRecords compares spend, calls, metrics and compare, not the stamps", (
   });
   assert.deepEqual(diffRecords(rec(1, 10, 5, 8), rec(3, 12, 4, 9)), { spend: 2, calls: 2, metrics: { prompts: -1 }, compare: { prompts: 1 } });
   assert.deepEqual(diffRecords(rec(1, 10, 5), rec(1, 10, 5, 9)), { spend: 0, calls: 0, metrics: { prompts: 0 } });
+});
+
+test("classifier provenance roundtrips alongside legacy records", () => {
+  const e = env();
+  const legacy = record("provenance", { spend: 1, calls: 1, metrics: { score: 1 } }, e);
+  const classifier = { backend: "jev", provider: "typesafe", model: "jev-latest" };
+  const current = record("provenance", { spend: 2, calls: 2, metrics: { score: 2 }, classifier }, e);
+  assert.deepEqual(last("provenance", 2, e), [legacy, current]);
+  assert.equal(last("provenance", 2, e)[0].classifier, undefined);
+  assert.deepEqual(last("provenance", 2, e)[1].classifier, classifier);
+});
+
+test("record comparisons warn for unknown or mismatched classifier provenance", () => {
+  const legacy: ResultRecord = { at: "t", commit: "c", dirty: false, seed: null, params: {}, spend: 1, calls: 1, metrics: { score: 1 } };
+  const classifier = { backend: "jev", provider: "typesafe", model: "jev-latest" };
+  const known = { ...legacy, classifier };
+  const next = { ...known, spend: 2, calls: 2, metrics: { score: 3 } };
+  const expected = { spend: 1, calls: 1, metrics: { score: 2 } };
+  assert.equal(comparisonWarning(known, next), undefined);
+  assert.deepEqual(diffRecords(known, next), expected);
+  assert.match(comparisonWarning(legacy, { ...next, classifier: undefined })!, /legacy\/unknown/u);
+  assert.deepEqual(diffRecords(legacy, { ...next, classifier: undefined }), expected);
+  for (const [a, b] of [[legacy, next], [next, legacy]] as const) {
+    assert.match(comparisonWarning(a, b)!, /legacy\/unknown/u);
+    assert.deepEqual(diffRecords(a, b), {});
+  }
+  for (const field of ["backend", "provider", "model"] as const) {
+    const different = { ...next, classifier: { ...classifier, [field]: "different" } };
+    assert.match(comparisonWarning(known, different)!, new RegExp(field, "u"));
+    assert.deepEqual(diffRecords(known, different), {});
+  }
 });
 
 test("evalParams keeps EVAL_* only and gitState answers", () => {

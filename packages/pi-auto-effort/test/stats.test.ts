@@ -71,7 +71,7 @@ test("/auto-effort status counts this session's decisions, restored from the bra
   fail = true;
   await h.emit("before_agent_start", { prompt: "and the queue" }, ctx);
   expect(jev.calls).toHaveLength(3);
-  expect(h.entries.map((e) => (e.data as { reason?: string }).reason)).toEqual(["up", "go-ahead", "hold", "assessment unavailable: boom"]);
+  expect(h.entries.map((e) => (e.data as { reason?: string }).reason)).toEqual(["up", "go-ahead", "hold", "assessment unavailable: classifier request failed"]);
   const line = await status();
   expect(line).toMatch(/^Session: 4 assessments \(avg \d+ ms\): 1 raised, 1 lowered, 1 held, 1 failed; 2 settled without a call \(go-ahead\)\.$/u);
 

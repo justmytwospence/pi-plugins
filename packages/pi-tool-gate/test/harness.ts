@@ -4,19 +4,22 @@ import { realpathSync } from "node:fs";
 type Handler = (event: any, ctx: any) => unknown;
 
 export interface FakeJev {
-  calls: Array<{ state: Record<string, unknown>; questions: Record<string, any>; options: any }>;
+  calls: Array<{ model: any; state: Record<string, unknown>; questions: Record<string, any>; options: any }>;
   answer: (questions: Record<string, any>, state: Record<string, unknown>) => any;
 }
 
 export function fakeJev(answer: FakeJev["answer"]): FakeJev & { registry: unknown } {
   const calls: FakeJev["calls"] = [];
   const registry = {
-    findOfType: (_type: string, provider: string, id: string) => ({ provider, id }),
-    classify: async (_model: unknown, context: any, options: any) => {
-      calls.push({ state: context.state, questions: context.questions, options });
+    findOfType: (_type: string, provider: string, id: string) => ({
+      provider, id,
+      ...(provider === "system1-openai" ? { api: "openai-decisions", baseUrl: "https://api.openai.com/v1" } : {}),
+    }),
+    classify: async (model: any, context: any, options: any) => {
+      calls.push({ model, state: context.state, questions: context.questions, options });
       const result = answer(context.questions, context.state);
       if (result && typeof result === "object" && "stopReason" in result) return result;
-      return { model: "jev-latest", stopReason: "stop", answers: result, usage: usage(300) };
+      return { model: model.id, stopReason: "stop", answers: result, usage: usage(300) };
     },
   };
   return { calls, answer, registry };

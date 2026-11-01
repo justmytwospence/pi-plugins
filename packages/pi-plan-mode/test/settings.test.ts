@@ -512,10 +512,13 @@ test("Plan-mode settings read alwaysOffer as a list of tool names", () => {
   assert.deepEqual(normalizePlanModeSettings({ alwaysOffer: [" web ", "jev", "web"] })?.alwaysOffer, ["web", "jev"]);
   assert.equal(normalizePlanModeSettings({ alwaysOffer: "web" }), undefined);
   assert.equal(normalizePlanModeSettings({ alwaysOffer: ["web", ""] }), undefined);
-  // Unset: web research, docs, and Jev judgments; set (even to []), yours replaces it.
+  // Unset: web research, docs, and manual System 1 judgments; explicit arrays replace defaults.
   assert.deepEqual(configuredAlwaysOffer({ thinkingLevel: "inherit" }), DEFAULT_ALWAYS_OFFER);
   assert.ok(DEFAULT_ALWAYS_OFFER.includes("web") && DEFAULT_ALWAYS_OFFER.includes("context7"));
   assert.ok(DEFAULT_ALWAYS_OFFER.includes("jev"));
+  assert.ok(DEFAULT_ALWAYS_OFFER.includes("system1_judge"));
+  assert.deepEqual(normalizePlanModeSettings({ alwaysOffer: [] })?.alwaysOffer, []);
+  assert.deepEqual(normalizePlanModeSettings({ alwaysOffer: ["jev"] })?.alwaysOffer, ["jev"]);
   assert.deepEqual(configuredAlwaysOffer({ thinkingLevel: "inherit", alwaysOffer: [] }), []);
   assert.deepEqual(configuredAlwaysOffer({ thinkingLevel: "inherit", alwaysOffer: ["marimo"] }), ["marimo"]);
 });

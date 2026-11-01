@@ -21,6 +21,8 @@ Sidebar is a second agent inside main's Pi process. It sees main's latest state:
 
 It cannot change anything.
 
+The global [System 1](/plugins/pi-system1/) selection (`/system1`) chooses Jev by default or native OpenAI Decisions for Sidebar's read-only guard. Decisions requires pi-system1 and its isolated API credential; it uses API billing, not subscription OAuth. Pi does not verify credit funding. A backend failure never silently switches providers; an unconfirmed call is refused.
+
 ## Enable and requirements
 
 Entry: `packages/pi-sidebar/src/index.ts`. To load it alone, merge this object into your `packages` array:
@@ -165,7 +167,7 @@ Everything main can, except changing anything. Sidebar loads the extensions behi
 - **Refused:** `edit`, `write`, `todo`, `ask_user_question`, plan mode's tools, `herdr`, and tools marked destructive.
 - **Allowed:** reading, search and web tools, codemode (its nested calls are judged one by one), tool search, pi-bg's job readers, and tools marked read-only.
 - **Shell commands** (including pi-bg's `bg_run`): run when they only read. Plan mode's policy, loosened for flags like `rg -i`, globs, `2>/dev/null`, `cd` and variables set in the same command.
-- **Anything else:** a Jev judgment of whether the call would change anything, refused at 50% or more, or when Jev is unavailable.
+- **Anything else:** a classifier judgment of whether the call would change anything, refused at 50% or more, or when the selected classifier is unavailable.
 - **Subagents:** allowed, and they run under the same guard. [pi-subagents](/plugins/pi-subagents/) passes `PI_SIDEBAR_GUARD=1` to them through its subagent-environment channel.
 
 It works from any point in the conversation. With no request of main's in memory, Sidebar rebuilds it from main's session and still lands on main's warm cache. This happens after a restart, resume, `/reload`, `/tree` or a compaction.
@@ -185,7 +187,7 @@ It aborts, sending nothing, if main's request vanishes mid-build, on an API or m
 
 ## Checking the guard against your sessions
 
-The repository's `guard` eval compares Jev's judgment with the guard's own rules. It takes shell commands from your saved sessions that the read-only policy settles (cleared as read-only, or plainly writing), asks the guard's question about up to 150 of each kind, and reports how many read-only commands Jev would refuse and how many writing ones it would clear, with the worst examples. It makes live, paid classifier requests, so it runs only on request (`npm run -s eval -- guard` from a checkout; `--dry` counts the requests first).
+The repository's `guard` eval compares the selected classifier's judgment with the guard's own rules. It takes shell commands from your saved sessions that the read-only policy settles (cleared as read-only, or plainly writing), asks the guard's question about up to 150 of each kind, and reports how many read-only commands the classifier would refuse and how many writing ones it would clear, with the worst examples. It makes live, paid classifier requests, so it runs only on request (`npm run -s eval -- guard` from a checkout; `--dry` counts the requests first).
 
 Claude Code's `/btw` and Codex's `/side` showed that a side question should reuse the main conversation's cache. [pi-herdr-btw](https://github.com/oscabriel/pi-herdr-btw) showed exact prompt replay; no code was copied from it.
 

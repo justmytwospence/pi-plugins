@@ -63,6 +63,7 @@ export class Picker {
     private readonly requestRender: () => void,
     private readonly done: (segment: Segment | undefined) => void,
     private readonly keybindings?: KeybindingsManager,
+    private readonly beforeInput?: () => void,
   ) {}
 
   /** The rows on the current tab, filtered. */
@@ -73,9 +74,12 @@ export class Picker {
 
   /** New ranking: reorder, keeping the cursor on the piece you moved to (or at the top). */
   update(model: PickerModel) {
-    const current = this.touched ? this.items()[this.cursor]?.id : undefined;
-    this.model = model;
-    const index = current ? this.items().findIndex((s) => s.id === current) : -1;
+    const current = this.touched ? this.items()[this.cursor] : undefined;
+    // A late prose filter must not remove the piece the user is already choosing.
+    this.model = current && !model.suggested.some((s) => s.id === current.id)
+      ? { ...model, suggested: [...model.suggested, current] }
+      : model;
+    const index = current ? this.items().findIndex((s) => s.id === current.id) : -1;
     this.cursor = index >= 0 ? index : 0;
     this.refresh();
   }
@@ -95,6 +99,7 @@ export class Picker {
   handleInput(data: string) {
     if (isKeyRelease(data)) return;
     this.touched = true;
+    this.beforeInput?.();
     if (this.paste !== undefined || data.includes("\x1b[200~")) {
       this.paste = (this.paste ?? "") + data.replace("\x1b[200~", "");
       const end = this.paste.indexOf("\x1b[201~");

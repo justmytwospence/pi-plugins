@@ -19,16 +19,18 @@ export type ToolTreeResult =
   | { kind: "back" }
   | { kind: "cancel" };
 
-/** Jev's preselection, arriving after the screen opens. */
+/** System 1 preselection, arriving after the screen opens. */
 export interface ToolPreselection {
-  /** Resolves to a one-line summary and a function that applies the picks to the tree. */
-  pending: Promise<{ message: string; apply(keepSelection: boolean): void }>;
+  /** The actual selected backend, captured before judging; never inferred from the chat model. */
+  label?: string;
+  /** Resolves to a one-line summary and a guarded function that applies the picks to the tree. */
+  pending: Promise<{ message: string; isCurrent?(): boolean; apply(keepSelection: boolean): void }>;
 }
 
 export interface ToolTreeViewOptions {
   title: string;
   task?: string;
-  /** Short lines under the task, e.g. the Jev summary when it is already known. */
+  /** Short lines under the task, e.g. the classifier summary when it is already known. */
   notes: readonly string[];
   roots: ToolNode[];
   /** What Enter does, asked as a question first: `Start planning with 1 planner`. */
@@ -58,7 +60,7 @@ export class ToolTreeView implements Component {
   private scroll = 0;
   private readonly expanded = new Set<string>();
   private jevStatus: { kind: "pending" } | { kind: "done"; message: string } | undefined;
-  /** True once the user changed any selection; Jev never overrides that. */
+  /** True once the user changed any selection; automatic picks never override that. */
   touched = false;
   private rowsTop = 0;
   private shownRows: Row[] = [];
@@ -81,10 +83,12 @@ export class ToolTreeView implements Component {
         (result) => {
           // A closed screen leaves the picks for the next time the tools screen opens.
           if (this.closed) return;
-          result.apply(this.touched);
+          const current = result.isCurrent?.() !== false;
+          if (current) result.apply(this.touched);
+          const message = current ? result.message : "Not used (System 1 changed); the defaults from settings apply.";
           this.jevStatus = {
             kind: "done",
-            message: this.touched ? `${result.message} Your own changes were kept.` : result.message,
+            message: this.touched ? `${message} Your own changes were kept.` : message,
           };
           options.requestRender();
         },
@@ -245,7 +249,7 @@ export class ToolTreeView implements Component {
     const selectedCount = all.filter((leaf) => leaf.selected).length;
     const jev =
       this.jevStatus?.kind === "pending"
-        ? `${theme.fg("accent", spinner())} ${theme.fg("muted", "Picking the tools this task needs…")}`
+        ? `${theme.fg("accent", spinner())} ${theme.fg("muted", `${this.options.preselection?.label ?? "Classifier"}: picking tools…`)}`
         : this.jevStatus?.kind === "done"
           ? theme.fg("muted", this.jevStatus.message)
           : undefined;
@@ -258,7 +262,7 @@ export class ToolTreeView implements Component {
         "Tools",
       ),
       ...(this.options.task ? [fieldLine(theme, width, "Task", this.options.task)] : []),
-      ...(jev ? [fieldLine(theme, width, "Auto", jev)] : []),
+      ...(jev ? [fieldLine(theme, width, "System 1", jev)] : []),
       ...this.options.notes.map((note) => fieldLine(theme, width, "", theme.fg("muted", note))),
       "",
     ];

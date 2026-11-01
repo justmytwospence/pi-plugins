@@ -1,5 +1,5 @@
-// pi-auto-effort: sets the thinking level for each message you send. Jev, through Pi's own
-// classifier models, answers which level (low to xhigh) the request needs; need(L), the probability
+// pi-auto-effort: sets the thinking level for each message you send. The selected System 1
+// classifier answers which level (low to xhigh) the request needs; need(L), the probability
 // the work needs at least L, must clear a threshold that rises with subscription pressure, and a
 // level goes down only with a clear margin (policy.ts). The bounds are your latest manual level
 // (ceiling) or the configured range (free). During a run (tool follow-ups) the level is re-assessed
@@ -42,6 +42,7 @@ import {
 } from "./policy.ts";
 import { DEFAULT_PREFILTER, type PrefilterConfig, isGoAhead, prefilterConfig } from "./prefilter.ts";
 import { type Counts, countsFromBranch, describeCounts, emptyCounts, tally } from "./stats.ts";
+import { SYSTEM1_CHANGED, readSystem1Setting, resolveSystem1Target } from "./system1.js";
 import { clip, messageText } from "./transcript.ts";
 import { UNTRUSTED_REPLY } from "./untrusted.ts";
 import { CodexPoller } from "./usage.ts";
@@ -277,6 +278,20 @@ export default function autoEffort(pi: ExtensionAPI, deps: AutoEffortDeps = {}) 
   // Bumped when a prompt, session, branch, model, manual level or gate replaces the state a
   // Jev answer would apply to. Shutdown invalidates callbacks from the old runtime too.
   let generation = 0;
+  // Cache the effective physical target, not the global setting's backend-only key.
+  let selectionKey: string | undefined;
+  const pending = new Set<AbortController>();
+  const cancelAssessments = () => {
+    for (const controller of pending) controller.abort();
+    pending.clear();
+  };
+  const clearAssessment = () => {
+    lastNeed = undefined;
+    lastTheta = undefined;
+    lastLevel = undefined;
+    lastReason = "";
+    turnsSince = 0;
+  };
 
   const active = () => sessionOn && config.enabled && !pinned;
   const policy = () => policyConfig(config.policy);
@@ -310,6 +325,45 @@ export default function autoEffort(pi: ExtensionAPI, deps: AutoEffortDeps = {}) 
     // pi-status-footer parses this: no parentheses inside the detail.
     const detail = `${arrow} ${bound}${limited}`.replace(/[()]/gu, "");
     ctx.ui.setStatus(STATUS_KEY, active() ? `effort: ${current} (auto ${detail})` : undefined);
+  };
+
+  /** Read on interactions as well as events: standalone use must work without a watcher. */
+  const refreshTarget = (ctx?: ExtensionContext) => {
+    const target = resolveSystem1Target(config.jev, readSystem1Setting());
+    if (selectionKey !== undefined && selectionKey !== target.key) {
+      generation++;
+      cancelAssessments();
+      clearAssessment();
+      selectionKey = target.key;
+      if (ctx) status(ctx);
+    } else selectionKey = target.key;
+    return target;
+  };
+
+  let unsubscribeSystem1: (() => void) | undefined;
+  const subscribeSystem1 = () => {
+    unsubscribeSystem1 ??= pi.events.on(SYSTEM1_CHANGED, () => refreshTarget(latestCtx ?? footerCtx));
+  };
+  subscribeSystem1();
+
+  /** Also guard the UI boundary: a completed adapter result can outlive its selection. */
+  const assess = async (
+    ctx: ExtensionContext,
+    state: Record<string, unknown>,
+    questions: Record<string, ClassifierQuestion>,
+    operationSignal?: AbortSignal,
+  ): Promise<JevOutcome | undefined> => {
+    const target = refreshTarget(ctx);
+    const controller = new AbortController();
+    pending.add(controller);
+    const signal = operationSignal ? AbortSignal.any([operationSignal, controller.signal]) : controller.signal;
+    try {
+      const outcome = await askJev(ctx.modelRegistry, config.jev, state, questions, signal);
+      if (signal.aborted || (outcome.ok && outcome.selectionKey !== target.key)) return undefined;
+      return outcome;
+    } finally {
+      pending.delete(controller);
+    }
   };
 
   const manual = (level: string) => {
@@ -347,11 +401,17 @@ export default function autoEffort(pi: ExtensionAPI, deps: AutoEffortDeps = {}) 
     const savedIndex = branch.findLastIndex((e) => e.type === "custom" && e.customType === STATE_ENTRY);
     const data = (isRecord(branch[savedIndex]?.data) ? branch[savedIndex]!.data : undefined) as Record<string, unknown> | undefined;
     manualLevel = typeof data?.ceiling === "string" ? data.ceiling : pi.getThinkingLevel();
-    lastLevel = typeof data?.level === "string" ? data.level : undefined;
-    lastReason = typeof data?.reason === "string" ? data.reason : "";
+    const target = refreshTarget(ctx);
+    // Older entries predate backend switching and describe Jev; never restore them as Decisions.
+    const sameTarget = typeof data?.selectionKey === "string" ? data.selectionKey === target.key : target.ok && target.backend === "jev";
+    clearAssessment();
+    if (sameTarget) {
+      lastLevel = typeof data?.level === "string" ? data.level : undefined;
+      lastReason = typeof data?.reason === "string" ? data.reason : "";
+      lastNeed = isRecord(data?.need) ? numbers(data.need) : undefined;
+      lastTheta = typeof data?.theta === "number" ? data.theta : undefined;
+    }
     counts = countsFromBranch(branch, STATE_ENTRY);
-    lastNeed = isRecord(data?.need) ? numbers(data.need) : undefined;
-    lastTheta = typeof data?.theta === "number" ? data.theta : undefined;
     pressure = NO_PRESSURE;
     // Own changes precede their state entry. Later thinking entries are manual choices
     // that must survive a reload or /tree move even if no new assessment was saved yet.
@@ -364,6 +424,7 @@ export default function autoEffort(pi: ExtensionAPI, deps: AutoEffortDeps = {}) 
   };
 
   pi.on("session_start", (_event, ctx) => {
+    subscribeSystem1();
     config = loadConfig("auto-effort", DEFAULT_CONFIG, ctx.cwd);
     restoreFromBranch(ctx);
     pollCodex(ctx);
@@ -377,10 +438,16 @@ export default function autoEffort(pi: ExtensionAPI, deps: AutoEffortDeps = {}) 
     if (footerCtx) footerCtx = ctx;
   });
 
+  pi.on("input", (_event, ctx) => {
+    latestCtx = ctx;
+    refreshTarget(ctx);
+  });
+
   // On models that take configuration_update items, any effort change (auto, manual, or another
   // extension's) keeps the prompt cache: the request-level effort stays put and the change
   // becomes an item in the input. Independent of /auto-effort on/off.
   pi.on("before_provider_request", (event, ctx) => {
+    refreshTarget(ctx);
     const model = ctx.model;
     if (!model || (event.payload as { model?: unknown } | undefined)?.model !== model.id) return undefined;
     const key = `${model.provider}/${model.id}`;
@@ -390,19 +457,27 @@ export default function autoEffort(pi: ExtensionAPI, deps: AutoEffortDeps = {}) 
   });
 
   pi.on("model_select", (_event, ctx) => {
+    refreshTarget(ctx);
     pollCodex(ctx);
     generation++;
     turnsSince = 0;
   });
-  pi.on("agent_settled", (_event, ctx) => pollCodex(ctx));
+  pi.on("agent_settled", (_event, ctx) => {
+    refreshTarget(ctx);
+    pollCodex(ctx);
+  });
   pi.on("session_shutdown", () => {
     generation++;
+    cancelAssessments();
+    unsubscribeSystem1?.();
+    unsubscribeSystem1 = undefined;
     latestCtx = undefined;
     footerCtx = undefined;
     ownLevel = undefined;
   });
 
   pi.on("after_provider_response", (event, ctx) => {
+    refreshTarget(ctx);
     const provider = ctx.model?.provider;
     const headers = event.headers ?? {};
     if (provider === "anthropic") readAnthropicHeaders(headers, now()).forEach((r) => tracker(provider).record(r));
@@ -410,6 +485,7 @@ export default function autoEffort(pi: ExtensionAPI, deps: AutoEffortDeps = {}) 
   });
 
   pi.on("thinking_level_select", (event, ctx) => {
+    refreshTarget(ctx);
     const own = applying || (ownLevel !== undefined && event.level === ownLevel);
     ownLevel = undefined;
     if (applying) firedWhileApplying = true;
@@ -463,6 +539,7 @@ export default function autoEffort(pi: ExtensionAPI, deps: AutoEffortDeps = {}) 
     lastLevel = pi.getThinkingLevel();
     const data = {
       ...extra,
+      selectionKey,
       ceiling: manualLevel,
       bounds,
       from: current,
@@ -483,6 +560,7 @@ export default function autoEffort(pi: ExtensionAPI, deps: AutoEffortDeps = {}) 
 
   pi.on("before_agent_start", async (event, ctx) => {
     config = loadConfig("auto-effort", DEFAULT_CONFIG, ctx.cwd);
+    refreshTarget(ctx);
     turnsSince = 0;
     const mine = ++generation;
     // ctx.signal can be a getter for the runtime's current operation. Keep this operation's
@@ -499,8 +577,10 @@ export default function autoEffort(pi: ExtensionAPI, deps: AutoEffortDeps = {}) 
       await settle(ctx, GO_AHEAD, undefined, { phase: "prompt" });
       return;
     }
-    const outcome = await askJev(ctx.modelRegistry, config.jev, effortState(event.prompt, ctx.sessionManager.getBranch()), QUESTIONS, signal);
+    const outcome = await assess(ctx, effortState(event.prompt, ctx.sessionManager.getBranch()), QUESTIONS, signal);
     if (mine !== generation || signal?.aborted || !active()) return;
+    refreshTarget(ctx);
+    if (!outcome || mine !== generation) return;
     const j = judgment(outcome, true);
     await settle(ctx, outcome, j, { phase: "prompt" });
   });
@@ -508,6 +588,7 @@ export default function autoEffort(pi: ExtensionAPI, deps: AutoEffortDeps = {}) 
   // Between tool turns, on models that take an effort change mid-conversation without losing the
   // cache: the handler is awaited before the next request, which picks up the new level.
   pi.on("turn_end", async (event, ctx) => {
+    refreshTarget(ctx);
     if (!active()) return;
     const mid = midRunConfig(config.midRun);
     if (!mid.enabled || !cacheSafe(ctx)) return;
@@ -520,13 +601,16 @@ export default function autoEffort(pi: ExtensionAPI, deps: AutoEffortDeps = {}) 
     if (!shouldAssess(mid, turnsSince, results.filter((r) => r.isError).length)) return;
     turnsSince = 0;
     const mine = generation;
-    const outcome = await askJev(ctx.modelRegistry, config.jev, runState(ctx.sessionManager.getBranch(), mid.steps), MID_RUN_QUESTIONS, signal);
+    const outcome = await assess(ctx, runState(ctx.sessionManager.getBranch(), mid.steps), MID_RUN_QUESTIONS, signal);
     if (mine !== generation || signal?.aborted || !active()) return;
+    refreshTarget(ctx);
+    if (!outcome || mine !== generation) return;
     // Mid-run there is no message to be a go-ahead.
     await settle(ctx, outcome, judgment(outcome, false), { phase: "run", turn: event.turnIndex });
   });
 
   const setSessionOn = (enabled: boolean, ctx: ExtensionContext) => {
+    refreshTarget(ctx);
     sessionOn = enabled;
     // An assessment in flight must not apply after the gate was switched.
     generation++;
@@ -552,6 +636,8 @@ export default function autoEffort(pi: ExtensionAPI, deps: AutoEffortDeps = {}) 
       active: active(),
       run: () => {
         if (footerCtx !== ctx || mine !== generation || !ctx.hasUI || ctx.sessionManager.getSessionId() !== sessionId) return;
+        refreshTarget(ctx);
+        if (mine !== generation) return;
         setSessionOn(!active(), ctx);
       },
     };
@@ -563,6 +649,7 @@ export default function autoEffort(pi: ExtensionAPI, deps: AutoEffortDeps = {}) 
     description: "auto-effort: status, limits, on, off, bounds ceiling|free (this session)",
     getArgumentCompletions: (prefix: string) => OPTIONS.filter((o) => o.startsWith(prefix)).map((o) => ({ value: o, label: o })),
     handler: async (args, ctx) => {
+      refreshTarget(ctx);
       const [arg = "", value] = args.trim().split(/\s+/u);
       if (arg === "on" || arg === "off") {
         setSessionOn(arg === "on", ctx);
@@ -586,7 +673,7 @@ export default function autoEffort(pi: ExtensionAPI, deps: AutoEffortDeps = {}) 
         [
           `auto-effort ${active() ? "on" : pinned ? "off (--thinking was given)" : "off"}: ${pi.getThinkingLevel()} now.`,
           `Bounds ${bounds} (${sessionBounds ? "this session" : "settings"}): ${boundsText(bounds, manualLevel, policy())}.`,
-          jevLine(lastNeed, lastTheta ?? threshold(policy(), pressureValue(pressure.tier)), pressure, lastLevel, lastReason),
+          assessmentLine(lastNeed, lastTheta ?? threshold(policy(), pressureValue(pressure.tier)), pressure, lastLevel, lastReason),
           describeCounts(counts),
           ...limitLines(ctx),
         ].join("\n"),
@@ -610,7 +697,7 @@ function boundsText(bounds: Bounds, manualLevel: string, policy: Policy) {
 }
 
 /** `Assessment: need(medium)=0.90 need(high)=0.55 need(xhigh)=0.10, θ=0.70 (5h caution) → medium, last decision: hold.` */
-function jevLine(need: Record<string, number> | undefined, theta: number, pressure: Pressure, level: string | undefined, reason: string) {
+function assessmentLine(need: Record<string, number> | undefined, theta: number, pressure: Pressure, level: string | undefined, reason: string) {
   const tag = pressure.tier !== "none" ? ` (${pressureTag(pressure)})` : "";
   const last = reason ? `, last decision: ${reason}` : "";
   if (!need) return `Assessment: none yet, θ=${theta.toFixed(2)}${tag}${last}.`;

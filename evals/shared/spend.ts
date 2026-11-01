@@ -1,8 +1,8 @@
-// What a live eval run costs. Node builtins only, no imports from any package.
+// Catalog-estimated usage cost for a live eval, not a cash charge or verified credit debit.
+// Node builtins only, no imports from any package.
 //
-// Every eval that calls `askJev` keeps one `Spend`, adds each outcome's `usage?.cost?.total` and
-// prints `spend.line()` at the end. A call without a reported cost (a failure, or a registry that
-// does not report usage) still counts as a call and adds nothing.
+// Every eval keeps one `Spend`, adds each outcome's `usage?.cost?.total` (including failures), and
+// prints `spend.line()` at the end. A call without a reported cost still counts and adds nothing.
 //
 // `estimate` is the dry run's figure: calls times a flat per-call price. The price is a guess, not a
 // measurement: `EVAL_COST_PER_CALL` (USD, default 0.0003). The range is 0.5x to 2x of the estimate.
@@ -23,7 +23,7 @@ export class Spend {
     return this;
   }
 
-  /** Counts one `askJev` outcome: its `usage.cost.total` when it has one (a failed outcome has none). */
+  /** Counts one outcome and adds its reported `usage.cost.total`, including on failure. */
   addOutcome(outcome: unknown): this {
     const cost = (outcome as { usage?: { cost?: { total?: unknown } } } | null | undefined)?.usage?.cost?.total;
     return this.add(typeof cost === "number" ? cost : undefined);
@@ -36,9 +36,9 @@ export class Spend {
     return this;
   }
 
-  /** `spend: $0.0123 over 41 calls` */
+  /** Catalog estimate, not a cash charge or verified credit debit. */
   line(): string {
-    return `spend: $${this.total.toFixed(4)} over ${this.calls} calls`;
+    return `spend: $${this.total.toFixed(4)} over ${this.calls} calls (catalog estimate; not a cash charge or verified credit debit)`;
   }
 
   toJSON(): { spend: number; calls: number } {

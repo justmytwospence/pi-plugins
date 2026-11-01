@@ -8,6 +8,10 @@ The Settings step of `/planners` edits planners, efforts, subagent models, the t
 selection, rendered plans, completion review and revision limit, the default implementation context, the export path, and the shortcut;
 everything else is edited in the file. An invalid file is ignored (defaults apply) and never overwritten.
 
+### System 1 tool selection
+
+`jevToolSelection` (default `true`) controls automatic tool preselection for either System 1 backend; `jevThreshold` remains the preselection threshold. `jevProvider` and `jevModel` are compatibility overrides for Jev only. `/system1` selects Jev by default or OpenAI Decisions suite-wide; Decisions requires the `pi-system1` component and an isolated `/login system1-openai` API key or `SYSTEM1_OPENAI_API_KEY`, not subscription OAuth. Before selecting Decisions, claim eligible [Pro API credits](https://developers.openai.com/api/docs/guides/chatgpt-api-credits) in an organization with no purchased balance, auto-recharge or paid continuation. Pi cannot verify entitlement or funding. Requests can be billed, and failures do not switch providers; the Tools step retains its fallback preselection. Default `alwaysOffer` includes `system1_judge` and legacy `jev`; an explicit list replaces the defaults.
+
 ### Workflow and shortcut
 
 `toggleShortcut` is unset by default. Without pi-tool-gate it toggles local work/plan; with the gate it cycles workflow, so do not configure it on the gate's own key. Gate's default Shift+Tab requires remapping Pi's stock `app.thinking.cycle`; Pi skips conflicting shortcuts. Gate's Alt+A changes approvals independently, including during planning and exec. Plan mode alone does not enforce approvals.

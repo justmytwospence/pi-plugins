@@ -8,8 +8,10 @@ import { FAMILY_CHANNEL, FAMILY_ENTRY, type FamilyMembership, type FamilyRequest
 import { directImplementationBrief, implementationBrief } from "../src/handoff.js";
 import planMode from "../src/index.js";
 import { INLINE_ENTRY, MODE_CHANGED, MODE_SET, PLAN_PROVIDER } from "../src/inline-plan.js";
+import type { JevToolPick, pickToolsWithJev } from "../src/jev-tool-picker.js";
 import { type PlannerSessionFactory, readSessionMessages, writeSeededSession } from "../src/planner/session.js";
 import type { PlanModeSettings } from "../src/settings.js";
+import { resolveSystem1Target, SYSTEM1_CHANGED } from "../src/system1.js";
 import { createCustomSelectorHarness, createMockContext, createMockPi } from "./support.js";
 
 initTheme("dark");
@@ -104,12 +106,14 @@ function setup(
     thinkingLevel?: string;
     approval?: "auto" | "bypassPermissions";
     configureContext?: (ctx: ExtensionContext) => void;
+    pickTools?: typeof pickToolsWithJev;
   } = {},
 ) {
   const mock = createMockPi({ thinkingLevel: options.thinkingLevel ?? "high" });
   const sessions = fakeSessions(options.ask, options.failFirst);
   const ready = planMode(mock.pi, {
     ...(options.login ? { login: options.login } : {}),
+    ...(options.pickTools ? { pickTools: options.pickTools } : {}),
     readSettings: async () => ({
       thinkingLevel: "inherit",
       planners: [{ provider: "anthropic", modelId: "claude-sonnet-5-5", thinkingLevel: "low" }],
@@ -158,6 +162,85 @@ function setup(
   options.configureContext?.(context.ctx as ExtensionContext);
   (context.ctx as { sendUserMessage?: unknown }).sendUserMessage = async (text: string) => sent.push(text);
   return { mock, context, sessions, sent, ready, workflowRequests, approvalRequests, harness: () => harness };
+}
+
+for (const stale of ["none", "event", "file", "event-roundtrip", "manual", "disabled"] as const) {
+  test(`/planners late System 1 preselection preserves selection after ${stale}`, async () => {
+    const previous = process.env.PI_CODING_AGENT_DIR;
+    const directory = mkdtempSync(join(tmpdir(), "plan-preselection-"));
+    process.env.PI_CODING_AGENT_DIR = directory;
+    onTestFinished(() => {
+      if (previous === undefined) delete process.env.PI_CODING_AGENT_DIR;
+      else process.env.PI_CODING_AGENT_DIR = previous;
+      rmSync(directory, { recursive: true, force: true });
+    });
+    let finish!: (pick: JevToolPick) => void;
+    let input: Parameters<typeof pickToolsWithJev>[0] | undefined;
+    const state = setup({
+      settings: {
+        jevToolSelection: stale !== "disabled",
+        alwaysOffer: [],
+        plannerToolsets: {
+          research: { label: "Research", tools: ["research"], extensions: [], enabled: false, scouts: false },
+        },
+      },
+      pickTools: (request) => {
+        input = request;
+        return new Promise((resolve) => {
+          finish = resolve;
+        });
+      },
+    });
+    await state.ready;
+    const opened = state.mock.commands.get("planners")?.handler("plan it", state.context.ctx);
+    await flush();
+    const app = state.harness();
+    assert.ok(app);
+    assert.match(app.render().join("\n"), /System 1 tool picks/u);
+    app.handleInput("\u001b[B");
+    app.handleInput("\r");
+    assert.match(app.render().join("\n"), /● Tools/u);
+    if (stale === "disabled") {
+      assert.equal(input, undefined, "legacy feature-off setting makes zero classifier calls");
+      assert.doesNotMatch(app.render().join("\n"), /picking tools/u);
+    } else {
+      assert.ok(input);
+      assert.match(app.render().join("\n"), /System 1.*Jev: picking tools/u);
+      const target = resolveSystem1Target({ provider: "typesafe", model: "jev-latest" });
+      assert.ok(target.ok);
+      if (stale === "file")
+        writeFileSync(join(directory, "system1.json"), JSON.stringify({ backend: "openai-decisions" }));
+      if (stale === "event" || stale === "event-roundtrip") state.mock.eventBus.emit(SYSTEM1_CHANGED, {});
+      if (stale === "event-roundtrip") state.mock.eventBus.emit(SYSTEM1_CHANGED, {});
+      if (stale === "manual") app.handleInput("n");
+      finish({
+        kind: "jev",
+        backend: target.backend,
+        provider: target.provider,
+        model: target.model,
+        selectionKey: target.key,
+        probabilities: Object.fromEntries(input.capabilities.map((capability) => [capability.id, 0.9])),
+        selected: Object.fromEntries(input.capabilities.map((capability) => [capability.id, true])),
+      });
+      await flush();
+      const screen = app.render().join("\n");
+      if (stale === "none") {
+        assert.match(screen, /Jev picked/u);
+        assert.match(screen, /\[x\] research/u);
+      } else if (stale === "manual") {
+        assert.match(screen, /Your own changes were kept/u);
+        assert.match(screen, /\[ \] research/u);
+        assert.match(screen, /90% suggested/u);
+      } else {
+        assert.match(screen, /System 1 changed/u);
+        assert.match(screen, /\[ \] research/u);
+        assert.doesNotMatch(screen, /90% suggested|Jev picked/u);
+      }
+    }
+    app.handleInput("\u0003");
+    app.handleInput("\u001b");
+    await opened;
+  });
 }
 
 async function implementationScreen(

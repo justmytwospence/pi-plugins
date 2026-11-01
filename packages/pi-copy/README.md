@@ -2,9 +2,11 @@
 
 A Pi extension: `/yank` (or `ctrl+shift+x`) opens a scrollable picker of things you might want to copy from the session, and copies the one you pick to the clipboard. `/copy-mode` (or `alt+s`) is a vim-style copy mode over the whole transcript: search, hints, jumps and yank.
 
-The picker opens at once in recency order. If a classifier model is available, Jev then ranks the newest pieces by how likely you are to want to copy each one now, and the list reorders in place. Pi's built-in `/copy` (the last reply) and `ctrl+x` are left as they are.
+The picker opens at once in recency order. If a classifier model is available, the classifier then ranks the newest pieces by how likely you are to want to copy each one now, and the list reorders in place. Pi's built-in `/copy` (the last reply) and `ctrl+x` are left as they are.
 
 Part of [Pi Plugins](https://github.com/justmytwospence/pi-plugins). Reference: <https://pi-plugins.vercel.app/plugins/pi-copy/>.
+
+**System 1 backend.** `/system1` selects Jev (the default) or native OpenAI Decisions for the suite; `/system1 jev` selects Jev and `/system1 openai` asks for billing confirmation. The selection is shared by sessions using the same agent directory. Jev works standalone; Decisions requires the `pi-system1` component and its isolated `/login system1-openai` API key (or `SYSTEM1_OPENAI_API_KEY`), not subscription OAuth or the ordinary OpenAI credential. Before selecting Decisions, claim eligible [ChatGPT Pro API credits](https://developers.openai.com/api/docs/guides/chatgpt-api-credits) in an API organization with no purchased balance, auto-recharge or paid continuation. Pi cannot verify entitlement or which funds pay for a request. Classifier requests may be billed; failures do not switch backend. Legacy `jev` settings remain: the local enable flag, thresholds and timeouts apply to either backend, while provider/model overrides apply only to Jev.
 
 ## Install
 
@@ -45,13 +47,13 @@ Each row shows a badge (`you`, `reply`, `sect`, `code`, `cmd`, `snip`, `path`, `
 
 ## How it ranks
 
-[Jev](https://docs.typesafe.ai), called through Pi's classifier models (`ctx.modelRegistry.findOfType("classifier", ...)` and `ctx.modelRegistry.classify`), judges up to 120 of the newest pieces in one request (`rank.maxPieces`, also capped by `rank.stateBudgetChars` of state; each piece is clipped to `rank.pieceChars`). Its input is the pieces plus your last three user messages. For each piece it scores how likely you want to copy it now (0-3); for prose pieces (paragraphs, lists, sections, quotes, whole replies) it also judges whether the piece is something worth pasting elsewhere rather than explanation.
+The selected System 1 classifier, called through Pi's classifier models (`ctx.modelRegistry.findOfType("classifier", ...)` and `ctx.modelRegistry.classify`), judges up to 120 of the newest pieces in one request (`rank.maxPieces`, also capped by `rank.stateBudgetChars` of state; each piece is clipped to `rank.pieceChars`). Its input is the pieces plus your last three user messages. For each piece it scores how likely you want to copy it now (0-3); for prose pieces (paragraphs, lists, sections, quotes, whole replies) it also judges whether the piece is something worth pasting elsewhere rather than explanation.
 
 - Suggested is ordered by `wantWeight * (score / 3) + (1 - wantWeight) * recency` (default `0.6` / `0.4`); unjudged pieces get the recency term alone.
-- Prose Jev judges below `rank.copyableThreshold` (default `0.3`) is left out of Suggested. It stays in All.
+- Prose the classifier judges below `rank.copyableThreshold` (default `0.3`) is left out of Suggested. It stays in All.
 - If you have moved or filtered, the cursor stays on the same piece while the list reorders; otherwise it goes to the top.
 - Judgments are cached by piece content for the session and cleared on `session_start`. Each successful request appends a `copy:decision` custom entry to the session (piece count, latency, input tokens).
-- Without Jev (off, no classifier model, no credentials, timeout or error), Suggested stays in recency order and the header shows `(recency order)`.
+- Without the classifier (off, no classifier model, no credentials, timeout or error), Suggested stays in recency order and the header shows `(recency order)`.
 
 ## Keys
 
@@ -134,7 +136,7 @@ npm ci
 npm run check
 ```
 
-`npm run check` runs `tsc --noEmit` and the Vitest unit tests (`vitest run`). `npm run eval` makes live, paid classifier requests; run it only with explicit authorization. It runs the package's eval target through the repository's one runner (`scripts/eval.mjs --package pi-copy`; the target shape and the runner are in `evals/shared/`) against Jev through the Pi installation on `PATH` (or `PI_PACKAGE_DIR`), and it is skipped without `TYPESAFE_API_KEY`. The `rank` target (`eval/rank.target.ts`) ranks five hand-written sessions with Jev and passes when the piece the user is after is in the top 3 of Suggested in every one of them. It makes five requests. Run it alone from the repository root with `npm run -s eval -- rank`; the runner prints `spend: $X over N calls`, appends a record to `evals/results/rank.jsonl` (git-ignored), and `npm run -s eval -- --dry rank` counts the requests without making any (`--list` shows every target). For the full suite, the repository root's `npm run check` runs every component's check after the root loader test.
+`npm run check` runs `tsc --noEmit` and the Vitest unit tests (`vitest run`). `npm run eval` makes live, paid classifier requests; run it only with explicit authorization. It runs the package's eval target through the repository's one runner (`scripts/eval.mjs --package pi-copy`; the target shape and the runner are in `evals/shared/`) against the selected System 1 backend through the Pi installation on `PATH` (or `PI_PACKAGE_DIR`), and skips when its authentication is not configured. The `rank` target (`eval/rank.target.ts`) ranks five hand-written sessions with the selected classifier and passes when the piece the user is after is in the top 3 of Suggested in every one of them. It makes five requests. Run it alone from the repository root with `npm run -s eval -- rank`; the runner prints `spend: $X over N calls` (a catalog estimate, not an invoice or verified credit debit), appends a record to `evals/results/rank.jsonl` (git-ignored), and `npm run -s eval -- --dry rank` counts the requests without making any (`--list` shows every target). For the full suite, the repository root's `npm run check` runs every component's check after the root loader test.
 
 ## License
 

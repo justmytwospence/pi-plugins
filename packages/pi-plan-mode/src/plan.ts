@@ -52,7 +52,7 @@ import {
   subagentRoleModel,
 } from "./implementation-models.js";
 import { type Approval, EXEC_GUIDANCE, type HandoffTarget, registerInlinePlanMode } from "./inline-plan.js";
-import { type JevToolPick, pickToolsWithJev } from "./jev-tool-picker.js";
+import { DEFAULT_JEV_MODEL, DEFAULT_JEV_PROVIDER, pickToolsWithJev } from "./jev-tool-picker.js";
 import { runLaneCommand } from "./lane-commands.js";
 import { isAuthError, loginInDialog, providerName } from "./login.js";
 import {
@@ -101,6 +101,7 @@ import {
   readPlanModeSettings,
   updatePlanModeSettings,
 } from "./settings.js";
+import { resolveSystem1Target, SYSTEM1_CHANGED } from "./system1.js";
 import { applyAlwaysOffer, applyJevPick, buildToolTree, leafCapabilities, type ToolNode } from "./tool-tree.js";
 import { type ToolPreselection, ToolTreeView } from "./tool-tree-view.js";
 import { effortText } from "./ui-kit.js";
@@ -219,6 +220,10 @@ export default async function plan(pi: ExtensionAPI, dependencies: PlanDependenc
   let releaseBlocked: (() => void) | undefined;
   let hostCtx: ExtensionContext | undefined;
   let branchEpoch = 0;
+  let system1Epoch = 0;
+  pi.events.on(SYSTEM1_CHANGED, () => {
+    system1Epoch++;
+  });
   let sessionReady: Promise<void> = Promise.resolve();
   let runtimeActive = true;
   /** Where you dragged the divider above M (a share of the space), for the rest of this process. */
@@ -1743,7 +1748,7 @@ export default async function plan(pi: ExtensionAPI, dependencies: PlanDependenc
           },
           {
             id: "jev",
-            label: "Auto-pick tools",
+            label: "System 1 tool picks",
             section: "Preferences",
             value: () => (settings.jevToolSelection === false ? "off" : "on"),
             cycle: () => {
@@ -1751,7 +1756,7 @@ export default async function plan(pi: ExtensionAPI, dependencies: PlanDependenc
               settings = { ...settings, jevToolSelection: next };
               saveSettings({ jevToolSelection: next });
             },
-            description: "Preselect the planners' tools from the task on the next step (needs a TypeSafe classifier).",
+            description: "Preselect the planners' tools from the task using the classifier selected in /system1.",
           },
           {
             id: "rendered",
@@ -1854,7 +1859,9 @@ export default async function plan(pi: ExtensionAPI, dependencies: PlanDependenc
 
       // --- Tools -------------------------------------------------------------------------------
 
-      let tree: { roots: ToolNode[]; others: OtherTool[]; touched: boolean; pick?: Promise<JevToolPick> } | undefined;
+      let tree:
+        | { roots: ToolNode[]; others: OtherTool[]; touched: boolean; preselection?: ToolPreselection }
+        | undefined;
       const toolsPage = () => {
         if (!tree) {
           const toolsets = settings.plannerToolsets ?? {};
@@ -1877,31 +1884,48 @@ export default async function plan(pi: ExtensionAPI, dependencies: PlanDependenc
           applyAlwaysOffer(roots, configuredAlwaysOffer(settings));
           tree = { roots, others, touched: false };
           if (settings.jevToolSelection !== false) {
-            tree.pick = (dependencies.pickTools ?? pickToolsWithJev)({
-              task: draft.task,
-              conversation: buildPlannerTranscript(ctx.sessionManager.getBranch()),
-              cwd: ctx.cwd,
-              capabilities: leafCapabilities(roots),
-              registry: ctx.modelRegistry,
-              ...(settings.jevThreshold !== undefined ? { threshold: settings.jevThreshold } : {}),
-              ...(settings.jevProvider ? { provider: settings.jevProvider } : {}),
-              ...(settings.jevModel ? { model: settings.jevModel } : {}),
-            });
+            const config = {
+              provider: settings.jevProvider?.trim() || DEFAULT_JEV_PROVIDER,
+              model: settings.jevModel?.trim() || DEFAULT_JEV_MODEL,
+            };
+            const target = resolveSystem1Target(config);
+            const selectionEpoch = system1Epoch;
+            const selectionCurrent = () =>
+              !closed &&
+              runtimeActive &&
+              epoch === branchEpoch &&
+              selectionEpoch === system1Epoch &&
+              resolveSystem1Target(config).key === target.key;
+            tree.preselection = {
+              label: target.ok ? (target.backend === "jev" ? "Jev" : "Decisions") : "unavailable",
+              pending: (dependencies.pickTools ?? pickToolsWithJev)({
+                task: draft.task,
+                conversation: buildPlannerTranscript(ctx.sessionManager.getBranch()),
+                cwd: ctx.cwd,
+                capabilities: leafCapabilities(roots),
+                registry: ctx.modelRegistry,
+                ...(settings.jevThreshold !== undefined ? { threshold: settings.jevThreshold } : {}),
+                ...config,
+              }).then((result) => {
+                const isCurrent = () =>
+                  selectionCurrent() && (result.kind !== "jev" || result.selectionKey === target.key);
+                return {
+                  message:
+                    result.kind === "jev"
+                      ? `${result.backend === "jev" ? "Jev" : "Decisions"} picked ${Object.values(result.selected).filter(Boolean).length} tools for this task.`
+                      : `Not used (${result.reason}); the defaults from settings apply.`,
+                  isCurrent,
+                  apply: (keep: boolean) => {
+                    if (isCurrent()) applyJevPick(roots, result, keep);
+                  },
+                };
+              }),
+            };
           }
         }
         const current = tree;
-        const preselection: ToolPreselection | undefined = current.pick
-          ? {
-              pending: current.pick.then((result) => ({
-                message:
-                  result.kind === "jev"
-                    ? `Picked ${Object.values(result.selected).filter(Boolean).length} tools for this task.`
-                    : `Not used (${result.reason}); the defaults from settings apply.`,
-                apply: (keep: boolean) => applyJevPick(current.roots, result, keep),
-              })),
-            }
-          : undefined;
-        current.pick = undefined;
+        const preselection = current.preselection;
+        current.preselection = undefined;
         const count = draft.planners.filter(Boolean).length;
         return new ToolTreeView(theme, {
           title: "Planners",

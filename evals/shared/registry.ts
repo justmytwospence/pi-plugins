@@ -5,7 +5,8 @@ import { pathToFileURL } from "node:url";
 
 /**
  * A real Pi model registry from the Pi installation on PATH (or PI_PACKAGE_DIR), so evals run
- * Jev exactly as the extension does inside Pi, with Pi's credentials.
+ * classifiers as extensions do inside Pi, with Pi's provider-scoped credentials. The CLI injects
+ * optional provider registration; shared eval helpers never import runtime components.
  */
 export async function installedRegistry(): Promise<unknown> {
   const dir = process.env.PI_PACKAGE_DIR || findPiPackage();
@@ -28,4 +29,5 @@ function findPiPackage() {
   throw new Error(`cannot find the pi-coding-agent package from ${bin}; set PI_PACKAGE_DIR`);
 }
 
+/** Legacy direct-runner compatibility only; the suite CLI checks the selected provider's configured auth. */
 export const hasCredentials = Boolean(process.env.TYPESAFE_API_KEY?.trim());

@@ -11,6 +11,8 @@ import { FLOW_ENTRY, queryFlow, requestExecution, requestWorkflow, type FlowStat
 import { queryFooterActions } from "../src/footer-actions.ts";
 import * as modelGuard from "../src/model-guard.ts";
 import { FLOW_TRANSITION } from "../src/provider-flows.ts";
+import { SYSTEM1_CHANGED } from "../src/system1.js";
+import { WORKAROUNDS } from "../src/judge.ts";
 import { assistantEntry, fakeJev, harness, usage, userEntry } from "./harness.ts";
 
 let configDir: string;
@@ -40,7 +42,7 @@ const risky = {
 };
 
 const workaround = {
-  workaround: { type: "choice", choice: "local", probabilities: { local: 0.6, dry_run: 0.32, skip: 0.08 }, confidence: 0.6 },
+  workaround: { type: "choice", choice: "local", probabilities: { ...Object.fromEntries(Object.keys(WORKAROUNDS).map(key => [key, 0])), local: 0.6, dry_run: 0.32, skip: 0.08 }, confidence: 0.6 },
 };
 
 function setup(answers: any, ctxOverrides: Record<string, unknown> = {}) {
@@ -66,6 +68,201 @@ function deferred<T>() {
   const promise = new Promise<T>((done) => { resolve = done; });
   return { promise, resolve };
 }
+
+function selectSystem1(backend: string) {
+  const dir = path.join(configDir, "pi");
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(path.join(dir, "system1.json"), JSON.stringify({ backend }));
+}
+
+describe("System 1 selection", () => {
+  test.each(["jev", "openai-decisions"])("verdict and workaround both use %s without changing local overrides", async (backend) => {
+    selectSystem1(backend);
+    writeFileSync(path.join(configDir, "pi", "tool-gate.json"), JSON.stringify({ jev: { provider: "custom", model: "custom-jev" } }));
+    const { h, ctx, jev } = setup(risky);
+    await h.emit("session_start", {}, ctx);
+    expect(await h.emit("tool_call", call("bash", { command: "npm publish" }), ctx)).toMatchObject({
+      block: true, reason: expect.stringContaining("Keep it local"),
+    });
+    expect(jev.calls).toHaveLength(2);
+    for (const judgment of jev.calls) {
+      expect(judgment.model).toMatchObject(backend === "jev"
+        ? { provider: "custom", id: "custom-jev" }
+        : { provider: "system1-openai", id: "gpt-6-luna", api: "openai-decisions", baseUrl: "https://api.openai.com/v1" });
+      expect(judgment.options.retries).toBe(0);
+    }
+    expect(jev.calls[0]?.questions).toHaveProperty("impact");
+    expect(jev.calls[1]?.questions).toHaveProperty("workaround");
+    expect(JSON.parse(readFileSync(path.join(configDir, "pi", "tool-gate.json"), "utf8")).jev).toEqual({ provider: "custom", model: "custom-jev" });
+  });
+
+  test.each([true, false])("a backend change clears failure retries and held families (event=%s)", async (emitEvent) => {
+    const { h, ctx, jev } = setup(safe);
+    await h.emit("session_start", {}, ctx);
+    const classify = (jev.registry as any).classify;
+    (jev.registry as any).classify = async () => ({ stopReason: "error", answers: {}, errorMessage: "unavailable" });
+    const failed = call("bash", { command: "npm test" }, "failed");
+    expect(await h.emit("tool_call", failed, ctx)).toMatchObject({ block: true, reason: expect.stringContaining(CLASSIFIER_UNAVAILABLE) });
+    // A fixed hold records a retry family independently of the classifier failure.
+    const fixed = call("bash", { command: "git push --force origin main" }, "fixed");
+    expect(await h.emit("tool_call", fixed, ctx)).toMatchObject({ block: true, reason: expect.stringContaining("make your case") });
+    (jev.registry as any).classify = classify;
+    selectSystem1("openai-decisions");
+    if (emitEvent) h.pi.events.emit(SYSTEM1_CHANGED, {});
+    expect(await h.emit("tool_call", failed, ctx)).toBeUndefined();
+    expect(await h.emit("tool_call", fixed, ctx)).toMatchObject({ block: true, reason: expect.stringContaining("make your case") });
+    expect(ctx.ui.selects).toHaveLength(0);
+    expect(jev.calls).toHaveLength(2);
+    expect(jev.calls.every(c => c.model.provider === "system1-openai")).toBe(true);
+  });
+
+  for (const stage of ["verdict", "workaround"] as const) {
+    for (const backend of ["jev", "openai-decisions"] as const) {
+      test.each([true, false])(`a pending ${backend} ${stage} is discarded after a switch (event=%s)`, async (emitEvent) => {
+        selectSystem1(backend);
+        const { h, ctx, jev } = setup(stage === "verdict" ? safe : risky);
+        await h.emit("session_start", {}, ctx);
+        const entered = deferred<void>();
+        const result = deferred<any>();
+        const classify = (jev.registry as any).classify;
+        (jev.registry as any).classify = async (model: any, context: any, options: any) => {
+          if (stage === "verdict" || context.questions.workaround) { entered.resolve(); return result.promise; }
+          return classify(model, context, options);
+        };
+        const pending = h.emit("tool_call", call("bash", { command: stage === "verdict" ? "npm test" : "npm publish" }), ctx);
+        await entered.promise;
+        selectSystem1(backend === "jev" ? "openai-decisions" : "jev");
+        if (emitEvent) h.pi.events.emit(SYSTEM1_CHANGED, {});
+        result.resolve({ model: backend === "jev" ? "jev-latest" : "gpt-6-luna", stopReason: "stop", answers: stage === "verdict" ? safe : workaround, usage: usage(700) });
+        expect(await pending).toMatchObject({ block: true, reason: expect.stringMatching(/System 1 changed.*reevaluated/u) });
+        expect(ctx.ui.selects).toHaveLength(0);
+        expect(h.entries.filter(e => e.customType === "tool-gate:decision" && (e.data as any).action === "allow")).toHaveLength(0);
+        expect(await h.emit("tool_result", { toolCallId: "t1", toolName: "bash", content: [], isError: false }, ctx)).toBeUndefined();
+      });
+    }
+  }
+
+  test("dormant Jev settings do not invalidate a Decisions failure retry", async () => {
+    selectSystem1("openai-decisions");
+    const { h, ctx, jev } = setup({ stopReason: "error", answers: {}, errorMessage: "insufficient_quota" });
+    await h.emit("session_start", {}, ctx);
+    const event = call("bash", { command: "npm test" });
+    expect(await h.emit("tool_call", event, ctx)).toMatchObject({ block: true, reason: expect.stringContaining(CLASSIFIER_UNAVAILABLE) });
+    writeFileSync(path.join(configDir, "pi", "tool-gate.json"), JSON.stringify({ jev: { provider: "dormant", model: "not-selected" } }));
+    ctx.ui.selectAnswers.push("Allow once");
+    expect(await h.emit("tool_call", event, ctx)).toBeUndefined();
+    expect(jev.calls).toHaveLength(1);
+    expect(ctx.ui.selects).toHaveLength(1);
+  });
+
+  test("a change event invalidates pending decisions even after switching back to the same target", async () => {
+    const { h, ctx, jev } = setup(safe);
+    await h.emit("session_start", {}, ctx);
+    const entered = deferred<void>();
+    const result = deferred<any>();
+    (jev.registry as any).classify = async () => { entered.resolve(); return result.promise; };
+    const pending = h.emit("tool_call", call("bash", { command: "npm test" }), ctx);
+    await entered.promise;
+    selectSystem1("openai-decisions");
+    h.pi.events.emit(SYSTEM1_CHANGED, {});
+    selectSystem1("jev");
+    h.pi.events.emit(SYSTEM1_CHANGED, {});
+    result.resolve({ model: "jev-latest", stopReason: "stop", answers: safe });
+    expect(await pending).toMatchObject({ block: true, reason: expect.stringContaining("reevaluated") });
+    expect(h.entries.filter(e => e.customType === "tool-gate:decision")).toHaveLength(0);
+  });
+
+  test("a delayed approval cannot save a rule after a switch with no watcher", async () => {
+    const { h, ctx } = setup(safe);
+    await h.emit("session_start", {}, ctx);
+    await h.commands.get("approvals").handler("manual", ctx);
+    const entered = deferred<void>();
+    const result = deferred<string>();
+    ctx.ui.select = async () => { entered.resolve(); return result.promise; };
+    const pending = h.emit("tool_call", call("bash", { command: "npm test" }), ctx);
+    await entered.promise;
+    selectSystem1("openai-decisions");
+    result.resolve("Allow rule for this session");
+    expect(await pending).toMatchObject({ block: true, reason: expect.stringContaining("reevaluated") });
+    ctx.ui.select = vi.fn(async () => "Block");
+    expect(await h.emit("tool_call", call("bash", { command: "npm test" }, "fresh"), ctx)).toMatchObject({ block: true });
+    expect(ctx.ui.select).toHaveBeenCalledOnce();
+  });
+
+  test.each(["missing provider", "missing credentials", "exhausted", "invalid answers", "invalid setting"])("Decisions %s fails closed and keeps failure approvals allow-once only", async (failure) => {
+    selectSystem1(failure === "invalid setting" ? "broken" : "openai-decisions");
+    const answers = failure === "invalid answers" ? { ...safe, impact: { type: "score", score: 9, confidence: 1 } }
+      : { stopReason: "error", answers: {}, errorMessage: failure === "exhausted" ? "insufficient_quota private-secret" : "No API key private-secret" };
+    const { h, ctx, jev } = setup(answers);
+    const find = vi.spyOn(jev.registry as any, "findOfType");
+    if (failure === "missing provider") find.mockReturnValue(undefined);
+    const event = call("bash", { command: "npm test" });
+    expect(await h.emit("tool_call", event, ctx)).toMatchObject({ block: true, reason: expect.stringContaining(CLASSIFIER_UNAVAILABLE) });
+    expect(ctx.ui.selects).toHaveLength(0);
+    expect(jev.calls).toHaveLength(["invalid setting", "missing provider"].includes(failure) ? 0 : 1);
+    if (failure === "invalid setting") expect(find).not.toHaveBeenCalled();
+    else expect(find).toHaveBeenCalledWith("classifier", "system1-openai", "gpt-6-luna");
+    ctx.ui.selectAnswers.push("Allow once");
+    expect(await h.emit("tool_call", event, ctx)).toBeUndefined();
+    expect(ctx.ui.selects[0].options).toEqual(["Allow once", "Block", "Block with a message"]);
+    expect(JSON.stringify([h.entries, ctx.ui.selects])).not.toContain("private-secret");
+  });
+
+  test.each([true, false])("malformed global JSON blocks without a model call (UI=%s)", async (hasUI) => {
+    selectSystem1("jev");
+    writeFileSync(path.join(configDir, "pi", "system1.json"), "{");
+    const { h, ctx, jev } = setup(safe, { hasUI });
+    const event = call("bash", { command: "npm test" });
+    expect(await h.emit("tool_call", event, ctx)).toMatchObject({ block: true, reason: expect.stringContaining(CLASSIFIER_UNAVAILABLE) });
+    if (!hasUI) expect(await h.emit("tool_call", event, ctx)).toMatchObject({ block: true });
+    expect(jev.calls).toHaveLength(0);
+    expect(ctx.ui.selects).toHaveLength(0);
+  });
+
+  test("an invalid global setting cannot bypass fixed holds or explicit rules", async () => {
+    selectSystem1("broken");
+    writeFileSync(path.join(configDir, "pi", "tool-gate.json"), JSON.stringify({ permissions: { deny: ["Bash(npm publish)"], allow: ["Bash(npm test)"] } }));
+    const { h, ctx, jev } = setup(safe);
+    expect(await h.emit("tool_call", call("bash", { command: "npm publish" }), ctx)).toMatchObject({ block: true, reason: expect.stringContaining("deny rule") });
+    expect(await h.emit("tool_call", call("bash", { command: "npm test" }), ctx)).toBeUndefined();
+    expect(await h.emit("tool_call", call("bash", { command: "git push --force origin main" }), ctx)).toMatchObject({ block: true, reason: expect.stringContaining("always held") });
+    expect(jev.calls).toHaveLength(0);
+  });
+
+  test("the local disable flag still prevents Decisions calls", async () => {
+    selectSystem1("openai-decisions");
+    writeFileSync(path.join(configDir, "pi", "tool-gate.json"), JSON.stringify({ jev: { enabled: false } }));
+    const { h, ctx, jev } = setup(safe);
+    expect(await h.emit("tool_call", call("bash", { command: "npm test" }), ctx)).toMatchObject({ block: true, reason: expect.stringContaining("ClassifierDisabledError") });
+    expect(jev.calls).toHaveLength(0);
+  });
+
+  test("changing System 1 preserves already granted session rules and authorized usage", async () => {
+    const { h, ctx, jev } = setup(safe);
+    await h.emit("session_start", {}, ctx);
+    expect(await h.emit("tool_call", call("bash", { command: "npm test" }, "running"), ctx)).toBeUndefined();
+    await h.commands.get("approvals").handler("manual", ctx);
+    ctx.ui.selectAnswers.push("Allow rule for this session");
+    expect(await h.emit("tool_call", call("bash", { command: "npm publish" }, "granted"), ctx)).toBeUndefined();
+    selectSystem1("openai-decisions");
+    h.pi.events.emit(SYSTEM1_CHANGED, {});
+    await h.commands.get("approvals").handler("auto", ctx);
+    expect(await h.emit("tool_call", call("bash", { command: "npm publish" }, "fresh"), ctx)).toBeUndefined();
+    expect(jev.calls).toHaveLength(1);
+    const result = { toolCallId: "running", toolName: "bash", content: [], isError: false };
+    expect(await h.emit("tool_result", result, ctx)).toMatchObject({ usage: { input: 300 } });
+    expect(await h.emit("tool_result", result, ctx)).toBeUndefined();
+  });
+
+  test.each(["jev", "openai-decisions", "broken"])("gate status names the effective System 1 target (%s)", async (backend) => {
+    selectSystem1(backend);
+    const { h, ctx, jev } = setup(safe);
+    await h.commands.get("gate").handler("status", ctx);
+    expect(ctx.ui.notes.at(-1).message).toContain(backend === "jev" ? "System 1: jev (typesafe/jev-latest)"
+      : backend === "openai-decisions" ? "System 1: openai-decisions (system1-openai/gpt-6-luna)" : "System 1: unavailable");
+    expect(jev.calls).toHaveLength(0);
+  });
+});
 
 // Keep the result genuinely pending: fakeJev's answer callback itself is synchronous.
 describe("pending decisions are invalidated by mode and branch changes", () => {
