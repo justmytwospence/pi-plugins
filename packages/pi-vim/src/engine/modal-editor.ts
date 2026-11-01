@@ -2388,7 +2388,7 @@ export class ModalEditor extends CustomEditor {
           : matchesKey(data, "ctrl+d")
             ? 1
             : 0;
-        if (direction !== 0 && this.scrollHalfPage(direction)) return;
+        if (direction !== 0 && this.navigateViewport(direction)) return;
         if ((data === "/" || data === "?") && this.openTranscriptSearch(data === "/" ? "forward" : "backward")) return;
       }
 
@@ -2425,11 +2425,11 @@ export class ModalEditor extends CustomEditor {
   /**
    * Ctrl+U / Ctrl+D in idle Normal mode. Return true to consume the key; the
    * engine default leaves both to the host editor (delete to line start,
-   * delete forward or app.exit). Surfaces route them to a half-page scroll of
-   * the transcript (main) or the consumer's viewport (embedded). Visual mode
+   * delete forward or app.exit). Surfaces route them to transcript checkpoints
+   * (main) or the consumer's viewport (embedded). Visual mode
    * and every pending state keep the engine behavior.
    */
-  protected scrollHalfPage(_direction: -1 | 1): boolean {
+  protected navigateViewport(_direction: -1 | 1): boolean {
     return false;
   }
 

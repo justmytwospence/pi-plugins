@@ -23,6 +23,9 @@ import stickyLastPrompt, {
   type AnchorIndex,
 } from "../src/index.ts";
 
+import { EMPTY_TRANSCRIPT_CONTEXT, TRANSCRIPT_BLOCK, TRANSCRIPT_ROWS, type TranscriptRowsContext } from "../src/transcript-contract.ts";
+import { indexTranscript } from "../src/transcript-index.ts";
+
 // ─── Fakes ───
 
 /** A pi-tui Container look-alike: `constructor.name` must be "Container" for recursion. */
@@ -57,6 +60,26 @@ function toolRow(toolName: string, result: unknown, lines: string[], isPartial =
   return Object.assign(Object.create(ToolExecutionComponent.prototype) as ToolExecutionComponent, { toolName, args: {}, result, isPartial, children: [], render: () => lines });
 }
 
+/** A document renderer, not the common walker, owns clear marker deletion. */
+function cleared(children: unknown[]): Container {
+  const document = new Container();
+  document.children = children;
+  const render = document.render.bind(document);
+  document.render = width => render(width).filter(line => line !== CLEAR_SENTINEL);
+  Object.assign(document, {
+    [TRANSCRIPT_ROWS](context: TranscriptRowsContext) {
+      let rows = context.index(children, context.width);
+      for (let row = 0; row < rows.lines.length;) {
+        if (rows.lines[row] !== CLEAR_SENTINEL) { row++; continue; }
+        rows = context.splice(rows, row, 1, []);
+        rows.horizons.push(row);
+      }
+      return rows;
+    },
+  });
+  return document;
+}
+
 function index(children: unknown[]): AnchorIndex {
   const result: AnchorIndex = { anchors: [], horizons: [] };
   collectAnchors(children, 80, 0, result, classify);
@@ -80,11 +103,15 @@ class FakeScreen {
   doc = new Container();
   sv = {
     scrollTop: 0,
+    viewportHeight: 20,
     contentHeight: 0,
     child: this.doc,
     getContentWidth: (width: number) => width,
     scrollTo: (top: number, options?: unknown) => this.scrollTo.push({ top, options }),
   };
+  get currentLayout() {
+    return { root: { component: this.sv, rect: { x: 0, y: 0, width: this.terminal.columns, height: 20 } } };
+  }
   hasOverlay(): boolean {
     return this.overlayStack.some((entry) => this.isOverlayVisible(entry));
   }
@@ -187,11 +214,11 @@ test("a clear sentinel takes no rows and records a horizon", () => {
   expect(isClearSentinel(["\u0000other-marker\u0000"])).toBe(false);
   expect(isClearSentinel(["text"])).toBe(false);
   expect(isClearSentinel([])).toBe(false);
-  const result = index([
+  const result = index([cleared([
     new Block(["a"], { kind: "user", text: "before" }),
     new Block([CLEAR_SENTINEL]),
     new Block(["b"], { kind: "user", text: "after" }),
-  ]);
+  ])]);
   expect(result.anchors.map(({ source: _source, ...anchor }) => anchor)).toEqual([
     { start: 0, end: 1, text: "before" },
     { start: 1, end: 2, text: "after" },
@@ -473,15 +500,18 @@ test("bar lines fit zero, tiny and wide-character widths, and use the current th
 
 test("malformed renderers and zero-height prompts do not become jump targets", () => {
   const empty = new Block([], { kind: "user", text: "invisible" });
-  const result = index([null, {}, { render: () => 7 }, { render: () => { throw new Error("gone"); } }, empty]);
+  for (const malformed of [null, {}, { render: () => 7 }, { render: () => { throw new Error("gone"); } }]) {
+    expect(() => index([malformed, empty])).toThrow();
+  }
+  const result = index([empty]);
   expect(result.anchors).toEqual([]);
   expect(result.horizons).toEqual([]);
   expect(selectAnchor(result, Number.NaN)).toBeUndefined();
   expect(selectAnchor(result, -1)).toBeUndefined();
 });
 
-test("only the exact clear marker has zero height; clears keep the latest prompt pinned", () => {
-  const result = index([
+test("only the renderer's exact clear marker has zero height; clears keep the latest prompt pinned", () => {
+  const result = index([cleared([
     new Block(["p"], { kind: "user", text: "one" }),
     new Block([CLEAR_SENTINEL]),
     new Block(["\u0000literal", "reply"]),
@@ -489,7 +519,7 @@ test("only the exact clear marker has zero height; clears keep the latest prompt
     new Block([CLEAR_SENTINEL]),
     new Block(["reply"]),
     new Block(["p"], { kind: "user", text: "three" }),
-  ]);
+  ])]);
   expect(result.horizons).toEqual([{ row: 1 }, { row: 4 }]);
   expect(selectAnchor(result, 4)?.text).toBe("two");
   expect(selectAnchor(result, 3)).toBeUndefined(); // two is at the boundary
@@ -684,7 +714,7 @@ test("layoutRectOf finds a nested component's rectangle in the last frame", () =
 
 test("findTranscriptView finds main's transcript under a split root while another view is primary", () => {
   const valid = (value: unknown): value is { scrollTop: number } => typeof (value as { scrollTop?: unknown })?.scrollTop === "number";
-  const transcript = { scrollTop: 3, primary: true, child: { children: [] } };
+  const transcript = { scrollTop: 3, primary: true, children: [{ children: [], render: () => [] }] };
   const side = { scrollTop: 0, primary: true, child: { render: () => [] } };
   const main = { children: [transcript, { children: [] }] };
   const split = { entries: [{ component: main }, { component: {} }, { component: { entries: [{ component: side }] } }] };
@@ -789,6 +819,7 @@ test("user-words providers register at session start; the bar and pin service us
 test("a tool group holding a row with the user's words anchors as a whole", () => {
   class ToolGroupComponent {
     constructor(readonly children: unknown[]) {}
+    [TRANSCRIPT_BLOCK]() { return { kind: "tool" as const, subjects: this.children }; }
     render(): string[] {
       return ["g1", "g2", "g3"];
     }
@@ -807,4 +838,46 @@ test("a tool group holding a row with the user's words anchors as a whole", () =
     classify,
   );
   expect(result.anchors.map(({ source: _source, ...anchor }) => anchor)).toEqual([{ start: 1, end: 4, text: "Pick me" }]);
+});
+
+test("common rows agree with pin anchors, without promoting report checkpoints to human intent", () => {
+  const report = {
+    render: () => ["delivered report"],
+    [TRANSCRIPT_BLOCK]: () => ({ kind: "tool" as const, checkpoint: { id: "report-1", kind: "report" } }),
+  };
+  const group = {
+    render: () => ["group header", "expanded result", "group tail"],
+    [TRANSCRIPT_BLOCK]: () => ({ kind: "tool" as const, subjects: [userMessage("latest answer", ["not group geometry"])] }),
+  };
+  const document = cleared([userMessage("first", ["p", "p"]), report, new Block([CLEAR_SENTINEL]), group]);
+  const common = indexTranscript(document, 40, EMPTY_TRANSCRIPT_CONTEXT);
+  const anchors: AnchorIndex = { anchors: [], horizons: [] };
+  expect(collectAnchors([document], 40, 7, anchors)).toBe(common.lines.length + 7);
+  expect(anchors.anchors).toEqual(common.blocks.filter(block => block.userText).map(block => ({
+    start: block.start + 7, end: block.end + 7, text: block.userText, source: block.source,
+  })));
+  expect(anchors.horizons).toEqual(common.horizons.map(row => ({ row: row + 7 })));
+  expect(anchors.anchors.map(anchor => anchor.text)).toEqual(["first", "latest answer"]);
+});
+
+test("unknown transformed groups stay opaque without a semantic hook", () => {
+  const unmarked = { children: [userMessage("must not guess offsets", ["p"])], render: () => ["transformed"] };
+  expect(index([unmarked]).anchors).toEqual([]);
+});
+
+test("user-word offers close at emit return and cannot leak from an earlier capture", async () => {
+  const h = harness();
+  const offers: NonNullable<UserWordsRequest["register"]>[] = [];
+  h.events.on(USER_WORDS_CHANNEL, data => { offers.push((data as UserWordsRequest).register!); });
+  stickyLastPrompt(h.pi);
+  await h.emit("session_start", h.ctx);
+  offers[0]!("ask", () => "late words");
+  h.screen.doc.children = [userMessage("real prompt", ["p"]), toolRow("ask", { details: {} }, ["tool"]), new Block(["tail"])];
+  h.screen.sv.scrollTop = 2;
+  expect(bar(h.screen)?.render(80).join("")).toContain("real prompt");
+  await h.emit("session_shutdown", h.ctx);
+  await h.emit("session_start", h.ctx);
+  offers[0]!("ask", () => "stale words");
+  offers[1]!("ask", () => "also late");
+  expect(bar(h.screen)?.render(80).join("")).toContain("real prompt");
 });

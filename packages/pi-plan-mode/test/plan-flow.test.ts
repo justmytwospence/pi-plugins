@@ -1299,7 +1299,15 @@ test("/planners opens on the settings, goes through tools, plans with two planne
   assert.match(sessions.prompts[1]?.text ?? "", /Another model is planning the same task/u);
 
   // Each plan landed in your main conversation, in full, without starting a turn.
-  type Delivery = { content: string; details: { kind: string; id: string; revision?: number } };
+  type Delivery = {
+    content: string;
+    details: {
+      kind: string;
+      id: string;
+      revision?: number;
+      "pi-plugins.transcript.v1": { version: number; checkpoint: { id: string; kind: string } };
+    };
+  };
   const deliveries = () =>
     mock.sentMessages
       .filter((sent) => (sent.message as { customType?: string }).customType === "plan-mode-plan")
@@ -1374,7 +1382,16 @@ test("/planners opens on the settings, goes through tools, plans with two planne
   assert.match(asked.content[0]?.text ?? "", /Planner A answered:[\s\S]*resubmitted its plan as v2/u);
   assert.match(sessions.prompts.at(-1)?.text ?? "", /^\[From the user's main agent[\s\S]*why this cache\?$/u);
   assert.match(app.render().join("\n"), /main agent › why this cache\?|A · Claude Sonnet 5\.5 low ─+ v2 ──/u);
+  const checkpoints = deliveries().map((delivery) => delivery.details["pi-plugins.transcript.v1"].checkpoint.id);
+  assert.equal(checkpoints.length, 3);
+  assert.equal(new Set(checkpoints).size, 3, "each plan delivery has a distinct occurrence ID");
+  for (const delivery of deliveries()) {
+    const annotation = delivery.details["pi-plugins.transcript.v1"];
+    assert.deepEqual(annotation, { version: 1, checkpoint: { id: annotation.checkpoint.id, kind: "plan" } });
+    assert.match(annotation.checkpoint.id, /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u);
+  }
   assert.deepEqual(deliveries().at(-1)?.details, {
+    "pi-plugins.transcript.v1": { version: 1, checkpoint: { id: checkpoints[2], kind: "plan" } },
     kind: "plan",
     id: "A",
     model: "Claude Sonnet 5.5 low",

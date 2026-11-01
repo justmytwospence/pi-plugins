@@ -76,6 +76,7 @@ import { LogViewer } from "./viewer.ts";
 import { MARIMO_READY, marimoName, marimoServer } from "./marimo.ts";
 import { type Block, blocks, blocksView } from "./result-view.ts";
 import { reportResultView, runResultView, type WakeDetails, wakeView } from "./rows.ts";
+import { transcriptCheckpoint } from "./transcript-contract.ts";
 
 const STARTUP_WAIT_MS = 1_500;
 
@@ -119,7 +120,7 @@ interface Waiter {
   readied: Task[];
   externals: External[];
   /** Other tasks that ended (or got ready) meanwhile; delivered with this wait's result. */
-  extras: string[];
+  extras: Block[];
   resolve: (r: Reason) => void;
 }
 
@@ -158,6 +159,8 @@ const KillParams = Type.Object({ id: Type.String({ description: "Task id or name
 const OWN_RESULT = { ccstyleOwnResult: true } as const;
 
 const text = (t: string) => ({ content: [{ type: "text" as const, text: t }], details: {} });
+/** Declare an outcome where it is produced, before any wait combines it with other blocks. */
+const completedReport = (text: string): Block => ({ text, checkpoint: { id: randomUUID(), kind: "report" } });
 
 export default function piBg(pi: ExtensionAPI) {
   const reg = registry();
@@ -556,8 +559,9 @@ export default function piBg(pi: ExtensionAPI) {
     owed.clear();
     if (!parts.length) return;
     try {
+      const message = { customType: "pi-bg", content: parts.join("\n\n---\n\n"), display: true, details: { tasks: sent } };
       pi.sendMessage(
-        { customType: "pi-bg", content: parts.join("\n\n---\n\n"), display: true, details: { tasks: sent } },
+        sent.some((item) => item.kind === "end") ? transcriptCheckpoint(message, { id: randomUUID(), kind: "report" }) : message,
         { triggerTurn: true, deliverAs: "followUp" },
       );
     } catch {
@@ -593,7 +597,9 @@ export default function piBg(pi: ExtensionAPI) {
     if (!open) return false;
     if (kind === "end") t.delivered = true;
     else t.readyDelivered = true;
-    open.extras.push(kind === "end" ? `${t.name} (${t.id}) ended: ${outcome(t)} after ${runtime(t)}. bg_logs ${t.id} for its output.` : `${t.name} (${t.id}) is ready${t.readyLine ? `: ${t.readyLine}` : ""}.`);
+    open.extras.push(kind === "end"
+      ? completedReport(`${t.name} (${t.id}) ended: ${outcome(t)} after ${runtime(t)}. bg_logs ${t.id} for its output.`)
+      : { text: `${t.name} (${t.id}) is ready${t.readyLine ? `: ${t.readyLine}` : ""}.` });
     return true;
   };
 
@@ -619,7 +625,7 @@ export default function piBg(pi: ExtensionAPI) {
           t.delivered = true;
           if (attached) {
             pi.sendMessage(
-              { customType: "pi-bg", content: `The user stopped background task ${t.name} (${t.id}) after ${runtime(t)}.`, display: true, details: { id: t.id, kind: "end", status: t.status } },
+              transcriptCheckpoint({ customType: "pi-bg", content: `The user stopped background task ${t.name} (${t.id}) after ${runtime(t)}.`, display: true, details: { id: t.id, kind: "end", status: t.status } }, { id: randomUUID(), kind: "report" }),
               { deliverAs: "nextTurn" },
             );
           }
@@ -748,9 +754,9 @@ export default function piBg(pi: ExtensionAPI) {
       parts.push(wakeText(t, "end"));
       tasks.push({ id: t.id, kind: "end", status: t.status });
     }
-    if (waiter.extras.length) parts.push(`Also meanwhile:\n${waiter.extras.map((e) => `- ${e}`).join("\n")}`);
+    if (waiter.extras.length) parts.push(`Also meanwhile:\n${waiter.extras.map((e) => `- ${e.text}`).join("\n")}`);
     return {
-      entries: [{ type: "custom_message", customType: "pi-bg", content: parts.join("\n\n---\n\n"), display: true, details: { tasks } }],
+      entries: [transcriptCheckpoint({ type: "custom_message" as const, customType: "pi-bg", content: parts.join("\n\n---\n\n"), display: true, details: { tasks } }, { id: randomUUID(), kind: "report" })],
       continue: true,
     };
   };
@@ -793,9 +799,11 @@ export default function piBg(pi: ExtensionAPI) {
 
   const externalLine = (x: External) => `${x.label} (${x.id}): ${x.state}${x.summary ? ` · ${x.summary}` : ""}`;
   const consumeExternal = (x: External): Block[] => {
-    if (x.state === "running" || typeof x.result !== "string") return [{ text: externalLine(x) }];
+    if (x.state === "running") return [{ text: externalLine(x) }];
+    const heading = completedReport(externalLine(x));
+    if (typeof x.result !== "string") return [heading];
     pi.events.emit("bg:external-consumed", { id: x.id });
-    return [{ text: externalLine(x) }, { text: x.result, markdown: true }];
+    return [heading, { text: x.result, markdown: true }];
   };
 
   pi.events.on("bg:annotate", (data) => {
@@ -1001,7 +1009,7 @@ export default function piBg(pi: ExtensionAPI) {
       }
       return runResultView(result as never, expanded, theme, () => (id ? reg.tasks.get(id) : undefined));
     },
-    async execute(_id, params, _signal, _onUpdate, c) {
+    async execute(id, params, _signal, _onUpdate, c) {
       const kind = params.kind as Kind;
       if (params.ready && kind !== "service") throw new Error("`ready` is for services; a job wakes you when it exits.");
       if (params.ready) parsePattern(params.ready);
@@ -1027,7 +1035,7 @@ export default function piBg(pi: ExtensionAPI) {
       const { waiter, done } = waitFor({ targets: new Set([task.id]), any: false, silent: true }, STARTUP_WAIT_MS, undefined);
       await done;
       refresh();
-      if (waiter.finished.length) return text(`${task.name} (${task.kind} ${task.id}) ended at once.\n\n${report(task)}`);
+      if (waiter.finished.length) return blocks([completedReport(`${task.name} (${task.kind} ${task.id}) ended at once.\n\n${report(task)}`)], id);
       const lines = [`Started ${task.name} (${task.kind} ${task.id}, pid ${task.pid}). Log: ${task.logPath}`];
       if (task.kind === "job") {
         lines.push(`You will be woken when it exits${task.timeoutSec ? ` (killed after ${task.timeoutSec}s)` : ""}. If nothing else is left to do, call bg_wait or end your turn: the turn stays open until the job ends.`);
@@ -1059,7 +1067,7 @@ export default function piBg(pi: ExtensionAPI) {
       // Reports keep the look of Pi's own tool output; a subagent's answer reads as Markdown.
       return reportResultView(result as never, expanded, theme, Boolean((context as { isError?: boolean } | undefined)?.isError));
     },
-    async execute(_id, params, signal, _onUpdate, c) {
+    async execute(id, params, signal, _onUpdate, c) {
       const generation = sessionGeneration;
       const timeoutS = Math.min(Math.max(1, Math.round(params.timeout ?? WAIT_DEFAULT_S)), WAIT_MAX_S);
       const targets = new Set<string>();
@@ -1075,7 +1083,7 @@ export default function piBg(pi: ExtensionAPI) {
           // Outside work a job drives: the job's end carries the output.
           targets.add(driver.id);
         } else if (x) {
-          if (x.state !== "running") return blocks(consumeExternal(x));
+          if (x.state !== "running") return blocks(consumeExternal(x), id);
           targets.add(x.id);
         } else if (!t) {
           const known = [...reg.list(sessionId).map((k) => `${k.id} ${k.name}`), ...[...externals.values()].filter((e) => e.state === "running").map((e) => e.id)];
@@ -1083,7 +1091,7 @@ export default function piBg(pi: ExtensionAPI) {
         } else if (t.status !== "running") {
           t.delivered = true;
           refresh();
-          return text(report(t));
+          return blocks([completedReport(report(t))], id);
         } else if (tiedRunning.length) {
           for (const e of tiedRunning) targets.add(e.id);
         } else if (tied.length) {
@@ -1142,7 +1150,7 @@ export default function piBg(pi: ExtensionAPI) {
       }
       refresh();
       const out: Block[] = [];
-      for (const t of waiter.finished) out.push({ text: report(t) });
+      for (const t of waiter.finished) out.push(completedReport(report(t)));
       for (const t of waiter.readied) out.push({ text: report(t) });
       for (const x of waiter.externals) out.push(...consumeExternal(x));
       if (reason !== "done") {
@@ -1156,15 +1164,17 @@ export default function piBg(pi: ExtensionAPI) {
               : `Stopped waiting after ${elapsed(Date.now() - started)} (the timeout).`;
         out.push({ text: `${why} Still running: ${what}. It wakes you when it ends; call bg_wait again to keep waiting.` });
       }
-      if (waiter.extras.length) out.push({ text: `Also while you waited:\n${waiter.extras.map((e) => `- ${e}`).join("\n")}` });
+      if (waiter.extras.length) out.push({ text: `Also while you waited:\n${waiter.extras.map((e) => `- ${e.text}`).join("\n")}`, checkpoint: waiter.extras.find((e) => e.checkpoint)?.checkpoint });
       // One block per item for the renderer; plain ones are merged so the model reads them as before.
       const merged: Block[] = [];
       for (const b of out) {
         const last = merged.at(-1);
-        if (last && !last.markdown && !b.markdown) last.text = `${last.text}\n\n${b.text}`;
-        else merged.push({ ...b });
+        if (last && !last.markdown && !b.markdown) {
+          last.text = `${last.text}\n\n${b.text}`;
+          last.checkpoint ??= b.checkpoint;
+        } else merged.push({ ...b });
       }
-      return blocks(merged);
+      return blocks(merged, id);
     },
   });
 

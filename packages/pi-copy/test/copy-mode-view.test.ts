@@ -3,6 +3,8 @@ import { stripVTControlCharacters as plain } from "node:util";
 import { visibleWidth } from "@earendil-works/pi-tui";
 import { CopyModeView } from "../src/copy-mode/view.ts";
 import { type Snapshot, findTranscript, renderBlocks, snapshotSession, snapshotTranscript } from "../src/copy-mode/snapshot.ts";
+import { TRANSCRIPT_BLOCK, USER_WORDS_CHANNEL, transcriptCheckpoint } from "../src/transcript-contract.ts";
+import { collectUserWords } from "../src/transcript-index.ts";
 
 const theme = { fg: (_c: string, t: string) => t, bold: (t: string) => t };
 
@@ -129,18 +131,79 @@ test("snapshot renders the transcript document and records message blocks", () =
   const doc = new Container([new Container([new Spacer()]), new Container([new UserMessageComponent(), new Spacer(), new ToolExecutionComponent()])]);
   const { lines, blocks } = renderBlocks(doc as never, 80);
   expect(lines).toEqual(["", "\x1b[1mhello\x1b[0m", "", "tool", "out"]);
-  expect(blocks).toEqual([{ start: 1, end: 2, kind: "user", error: false }, { start: 3, end: 5, kind: "tool", error: true }]);
+  expect(blocks.map(({ start, end, kind, error }) => ({ start, end, kind, error }))).toEqual([
+    { start: 0, end: 1, kind: "other", error: false }, { start: 1, end: 2, kind: "user", error: false },
+    { start: 2, end: 3, kind: "other", error: false }, { start: 3, end: 5, kind: "tool", error: true },
+  ]);
   let scrolled = -1;
   const view = { scrollTop: 2, viewportHeight: 3, child: doc, scrollTo: (r: number) => { scrolled = r; }, getContentWidth: (w: number) => w - 1, render: () => [] };
-  const tui = { getPrimaryScrollView: () => view };
+  const tui = { getPrimaryScrollView: () => view, currentLayout: { root: { component: view, rect: { width: 60 }, scrollContentLines: doc.render(59) } } };
   expect(findTranscript(tui)).toBe(view);
   const s = snapshotTranscript(tui, 80)!;
   expect(s.plain[1]).toBe("hello");
   s.scrollTo!(4);
   expect(scrolled).toBe(4);
   expect(snapshotTranscript({}, 80)).toBeUndefined();
-  // Found through the layout tree when getPrimaryScrollView is missing.
-  expect(findTranscript({ layoutRoot: { entries: [{ component: view }] } })).toBe(view);
+  // Neither an arbitrary layout view nor terminal width substitutes for a resolved primary box.
+  expect(findTranscript({ layoutRoot: { entries: [{ component: view }] } })).toBeUndefined();
+  expect(snapshotTranscript({ getPrimaryScrollView: () => view }, 80)).toBeUndefined();
+});
+
+test("shared native, custom and grouped blocks remain copyable and retain bindings", async () => {
+  class Container { constructor(public children: any[]) {} render(w: number): string[] { return this.children.flatMap(c => c.render(w)); } }
+  class UserMessageComponent { text = "question"; render() { return ["question"]; } }
+  class AssistantMessageComponent { lastMessage = { content: [{ type: "text", text: "answer" }], stopReason: "stop" }; render() { return ["answer"]; } }
+  class ToolExecutionComponent {
+    toolName = "ask"; toolCallId = "call"; args = {};
+    result = { ...transcriptCheckpoint({ content: [], details: {} }, { id: "report", kind: "report" }), isError: true };
+    render() { return ["tool response"]; }
+  }
+  class CustomMessageComponent { message = transcriptCheckpoint({ display: true, details: {} }, { id: "custom", kind: "report" }); render() { return ["custom output"]; } }
+  const tool = new ToolExecutionComponent();
+  const group = { [TRANSCRIPT_BLOCK]: () => ({ kind: "tool" as const, subjects: [tool] }), render: () => ["group output"] };
+  const events = { emit: (channel: string, request: any) => {
+    expect(channel).toBe(USER_WORDS_CHANNEL);
+    request.register("ask", () => "human feedback");
+  } };
+  const doc = new Container([new UserMessageComponent(), new AssistantMessageComponent(), tool, new CustomMessageComponent(), group]);
+  const indexed = renderBlocks(doc, 40, { userWords: collectUserWords(events) });
+  expect(indexed.lines).toEqual(["question", "answer", "tool response", "custom output", "group output"]);
+  expect(indexed.blocks.map(b => [b.kind, b.error, b.checkpoint?.kind])).toEqual([
+    ["user", false, "prompt"], ["assistant", false, "response"], ["tool", true, "feedback"],
+    ["other", false, "report"], ["tool", true, "feedback"],
+  ]);
+  const { keys, view, copied } = make(snap(indexed.lines, indexed.blocks));
+  keys("g", "g", "]", "m");
+  expect(view.cursor.row).toBe(1);
+  keys("]", "t");
+  expect(view.cursor.row).toBe(2);
+  keys("j", "y", "y", "j", "y", "y");
+  await Promise.resolve();
+  expect(copied).toEqual(["custom output", "group output"]);
+});
+
+test("frozen scroll-back rejects changed view, document, layout width, content width or lines", () => {
+  let text = "first";
+  const doc = { render: (width: number) => [`${text} ${width}`] };
+  let contentOffset = 1;
+  const calls: unknown[] = [];
+  const view = { children: [doc], scrollTop: 0, viewportHeight: 5, getContentWidth: (width: number) => width - contentOffset,
+    scrollTo: (...args: unknown[]) => calls.push(args) };
+  let primary = view;
+  const box = { component: view, rect: { width: 40 }, scrollContentLines: doc.render(39) };
+  const tui = { getPrimaryScrollView: () => primary, currentLayout: { root: box }, requestRender: () => calls.push("render") };
+  const capture = () => snapshotTranscript(tui, 1000)!;
+  const valid = capture();
+  expect(valid.lines).toEqual(["first 39"]);
+  valid.scrollTo!(0);
+  expect(calls).toEqual([[0, { disableFollow: true }], "render"]);
+  calls.length = 0;
+  const changedView = capture(); primary = { ...view }; changedView.scrollTo!(0); primary = view;
+  const changedDoc = capture(); view.children[0] = { render: doc.render }; changedDoc.scrollTo!(0); view.children[0] = doc;
+  const changedBox = capture(); box.rect.width++; changedBox.scrollTo!(0); box.rect.width--;
+  const changedWidth = capture(); contentOffset++; changedWidth.scrollTo!(0); contentOffset--;
+  const changedLines = capture(); text = "other"; changedLines.scrollTo!(0);
+  expect(calls).toEqual([]);
 });
 
 test("session fallback", () => {

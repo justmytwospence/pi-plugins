@@ -450,19 +450,20 @@ describe("mode context substates", () => {
 });
 
 describe("main editor Ctrl+U / Ctrl+D", () => {
-  it("scrolls the fullscreen transcript by half a page in idle Normal mode only", async () => {
+  it("routes idle Normal keys to directional checkpoint navigation", async () => {
     const installed = await started();
     const { tui, scrolls } = scrollableTui(40);
     const editor = installed.editorFactory()(tui, stubTheme, stubKeybindings);
+    (editor as MainEditor).setTranscriptNavigationFn(direction => scrolls.push(direction));
     seed(editor, "hello world");
     editor.handleInput(CTRL_U);
     editor.handleInput(CTRL_D);
-    assert.deepEqual(scrolls, [-20, 20]);
+    assert.deepEqual(scrolls, [-1, 1]);
     assert.equal(editor.getText(), "hello world");
     assert.equal(mode(editor).state, "normal");
   });
 
-  it("uses at least one line when the terminal size is unknown", async () => {
+  it("does not fall back to half-page motion when checkpoint geometry is unavailable", async () => {
     const installed = await started();
     const scrolls: number[] = [];
     const tui = {
@@ -475,7 +476,7 @@ describe("main editor Ctrl+U / Ctrl+D", () => {
     const editor = installed.editorFactory()(tui, stubTheme, stubKeybindings);
     seed(editor, "x");
     editor.handleInput(CTRL_D);
-    assert.deepEqual(scrolls, [1]);
+    assert.deepEqual(scrolls, []);
   });
 
   it("consumes the keys without a scrollable TUI (regular mode)", async () => {

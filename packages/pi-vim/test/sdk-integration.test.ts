@@ -26,6 +26,9 @@ import {
   createAgentSessionServices,
   createEventBus,
   CustomEditor,
+  UserMessageComponent,
+  AssistantMessageComponent,
+  CustomMessageComponent,
   type ExtensionError,
   type ExtensionUIContext,
   ModelRuntime,
@@ -62,6 +65,9 @@ import {
   INPUT_CONTEXT,
   type SuiteEditor,
 } from "../src/contract.js";
+
+import { transcriptCheckpoint } from "../src/transcript-contract.js";
+import { captureTranscript } from "../src/transcript-viewport.js";
 
 const ESC = "\x1b";
 const CTRL_D = "\x04";
@@ -469,23 +475,48 @@ describe("Pi SDK 1.2.0 loader and terminal input lifecycle", { concurrency: fals
     });
   }
 
-  it("main default fullscreen half-page motion matches the SDK's transcript viewport, not total terminal height", async (t) => {
-    const f = await fixture(t, { fullscreen: true, draft: "draft" });
-    f.send(ESC);
-    const renderer = f.interactive.renderer;
-    assert.ok(renderer instanceof TuiAltScreen);
-    const halfPage = Math.max(1, Math.floor(f.viewport.viewportHeight / 2));
-    assert.ok(f.viewport.viewportHeight < f.terminal.rows, "fixed editor dock must reduce transcript height");
-    const start = renderer.viewportTop;
-    f.send(CTRL_U);
-    assert.equal(renderer.viewportTop, start - halfPage);
-    f.send(CTRL_D);
-    assert.equal(renderer.viewportTop, start);
-    assert.equal(f.main.getText(), "draft");
-    assert.equal(f.shutdownCalls, 0);
-  });
+  for (const bindings of [undefined, HALF_PAGE_BINDINGS]) {
+    it(`main fullscreen navigates explicit checkpoints, even with conflicting native keys (${bindings ? "configured" : "default"})`, async (t) => {
+      const f = await fixture(t, { fullscreen: true, draft: "draft", bindings });
+      const document = f.interactive.documentContainer;
+      document.clear();
+      const filler = () => ({ render: () => Array.from({ length: 35 }, (_, i) => `ordinary tool/status row ${i}`), invalidate() {} });
+      document.addChild(new UserMessageComponent("User request"));
+      document.addChild(filler());
+      document.addChild(new CustomMessageComponent(transcriptCheckpoint({ role: "custom" as const, customType: "never-seen-plugin", content: "Delivered artifact", display: true, timestamp: Date.now(), details: {} }, { id: "delivery", kind: "new-kind" })));
+      document.addChild(filler());
+      document.addChild(new AssistantMessageComponent({ role: "assistant", content: [{ type: "text", text: "Concluding response" }], stopReason: "stop" } as never));
+      document.addChild(filler());
+      f.frame();
+      f.send(ESC);
+      const renderer = f.interactive.renderer;
+      assert.ok(renderer instanceof TuiAltScreen);
+      const snap = captureTranscript(renderer)!;
+      assert.ok(snap, "real layout must expose accurate transcript geometry");
+      const targets = snap.blocks.filter(block => block.checkpoint).map(block => Math.max(0, block.start - 1));
+      assert.equal(targets.length, 3);
+      for (const target of [...targets].reverse()) {
+        f.send(CTRL_U);
+        assert.equal(renderer.viewportTop, target);
+      }
+      f.send(CTRL_U);
+      assert.equal(renderer.viewportTop, targets[0]);
+      for (const target of targets.slice(1)) {
+        f.send(CTRL_D);
+        assert.equal(renderer.viewportTop, target);
+      }
+      f.send(CTRL_U);
+      const interior = renderer.viewportTop;
+      assert.equal(interior, targets[1]);
+      f.send("\x1b[100;5:3u");
+      assert.equal(renderer.viewportTop, interior, "release must not navigate at an interior checkpoint");
+      assert.equal(f.viewport.isFollowingEnd, false);
+      assert.equal(f.main.getText(), "draft");
+      assert.equal(f.shutdownCalls, 0);
+    });
+  }
 
-  it("default fullscreen half-page keys leave Insert, Visual, EX and pending input with the editor", async (t) => {
+  it("fullscreen checkpoint keys leave Insert, Visual, EX and pending input with the editor", async (t) => {
     const f = await fixture(t, { fullscreen: true, draft: "alpha" });
     const renderer = f.interactive.renderer;
     assert.ok(renderer instanceof TuiAltScreen);

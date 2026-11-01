@@ -3,13 +3,16 @@
 //
 // Pi's fullscreen layout keeps the transcript in a ScrollView whose child is the document
 // container (header, startup notices, chat). Rendering that document at the view's content width
-// gives exactly what fullscreen draws, folded output included as folded. The structure is found
-// by duck typing; when it is not there (regular mode, an older Pi) the caller falls back to the
-// session's text.
+// gives exactly what fullscreen draws, folded output included as folded. The shared capture
+// resolves the primary view and its allocated layout width; when unavailable the caller falls
+// back to the session's text.
 import { stripVTControlCharacters } from "node:util";
 import { messageText } from "../transcript.ts";
+import { EMPTY_TRANSCRIPT_CONTEXT, type BlockKind, type TranscriptCheckpoint, type TranscriptContext } from "../transcript-contract.ts";
+import { indexTranscript } from "../transcript-index.ts";
+import { captureTranscript, primaryTranscriptView } from "../transcript-viewport.ts";
 
-export type BlockKind = "user" | "assistant" | "tool" | "bash" | "other";
+export type { BlockKind } from "../transcript-contract.ts";
 
 export interface Block {
   start: number;
@@ -17,6 +20,7 @@ export interface Block {
   end: number;
   kind: BlockKind;
   error: boolean;
+  checkpoint?: TranscriptCheckpoint;
 }
 
 export interface Snapshot {
@@ -34,108 +38,29 @@ export interface Snapshot {
   fallback: boolean;
 }
 
-interface Node {
-  children?: unknown[];
-  render?: (width: number) => string[];
-  constructor?: { name?: string };
-  [key: string]: unknown;
+/** The fullscreen primary transcript, when supported by the host. */
+export function findTranscript(tui: unknown) {
+  return primaryTranscriptView(tui);
 }
 
-interface ScrollViewLike extends Node {
-  scrollTop: number;
-  viewportHeight: number;
-  scrollTo(row: number, options?: { disableFollow?: boolean }): void;
-  getContentWidth(width: number): number;
-}
-
-const isScrollView = (n: unknown): n is ScrollViewLike =>
-  !!n && typeof n === "object" && typeof (n as ScrollViewLike).scrollTo === "function" && typeof (n as ScrollViewLike).getContentWidth === "function" && typeof (n as ScrollViewLike).scrollTop === "number";
-
-/** The transcript's ScrollView: Pi's primary scroll view, else the first primary one in the layout tree. */
-export function findTranscript(tui: unknown): ScrollViewLike | undefined {
-  const t = tui as { getPrimaryScrollView?: () => unknown; layoutRoot?: unknown } | undefined;
-  try {
-    const primary = t?.getPrimaryScrollView?.();
-    if (isScrollView(primary)) return primary;
-  } catch {
-    // Not a fullscreen TUI.
-  }
-  const seen = new Set<unknown>();
-  const walk = (n: unknown, depth: number): ScrollViewLike | undefined => {
-    if (!n || typeof n !== "object" || seen.has(n) || depth > 8) return undefined;
-    seen.add(n);
-    if (isScrollView(n) && (n as { primary?: boolean }).primary !== false) return n;
-    const node = n as { children?: unknown[]; entries?: Array<{ component?: unknown }> };
-    for (const child of [...(node.children ?? []), ...(node.entries ?? []).map((e) => e?.component)]) {
-      const found = walk(child, depth + 1);
-      if (found) return found;
-    }
-    return undefined;
-  };
-  return walk(t?.layoutRoot, 0);
-}
-
-const KIND_BY_NAME: Record<string, BlockKind> = {
-  UserMessageComponent: "user",
-  AssistantMessageComponent: "assistant",
-  ToolExecutionComponent: "tool",
-  BashExecutionComponent: "bash",
-};
-
-function kindOf(n: Node): { kind: BlockKind; error: boolean } | undefined {
-  const name = n.constructor?.name ?? "";
-  const kind = KIND_BY_NAME[name];
-  if (!kind) return undefined;
-  let error = false;
-  if (kind === "tool") error = (n.result as { isError?: boolean } | undefined)?.isError === true;
-  if (kind === "bash") error = typeof n.exitCode === "number" && n.exitCode !== 0;
-  return { kind, error };
-}
-
-/**
- * Render a component tree into lines, recording a block for each message-level component.
- * A plain container's lines are its children's lines in order (pi-tui's Container), so children
- * are rendered one by one and their ranges are exact.
- */
-export function renderBlocks(root: Node, width: number): { lines: string[]; blocks: Block[] } {
-  const lines: string[] = [];
-  const blocks: Block[] = [];
-  const visit = (n: Node, depth: number) => {
-    const known = kindOf(n);
-    const plainContainer = !known && Array.isArray(n.children) && n.constructor?.name === "Container" && depth < 6;
-    if (plainContainer) {
-      for (const child of n.children as Node[]) visit(child, depth + 1);
-      return;
-    }
-    const start = lines.length;
-    const rendered = typeof n.render === "function" ? n.render(width) : [];
-    for (const line of rendered) lines.push(line);
-    if (known && rendered.length) blocks.push({ start, end: lines.length, ...known });
-  };
-  visit(root, 0);
-  return { lines, blocks };
+/** Render the shared transcript index without filtering copyable blocks. */
+export function renderBlocks(root: unknown, width: number, context: TranscriptContext = EMPTY_TRANSCRIPT_CONTEXT): { lines: string[]; blocks: Block[] } {
+  return indexTranscript(root, width, context);
 }
 
 const strip = (line: string) => stripVTControlCharacters(line).replace(/\s+$/u, "");
 
 /** The fullscreen transcript, or undefined when Pi is not in fullscreen mode. */
-export function snapshotTranscript(tui: unknown, width: number): Snapshot | undefined {
-  const view = findTranscript(tui);
-  if (!view) return undefined;
-  const doc = (view as unknown as { child?: Node }).child;
-  const contentWidth = Math.max(1, view.getContentWidth(width));
-  let lines: string[];
-  let blocks: Block[] = [];
-  if (doc && typeof doc.render === "function") ({ lines, blocks } = renderBlocks(doc, contentWidth));
-  else lines = typeof view.render === "function" ? view.render(width) : [];
-  if (!lines.length) return undefined;
+export function snapshotTranscript(tui: unknown, _width: number, context: TranscriptContext = EMPTY_TRANSCRIPT_CONTEXT): Snapshot | undefined {
+  const capture = captureTranscript(tui, context);
+  if (!capture?.lines.length) return undefined;
   return {
-    lines,
-    plain: lines.map(strip),
-    blocks,
-    scrollTop: Math.max(0, Math.min(view.scrollTop, lines.length - 1)),
-    viewportHeight: view.viewportHeight,
-    scrollTo: (row) => view.scrollTo(row, { disableFollow: true }),
+    lines: capture.lines,
+    plain: capture.lines.map(strip),
+    blocks: capture.blocks,
+    scrollTop: Math.max(0, Math.min(capture.scrollTop, capture.lines.length - 1)),
+    viewportHeight: capture.viewportHeight,
+    scrollTo: capture.scrollTo,
     fallback: false,
   };
 }

@@ -5,6 +5,7 @@ import { pathToFileURL } from "node:url";
 import { expect, test, vi } from "vitest";
 import { createFocusProxy, hideDuplicateStatus, resolveTranscript, TranscriptPanels } from "../src/transcript.ts";
 import { TerminalPanel } from "../src/panel.ts";
+import { TRANSCRIPT_BLOCK } from "../src/transcript-contract.ts";
 
 // The emulator and panel are real; no child process or process-tree signalling.
 vi.mock("../src/pty.ts", () => ({ spawnPty: vi.fn(), stopPty: vi.fn(async () => {}) }));
@@ -232,6 +233,7 @@ for (const renderer of ["regular", "fullscreen"] as const) {
         await mounted();
         await start;
         expect(h.chat.children).toEqual([h.resumed, panel]);
+        expect((panel as any)[TRANSCRIPT_BLOCK]).toBeUndefined();
         expect(h.editorContainer.render(80)).toEqual([]);
         expect(h.editorContainer.children).not.toContain(h.editor);
         expect(h.mode.renderer.hasOverlayEntries).toBe(false);
@@ -246,6 +248,8 @@ for (const renderer of ["regular", "fullscreen"] as const) {
         expect(h.editor.getText()).toBe("saved editor draft");
         expect(h.mode.ui.getFocusedComponent()).toBe(h.editor);
         expect(h.chat.children).toEqual([h.resumed, snapshot]);
+        const checkpoint = (snapshot as any)[TRANSCRIPT_BLOCK]().checkpoint;
+        expect(checkpoint).toEqual({ id: expect.any(String), kind: "shell" });
 
         // Pi still records/appends its normal status-only result. Only its
         // redundant display is removed while the richer snapshot remains.
@@ -262,6 +266,8 @@ for (const renderer of ["regular", "fullscreen"] as const) {
         h.chat.addChild(assistant);
         await mounted();
         expect(h.chat.children).toEqual([h.resumed, snapshot, assistant]);
+        expect((snapshot as any)[TRANSCRIPT_BLOCK]().checkpoint).toEqual(checkpoint);
+        expect(h.chat.children).not.toContain(card);
         const transcript = h.document.render(80).join("\n");
         for (const marker of ["resumed user message", "retained-row-01", "rows omitted", "retained-row-60", "Subsequent assistant response"]) {
           expect(transcript).toContain(marker);

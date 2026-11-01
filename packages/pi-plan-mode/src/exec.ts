@@ -55,6 +55,7 @@ import { type PlannerSessionFactory, plannerSessionDir } from "./planner/session
 import { formatCost } from "./planners.js";
 import { reviewCard, reviewTitle } from "./review-card.js";
 import { emptyUsage, type Usage } from "./scout-process.js";
+import { transcriptCheckpoint } from "./transcript-contract.js";
 
 export type { FinishDetails } from "./exec-cards.js";
 
@@ -115,6 +116,17 @@ export interface ExecController {
 
 const NOT_ACTIVE = "No approved plan is being implemented.";
 const WORK_MODEL_UNAVAILABLE = "Work model unavailable. Retry completion or use /flow independent.";
+
+function finalResult<T extends { details?: object }>(result: T, id: string) {
+  return transcriptCheckpoint(result, { id, kind: "report" });
+}
+
+function finishDelivery(details: FinishDetails) {
+  return transcriptCheckpoint(
+    { customType: FINISH_MESSAGE_TYPE, content: finishMessageText(details), details, display: true },
+    { id: randomUUID(), kind: "report" },
+  );
+}
 
 export function registerExec(pi: ExtensionAPI, host: ExecHost): ExecController {
   let state: ExecState | undefined;
@@ -255,6 +267,7 @@ export function registerExec(pi: ExtensionAPI, host: ExecHost): ExecController {
     ctx: ExtensionContext,
     usage?: Usage,
     signal?: AbortSignal,
+    toolCallId?: string,
   ) => {
     const manager = ctx.sessionManager;
     const sessionId = manager.getSessionId?.();
@@ -361,12 +374,13 @@ export function registerExec(pi: ExtensionAPI, host: ExecHost): ExecController {
       current.completion = structuredClone(details);
       persist();
     }
-    return {
+    const result = {
       content: [{ type: "text", text: `${finishMessageText(details)}\n\nExec mode is over. Stop here.` }],
       details,
       ...(usage ? { usage } : {}),
       terminate: true,
-    } as never;
+    };
+    return (toolCallId ? finalResult(result, toolCallId) : result) as never;
   };
 
   const record = (usage: Usage, ctx: ExtensionContext) => {
@@ -569,12 +583,7 @@ export function registerExec(pi: ExtensionAPI, host: ExecHost): ExecController {
       if (action !== "retry") return pausedResult(WORK_MODEL_UNAVAILABLE);
       const result = await finalize(current, token, structuredClone(current.pendingCompletion), ctx, undefined, signal);
       if (origin === "command" && live(current, token) && !current.active && current.completion) {
-        pi.sendMessage({
-          customType: FINISH_MESSAGE_TYPE,
-          content: finishMessageText(current.completion),
-          details: structuredClone(current.completion),
-          display: true,
-        });
+        pi.sendMessage(finishDelivery(structuredClone(current.completion)));
       }
       return result;
     }
@@ -624,12 +633,7 @@ export function registerExec(pi: ExtensionAPI, host: ExecHost): ExecController {
       }
       const result = await finalize(current, token, details, ctx, undefined, signal);
       if (origin === "command" && live(current, token) && !current.active) {
-        pi.sendMessage({
-          customType: FINISH_MESSAGE_TYPE,
-          content: finishMessageText(details),
-          details,
-          display: true,
-        });
+        pi.sendMessage(finishDelivery(details));
       }
       return result;
     }
@@ -811,7 +815,7 @@ export function registerExec(pi: ExtensionAPI, host: ExecHost): ExecController {
     },
     renderResult: (result, options, theme) =>
       renderAsk(result.details as AskDetails | undefined, options, theme, currentExchange),
-    async execute(_id, params: unknown, signal, onUpdate, ctx) {
+    async execute(id, params: unknown, signal, onUpdate, ctx) {
       hostCtx = ctx;
       const current = state;
       if (!current?.active || !current.planner) {
@@ -829,16 +833,19 @@ export function registerExec(pi: ExtensionAPI, host: ExecHost): ExecController {
       const planner = consultant(ctx);
       if (!planner) {
         const error = "The planner's session is missing; ask the user about anything the approved plan leaves open.";
-        return {
-          content: [{ type: "text", text: error }],
-          details: {
-            question: message,
-            planner: current.planner.name,
-            error,
-            executionId: n.executionId,
-            number: current.asks + 1,
+        return finalResult(
+          {
+            content: [{ type: "text", text: error }],
+            details: {
+              question: message,
+              planner: current.planner.name,
+              error,
+              executionId: n.executionId,
+              number: current.asks + 1,
+            },
           },
-        } as never;
+          id,
+        ) as never;
       }
       const previousPhase = n.phase;
       n.phase = "consulting";
@@ -868,10 +875,13 @@ export function registerExec(pi: ExtensionAPI, host: ExecHost): ExecController {
         disposeAgent();
         persist();
         updateStatus(ctx);
-        return {
-          content: [{ type: "text", text: `Planner consultation failed: ${String(error)}` }],
-          details: { ...askIdentity, question: message, planner: name, error: String(error) },
-        } as never;
+        return finalResult(
+          {
+            content: [{ type: "text", text: `Planner consultation failed: ${String(error)}` }],
+            details: { ...askIdentity, question: message, planner: name, error: String(error) },
+          },
+          id,
+        ) as never;
       } finally {
         unsubscribe();
         signal?.removeEventListener("abort", onAbort);
@@ -893,22 +903,25 @@ export function registerExec(pi: ExtensionAPI, host: ExecHost): ExecController {
           usage: result.usage,
         } as never;
       if (result.error) {
-        return {
-          content: [
-            {
-              type: "text",
-              text: `The planner failed: ${result.error}. Decide within the plan, and ask the user about anything it leaves open.`,
-            },
-          ],
-          details: {
-            ...askIdentity,
-            error: result.error,
-            question: message,
-            planner: name,
-            costUsd: result.usage.cost.total,
-          } satisfies AskDetails,
-          usage: result.usage,
-        } as never;
+        return finalResult(
+          {
+            content: [
+              {
+                type: "text",
+                text: `The planner failed: ${result.error}. Decide within the plan, and ask the user about anything it leaves open.`,
+              },
+            ],
+            details: {
+              ...askIdentity,
+              error: result.error,
+              question: message,
+              planner: name,
+              costUsd: result.usage.cost.total,
+            } satisfies AskDetails,
+            usage: result.usage,
+          },
+          id,
+        ) as never;
       }
       const after = readPlan(current.planFile);
       const changes = before === after ? [] : planDiff(before, after);
@@ -918,18 +931,21 @@ export function registerExec(pi: ExtensionAPI, host: ExecHost): ExecController {
         changes.length > 0
           ? `\n\nIt amended the plan (${tildify(current.planFile)}):\n${planDiffText(changes)}\n\nFollow the amended plan.`
           : "";
-      return {
-        content: [{ type: "text", text: `${body}${amended}` }],
-        details: {
-          ...askIdentity,
-          question: message,
-          reply,
-          planner: name,
-          changes,
-          costUsd: result.usage.cost.total,
-        } satisfies AskDetails,
-        usage: result.usage,
-      } as never;
+      return finalResult(
+        {
+          content: [{ type: "text", text: `${body}${amended}` }],
+          details: {
+            ...askIdentity,
+            question: message,
+            reply,
+            planner: name,
+            changes,
+            costUsd: result.usage.cost.total,
+          } satisfies AskDetails,
+          usage: result.usage,
+        },
+        id,
+      ) as never;
     },
   });
 
@@ -982,7 +998,7 @@ export function registerExec(pi: ExtensionAPI, host: ExecHost): ExecController {
     renderCall: (_args, theme) => reviewTitle(theme, "Implementation review"),
     renderResult: (result, options, theme) =>
       renderFinish(result.details as FinishDetails | undefined, options, theme, currentExchange),
-    async execute(_id, params: unknown, signal, onUpdate, ctx) {
+    async execute(id, params: unknown, signal, onUpdate, ctx) {
       hostCtx = ctx;
       const current = state;
       if (!current?.active) return text(NOT_ACTIVE);
@@ -990,7 +1006,7 @@ export function registerExec(pi: ExtensionAPI, host: ExecHost): ExecController {
       let n = current.negotiation!;
       if (current.pendingCompletion) {
         if (signal?.aborted || ctx.signal?.aborted) return pausedResult(WORK_MODEL_UNAVAILABLE);
-        return finalize(current, token, structuredClone(current.pendingCompletion), ctx, undefined, signal);
+        return finalize(current, token, structuredClone(current.pendingCompletion), ctx, undefined, signal, id);
       }
       if (n.phase === "paused") {
         pauseShownThisRun = true;
@@ -1057,7 +1073,7 @@ export function registerExec(pi: ExtensionAPI, host: ExecHost): ExecController {
         details.assessment = { state: "disabled" };
         details.completion = "no_review";
         details.negotiation = structuredClone(n);
-        return await finalize(current, token, details, ctx, undefined, signal);
+        return await finalize(current, token, details, ctx, undefined, signal, id);
       }
       try {
         n = startReview(n, submission, responses);
@@ -1217,7 +1233,7 @@ export function registerExec(pi: ExtensionAPI, host: ExecHost): ExecController {
       updateStatus(ctx);
       if (decision?.outcome === "accepted") {
         details.completion = "accepted";
-        return await finalize(current, token, details, ctx, usage, signal);
+        return await finalize(current, token, details, ctx, usage, signal, id);
       }
       if (n.phase === "paused") {
         pauseShownThisRun = true;
@@ -1227,33 +1243,39 @@ export function registerExec(pi: ExtensionAPI, host: ExecHost): ExecController {
           if (!signal?.aborted && !ctx.signal?.aborted) {
             const result = await recoveryMenu(current, token, ctx, "tool", signal);
             if (!live(current, token)) return text("Execution changed; discarded stale recovery choice.");
-            return {
-              ...result,
-              content: result.details
-                ? result.content
-                : [
-                    {
-                      type: "text",
-                      text: `${finishMessageText(details)}\n\n${result.content.map((part) => part.text).join("\n")}`,
-                    },
-                  ],
-              details: result.details ?? details,
-              ...(usage ? { usage } : {}),
-            } as never;
+            return finalResult(
+              {
+                ...result,
+                content: result.details
+                  ? result.content
+                  : [
+                      {
+                        type: "text",
+                        text: `${finishMessageText(details)}\n\n${result.content.map((part) => part.text).join("\n")}`,
+                      },
+                    ],
+                details: result.details ?? details,
+                ...(usage ? { usage } : {}),
+              },
+              id,
+            ) as never;
           }
         }
       }
-      return {
-        content: [
-          {
-            type: "text",
-            text: `${finishMessageText(details)}\n\n${n.phase === "paused" ? pauseText(n) : "Exec remains active. Fix the findings or provide evidence-backed disputes, then submit finish_plan with a response for every finding."}`,
-          },
-        ],
-        details,
-        ...(usage ? { usage } : {}),
-        ...(n.phase === "paused" ? { terminate: true } : {}),
-      } as never;
+      return finalResult(
+        {
+          content: [
+            {
+              type: "text",
+              text: `${finishMessageText(details)}\n\n${n.phase === "paused" ? pauseText(n) : "Exec remains active. Fix the findings or provide evidence-backed disputes, then submit finish_plan with a response for every finding."}`,
+            },
+          ],
+          details,
+          ...(usage ? { usage } : {}),
+          ...(n.phase === "paused" ? { terminate: true } : {}),
+        },
+        id,
+      ) as never;
     },
   });
 
@@ -1434,12 +1456,7 @@ export function registerExec(pi: ExtensionAPI, host: ExecHost): ExecController {
       if (leaf && leaf !== back.leaf) return;
       pendingReturn = undefined;
       const details: FinishDetails = { ...back.details, ...(headline ? { headline } : {}) };
-      pi.sendMessage({
-        customType: FINISH_MESSAGE_TYPE,
-        content: finishMessageText(details),
-        details,
-        display: true,
-      });
+      pi.sendMessage(finishDelivery(details));
     },
   });
   pi.registerMessageRenderer<FinishDetails>(FINISH_MESSAGE_TYPE, (message, options, theme) =>

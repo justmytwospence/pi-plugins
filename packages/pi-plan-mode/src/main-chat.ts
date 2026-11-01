@@ -17,6 +17,7 @@ import type { PlannerAgent, PlannerStats, PlannerStatus } from "./planner/agent.
 import { consultMessage, MAIN_AGENT_GUIDELINES } from "./planner/prompt.js";
 import { describeToolArgs, PlannerTrace } from "./planner-trace.js";
 import { SubagentTracker } from "./subagent-progress.js";
+import { transcriptCheckpoint } from "./transcript-contract.js";
 
 export const PLAN_MESSAGE_TYPE = "plan-mode-plan";
 export const ASK_PLANNER_TOOL = "plan_ask_planner";
@@ -70,7 +71,7 @@ export function registerMainChat(pi: ExtensionAPI, bridge: MainChatBridge) {
         message: { type: "string", minLength: 1, description: "What to ask or tell it." },
       },
     } as never,
-    async execute(_id, params: unknown, signal, _onUpdate, ctx) {
+    async execute(toolCallId, params: unknown, signal, _onUpdate, ctx) {
       const input = params as { planner?: unknown; message?: unknown };
       const id = String(input.planner ?? "")
         .trim()
@@ -93,10 +94,11 @@ export function registerMainChat(pi: ExtensionAPI, bridge: MainChatBridge) {
       }
       const result = await planner.consult(consultMessage(message), ctx, "main agent", signal ?? undefined, message);
       if (signal?.aborted) return text(`Stopped waiting; planner ${id} may still answer in its lane.`);
-      if (result.error) return text(`Planner ${id} failed: ${result.error}`);
+      if (result.error) return completedReply(`Planner ${id} failed: ${result.error}`, toolCallId);
       const reply = result.reply.trim() || "(it answered with no text)";
-      return text(
+      return completedReply(
         `Planner ${id} answered:\n\n${reply}${result.revised ? `\n\n(It resubmitted its plan as v${planner.revision}; the new version arrives in this conversation.)` : ""}`,
+        toolCallId,
       );
     },
   });
@@ -323,5 +325,9 @@ function ids(planners: readonly PlannerAgent[]) {
 }
 
 function text(value: string) {
-  return { content: [{ type: "text" as const, text: value }], details: undefined } as never;
+  return { content: [{ type: "text" as const, text: value }], details: undefined };
+}
+
+function completedReply(value: string, id: string) {
+  return transcriptCheckpoint(text(value), { id, kind: "report" });
 }

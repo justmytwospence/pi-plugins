@@ -6,6 +6,8 @@ import { elapsed, footerStatus, marimoNote, nameFromCommand } from "../src/forma
 import { LogFollower, bounded, cleanLine, grep, head, tail } from "../src/log.ts";
 import { type Task, parsePattern } from "../src/registry.ts";
 import { MARIMO_READY, marimoName, marimoServer } from "../src/marimo.ts";
+import { blocks } from "../src/result-view.ts";
+import { readTranscriptCheckpoint } from "../src/transcript-contract.ts";
 
 const task = (over: Partial<Task>): Task => ({
   id: "abc12",
@@ -23,6 +25,15 @@ const task = (over: Partial<Task>): Task => ({
   delivered: false,
   readyDelivered: false,
   ...over,
+});
+
+describe("block results", () => {
+  it("preserves markdown indexes while declaring the first report at the aggregate occurrence", () => {
+    const result = blocks([{ text: "ready" }, { text: "# Report", markdown: true, checkpoint: { id: "event", kind: "report" } }], "wait-call");
+    expect(result.details.markdown).toEqual([1]);
+    expect(readTranscriptCheckpoint(result.details)).toEqual({ id: "wait-call", kind: "report" });
+    expect(readTranscriptCheckpoint(blocks([{ text: "ready" }], "wait-call").details)).toBeUndefined();
+  });
 });
 
 describe("format", () => {

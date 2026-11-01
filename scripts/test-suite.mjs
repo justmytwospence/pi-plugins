@@ -18,6 +18,7 @@ const scripts = [
   ['scripts/test-mode-flow.mjs'],
   ['scripts/test-linked-flow.mjs'],
   ['scripts/test-footer-controls.mjs'],
+  ['scripts/test-transcript-navigation.mjs'],
   ['--test', 'evals/shared/*.test.ts'],
   ['scripts/test-system1.mjs'],
 ];

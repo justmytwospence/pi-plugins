@@ -11,6 +11,7 @@
 //
 // Running children outlive `/reload`: the old runtime parks them and the new one adopts them
 // (handoff.ts). Any other session end stops them, after recording that it did.
+import { randomUUID } from "node:crypto";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { type ExtensionAPI, type ExtensionContext, getMarkdownTheme } from "@earendil-works/pi-coding-agent";
@@ -36,6 +37,10 @@ import { FleetView, SUCCESS_HINT_MS } from "./ui/fleet.ts";
 import type { ViewerActions } from "./ui/viewer.ts";
 import { elapsedMs, formatCount, formatElapsed, modelSourceMark, shortModel } from "./ui/format.ts";
 import { RunsWidget, WIDGET_MODES, type WidgetMode } from "./ui/widget.ts";
+import { transcriptCheckpoint } from "./transcript-contract.ts";
+
+const finalReport = <T extends { details?: object }>(value: T, id: string) =>
+  transcriptCheckpoint(value, { id, kind: "report" });
 
 /** How readily the main agent delegates: `economical` (default) or `conservative`. */
 export type Delegation = "conservative" | "economical";
@@ -702,7 +707,7 @@ export default function subagents(pi: ExtensionAPI) {
     if (!items.length) return;
     safely(() => {
       pi.sendMessage(
-        { customType: "subagent-result", content: items.map((i) => i.content).join("\n\n---\n\n"), display: true, details: items.length === 1 ? items[0]?.details : { batches: items.map((i) => i.details) } },
+        finalReport({ customType: "subagent-result", content: items.map((i) => i.content).join("\n\n---\n\n"), display: true, details: (items.length === 1 ? items[0]?.details : { batches: items.map((i) => i.details) }) as object | undefined }, randomUUID()),
         { triggerTurn: true, deliverAs: "followUp" },
       );
       for (const item of items) for (const run of item.runs ?? []) consumedResults.add(run.id);
@@ -1367,7 +1372,8 @@ export default function subagents(pi: ExtensionAPI) {
             const provenance = run.source?.model === "default" ? ` · ${run.model} (parent) · ${run.thinking}` : "";
             const text = `[${runLabel(run)} · ${run.agent}${provenance} · ${run.state.status}]\n\n${truncateOutput(output || "(no output yet)", run.outputPath)}${run.note ? `\n\n${run.note}` : ""}${note ? `\n\n${note}` : ""}`;
             const shown = { ...view(run, true), ...(output ? { output: clip(output, 2_000) } : {}) };
-            return { content: [{ type: "text", text }], details: { mode: "single", runs: [shown] } as Details };
+            const result = { content: [{ type: "text" as const, text }], details: { mode: "single", runs: [shown] } as Details };
+            return run.state.status === "running" ? result : finalReport(result, _toolCallId);
           }
           return { content: [{ type: "text", text: `${JSON.stringify(view(run, true), null, 2)}${note ? `\n\n${note}` : ""}` }], details: { mode: "single", runs: [view(run, true)] } as Details };
         }
@@ -1632,12 +1638,12 @@ export default function subagents(pi: ExtensionAPI) {
         const skipped = items.length - done.length;
         const text = `${mode === "chain" ? resultText(done.at(-1) as Run) : done.map(resultText).join("\n\n---\n\n")}${skipped > 0 && signal?.aborted ? `\n\n[Cancelled: ${skipped} queued task${skipped === 1 ? "" : "s"} never started.]` : ""}`;
         const allFailed = done.every((r) => r.state.status !== "done");
-        return {
-          content: [{ type: "text", text }],
+        return finalReport({
+          content: [{ type: "text" as const, text }],
           details: { mode, runs: done.map((r) => view(r, true)) } as Details,
           usage: usageOf(done) as never,
           ...(allFailed ? { isError: true } : {}),
-        };
+        }, _toolCallId);
       },
 
       renderCall(args, theme) {

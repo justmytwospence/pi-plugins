@@ -26,6 +26,8 @@ import { EX_BUILTIN_COMMAND_NAMES } from "./engine/modal-editor.js";
 import { cancelModeChangeCommands } from "./engine/mode-change-command.js";
 import { FilePicker } from "./file-picker.js";
 import { MainEditor } from "./main-editor.js";
+import { collectUserWords } from "./transcript-index.js";
+import { scrollToCheckpoint } from "./transcript-viewport.js";
 import { resolveSessionConfig, type SessionConfig } from "./session.js";
 
 export {
@@ -161,6 +163,10 @@ export default function piVim(pi: ExtensionAPI) {
       const { ctx, config } = current;
       const editor = new MainEditor(options.tui, options.theme, options.keybindings, config.editorOptions);
       current.main.add(editor);
+      editor.setTranscriptNavigationFn((direction) => {
+        if (session !== current || editor.isDisposed()) return;
+        scrollToCheckpoint(options.tui, { userWords: collectUserWords(pi.events) }, direction);
+      });
       editor.setClipboardMirrorPolicy(config.clipboardMirrorPolicy);
       editor.setSharedRegister(createFileSharedRegister());
       editor.setQuitFn(() => ctx.shutdown());

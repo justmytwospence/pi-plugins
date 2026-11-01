@@ -191,6 +191,7 @@ for (const gate of [false, true]) {
         outcome: "saved",
         edited: false,
         mode: "work",
+        "pi-plugins.transcript.v1": { version: 1, checkpoint: { id: "save", kind: "plan" } },
       });
       assert.ok(result.content[0]?.text.includes(saved));
       assert.match(result.content[0]?.text ?? "", /not approval to implement[\s\S]*Stop here/u);

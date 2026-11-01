@@ -34,7 +34,7 @@ On Windows/WSL, search defaults to Ctrl+F and marked-message jumps use Ctrl+Up/D
 
 Suite additions:
 
-- [pi-vim](/plugins/pi-vim/) uses Ctrl+U/D for half-page transcript scrolling **only in idle Normal mode on the main prompt**. Do not assign those keys globally to native half-page actions; native fullscreen bindings normally precede editor input.
+- [pi-vim](/plugins/pi-vim/) uses Ctrl+U/D for previous/next [transcript checkpoints](/architecture/transcript/) **only in idle Normal mode on the main prompt**: prompts, feedback, concluding responses and explicitly delivered artifacts. Routine tools/progress are skipped without interpreting prose. Do not assign those keys globally to native half-page actions; native fullscreen bindings normally precede editor input.
 - [pi-clear-screen](/plugins/pi-clear-screen/) clears the view with Ctrl+L **after an explicit model-selector remap**. It leaves history/context and the current draft intact. `/clear` instead starts a fresh conversation while retaining model/effort.
 - [pi-sticky-last-prompt](/plugins/pi-sticky-last-prompt/) pins a scrolled-past prompt; clicking it jumps back. It adds no keyboard shortcut.
 
@@ -90,7 +90,7 @@ With this component enabled, configured `tui.editor.historyPrevious`/`tui.editor
 | --- | --- | --- |
 | Leave Insert/Visual or cancel pending input | Escape or Ctrl+[ is local first. | Same; the host dialog does not close on the first mode change. |
 | Escape in idle Normal | Reaches Pi's `app.interrupt`. | Cancels/returns to the host dialog. |
-| Half-page with Ctrl+U/D | Scrolls the fullscreen transcript; consumed/inert in regular mode. | Scrolls only the host's offered viewport, otherwise consumed. |
+| Ctrl+U/D in idle Normal | Previous/next fullscreen checkpoint; consumed/inert in regular mode. | Pages only the host's offered viewport, otherwise consumed. |
 | Ctrl+U/D in Insert | Native text editing; empty Ctrl+D can exit Pi. | Local editing, never Pi process exit. |
 | Ctrl+U/D in EX/pending state | Edits EX text or cancels pending keys; does not scroll. | Same local behavior; never invokes `app.exit`. |
 | `:name args` / `:!cmd` / `:!!cmd` | Dispatches a known Pi command or shell action, preserving the draft. Reserved Vim EX names are not Pi commands. | Never dispatches to Pi, shell or the model. |
@@ -256,7 +256,7 @@ Herdr/tmux prefixes are separate and can intercept keys before Pi. A multiplexer
 Use this ownership order to diagnose a key, not a promise that arbitrary extensions cannot intercept it:
 
 1. **Terminal/multiplexer:** only delivered key packets can reach Pi; modified keys may need richer keyboard reporting.
-2. **Native fullscreen input:** transcript scroll/search actions normally precede public input listeners. Search owns its match controls while open; overlays/dialogs own their own focus. The suite's narrow Vim adapter protects Ctrl+U/D in marked text editors from native half-page bindings.
+2. **Native fullscreen input:** transcript scroll/search actions normally precede public input listeners. Search owns its match controls while open; overlays/dialogs own their own focus. The suite's narrow Vim adapter protects Ctrl+U/D in marked text editors from conflicting native viewport bindings.
 3. **Suite raw listeners:** route contextual Tab, suggestions, panel focus or eligible picker movement. Components declare `editor`, `filter`, `list` or `viewer` through `Symbol.for("pi-plugins.input-context.v1")`; select-nav leaves declared list-navigation ownership alone.
 4. **Focused component:** local text/modal/picker handlers run. Application/extension shortcuts are normally dispatched from the main prompt editor, not every dialog. Escape is local first; an embedded idle-Normal Escape cancels that dialog, not Pi.
 

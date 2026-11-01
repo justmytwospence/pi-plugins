@@ -5,6 +5,11 @@ import { fileURLToPath } from 'node:url';
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const manifest = JSON.parse(readFileSync(resolve(root, 'package.json'), 'utf8'));
 const components = manifest.pi.extensions.map(p => p.split('/')[2]);
+const { transcriptHelpers } = await import('./sync-transcript-helpers.mjs');
+for (const { source, copies } of transcriptHelpers) {
+  const expected = readFileSync(resolve(root, source), 'utf8');
+  for (const copy of copies) assert.equal(readFileSync(resolve(root, copy), 'utf8'), expected, `generated transcript helper drift: ${copy}`);
+}
 const identical = [
   ['pi-plan-mode','pi-cc-render'].map(p => `packages/${p}/src/fresh-handoff.ts`),
   ['pi-context','pi-cc-render'].map(p => `packages/${p}/src/context-metadata.ts`),

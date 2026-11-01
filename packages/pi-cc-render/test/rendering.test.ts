@@ -2,7 +2,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { stripTerminalSequences, visibleWidth } from "@earendil-works/pi-tui";
-import { afterAll, beforeAll, describe, expect, test } from "vitest";
+import { afterAll, beforeAll, describe, expect, test, vi } from "vitest";
 
 // The config module reads its file at import time; isolate it from the real home directory.
 let agentDir: string;
@@ -609,6 +609,43 @@ describe("tool groups", () => {
     }
   });
 
+  test("indexes expanded and collapsed groups as one actual range with the latest human words", async () => {
+    const { indexTranscript } = await import(new URL("../../pi-copy/src/transcript-index.ts", import.meta.url).href);
+    const { transcriptCheckpoint, TRANSCRIPT_BLOCK } = await import("../src/transcript-contract.ts");
+    const { hooks, group, root } = await groupedTools();
+    const { Text } = await import("@earendil-works/pi-tui");
+    try {
+      const prefix = new Text("Earlier prompt", 0, 0);
+      root.children.unshift(prefix);
+      const [first, second] = group.children;
+      first.result = transcriptCheckpoint(first.result, { id: "report-1", kind: "report" });
+      second.result = transcriptCheckpoint(second.result, { id: "report-2", kind: "report" });
+      const context = { userWords: new Map([
+        ["bash", [() => "first answer"]],
+        ["read", [() => "latest answer"]],
+      ]) };
+      expect(group[TRANSCRIPT_BLOCK]()).toEqual({ kind: "tool", subjects: group.children });
+      for (const width of [46, 120, 180]) {
+        for (const expanded of [false, true]) {
+          group.setExpanded(expanded);
+          const lines = root.render(width);
+          const index = indexTranscript(root, width, context);
+          expect(index.lines).toEqual(lines);
+          expect(index.blocks).toHaveLength(2);
+          const start = prefix.render(width).length;
+          expect(index.blocks[1]).toMatchObject({
+            source: group, start, end: start + group.render(width).length, kind: "tool", userText: "latest answer",
+            checkpoint: { id: "feedback:read-1", kind: "feedback" },
+          });
+          const reportsOnly = indexTranscript(root, width, { userWords: new Map() });
+          expect(reportsOnly.blocks[1].checkpoint).toEqual({ id: "report-1", kind: "report" });
+        }
+      }
+    } finally {
+      hooks.shutdown();
+    }
+  });
+
   test("a group draws its children's images, collapsed and expanded, once each", async () => {
     const { hooks, group } = await groupedTools();
     try {
@@ -625,6 +662,59 @@ describe("tool groups", () => {
       }
     } finally {
       hooks.shutdown();
+    }
+  });
+});
+
+describe("compact transcript checkpoints", () => {
+  test("hidden annotated tools and live/settled tails add no stop; native final response does", async () => {
+    const { AssistantMessageComponent, ToolExecutionComponent, initTheme } = await import("@earendil-works/pi-coding-agent");
+    const { Container } = await import("@earendil-works/pi-tui");
+    const { indexTranscript } = await import(new URL("../../pi-copy/src/transcript-index.ts", import.meta.url).href);
+    const { transcriptCheckpoint } = await import("../src/transcript-contract.ts");
+    const { installCompactMode } = await import("../src/renderer/compact-mode.ts");
+    const { installToolGrouping } = await import("../src/renderer/tool/grouping.ts");
+    const { config } = await import("../src/config/config.ts");
+    initTheme("dark", false);
+    const savedMode = config.mode;
+    const clock = vi.spyOn(Date, "now").mockReturnValue(1234);
+    config.mode = "compact";
+    const grouping = installToolGrouping(() => false);
+    const compact = installCompactMode({ writeMetadata: new Map() as any });
+    const root = new Container();
+    const base = { role: "assistant", timestamp: 1234, api: "anthropic-messages", provider: "test", model: "test", usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } } };
+    const call = { ...base, stopReason: "toolUse", content: [{ type: "toolCall", id: "hidden-1", name: "bash", arguments: { command: "echo" } }] };
+    try {
+      const assistant = new AssistantMessageComponent(call as never, true) as any;
+      root.addChild(assistant);
+      const tool = new ToolExecutionComponent("bash", "hidden-1", { command: "echo" }, {}, undefined, { requestRender() {} } as any, "/tmp") as any;
+      tool.result = transcriptCheckpoint({ content: [{ type: "text", text: "done" }], isError: false, details: {} }, { id: "hidden-report", kind: "report" });
+      tool.isPartial = false;
+      tool.executionStarted = true;
+      root.addChild(tool);
+      assistant.updateContent(call, true);
+      expect(tool.render(80)).toEqual([]);
+      let index = indexTranscript(root, 80);
+      expect(index.lines).toEqual(root.render(80));
+      expect(index.lines.some((line: string) => stripTerminalSequences(line).includes("Running"))).toBe(true);
+      expect(index.blocks.filter((block: any) => block.checkpoint)).toEqual([]);
+
+      const final = { ...base, stopReason: "stop", content: [{ type: "text", text: "Final answer" }] };
+      const response = new AssistantMessageComponent(final as never, false) as any;
+      root.addChild(response);
+      response.updateContent(final, false);
+      index = indexTranscript(root, 80);
+      expect(index.lines).toEqual(root.render(80));
+      const stops = index.blocks.filter((block: any) => block.checkpoint);
+      expect(stops).toHaveLength(1);
+      expect(stops[0]).toMatchObject({ source: response, kind: "assistant", checkpoint: { kind: "response" } });
+      expect(index.lines.slice(stops[0].start, stops[0].end).join("\n")).toContain("Final answer");
+      expect(index.blocks.filter((block: any) => block.source !== response).every((block: any) => !block.checkpoint)).toBe(true);
+    } finally {
+      compact.shutdown();
+      grouping.shutdown();
+      config.mode = savedMode;
+      clock.mockRestore();
     }
   });
 });

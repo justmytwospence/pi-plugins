@@ -3,10 +3,12 @@
 // subagent's answer) is Markdown and is rendered as such, as it is when it arrives as a message.
 import { getMarkdownTheme, keyHint, type Theme } from "@earendil-works/pi-coding-agent";
 import { type Component, Markdown, Text } from "@earendil-works/pi-tui";
+import { transcriptCheckpoint, type TranscriptCheckpoint } from "./transcript-contract.ts";
 
 export interface Block {
   text: string;
   markdown?: boolean;
+  checkpoint?: TranscriptCheckpoint;
 }
 
 /** Details of a result with Markdown blocks: the indexes of its content items to render as Markdown. */
@@ -18,12 +20,14 @@ export interface BlockDetails {
 export const PREVIEW_LINES = 10;
 
 /** A tool result made of blocks; the model gets one text item per block. */
-export function blocks(list: Block[]) {
+export function blocks(list: Block[], aggregateId?: string) {
   const markdown = list.flatMap((b, i) => (b.markdown ? [i] : []));
-  return {
+  const result = {
     content: list.map((b) => ({ type: "text" as const, text: b.text })),
     details: (markdown.length ? { markdown } : {}) as BlockDetails,
   };
+  const checkpoint = list.find((b) => b.checkpoint)?.checkpoint;
+  return checkpoint ? transcriptCheckpoint(result, { ...checkpoint, id: aggregateId ?? checkpoint.id }) : result;
 }
 
 type Content = { type: string; text?: string };

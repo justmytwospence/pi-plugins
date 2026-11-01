@@ -141,3 +141,5 @@ npm run check
 ## License
 
 MIT. See [LICENSE](./LICENSE).
+
+Vim checkpoint navigation, copy mode and sticky prompts use one shared row index. Plugin artifacts explicitly declare their checkpoints; copyable text and pinned user words remain separate selections. See [transcript architecture](https://pi-plugins.vercel.app/architecture/transcript/) for the annotation and component hooks.

@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { constants } from "node:os";
 import type { Theme } from "@earendil-works/pi-coding-agent";
 import { type Component, type TUI, type TuiMouseEvent, type TuiMouseEventResult, matchesKey, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
@@ -5,6 +6,7 @@ import { encodeInput } from "./input.ts";
 import { footerRows } from "./footer.ts";
 import { TerminalScreen } from "./screen.ts";
 import { type PtyFactory, type PtyProcess, spawnPty, stopPty } from "./pty.ts";
+import { TRANSCRIPT_BLOCK, type TranscriptCheckpoint } from "./transcript-contract.ts";
 
 export interface HandoffResult { output: string; exitCode: number; cancelled: boolean; truncated: false }
 export function failure(message: string): HandoffResult {
@@ -29,6 +31,7 @@ export class TerminalPanel {
   focused = true;
   readonly [INPUT_CONTEXT] = () => "terminal";
   private readonly screen: TerminalScreen;
+  private readonly checkpoint: TranscriptCheckpoint = { id: randomUUID(), kind: "shell" };
   private pty?: PtyProcess;
   private listeners: Array<{ dispose(): void }> = [];
   private expanded = false;
@@ -246,7 +249,9 @@ export class TerminalPanel {
     const lines = this.frame(content, `exited ${result.exitCode}`, " Exited · output retained for this session", false);
     const dividerIndex = 2 + head.length;
     const capturedWidth = this.width;
-    return {
+    const checkpoint = this.checkpoint;
+    const snapshot: Component & { [TRANSCRIPT_BLOCK]: () => { kind: "bash"; checkpoint: TranscriptCheckpoint } } = {
+      [TRANSCRIPT_BLOCK]: () => ({ kind: "bash", checkpoint }),
       render: width => lines.map((line, index) => {
         if (omitted && index === dividerIndex) {
           const bodyWidth = Math.max(0, Math.min(capturedWidth, width) - 4);
@@ -257,6 +262,7 @@ export class TerminalPanel {
       }),
       invalidate() {},
     };
+    return snapshot;
   }
 
   private frame(content: string[], status: string, hint: string, clipLive = true): string[] {

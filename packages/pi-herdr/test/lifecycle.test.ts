@@ -8,6 +8,7 @@ import { ChildrenActivity } from "../src/children-activity.ts";
 import { Children, type ChildRecord } from "../src/core/children.ts";
 import piHerdr from "../src/index.ts";
 import { processInboxState } from "../src/inbox.ts";
+import { readTranscriptCheckpoint } from "../src/transcript-contract.ts";
 import { fakeCall } from "./core/fake.ts";
 
 afterEach(() => vi.unstubAllEnvs());
@@ -516,7 +517,10 @@ test("an awaited reply nobody consumed is delivered once as a message when pi is
   piHerdr(p.pi, { call: w.f.call, exec: async () => ({ code: 0, stdout: "", stderr: "" }), pollMs: 5 });
   const ctx = { ...ctxOf([]), isIdle: () => true };
   await p.emit("session_start", { type: "session_start", reason: "startup" }, ctx);
-  await p.tool().execute("t", { action: "send", name: "other", message: "go", await_reply: true }, undefined, undefined, ctx);
+  const launch = await p.tool().execute("t", { action: "send", name: "other", message: "go", await_reply: true }, undefined, undefined, ctx);
+  expect(readTranscriptCheckpoint(launch.details)).toBeUndefined();
+  const status = await p.tool().execute("t", { action: "list" }, undefined, undefined, ctx);
+  expect(readTranscriptCheckpoint(status.details)).toBeUndefined();
   // The waiting tool refuses an awaited agent: its reply comes on its own.
   await expect(p.tool().execute("t", { action: "wait", name: "other" }, undefined, undefined, ctx)).rejects.toThrow("bg_wait herdr:other");
   await expect(p.tool().execute("t", { action: "interrupt", name: "other" }, undefined, undefined, ctx)).rejects.toThrow("only on this session's children");
@@ -527,6 +531,12 @@ test("an awaited reply nobody consumed is delivered once as a message when pi is
   await until(() => p.messages.length === 1);
   expect(p.messages[0].message.customType).toBe("herdr-child");
   expect(p.messages[0].message.content).toContain("a screen read");
+  const persisted = JSON.parse(JSON.stringify(p.messages[0].message));
+  expect(persisted.details).toMatchObject({ name: "other", paneId: "w7:p1", turnKey: expect.any(String) });
+  expect(readTranscriptCheckpoint(persisted.details)).toEqual({ id: persisted.details.turnKey, kind: "report" });
+  expect(readTranscriptCheckpoint({ name: "other", paneId: "w7:p1", turnKey: persisted.details.turnKey })).toBeUndefined();
+  expect(readTranscriptCheckpoint(launch.details)).toBeUndefined();
+  expect(readTranscriptCheckpoint(status.details)).toBeUndefined();
   await new Promise((r) => setTimeout(r, 30));
   expect(p.messages).toHaveLength(1);
   // A consume after the message is a no-op.
@@ -636,6 +646,7 @@ test("presence: a message waits while the user types, is acknowledged held:typin
     await vi.advanceTimersByTimeAsync(1_000);
     expect(t.p.messages).toHaveLength(1);
     expect(t.p.messages[0].options).toEqual({ triggerTurn: true, deliverAs: "followUp" });
+    expect(readTranscriptCheckpoint(t.p.messages[0].message.details)).toBeUndefined();
     // The typing token ends with the burst.
     await vi.advanceTimersByTimeAsync(16_000);
     expect(t.tokens("pi-herdr-inbox")).toContainEqual(["typing", null]);

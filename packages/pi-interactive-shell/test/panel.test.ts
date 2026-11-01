@@ -2,6 +2,7 @@ import { beforeEach, expect, test, vi } from "vitest";
 import { CURSOR_MARKER, visibleWidth, type TuiMouseEvent } from "@earendil-works/pi-tui";
 import { omissionDivider, TerminalPanel } from "../src/panel.ts";
 import { stopPty } from "../src/pty.ts";
+import { TRANSCRIPT_BLOCK } from "../src/transcript-contract.ts";
 
 vi.mock("../src/pty.ts", () => ({ spawnPty: vi.fn(), stopPty: vi.fn(async () => {}) }));
 beforeEach(() => vi.clearAllMocks());
@@ -24,6 +25,22 @@ async function setup(factory?: any, command = "interactive-example", autoClose =
 }
 
 const plain = (lines: string[]) => lines.join("\n").replace(/\x1b\[[0-9;]*m/g, "");
+
+test("only retained snapshots declare distinct shell command occurrences", async () => {
+  const first = await setup(undefined, "same command", false, true);
+  const second = await setup(undefined, "same command", false, true);
+  expect((first.panel as any)[TRANSCRIPT_BLOCK]).toBeUndefined();
+  expect((second.panel as any)[TRANSCRIPT_BLOCK]).toBeUndefined();
+  await first.panel.shutdown();
+  await second.panel.shutdown();
+  const firstSnapshot = first.done.mock.calls[0][1];
+  const secondSnapshot = second.done.mock.calls[0][1];
+  const firstBlock = firstSnapshot[TRANSCRIPT_BLOCK]({ width: 98, lines: firstSnapshot.render(98) });
+  const secondBlock = secondSnapshot[TRANSCRIPT_BLOCK]({ width: 98, lines: secondSnapshot.render(98) });
+  expect(firstBlock).toEqual({ kind: "bash", checkpoint: { id: expect.any(String), kind: "shell" } });
+  expect(firstSnapshot[TRANSCRIPT_BLOCK]()).toEqual(firstBlock);
+  expect(secondBlock.checkpoint.id).not.toBe(firstBlock.checkpoint.id);
+});
 
 test("renders a bounded overlay and never suspends or clears Pi", async () => {
   const h = await setup();

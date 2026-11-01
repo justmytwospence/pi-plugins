@@ -104,6 +104,7 @@ import {
 import { resolveSystem1Target, SYSTEM1_CHANGED } from "./system1.js";
 import { applyAlwaysOffer, applyJevPick, buildToolTree, leafCapabilities, type ToolNode } from "./tool-tree.js";
 import { type ToolPreselection, ToolTreeView } from "./tool-tree-view.js";
+import { transcriptCheckpoint } from "./transcript-contract.js";
 import { effortText } from "./ui-kit.js";
 
 const EXTENSION_ENTRY_PATH = fileURLToPath(new URL("./index.ts", import.meta.url));
@@ -361,7 +362,10 @@ export default async function plan(pi: ExtensionAPI, dependencies: PlanDependenc
   const sendToMain = (content: string, details: PlanMessageDetails) => {
     try {
       pi.sendMessage<PlanMessageDetails>(
-        { customType: PLAN_MESSAGE_TYPE, content, display: true, details },
+        transcriptCheckpoint(
+          { customType: PLAN_MESSAGE_TYPE, content, display: true, details },
+          { id: randomUUID(), kind: details.kind === "plan" ? "plan" : "report" },
+        ),
         {
           triggerTurn: false,
         },
@@ -915,13 +919,16 @@ export default async function plan(pi: ExtensionAPI, dependencies: PlanDependenc
             firstKeptEntryId: null,
             details: { planMode: { direct: approval.planFile } },
           },
-          {
-            type: "custom_message" as const,
-            customType: "plan-mode-implementation",
-            content: directImplementationBrief(approval),
-            display: true,
-            details: { planFile: approval.planFile, lines: approval.plan.split("\n").length },
-          },
+          transcriptCheckpoint(
+            {
+              type: "custom_message" as const,
+              customType: "plan-mode-implementation",
+              content: directImplementationBrief(approval),
+              display: true,
+              details: { planFile: approval.planFile, lines: approval.plan.split("\n").length },
+            },
+            { id: randomUUID(), kind: "plan" },
+          ),
         ],
         continue: true,
       };
@@ -1050,24 +1057,27 @@ export default async function plan(pi: ExtensionAPI, dependencies: PlanDependenc
             ]
           : []),
         { type: "custom" as const, customType: EXEC_ENTRY, data: execState },
-        {
-          type: "custom_message" as const,
-          customType: HANDOFF_MESSAGE_TYPE,
-          content: implementationBrief({
-            plan: approval.plan,
-            planFile: approval.planFile,
-            context: "here",
-            ...(planner ? { planner: planner.name } : {}),
-            edited: approval.edited,
-          }),
-          display: true,
-          details: {
-            planFile: approval.planFile,
-            implementer,
-            ...(planner ? { planner: planner.name } : {}),
-            lines: approval.plan.split("\n").length,
+        transcriptCheckpoint(
+          {
+            type: "custom_message" as const,
+            customType: HANDOFF_MESSAGE_TYPE,
+            content: implementationBrief({
+              plan: approval.plan,
+              planFile: approval.planFile,
+              context: "here",
+              ...(planner ? { planner: planner.name } : {}),
+              edited: approval.edited,
+            }),
+            display: true,
+            details: {
+              planFile: approval.planFile,
+              implementer,
+              ...(planner ? { planner: planner.name } : {}),
+              lines: approval.plan.split("\n").length,
+            },
           },
-        },
+          { id: randomUUID(), kind: "plan" },
+        ),
       ],
       continue: true,
     };

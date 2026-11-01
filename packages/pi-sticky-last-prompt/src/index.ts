@@ -3,8 +3,6 @@
 import { randomUUID } from "node:crypto";
 import {
   SkillInvocationMessageComponent,
-  ToolExecutionComponent,
-  UserMessageComponent,
   type ExtensionAPI,
   type Theme,
 } from "@earendil-works/pi-coding-agent";
@@ -19,12 +17,12 @@ import {
   type TuiMouseEventResult,
 } from "@earendil-works/pi-tui";
 
-interface ScrollViewLike {
-  scrollTop: number;
-  child?: unknown;
-  getContentWidth?(width: number): number;
-  scrollTo(scrollTop: number, options?: { disableFollow?: boolean }): void;
-}
+import { EMPTY_TRANSCRIPT_CONTEXT, type TranscriptDescription, type TranscriptIndex, type UserWordsRegistry } from "./transcript-contract.ts";
+import { collectUserWords, describeTranscriptComponent, indexTranscriptChildren } from "./transcript-index.ts";
+import { captureTranscriptView, transcriptDocument, transcriptViewWidth, type TranscriptView } from "./transcript-viewport.ts";
+export { USER_WORDS_CHANNEL, type ToolCallView, type UserWordsExtractor, type UserWordsRequest, type UserWordsRegistry } from "./transcript-contract.ts";
+
+type ScrollViewLike = TranscriptView;
 
 interface LayoutBoxLike {
   component?: unknown;
@@ -50,8 +48,8 @@ export function findTranscriptView<T>(root: unknown, valid: (value: unknown) => 
   const walk = (node: unknown, depth: number): T | undefined => {
     if (!node || typeof node !== "object" || seen.has(node) || depth > 8) return undefined;
     seen.add(node);
-    const view = node as { primary?: unknown; child?: { children?: unknown } };
-    if (valid(node) && Array.isArray(view.child?.children)) {
+    const view = node as { primary?: unknown };
+    if (valid(node) && Array.isArray((transcriptDocument(node as unknown as TranscriptView) as { children?: unknown } | undefined)?.children)) {
       if (view.primary === true) return node;
       fallback ??= node;
     }
@@ -101,25 +99,9 @@ function padToWidth(text: string, width: number): string {
   return text + " ".repeat(Math.max(0, width - visibleWidth(text)));
 }
 
-function renderLines(component: unknown, width: number): string[] {
-  try {
-    const render = (component as { render?: (w: number) => unknown }).render;
-    const lines = typeof render === "function" ? render.call(component, width) : undefined;
-    return Array.isArray(lines) && lines.every((line) => typeof line === "string") ? lines : [];
-  } catch {
-    return [];
-  }
-}
-
 /** Match only pi-clear-screen's marker, not arbitrary lines containing NUL. */
 export function isClearSentinel(lines: string[]): boolean {
   return lines.length > 0 && lines.every((line) => line === CLEAR_SENTINEL);
-}
-
-/** Only plain Containers concatenate their children without padding or layout transforms. */
-function isPlainContainer(value: unknown): value is { children: readonly unknown[] } {
-  const name = (value as { constructor?: { name?: string } } | undefined)?.constructor?.name;
-  return name === "Container" && Array.isArray((value as { children?: unknown }).children);
 }
 
 export interface UserAnchor {
@@ -155,84 +137,39 @@ export function extractUserText(content: unknown): string {
 /** `tool`: a tool row carrying the user's words; renderers may group it with other calls. */
 type Classifier = (child: unknown) => { kind: "user"; text: string; tool?: boolean } | { kind: "skill"; name: string } | undefined;
 
-/**
- * The user's words in a tool group (pi-cc-render's ToolGroupComponent, say): a non-plain
- * component whose direct children include such tool rows. Its rows cannot be split by child,
- * so the whole group anchors with the latest words in it.
- */
-function groupedWords(child: unknown, classify: Classifier): string | undefined {
-  const children = (child as { children?: unknown } | undefined)?.children;
-  if (!Array.isArray(children)) return undefined;
-  let words: string | undefined;
-  for (const kid of children) {
-    const kind = classify(kid);
-    if (kind?.kind === "user" && kind.tool) words = kind.text;
-  }
-  return words;
-}
-
-/**
- * User-words service (version 1): what the user told the agent through another plugin's dialog
- * (an ask_user_question answer, plan feedback, a message on a declined call) comes back as a
- * tool result, not a user message. Providers say how to read those words out of their results.
- * On each `session_start`, an active copy emits `{ version: 1, register }` on `USER_WORDS_CHANNEL`;
- * providers listening there call `register(toolName, extract)` before `emit` returns (`"*"`
- * matches any tool). Providers copy these declarations structurally; without this extension
- * nothing asks them.
- */
-export const USER_WORDS_CHANNEL = "pi-plugins.user-words.v1";
-
-export interface ToolCallView {
-  toolName: string;
-  args: unknown;
-  result: { content?: unknown; details?: unknown; isError?: boolean };
-}
-
-/** The user's words in a finished call's result, or undefined when it carries none. */
-export type UserWordsExtractor = (call: ToolCallView) => string | undefined;
-
-export interface UserWordsRequest {
-  version: 1;
-  register?: (toolName: string, extract: UserWordsExtractor) => void;
-}
-
-export type UserWordsRegistry = ReadonlyMap<string, readonly UserWordsExtractor[]>;
-
-function userWordsOf(child: unknown, registry: UserWordsRegistry): string | undefined {
-  if (registry.size === 0 || !(child instanceof ToolExecutionComponent)) return undefined;
-  // Renderer internals: the call's name, arguments and its final (not partial) result.
-  const call = child as unknown as { toolName?: unknown; args?: unknown; result?: ToolCallView["result"]; isPartial?: unknown };
-  if (typeof call.toolName !== "string" || !call.result || typeof call.result !== "object" || call.isPartial === true) return undefined;
-  const view: ToolCallView = { toolName: call.toolName, args: call.args, result: call.result };
-  for (const extract of [...(registry.get(call.toolName) ?? []), ...(registry.get("*") ?? [])]) {
-    try {
-      const words = extract(view);
-      if (typeof words === "string" && words.trim()) return words;
-    } catch {
-      // A provider's bug must not blank the bar.
-    }
-  }
-  return undefined;
-}
-
-/** Pi's prompt components, plus tool rows that carry the user's words per `registry`. */
+/** Pi's prompt components and explicit human words, described by the common adapter. */
 export function makeClassifier(registry: UserWordsRegistry = new Map()): Classifier {
   return (child) => {
-    if (child instanceof UserMessageComponent) {
-      return { kind: "user", text: extractUserText((child as unknown as { text?: unknown }).text) };
-    }
+    const description = describeTranscriptComponent(child, { userWords: registry, width: 1, lines: [] });
+    if (!description?.userText) return undefined;
     if (child instanceof SkillInvocationMessageComponent) {
-      const name = (child as unknown as { skillBlock?: { name?: unknown } }).skillBlock?.name;
-      return { kind: "skill", name: typeof name === "string" ? name : "" };
+      return { kind: "skill", name: description.userText.slice("[skill] ".length) };
     }
-    const words = userWordsOf(child, registry);
-    return words === undefined ? undefined : { kind: "user", text: words, tool: true };
+    return { kind: "user", text: description.userText, ...(description.kind === "tool" ? { tool: true } : {}) };
   };
 }
 
 export const classifyPiComponent: Classifier = makeClassifier();
 
-/** Walk live document rows, including nested transcript rebuilds and zero-row clears. */
+function descriptionFor(classify: Classifier): (child: unknown) => TranscriptDescription | undefined {
+  return (child) => {
+    const description = classify(child);
+    return description ? {
+      kind: description.kind === "user" && description.tool ? "tool" : "user",
+      userText: description.kind === "skill" ? `[skill] ${description.name}` : description.text,
+    } : undefined;
+  };
+}
+
+function appendAnchors(transcript: TranscriptIndex, offset: number, index: AnchorIndex): void {
+  for (const block of transcript.blocks) {
+    const text = block.userText && collapseWhitespace(block.userText);
+    if (text) index.anchors.push({ start: offset + block.start, end: offset + block.end, text, source: block.source });
+  }
+  index.horizons.push(...transcript.horizons.map(row => ({ row: offset + row })));
+}
+
+/** Adapt common rendered rows to the public prompt-pin service's anchor shape. */
 export function collectAnchors(
   children: readonly unknown[],
   width: number,
@@ -240,29 +177,9 @@ export function collectAnchors(
   index: AnchorIndex,
   classify: Classifier = classifyPiComponent,
 ): number {
-  for (const child of children) {
-    let kind = classify(child);
-    if (!kind && !isPlainContainer(child)) {
-      const words = groupedWords(child, classify);
-      if (words !== undefined) kind = { kind: "user", text: words };
-    }
-    if (kind) {
-      const height = renderLines(child, width).length;
-      const text = kind.kind === "user" ? collapseWhitespace(kind.text) : collapseWhitespace(kind.name);
-      if (text && height > 0) {
-        index.anchors.push({ start: offset, end: offset + height, text: kind.kind === "skill" ? `[skill] ${text}` : text, source: child });
-      }
-      offset += height;
-    } else if (isPlainContainer(child)) {
-      offset = collectAnchors(child.children, width, offset, index, classify);
-    } else {
-      for (const line of renderLines(child, width)) {
-        if (line === CLEAR_SENTINEL) index.horizons.push({ row: offset });
-        else offset++;
-      }
-    }
-  }
-  return offset;
+  const transcript = indexTranscriptChildren(children, width, EMPTY_TRANSCRIPT_CONTEXT, { describe: descriptionFor(classify) });
+  appendAnchors(transcript, offset, index);
+  return offset + transcript.lines.length;
 }
 
 /**
@@ -320,10 +237,14 @@ export interface PromptPinRequest {
 export function createPromptPinService(classify: Classifier = classifyPiComponent): PromptPinService {
   return {
     anchor(children, width, top) {
-      const index: AnchorIndex = { anchors: [], horizons: [] };
-      collectAnchors(children, Math.max(1, Math.floor(width)), 0, index, classify);
-      const selected = selectAnchor(index, top);
-      return selected ? { start: selected.start, end: selected.end, text: selected.text } : undefined;
+      try {
+        const index: AnchorIndex = { anchors: [], horizons: [] };
+        collectAnchors(children, Math.max(1, Math.floor(width)), 0, index, classify);
+        const selected = selectAnchor(index, top);
+        return selected ? { start: selected.start, end: selected.end, text: selected.text } : undefined;
+      } catch {
+        return undefined; // Never reuse row offsets after an unmeasurable render.
+      }
     },
     bar: renderPinBar,
   };
@@ -409,9 +330,8 @@ export default function stickyLastPrompt(pi: ExtensionAPI): void {
   let releasePatch: (() => void) | undefined;
   let paintedAnchor: UserAnchor | undefined;
   let serving = false;
-  const userWords = new Map<string, UserWordsExtractor[]>();
-  const classify = makeClassifier(userWords);
-  const pinService = createPromptPinService(classify);
+  let userWords: UserWordsRegistry = new Map();
+  const pinService = createPromptPinService(child => makeClassifier(userWords)(child));
   // Pi keeps this object and reads it on every render, so a narrower transcript moves the bar.
   const barOptions: OverlayOptions = { anchor: "top-left", row: 0, col: 0, width: "100%", nonCapturing: true };
 
@@ -433,12 +353,13 @@ export default function stickyLastPrompt(pi: ExtensionAPI): void {
     if (!screen) return undefined;
     const valid = (value: unknown): value is ScrollViewLike => {
       const sv = value as Partial<ScrollViewLike> | undefined;
-      return !!sv && Number.isFinite(sv.scrollTop) && typeof sv.scrollTo === "function";
+      return !!sv && Number.isFinite(sv.scrollTop) && Number.isFinite(sv.viewportHeight)
+        && typeof sv.getContentWidth === "function" && typeof sv.scrollTo === "function";
     };
     try {
       const direct = screen.getPrimaryScrollView?.();
       // Before the first layout, Pi returns an implicit scroll view without transcript children.
-      if (valid(direct) && Array.isArray((direct.child as { children?: unknown } | undefined)?.children)) return direct;
+      if (valid(direct) && Array.isArray((transcriptDocument(direct) as { children?: unknown } | undefined)?.children)) return direct;
     } catch {
       // Fall back to the mounted primary scroll view.
     }
@@ -477,23 +398,23 @@ export default function stickyLastPrompt(pi: ExtensionAPI): void {
   function currentSelection(): UserAnchor | undefined {
     if (screen?.mode !== "fullscreen" || duplicateBarVisible()) return undefined;
     const sv = primaryScrollView();
-    const children = (sv?.child as { children?: unknown } | undefined)?.children;
-    if (!sv || !Array.isArray(children)) return undefined;
+    if (!sv) return undefined;
     try {
       const termWidth = screen.terminal.columns;
       // The transcript may not span the screen (pi-sidebar puts a panel beside it): the bar covers
       // only the transcript, and anchors are measured at its width.
       const rect = layoutRectOf(screen.currentLayout?.root, sv);
-      const boxWidth = rect && rect.width > 0 ? rect.width : termWidth;
+      const boxWidth = transcriptViewWidth(screen, sv);
+      if (!rect || boxWidth === undefined) return undefined;
       if (rect && rect.width > 0 && rect.width < termWidth) Object.assign(barOptions, { row: rect.y, col: rect.x, width: rect.width });
       else Object.assign(barOptions, { row: 0, col: 0, width: "100%" });
-      const width = sv.getContentWidth?.(boxWidth) ?? boxWidth;
-      if (!Number.isFinite(width) || width < 1) return undefined;
-      // Outer children identity + total height cannot detect nested, in-place, same-height
-      // edits or skill expansion. Rewalk on each paint; component render caches still apply.
+      // Capture the document itself: document row hooks own clear deletion and padding.
+      // Always recapture so same-height edits and group expansion cannot retain stale rows.
+      const transcript = captureTranscriptView(sv, boxWidth, { userWords });
+      if (!transcript) return undefined;
       const index: AnchorIndex = { anchors: [], horizons: [] };
-      collectAnchors(children, Math.floor(width), 0, index, classify);
-      return selectAnchor(index, sv.scrollTop);
+      appendAnchors(transcript, 0, index);
+      return selectAnchor(index, transcript.scrollTop);
     } catch {
       return undefined;
     }
@@ -556,7 +477,7 @@ export default function stickyLastPrompt(pi: ExtensionAPI): void {
     paintedAnchor = undefined;
     warnedDuplicate = false;
     serving = false;
-    userWords.clear();
+    userWords = new Map();
     for (const release of cleanup) {
       try {
         release?.();
@@ -571,20 +492,7 @@ export default function stickyLastPrompt(pi: ExtensionAPI): void {
     if (ctx.mode !== "tui" || !ctx.hasUI) return;
     const mine = generation;
     serving = true;
-    const request: UserWordsRequest = {
-      version: 1,
-      register: (toolName, extract) => {
-        if (mine !== generation || typeof toolName !== "string" || typeof extract !== "function") return;
-        const list = userWords.get(toolName) ?? [];
-        if (!list.includes(extract)) list.push(extract);
-        userWords.set(toolName, list);
-      },
-    };
-    try {
-      pi.events?.emit?.(USER_WORDS_CHANNEL, request);
-    } catch {
-      // A provider that throws only loses its own words.
-    }
+    userWords = collectUserWords(pi.events);
     notify = (message) => ctx.ui.notify(message, "warning");
     removeWidget = () => ctx.ui.setWidget(widgetId, undefined);
     try {

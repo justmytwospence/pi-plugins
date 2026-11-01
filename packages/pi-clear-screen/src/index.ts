@@ -15,6 +15,7 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { getKeybindings } from "@earendil-works/pi-tui";
 import { clearHandlerOf, routeCtrlC, routeEscape } from "./interrupt.ts";
+import { TRANSCRIPT_ROWS, type TranscriptHooks, type TranscriptRowsContext } from "./transcript-contract.ts";
 
 // setup runs before the replacement's session_start. Carry plain data, never stale APIs.
 type Selection = { provider: string; modelId: string; thinkingLevel: ExtensionContext["thinkingLevel"] };
@@ -23,7 +24,7 @@ const RESTORE_ENTRY = "clear-screen:model-restore";
 const KEY = "ctrl+l";
 const SENTINEL = "\u0000pi-clear-screen\u0000";
 
-type Comp = { render(width: number): string[]; invalidate?(): void; children?: Comp[] };
+type Comp = TranscriptHooks & { render(width: number): string[]; invalidate?(): void; children?: Comp[] };
 type Tui = Comp & {
   children: Comp[];
   getFocusedComponent?(): unknown;
@@ -32,6 +33,40 @@ type Tui = Comp & {
   requestRender(force?: boolean): void;
 };
 type ScrollLike = { child?: unknown; viewportHeight: number; scrollToEnd(): void };
+
+type RowSplice = { start: number; deleteCount: number; lines: string[] };
+const sameLines = (a: readonly string[], b: readonly string[]) => a.length === b.length && a.every((line, i) => line === b[i]);
+
+/** Pure geometry shared by rendering and indexing; the sentinel never occupies a final row. */
+function clearRows(input: readonly string[], height: number | undefined): { lines: string[]; splices: RowSplice[]; horizon?: number } {
+  const lines = [...input];
+  const at = lines.indexOf(SENTINEL);
+  if (at < 0) return { lines, splices: [] };
+  lines.splice(at, 1);
+  const splices: RowSplice[] = [{ start: at, deleteCount: 1, lines: [] }];
+  // Regular mode (e.g. the transcript printed on fullscreen exit) gets no padding.
+  const padding = height === undefined ? 0 : Math.max(0, Math.ceil(at + height - lines.length));
+  if (padding) {
+    const blanks = Array<string>(padding).fill("");
+    splices.push({ start: lines.length, deleteCount: 0, lines: blanks });
+    lines.push(...blanks);
+  }
+  return { lines, splices, horizon: at };
+}
+
+/** Restore the exact descriptor, but never clobber a subsequent owner's method. */
+function installMethod(target: Comp, key: PropertyKey, value: unknown): () => void {
+  const previous = Object.getOwnPropertyDescriptor(target, key);
+  const installed = { value, writable: true, configurable: previous?.configurable ?? true, enumerable: previous?.enumerable ?? true };
+  Object.defineProperty(target, key, installed);
+  return () => {
+    const current = Object.getOwnPropertyDescriptor(target, key);
+    if (!current || current.value !== value || current.writable !== installed.writable
+      || current.configurable !== installed.configurable || current.enumerable !== installed.enumerable) return;
+    if (previous) Object.defineProperty(target, key, previous);
+    else Reflect.deleteProperty(target, key);
+  };
+}
 
 class ClearMarker implements Comp {
   render(): string[] {
@@ -153,28 +188,41 @@ export default function (pi: ExtensionAPI) {
       if (!release) {
         let active = true;
         const render = doc.render;
-        const own = Object.hasOwn(doc, "render");
+        const precedingRows = doc[TRANSCRIPT_ROWS];
+        // Pad so the marker is the first visible row; viewportHeight is from the last frame.
+        const height = () => tui?.layoutRoot ? scroll.viewportHeight || process.stdout.rows || 24 : undefined;
         const wrapper = (width: number) => {
           const lines = [...render.call(doc, width)];
-          if (!active) return lines;
-          const at = lines.indexOf(SENTINEL);
-          if (at < 0) return lines;
-          lines.splice(at, 1);
-          // Regular mode (e.g. the transcript printed on fullscreen exit) gets no padding.
-          if (!tui?.layoutRoot) return lines;
-          // Pad so the marker is the first visible row; viewportHeight is from the last frame.
-          const height = scroll.viewportHeight || process.stdout.rows || 24;
-          for (let n = at + height - lines.length; n > 0; n--) lines.push("");
-          return lines;
+          return active ? clearRows(lines, height()).lines : lines;
         };
-        doc.render = wrapper;
+        const rows = (context: TranscriptRowsContext) => {
+          // A preceding transform must see its own rendered rows, not our sentinel-free output.
+          const lines = active ? [...render.call(doc, context.width)] : context.lines;
+          let index = precedingRows
+            ? precedingRows.call(doc, { ...context, lines })
+            : context.index(doc.children ?? [], context.width);
+          if (!index || !sameLines(index.lines, lines)) return undefined;
+          const transformed = active ? clearRows(lines, height()) : { lines, splices: [], horizon: undefined };
+          for (const splice of transformed.splices) index = context.splice(index, splice.start, splice.deleteCount, splice.lines);
+          if (transformed.horizon !== undefined) index = { ...index, horizons: [...index.horizons, transformed.horizon] };
+          return sameLines(index.lines, transformed.lines) && sameLines(index.lines, context.lines) ? index : undefined;
+        };
+        let restoreRender: (() => void) | undefined;
+        let restoreRows: (() => void) | undefined;
+        try {
+          restoreRender = installMethod(doc, "render", wrapper);
+          restoreRows = installMethod(doc, TRANSCRIPT_ROWS, rows);
+        } catch {
+          active = false;
+          restoreRender?.();
+          ctx.ui.notify("clear-screen: pi's transcript methods cannot be wrapped; extension needs updating", "warning");
+          return;
+        }
         release = () => {
           active = false;
           if (marker) chat.removeChild(marker);
-          if (doc.render === wrapper) {
-            if (own) doc.render = render;
-            else delete (doc as Partial<Comp>).render;
-          }
+          restoreRender?.();
+          restoreRows?.();
           tui?.requestRender();
         };
       }

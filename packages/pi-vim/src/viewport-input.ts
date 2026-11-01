@@ -1,7 +1,7 @@
 /**
  * SDK 1.1.0's fullscreen listener precedes public addInputListener hooks.
  * It dynamically calls handleViewportInput, so this narrow adapter lets an
- * explicitly marked editor own Ctrl+U/D even when native half-page bindings
+ * explicitly marked editor own Ctrl+U/D even when native viewport bindings
  * map those keys. Other keys and unknown/non-editor focus are untouched.
  */
 import { matchesKey } from "@earendil-works/pi-tui";

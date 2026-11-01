@@ -6,6 +6,7 @@ import { beforeAll, expect, test } from "vitest";
 import subagents, { DEFAULT_CONFIG, jevMark, promptGuidelines, readPressure, truncateOutput } from "../src/index.ts";
 import { fakeJev, harness } from "./harness.ts";
 import { fakeUI, normalFocus, plain } from "./ui-helpers.ts";
+import { readTranscriptCheckpoint } from "../src/transcript-contract.ts";
 
 beforeAll(() => initTheme("dark"));
 
@@ -106,6 +107,7 @@ test("b in FleetView moves a foreground call to the background; its result arriv
     expect(ui.widgets.has("subagents")).toBe(false);
     expect(ui.press("b")).toBe(true);
     const result = await call;
+    expect(readTranscriptCheckpoint(result.details)).toBeUndefined();
     expect(result.content[0].text).toMatch(/^The user moved this single to the background: \w+ \(loop forever · general, p\/m \(parent\), medium\): parent fallback: no usable role or tier mapping for p/u);
     // Now a background run: still listed below the prompt (no widget above it by default), and b is no longer offered.
     expect(ui.widgets.has("subagents")).toBe(false);
@@ -113,6 +115,7 @@ test("b in FleetView moves a foreground call to the background; its result arriv
     expect(h.messages).toHaveLength(0);
     await h.commands.get("subagents").handler("stop all", ctx);
     await new Promise((r) => setTimeout(r, 200));
+    expect(readTranscriptCheckpoint(h.messages[0]?.message.details)).toEqual({ id: expect.any(String), kind: "report" });
     expect(h.messages[0]?.message.content).toMatch(/^Subagent "loop forever" stopped after \d+s:\n\n\[loop forever · general · p\/m \(parent\) · medium · stopped\][\s\S]*parent fallback: no usable role or tier mapping for p/u);
     await h.emit("session_shutdown", { type: "session_shutdown" }, ctx);
   } finally {

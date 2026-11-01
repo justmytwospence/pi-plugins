@@ -68,7 +68,7 @@ Plain `j`/`k` deliberately remain letters in search fields. Ctrl+J and Ctrl+K re
 
 ### Ctrl+U or Ctrl+D edits text instead of scrolling
 
-That is intended. Ctrl+U and Ctrl+D scroll half a page only in read-only viewers and in pi-vim's idle Normal mode. In a text field they keep their editing meaning: in the copy picker's filter, Ctrl+U clears the query and Ctrl+D deletes forward. They are not global scrolling shortcuts. See [keyboard & focus](/guides/keyboard/#use-vim-on-the-main-prompt-or-in-a-dialog).
+That is intended. Ctrl+U and Ctrl+D navigate declared transcript checkpoints on pi-vim's main prompt in idle Normal mode; read-only viewers and embedded viewports retain their own paging controls. In a text field they keep their editing meaning: in the copy picker's filter, Ctrl+U clears the query and Ctrl+D deletes forward. They are not global scrolling shortcuts. See [keyboard & focus](/guides/keyboard/#use-vim-on-the-main-prompt-or-in-a-dialog).
 
 ### Tab accepts a suggestion instead of completing
 

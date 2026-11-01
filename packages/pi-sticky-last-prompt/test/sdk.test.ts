@@ -6,6 +6,7 @@ import { createInteractiveTuiReference } from "../node_modules/@earendil-works/p
 import { InteractiveMode } from "../node_modules/@earendil-works/pi-coding-agent/dist/modes/interactive/interactive-mode.js";
 import { renderLayoutFrame } from "../node_modules/@earendil-works/pi-tui/dist/layout.js";
 import stickyLastPrompt, { CLEAR_SENTINEL, OWNER, PinBar, WRAPPER_TAG, classifyPiComponent, collectAnchors, type AnchorIndex } from "../src/index.ts";
+import { TRANSCRIPT_ROWS, type TranscriptRowsContext } from "../src/transcript-contract.ts";
 
 const theme = {
   fg: (_token: string, text: string) => text,
@@ -232,7 +233,7 @@ test("an untagged live legacy top bar hides this bar and warns once until remove
   await h.emit("session_start");
   expect(h.internals.overlayStack).toHaveLength(2);
   const pin = h.internals.overlayStack[1]!.component;
-  renderLayoutFrame(root, 40, 5, () => {});
+  h.internals.currentLayout = renderLayoutFrame(root, 40, 5, () => {});
   scroll.scrollTo(10);
   expect(pin.render(40)).toEqual([]);
   expect(pin.render(40)).toEqual([]);
@@ -319,21 +320,31 @@ test("SDK first layout, nested clear, and resize use live ScrollView rows", asyn
   const { chat, document, scroll, root } = transcript(h.renderer);
   await h.emit("session_start");
   const pin = h.internals.overlayStack[0]!.component;
-  // Before currentLayout exists the SDK returns its implicit scroll view; scan the mounted one.
-  renderLayoutFrame(root, 40, 5, () => {});
+  // A mounted view without its allocated layout box must fail closed.
+  expect(pin.render(40)).toEqual([]);
+  h.internals.currentLayout = renderLayoutFrame(root, 40, 5, () => {});
   scroll.scrollTo(10);
   expect(pin.render(40)[0]).toContain("the real SDK prompt");
   const marker = { render: () => [CLEAR_SENTINEL], invalidate() {} };
   chat.addChild(marker);
   const original = document.render.bind(document);
   document.render = (width) => original(width).filter((line) => line !== CLEAR_SENTINEL).concat(["", "", "", "", ""]);
-  renderLayoutFrame(root, 40, 5, () => {});
+  Object.assign(document, {
+    [TRANSCRIPT_ROWS](context: TranscriptRowsContext) {
+      let rows = context.index(document.children, context.width);
+      const markerRow = rows.lines.indexOf(CLEAR_SENTINEL);
+      rows = context.splice(rows, markerRow, 1, []);
+      rows.horizons.push(markerRow);
+      return context.splice(rows, rows.lines.length, 0, ["", "", "", "", ""]);
+    },
+  });
+  h.internals.currentLayout = renderLayoutFrame(root, 40, 5, () => {});
   scroll.scrollToEnd();
   expect(pin.render(40)[0]).toContain("the real SDK prompt");
   scroll.scrollTo(10);
   expect(pin.render(40)[0]).toContain("the real SDK prompt");
   h.terminal.columns = 5;
-  renderLayoutFrame(root, 5, 5, () => {});
+  h.internals.currentLayout = renderLayoutFrame(root, 5, 5, () => {});
   scroll.scrollTo(1);
   expect(pin.render(5)).toEqual([]); // wrapped prompt now straddles the edge
   await h.emit("session_shutdown");

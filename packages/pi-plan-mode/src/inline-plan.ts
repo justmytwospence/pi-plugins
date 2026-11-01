@@ -51,6 +51,7 @@ import { promptPlanName } from "./plan-name-input.js";
 import { PlanReviewViewport } from "./plan-review-viewport.js";
 import { type ReviewStatus, reviewBody, reviewTitle } from "./review-card.js";
 import { findBlockedCommandSegment, readCommand, type SafeSubcommands } from "./tool-policy.js";
+import { transcriptCheckpoint } from "./transcript-contract.js";
 import { registerWorkflowRenderer, sendWorkflowTransition, type WorkflowKind } from "./workflow-ui.js";
 
 export const MODE_CHANGED = "workflow-mode:changed";
@@ -674,16 +675,19 @@ export function registerInlinePlanMode(pi: ExtensionAPI, host: InlineHost): Inli
             announce();
             exitLocal(ctx, false);
             persist();
-            return {
-              content: [
-                {
-                  type: "text",
-                  text: `Saved the plan for later at ${savedFile}. This is not approval to implement. Stop here and wait for the user's next request.`,
-                },
-              ],
-              details: { plan, planFile, savedFile, outcome: "saved", edited, mode: "work" } satisfies ExitDetails,
-              terminate: true,
-            } as never;
+            return transcriptCheckpoint(
+              {
+                content: [
+                  {
+                    type: "text",
+                    text: `Saved the plan for later at ${savedFile}. This is not approval to implement. Stop here and wait for the user's next request.`,
+                  },
+                ],
+                details: { plan, planFile, savedFile, outcome: "saved", edited, mode: "work" } satisfies ExitDetails,
+                terminate: true,
+              },
+              { id, kind: "plan" },
+            ) as never;
           }
           if (choice === undefined || choice.kind === "keep") {
             // You say what should change in the chat, as your next message.
@@ -694,16 +698,19 @@ export function registerInlinePlanMode(pi: ExtensionAPI, host: InlineHost): Inli
               ...(previous ? { previous, ...(changes ? { changes: [...changes] } : {}) } : {}),
             };
             declined = plan;
-            return {
-              content: [
-                {
-                  type: "text",
-                  text: "The user declined the plan and wants to keep planning. Stop here: their next message says what should change.",
-                },
-              ],
-              details,
-              terminate: true,
-            } as never;
+            return transcriptCheckpoint(
+              {
+                content: [
+                  {
+                    type: "text",
+                    text: "The user declined the plan and wants to keep planning. Stop here: their next message says what should change.",
+                  },
+                ],
+                details,
+                terminate: true,
+              },
+              { id, kind: "plan" },
+            ) as never;
           }
           if (state.temporaryDraft) {
             try {
@@ -743,34 +750,54 @@ export function registerInlinePlanMode(pi: ExtensionAPI, host: InlineHost): Inli
           declined = undefined;
           if (who && handsOffToAnotherModel(who)) {
             host.handoff(approval, who, ctx);
-            return {
-              content: [
-                {
-                  type: "text",
-                  text: `The user approved the plan and handed it off to ${who.targetName}. ${who.context === "clear" ? "Implementation starts in a fresh conversation after this turn settles." : who.context === "compact" ? "Implementation continues in this conversation after compaction to the approved plan." : "Implementation continues in this conversation with its history."} You stay on call to answer its questions. Stop here and do nothing else.`,
-                },
-              ],
-              details: {
-                plan,
-                planFile,
-                outcome: "handoff",
-                ...(previous ? { previous, ...(changes ? { changes: [...changes] } : {}) } : {}),
-                edited,
-                ...(who ? { handoff: who.targetName } : {}),
-                ...(mode ? { mode } : {}),
-              } satisfies ExitDetails,
-              terminate: true,
-            } as never;
+            return transcriptCheckpoint(
+              {
+                content: [
+                  {
+                    type: "text",
+                    text: `The user approved the plan and handed it off to ${who.targetName}. ${who.context === "clear" ? "Implementation starts in a fresh conversation after this turn settles." : who.context === "compact" ? "Implementation continues in this conversation after compaction to the approved plan." : "Implementation continues in this conversation with its history."} You stay on call to answer its questions. Stop here and do nothing else.`,
+                  },
+                ],
+                details: {
+                  plan,
+                  planFile,
+                  outcome: "handoff",
+                  ...(previous ? { previous, ...(changes ? { changes: [...changes] } : {}) } : {}),
+                  edited,
+                  ...(who ? { handoff: who.targetName } : {}),
+                  ...(mode ? { mode } : {}),
+                } satisfies ExitDetails,
+                terminate: true,
+              },
+              { id, kind: "plan" },
+            ) as never;
           }
           if (choice.kind === "compact-here") {
             host.compactHere(approval);
-            return {
-              content: [
-                {
-                  type: "text",
-                  text: "The user approved the plan. Stop here; implementation continues in this session after compaction to the approved plan.",
-                },
-              ],
+            return transcriptCheckpoint(
+              {
+                content: [
+                  {
+                    type: "text",
+                    text: "The user approved the plan. Stop here; implementation continues in this session after compaction to the approved plan.",
+                  },
+                ],
+                details: {
+                  plan,
+                  planFile,
+                  outcome: "approved",
+                  edited,
+                  ...(previous ? { previous, ...(changes ? { changes: [...changes] } : {}) } : {}),
+                  ...(mode ? { mode } : {}),
+                } satisfies ExitDetails,
+                terminate: true,
+              },
+              { id, kind: "plan" },
+            ) as never;
+          }
+          return transcriptCheckpoint(
+            {
+              content: [{ type: "text", text: host.implementHere(ctx, approval) }],
               details: {
                 plan,
                 planFile,
@@ -779,20 +806,9 @@ export function registerInlinePlanMode(pi: ExtensionAPI, host: InlineHost): Inli
                 ...(previous ? { previous, ...(changes ? { changes: [...changes] } : {}) } : {}),
                 ...(mode ? { mode } : {}),
               } satisfies ExitDetails,
-              terminate: true,
-            } as never;
-          }
-          return {
-            content: [{ type: "text", text: host.implementHere(ctx, approval) }],
-            details: {
-              plan,
-              planFile,
-              outcome: "approved",
-              edited,
-              ...(previous ? { previous, ...(changes ? { changes: [...changes] } : {}) } : {}),
-              ...(mode ? { mode } : {}),
-            } satisfies ExitDetails,
-          } as never;
+            },
+            { id, kind: "plan" },
+          ) as never;
         }
       } finally {
         releaseBlocked();

@@ -1,6 +1,7 @@
 import { expect, test } from "vitest";
 import piCopy from "../src/index.ts";
 import { harness, userEntry } from "./harness.ts";
+import { USER_WORDS_CHANNEL } from "../src/transcript-contract.ts";
 
 function setup(mode: string, branch: unknown[]) {
   const h = harness();
@@ -21,6 +22,33 @@ test("the open /yank picker holds herdr:blocked", async () => {
     { channel: "ui.custom", data: undefined },
     { channel: "herdr:blocked", data: { active: false } },
   ]);
+});
+
+test("copy mode discovers user words at each live capture without invoking the picker", async () => {
+  const h = harness();
+  piCopy(h.pi);
+  let registrations = 0;
+  h.pi.events.on(USER_WORDS_CHANNEL, (request: any) => {
+    registrations++;
+    request.register("ask", () => "actual words");
+  });
+  class ToolExecutionComponent {
+    toolName = "ask"; toolCallId = "1"; args = {}; result = { content: [] };
+    render() { return ["answer"]; }
+  }
+  const doc = new ToolExecutionComponent();
+  const view = { children: [doc], scrollTop: 0, viewportHeight: 4, getContentWidth: (width: number) => width, scrollTo: () => {} };
+  const tui = { getPrimaryScrollView: () => view, currentLayout: { root: { component: view, rect: { width: 42 }, scrollContentLines: doc.render() } },
+    terminal: { columns: 120, rows: 24 }, requestRender: () => {} };
+  const ctx = h.ctx();
+  ctx.ui.custom = async (factory: any) => {
+    const copyView = factory(tui, {}, {}, () => {});
+    expect(copyView.snap.blocks[0].checkpoint.kind).toBe("feedback");
+  };
+  await h.commands.get("copy-mode").handler("", ctx);
+  await h.commands.get("copy-mode").handler("", ctx);
+  expect(registrations).toBe(2);
+  expect(h.entries).toEqual([]);
 });
 
 test("no picker, no hold: outside the terminal UI or with nothing to copy", async () => {

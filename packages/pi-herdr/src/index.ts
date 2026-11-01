@@ -39,6 +39,7 @@ import { hostname } from "node:os";
 import { matchesKey } from "@earendil-works/pi-tui";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
+import { transcriptCheckpoint } from "./transcript-contract.ts";
 import { ACTIVITY_CHANGED, ACTIVITY_GONE, ACTIVITY_HOST, ACTIVITY_SECTION } from "./activity.ts";
 import { ACTIVITY_CHANNELS, type HoldEvent } from "./core/activity.ts";
 import { ActivityBadges } from "./activity-badges.ts";
@@ -406,7 +407,7 @@ export default function piHerdr(pi: ExtensionAPI, dependencies: HerdrDependencie
       if (!delivered.has(key)) {
         const epoch = generation;
         const sent = safely(() => pi.sendMessage(
-          { customType: "herdr-child", content: item.text, display: true, details: { name: item.rec.name, paneId: item.rec.paneId, turnKey: key } },
+          transcriptCheckpoint({ customType: "herdr-child", content: item.text, display: true, details: { name: item.rec.name, paneId: item.rec.paneId, turnKey: key } }, { id: key, kind: "report" }),
           { triggerTurn: true, deliverAs: "followUp" },
         ));
         if (!sent) return;

@@ -15,6 +15,7 @@ import { type Segment, extractSegments, segmentKey } from "./segments.ts";
 import { clip, messageText } from "./transcript.ts";
 import { type Snapshot, snapshotSession, snapshotTranscript } from "./copy-mode/snapshot.ts";
 import { CopyModeView } from "./copy-mode/view.ts";
+import { collectUserWords } from "./transcript-index.ts";
 
 /** Event other extensions (pi-vim's `/` and `?`) emit to open copy mode; `handled` is set when it opens. */
 export const COPY_MODE_OPEN = "copy-mode:open";
@@ -149,7 +150,7 @@ export default function piCopy(pi: ExtensionAPI) {
     try {
       const result = await ctx.ui.custom<{ row: number } | undefined>((tui, theme, _keys, done) => {
         const width = (tui as { terminal?: { columns?: number } }).terminal?.columns ?? 80;
-        snap = snapshotTranscript(tui, width) ?? snapshotSession(ctx.sessionManager.getBranch(), width);
+        snap = snapshotTranscript(tui, width, { userWords: collectUserWords(pi.events) }) ?? snapshotSession(ctx.sessionManager.getBranch(), width);
         return new CopyModeView(snap, theme as never, () => (tui as { terminal?: { rows?: number } }).terminal?.rows ?? 24, {
           copy: (text) => copyToClipboard(text),
           insert: (text) => {

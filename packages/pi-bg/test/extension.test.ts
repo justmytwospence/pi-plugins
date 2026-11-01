@@ -163,6 +163,7 @@ describe("pi-bg", () => {
       expect(r.entries[0].type).toBe("custom_message");
       expect(r.entries[0].content).toMatch(/Background job tests .* ended: exit 0/);
       expect(r.entries[0].content).toMatch(/settled/);
+      expect(JSON.parse(JSON.stringify(r.entries[0])).details["pi-plugins.transcript.v1"]).toEqual({ version: 1, checkpoint: { id: expect.any(String), kind: "report" } });
       expect(x.working.some((m) => m?.startsWith("Waiting on tests"))).toBe(true);
       expect(x.working.at(-1)).toBeUndefined();
       // Pi took its indicator down at agent_end: the wait puts it back, and the continued run's turn owns it.
@@ -243,6 +244,7 @@ describe("pi-bg", () => {
     expect(x.emitted.some((e) => e.channel === "herdr:background")).toBe(false);
     await until(() => x.sent.length > 0, 5_000);
     expect(x.sent[0]?.message.content).toMatch(/srv .* is ready: ready on :8000/);
+    expect(x.sent[0]?.message.details?.["pi-plugins.transcript.v1"]).toBeUndefined();
     const k = x.textOf(await x.call("bg_kill", { id: "srv" }));
     expect(k).toMatch(/Stopped srv/);
     expect(x.emitted.some((e) => e.channel === "bg:killed")).toBe(true);
@@ -274,7 +276,7 @@ describe("pi-bg", () => {
     );
     const r = await x.call("bg_wait", { id: "subagent:a1" });
     expect(r.content.map((c: any) => c.text)).toEqual(["audit · general (subagent:a1): done · done after 3s", "## Findings\n\n- **one** thing\n- `two`"]);
-    expect(r.details).toEqual({ markdown: [1] });
+    expect(r.details).toMatchObject({ markdown: [1], "pi-plugins.transcript.v1": { version: 1, checkpoint: { id: "call", kind: "report" } } });
     const theme = { fg: (_c: string, t: string) => t, bg: (_c: string, t: string) => t, bold: (t: string) => t, italic: (t: string) => t, underline: (t: string) => t, strikethrough: (t: string) => t };
     const { initTheme } = await import("@earendil-works/pi-coding-agent");
     initTheme("dark");

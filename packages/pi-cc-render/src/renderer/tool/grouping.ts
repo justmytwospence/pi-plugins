@@ -7,6 +7,7 @@ import {
 	type Component,
 } from "@earendil-works/pi-tui";
 import { config } from "../../config/config.ts";
+import { TRANSCRIPT_BLOCK, type TranscriptDescription } from "../../transcript-contract.ts";
 import { TOOL_LOADING_INTERVAL_MS, toolLoadingIcon } from "../../utils/tool-loading-icon.ts";
 import {
 	CODEMODE_TOOL_NAME,
@@ -293,6 +294,10 @@ export class ToolGroupComponent extends Container {
 		super();
 		this.patch = patch;
 		patch.groups.add(this);
+	}
+
+	[TRANSCRIPT_BLOCK](): TranscriptDescription {
+		return { kind: "tool", subjects: this.children };
 	}
 
 	private clearPaintCache(): void {

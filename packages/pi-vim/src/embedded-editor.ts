@@ -64,7 +64,7 @@ export class EmbeddedEditor extends SuiteModalEditor {
     this.hooks.onCancel?.();
   }
 
-  protected override scrollHalfPage(direction: -1 | 1): boolean {
+  protected override navigateViewport(direction: -1 | 1): boolean {
     this.hooks.scrollViewport?.(direction);
     return true;
   }

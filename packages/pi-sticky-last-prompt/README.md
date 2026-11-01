@@ -51,3 +51,5 @@ This runs strict TypeScript checking and local Vitest tests. It requires no live
 ## Attribution
 
 Derived from **`pi-sticky-last-prompt@0.1.1`**, by the pi-collections contributors, under MIT. [UPSTREAM.md](UPSTREAM.md) records the verified installed artifact, repository, hashes and local changes. [LICENSE](LICENSE) preserves the original copyright and MIT text verbatim. [UPSTREAM-CHANGELOG.md](UPSTREAM-CHANGELOG.md) is the unmodified upstream changelog, not this fork's release history.
+
+Vim checkpoint navigation, copy mode and sticky prompts use one shared row index. Plugin artifacts explicitly declare their checkpoints; copyable text and pinned user words remain separate selections. See [transcript architecture](https://pi-plugins.vercel.app/architecture/transcript/) for the annotation and component hooks.
