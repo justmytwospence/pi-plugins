@@ -15,6 +15,7 @@ import {
 import { isMessageDisplayComponent } from "../tool/message-display.ts";
 import { config } from "../../config/config.ts";
 import { isLazyProxyTui } from "../../utils/fullscreen-detect.ts";
+import { resolveTuiRuntime } from "../../tui-runtime.ts";
 import { setToolTuiFullscreen, isCollapseHintLine } from "../tool/show-more-hint.ts";
 import {
 	type ExpandedToolIoView,
@@ -313,6 +314,9 @@ function ensureFullscreenToolMouseMotion(tui: any): void {
 	// After the panel changes scrollStepLines, the next frame syncs it (restore still restores from original).
 	if (typeof tui.wheelScrollLines === "number" && tui.wheelScrollLines !== config.scrollStepLines) {
 		tui.wheelScrollLines = config.scrollStepLines;
+		if (fullscreenViewportPatch?.renderer === resolveTuiRuntime(tui)) {
+			fullscreenViewportPatch.wheelApplied = config.scrollStepLines;
+		}
 	}
 	if (
 		!toolMouseInteractionActive() ||
@@ -351,6 +355,17 @@ function releaseFullscreenToolMouseMotion(tui?: any): void {
 
 const FULLSCREEN_VIEWPORT_PATCH = Symbol("ccstyle.fullscreen-viewport-patch");
 const FULLSCREEN_WHEEL_SCROLL_ORIGINAL = Symbol("ccstyle.fullscreen-wheel-scroll-original");
+
+type FullscreenViewportPatch = {
+	renderer: any;
+	active: boolean;
+	descriptor: PropertyDescriptor | undefined;
+	wrapper: (data: string) => any;
+	wheelApplied: number | undefined;
+};
+// Retain the actual patched instance, not the stable Proxy (which may switch
+// renderers before either the next widget render or teardown).
+let fullscreenViewportPatch: FullscreenViewportPatch | null = null;
 
 /**
  * A diff result component carries its own remainder row: when declared, only that row is the expand entry (the same wording in the body does not count);
@@ -585,74 +600,116 @@ function handleFullscreenToolHover(tui: any, packet: SgrMousePacket): void {
 
 /**
  * Instance-level wrapper for TuiAltScreen.handleViewportInput (safe with the lazy Proxy):
- * take original from the prototype method (bypassing the proxy function wrapper), and install the wrapper as an instance own property
- * (the constructor arrow's dynamic lookup hits it). Only in fullscreen with no overlay, consume
- * tool card left clicks first; everything else goes to the official selection/scrollbar/URL/keyboard chain.
+ * resolve the live renderer before capturing its current handler, including other
+ * extensions' instance guards. Only in fullscreen with no overlay, consume tool
+ * card left clicks first; everything else continues through the existing chain.
  */
 function patchFullscreenViewportInput(tui: any): void {
-	if (tui[FULLSCREEN_VIEWPORT_PATCH] || !isLazyProxyTui(tui)) return;
-	const proto = Object.getPrototypeOf(tui);
-	const original = proto?.handleViewportInput;
-	if (typeof original !== "function") return;
-	// The official native routeWheel already handles nested ScrollViews; only adjust the default step (config.scrollStepLines).
-	if (typeof tui.wheelScrollLines === "number") {
-		tui[FULLSCREEN_WHEEL_SCROLL_ORIGINAL] = tui.wheelScrollLines;
-		tui.wheelScrollLines = config.scrollStepLines;
+	if (!isLazyProxyTui(tui)) return;
+	const renderer = resolveTuiRuntime(tui) as any;
+	if (fullscreenViewportPatch && fullscreenViewportPatch.renderer !== renderer) {
+		restoreFullscreenViewportInput();
 	}
-	tui[FULLSCREEN_VIEWPORT_PATCH] = true;
-	tui.handleViewportInput = function (this: any, data: string) {
-		if (toolMouseInteractionActive() && tui.mode === "fullscreen") {
-			// After scroll input (wheel/pageUp/end etc.), sync the back-to-bottom button's visibility;
-			// the official viewport consumes keyboard input, so the extension listener cannot compensate and must schedule it here.
-			scheduleScrollButtonSync(tui, data);
-			const packets = parseSgrMousePackets(data);
-			// Official fullscreen consumes all mouse input; while a text preview overlay is active, let it through to the focused
-			// custom component so [esc] clicks and the wheel work.
-			if (packets && tui.hasOverlay?.() && hasActiveTextPreview()) return undefined;
-			if (packets && !tui.hasOverlay?.()) {
-				for (const packet of packets) {
-					if (isSgrLeftRelease(packet)) {
-						// Clear the selection only for compact panels: collapsing an own panel reflows the layout, and the official selection anchor
-						// still sits on the old layout, so the same release would settle into a multi-row highlight.
-						if (
-							isCompactAssistantComponent(
-								resolveCollapsePress(tui, packet, { skipOfficialCards: true }),
-							)
-						) {
-							try {
-								Reflect.apply(original, this, [FULLSCREEN_FOCUS_OUT]);
-							} catch {
-								/* older versions have no selection state */
+	// An unsupported Proxy that refused the receiver probe cannot be reflected safely.
+	if (renderer === tui) return;
+	if (renderer[FULLSCREEN_VIEWPORT_PATCH]) return;
+	const original = renderer.handleViewportInput;
+	if (typeof original !== "function") return;
+	const descriptor = Object.getOwnPropertyDescriptor(renderer, "handleViewportInput");
+	const patch: FullscreenViewportPatch = {
+		renderer,
+		active: true,
+		descriptor,
+		wheelApplied: undefined,
+		wrapper(data: string) {
+			// A later extension can retain this wrapper after cleanup. It must then
+			// be a transparent link, with no hover/click/selection side effects.
+			if (!patch.active || resolveTuiRuntime(tui) !== renderer) {
+				return Reflect.apply(original, renderer, [data]);
+			}
+			if (toolMouseInteractionActive() && tui.mode === "fullscreen") {
+				// After scroll input (wheel/pageUp/end etc.), sync the back-to-bottom button's visibility;
+				// the official viewport consumes keyboard input, so the extension listener cannot compensate and must schedule it here.
+				scheduleScrollButtonSync(tui, data);
+				const packets = parseSgrMousePackets(data);
+				// Official fullscreen consumes all mouse input; while a text preview overlay is active, let it through to the focused
+				// custom component so [esc] clicks and the wheel work.
+				if (packets && tui.hasOverlay?.() && hasActiveTextPreview()) return undefined;
+				if (packets && !tui.hasOverlay?.()) {
+					for (const packet of packets) {
+						if (isSgrLeftRelease(packet)) {
+							// Clear the selection only for compact panels: collapsing an own panel reflows the layout, and the official selection anchor
+							// still sits on the old layout, so the same release would settle into a multi-row highlight.
+							if (
+								isCompactAssistantComponent(
+									resolveCollapsePress(tui, packet, { skipOfficialCards: true }),
+								)
+							) {
+								try {
+									Reflect.apply(original, renderer, [FULLSCREEN_FOCUS_OUT]);
+								} catch {
+									/* older versions have no selection state */
+								}
 							}
+						} else if (!isSgrLeftPress(packet) && !isSgrIdleMotion(packet))
+							clearPendingCollapsePressOnMove(packet);
+						if (isSgrLeftPress(packet) && handleFullscreenToolClick(tui, packet)) {
+							return { consume: true };
 						}
-					} else if (!isSgrLeftPress(packet) && !isSgrIdleMotion(packet))
-						clearPendingCollapsePressOnMove(packet);
-					if (isSgrLeftPress(packet) && handleFullscreenToolClick(tui, packet)) {
-						return { consume: true };
-					}
-					// Only motion with no button goes to hover; left-button drag (multi-line text selection) goes to the official selection, avoiding hit-test + redraw per pixel.
-					if (isSgrIdleMotion(packet)) {
-						handleFullscreenToolHover(tui, packet);
+						// Only motion with no button goes to hover; left-button drag (multi-line text selection) goes to the official selection, avoiding hit-test + redraw per pixel.
+						if (isSgrIdleMotion(packet)) {
+							handleFullscreenToolHover(tui, packet);
+						}
 					}
 				}
 			}
-		}
-		return Reflect.apply(original, this, [data]);
+			return Reflect.apply(original, renderer, [data]);
+		},
 	};
+	const wrapper = patch.wrapper;
+	try {
+		Object.defineProperty(
+			renderer,
+			"handleViewportInput",
+			descriptor && "value" in descriptor
+				? { ...descriptor, value: wrapper }
+				: {
+						configurable: true,
+						enumerable: descriptor?.enumerable ?? false,
+						writable: true,
+						value: wrapper,
+					},
+		);
+	} catch {
+		return;
+	}
+	fullscreenViewportPatch = patch;
+	renderer[FULLSCREEN_VIEWPORT_PATCH] = true;
+	// Native routeWheel still handles nested ScrollViews; only adjust its step.
+	if (typeof renderer.wheelScrollLines === "number") {
+		renderer[FULLSCREEN_WHEEL_SCROLL_ORIGINAL] = renderer.wheelScrollLines;
+		renderer.wheelScrollLines = patch.wheelApplied = config.scrollStepLines;
+	}
 }
 
-function restoreFullscreenViewportInput(tui: any): void {
-	if (!tui || !tui[FULLSCREEN_VIEWPORT_PATCH]) return;
-	const proto = Object.getPrototypeOf(tui);
-	if (typeof proto?.handleViewportInput === "function") {
-		tui.handleViewportInput = proto.handleViewportInput;
+function restoreFullscreenViewportInput(): void {
+	const patch = fullscreenViewportPatch;
+	if (!patch) return;
+	fullscreenViewportPatch = null;
+	patch.active = false;
+	const { renderer, descriptor } = patch;
+	// Inspect the own descriptor rather than reading through the Proxy (which
+	// returns a new function each time). Never remove a newer extension's guard.
+	if (Object.getOwnPropertyDescriptor(renderer, "handleViewportInput")?.value === patch.wrapper) {
+		if (descriptor) Object.defineProperty(renderer, "handleViewportInput", descriptor);
+		else delete renderer.handleViewportInput;
 	}
-	const originalWheelScrollLines = tui[FULLSCREEN_WHEEL_SCROLL_ORIGINAL];
-	if (typeof originalWheelScrollLines === "number") {
-		tui.wheelScrollLines = originalWheelScrollLines;
-		tui[FULLSCREEN_WHEEL_SCROLL_ORIGINAL] = undefined;
+	const originalWheelScrollLines = renderer[FULLSCREEN_WHEEL_SCROLL_ORIGINAL];
+	if (typeof originalWheelScrollLines === "number" && renderer.wheelScrollLines === patch.wheelApplied) {
+		renderer.wheelScrollLines = originalWheelScrollLines;
 	}
-	tui[FULLSCREEN_VIEWPORT_PATCH] = false;
+	renderer[FULLSCREEN_WHEEL_SCROLL_ORIGINAL] = undefined;
+	renderer[FULLSCREEN_VIEWPORT_PATCH] = false;
 }
 
 function restoreToolMouseRenderPatch(): void {
@@ -1025,7 +1082,7 @@ export function teardownToolMouseInteraction(
 		// The UI context may already have been reset during /reload.
 	}
 	restoreToolMouseRenderPatch();
-	restoreFullscreenViewportInput(getToolMouseTui());
+	restoreFullscreenViewportInput();
 	restoreOfficialScrollToEnd(getToolMouseTui());
 	resetScrollButtonState();
 	setToolMouseTui(null);

@@ -3,7 +3,7 @@ title: Transcript checkpoints
 description: Explicit producer-authored checkpoints and one shared row index for navigation, copying and pinned prompts.
 ---
 
-Ctrl+U/D on [pi-vim](/plugins/pi-vim/)'s fullscreen main prompt moves between **checkpoints**, only in idle Normal mode. Prompts, human feedback, concluding assistant responses, delivered plans/reports and completed shell frames are stops. Routine tool calls, status updates and thinking-only content are not. Embedded editors and read-only viewers retain their local paging behavior.
+Ctrl+U/D on [pi-vim](/plugins/pi-vim/)'s fullscreen main prompt moves between **checkpoints** in Insert and idle Normal mode, without Escape. Navigation preserves the draft and mode; Ctrl+D never exits main Pi. Prompts, human feedback, concluding assistant responses, delivered plans/reports and completed shell frames are stops. Routine tool calls, status updates and thinking-only content are not. Visual, EX and pending input remain local; embedded editors and read-only viewers retain their local editing and paging behavior.
 
 The implementation separates three concerns:
 
@@ -79,7 +79,7 @@ The existing `pi-plugins.user-words.v1` hook supplies actual user answers/feedba
 
 ## Shared implementation and lifecycle
 
-`shared/transcript/` is the canonical development source for the contract, index and viewport adapter. Generate the independently usable components' local copies with:
+`shared/transcript/` is the canonical development source for the contract, index, viewport adapter and runtime-receiver helper. Generate the independently usable components' local copies with:
 
 ```sh
 node scripts/sync-transcript-helpers.mjs
@@ -94,5 +94,7 @@ node scripts/sync-transcript-helpers.mjs --check
 Root contract tests enforce source/copy equality and prohibit runtime sibling imports. Edit the canonical files, not generated copies. There is no required transcript-service extension.
 
 Navigation captures current rows and actual allocated pane width. Stops do not wrap or resume follow mode, and leave one row above the checkpoint when possible for the pinned-prompt bar. Repeated clamped positions at the end are one landing position. Frozen copy-mode scroll-back refuses changed document/view/width/lines instead of applying stale coordinates.
+
+Vim's keyboard guard and cc-render's mouse/viewport wrapper use the same stable-Proxy receiver resolver. Wrappers chain the current instance handler, not the native prototype, and restore only their own property descriptors. This keeps configured native scroll bindings from stealing main checkpoint input and preserves newer owners during cleanup.
 
 Pi currently has no supported API for full live transcript-child geometry. Necessary host-layout lookups are isolated in the capability-checked viewport adapter. Unsupported/ambiguous geometry fails closed rather than scrolling a different view. Resize, same-height edits, compact rendering and session/renderer replacement require fresh captures; the implementation does not retain stale row positions or run another layout pass.

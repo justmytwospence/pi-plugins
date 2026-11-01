@@ -64,8 +64,9 @@ export type EditorMode = "insert" | "normal" | "visual" | "visual-line";
  * prefix or a discarded Normal-mode paste is in progress and the next key
  * completes or cancels it. `"ex"` means an EX text field is being edited:
  * Ctrl+U clears its input but keeps `:` open; Ctrl+D deletes forward at its
- * end cursor (a no-op). Only idle `"normal"`, never `"visual"`, scrolls a
- * viewport on Ctrl+U/D; leave Visual for Normal before viewport scrolling.
+ * end cursor (a no-op). Main Ctrl+U/D navigate checkpoints in Insert and
+ * idle Normal; embedded viewports use idle Normal only. Visual never scrolls
+ * a viewport; leave Visual for Normal before viewport navigation.
  */
 export type EditorModeState = "insert" | "normal" | "visual" | "ex" | "pending";
 

@@ -1,10 +1,10 @@
+// Canonical: shared/transcript/tui-runtime.ts. Sync: node scripts/sync-transcript-helpers.mjs
 /**
- * SDK 1.1.0 passes a stable TUI Proxy to editors while replacing its renderer.
- * Method reads are bound to that renderer, but reflection/deletion are not
- * forwarded. A synchronous, temporary receiver method resolves the real TUI
- * without retaining the Proxy's freshly bound functions or leaking a property.
+ * Pi passes a stable TUI Proxy while replacing the renderer. Method reads are
+ * bound, but reflection/deletion are not forwarded. Resolve the live receiver
+ * before capturing instance handlers or restoring their property descriptors.
  */
-const RECEIVER = Symbol("pi-vim.tui-receiver");
+const RECEIVER = Symbol("pi-plugins.tui-receiver");
 
 export function resolveTuiRuntime(tui: object): object {
   let receiver = tui;

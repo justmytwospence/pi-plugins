@@ -8,6 +8,7 @@ export const transcriptHelpers = [
   ['transcript-contract.ts', [...consumers, 'pi-cc-render', 'pi-clear-screen', 'pi-interactive-shell', 'pi-plan-mode', 'pi-subagents', 'pi-bg', 'pi-herdr']],
   ['transcript-index.ts', consumers],
   ['transcript-viewport.ts', consumers],
+  ['tui-runtime.ts', ['pi-vim', 'pi-cc-render']],
 ].map(([name, packages]) => ({ source: `shared/transcript/${name}`, copies: packages.map(pkg => `packages/${pkg}/src/${name}`) }));
 
 export function syncTranscriptHelpers(check = false) {

@@ -19,6 +19,7 @@ const scripts = [
   ['scripts/test-linked-flow.mjs'],
   ['scripts/test-footer-controls.mjs'],
   ['scripts/test-transcript-navigation.mjs'],
+  ['scripts/test-checkpoint-pty.mjs'],
   ['--test', 'evals/shared/*.test.ts'],
   ['scripts/test-system1.mjs'],
 ];

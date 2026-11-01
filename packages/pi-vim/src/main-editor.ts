@@ -2,10 +2,10 @@
  * The main prompt editor: the upstream pi-vim editor (EX bridge to Pi
  * commands and the shell, `:q` quits Pi, Escape in idle Normal mode reaches
  * Pi's `app.interrupt`) plus the suite protocol and explicit transcript
- * checkpoint navigation on Ctrl+U / Ctrl+D in idle Normal mode.
+ * checkpoint navigation on Ctrl+U / Ctrl+D in Insert and idle Normal mode.
  */
 import type { ModalEditorOptions } from "./engine/modal-editor.js";
-import { matchesKey } from "@earendil-works/pi-tui";
+import { isKeyRelease, matchesKey } from "@earendil-works/pi-tui";
 import { SuiteModalEditor } from "./suite-editor.js";
 
 /** Like Vim's 'timeoutlen': how long `Ctrl-X` waits for its second key. */
@@ -20,7 +20,13 @@ export class MainEditor extends SuiteModalEditor {
     keybindings: EditorConstructorArgs[3],
     options?: ModalEditorOptions,
   ) {
-    super("main", tui, theme, keybindings, options);
+    // Even a modal fallback on an empty draft must not turn this navigation key
+    // into app.exit. Explicitly configured exit keys other than Ctrl+D still work.
+    const mainKeys = Object.assign(Object.create(keybindings), {
+      matches: (data: string, action: Parameters<typeof keybindings.matches>[1]) =>
+        !(action === "app.exit" && matchesKey(data, "ctrl+d")) && keybindings.matches(data, action),
+    });
+    super("main", tui, theme, mainKeys, options);
   }
 
   private transcriptNavigationFn: ((direction: -1 | 1) => void) | undefined;
@@ -88,6 +94,13 @@ export class MainEditor extends SuiteModalEditor {
       }, CTRL_X_TIMEOUT_MS);
       return;
     }
+    if (this.getModeContext().state === "insert") {
+      const direction = matchesKey(data, "ctrl+u") ? -1 : matchesKey(data, "ctrl+d") ? 1 : 0;
+      if (direction !== 0) {
+        if (!isKeyRelease(data)) this.navigateViewport(direction);
+        return;
+      }
+    }
     super.handleInput(data);
   }
 
@@ -116,7 +129,7 @@ export class MainEditor extends SuiteModalEditor {
     super.dispose(event);
   }
 
-  /** Idle Normal owns these keys even without a fullscreen checkpoint to move to. */
+  /** Main owns these keys in Insert/idle Normal, even without a usable checkpoint. */
   protected override navigateViewport(direction: -1 | 1): boolean {
     this.transcriptNavigationFn?.(direction);
     return true;

@@ -34,13 +34,13 @@ On Windows/WSL, search defaults to Ctrl+F and marked-message jumps use Ctrl+Up/D
 
 Suite additions:
 
-- [pi-vim](/plugins/pi-vim/) uses Ctrl+U/D for previous/next [transcript checkpoints](/architecture/transcript/) **only in idle Normal mode on the main prompt**: prompts, feedback, concluding responses and explicitly delivered artifacts. Routine tools/progress are skipped without interpreting prose. Do not assign those keys globally to native half-page actions; native fullscreen bindings normally precede editor input.
+- [pi-vim](/plugins/pi-vim/) uses Ctrl+U/D for previous/next [transcript checkpoints](/architecture/transcript/) **in Insert and idle Normal mode on the main prompt**, without Escape and without changing the draft or mode: prompts, feedback, concluding responses and explicitly delivered artifacts. Routine tools/progress are skipped without interpreting prose. Do not assign those keys globally to native half-page actions; native fullscreen bindings normally precede editor input.
 - [pi-clear-screen](/plugins/pi-clear-screen/) clears the view with Ctrl+L **after an explicit model-selector remap**. It leaves history/context and the current draft intact. `/clear` instead starts a fresh conversation while retaining model/effort.
 - [pi-sticky-last-prompt](/plugins/pi-sticky-last-prompt/) pins a scrolled-past prompt; clicking it jumps back. It adds no keyboard shortcut.
 
 ## Edit, recall and send a prompt
 
-**Owner: stock Pi. Focus: native main editor, or pi-vim in Insert mode unless a modal/chord action owns the input.** Autocomplete and dialogs can change what Enter/Tab mean.
+**Owner: stock Pi. Focus: native main editor, or pi-vim in Insert mode unless a modal/chord action owns the input.** With pi-vim, main Ctrl+U/D instead navigate checkpoints in Insert and idle Normal; Ctrl+D never exits main Pi. Autocomplete and dialogs can change what Enter/Tab mean.
 
 | Action ID | Stock keys | Task |
 | --- | --- | --- |
@@ -91,8 +91,8 @@ With this component enabled, configured `tui.editor.historyPrevious`/`tui.editor
 | Leave Insert/Visual or cancel pending input | Escape or Ctrl+[ is local first. | Same; the host dialog does not close on the first mode change. |
 | Escape in idle Normal | Reaches Pi's `app.interrupt`. | Cancels/returns to the host dialog. |
 | Ctrl+U/D in idle Normal | Previous/next fullscreen checkpoint; consumed/inert in regular mode. | Pages only the host's offered viewport, otherwise consumed. |
-| Ctrl+U/D in Insert | Native text editing; empty Ctrl+D can exit Pi. | Local editing, never Pi process exit. |
-| Ctrl+U/D in EX/pending state | Edits EX text or cancels pending keys; does not scroll. | Same local behavior; never invokes `app.exit`. |
+| Ctrl+U/D in Insert | Previous/next fullscreen checkpoint without Escape; preserves draft and mode, never exits Pi. Consumed/inert in regular mode. | Local editing, never Pi process exit. |
+| Ctrl+U/D in Visual/EX/pending state | Visual stays local; edits EX text or cancels pending keys; does not scroll. | Same local behavior; never invokes `app.exit`. |
 | `:name args` / `:!cmd` / `:!!cmd` | Dispatches a known Pi command or shell action, preserving the draft. Reserved Vim EX names are not Pi commands. | Never dispatches to Pi, shell or the model. |
 | `:w`, `:wq`, `:x` | Not embedded-submit commands; main EX is the Pi bridge. | Submits locally; Enter also submits according to the host. |
 | `:q` / `:q!` | Quit only with an empty draft, or force quit. | Cancel, guarded when text exists unless forced. |
@@ -231,6 +231,7 @@ Merge, `/reload`, then inspect `/hotkeys` and startup diagnostics. An array repl
   "app.tree.filter.noTools": "ctrl+shift+t",
   "app.tree.filter.labeledOnly": "ctrl+shift+l",
   "app.editor.external": [],
+  "app.exit": [],
   "tui.altScreen.bottom": ["ctrl+g", "ctrl+end"],
   "tui.editor.historyPrevious": "ctrl+p",
   "tui.editor.historyNext": "ctrl+n",
@@ -251,7 +252,7 @@ To pair the profile above with pi-todo, merge this into `~/.pi/agent/pi-todo.jso
 
 Use both changes together, then `/reload`: **Ctrl+T becomes the personal todo key; Ctrl+Shift+T becomes native thinking, not the todo default.** Applying only the keybindings profile would conflict with pi-todo's default Ctrl+Shift+T. Neither file is installed by the suite, and neither is necessary when you keep stock Pi plus suite defaults.
 
-During transcript search, Ctrl+G still advances matches rather than jumping to the tail; close search first. The profile disables both model-cycle actions, including Windows/WSL's Alt+P conflict. Ctrl+O remains native tool expansion. Ctrl+U/D remain **unbound** as native fullscreen half-page actions; Vim supplies the mode-sensitive route. Alt+T cycles Pi effort, not a guarantee of identical Claude thinking semantics.
+During transcript search, Ctrl+G still advances matches rather than jumping to the tail; close search first. The profile disables both model-cycle actions, including Windows/WSL's Alt+P conflict, and disables the direct `app.exit` binding. Stock Pi otherwise binds Ctrl+D to exit an empty main editor; pi-vim owns main Ctrl+D instead. Ctrl+O remains native tool expansion. Ctrl+U/D remain **unbound** as native fullscreen half-page actions; Vim supplies the mode-sensitive route. Alt+T cycles Pi effort, not a guarantee of identical Claude thinking semantics.
 
 Herdr/tmux prefixes are separate and can intercept keys before Pi. A multiplexer shortcut is not an application action ID, and no complete cross-tool keymap mirroring is implied.
 

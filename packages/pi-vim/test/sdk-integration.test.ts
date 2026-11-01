@@ -366,6 +366,29 @@ describe("Pi SDK 1.2.0 loader and terminal input lifecycle", { concurrency: fals
     assert.equal(exits, 1);
   });
 
+  it("native fallback CustomEditor respects personal app.exit[] without losing forward deletion", (t) => {
+    initTheme("dark", false);
+    const previous = getKeybindings();
+    const keybindings = new KeybindingsManager({ "app.exit": [] });
+    setKeybindings(keybindings);
+    t.after(() => setKeybindings(previous));
+    const terminal = new MemoryTerminal();
+    const tui = new TuiMainScreen(terminal);
+    t.after(() => tui.stop());
+    const editor = new CustomEditor(tui, getEditorTheme(), keybindings);
+    let exits = 0;
+    editor.onCtrlD = () => { exits++; };
+    tui.addChild(editor);
+    tui.setFocus(editor);
+    tui.start();
+    terminal.send(CTRL_D, "\x1b[100;5u", "\x1b[100;5:2u", "\x1b[100;5:3u");
+    assert.equal(exits, 0);
+    editor.setText("abc");
+    terminal.send("\x1b[H", CTRL_D);
+    assert.equal(editor.getText(), "bc");
+    assert.equal(exits, 0);
+  });
+
   it("Ctrl+X Ctrl+E opens the editor while Ctrl+G jumps to chat end with the direct editor binding disabled", async (t) => {
     const { MainEditor } = await import("../src/main-editor.js");
     initTheme("dark", false);
@@ -462,18 +485,33 @@ describe("Pi SDK 1.2.0 loader and terminal input lifecycle", { concurrency: fals
   });
 
   for (const fullscreen of [false, true]) {
-    it(`main Ctrl+D preserves default Insert app.exit, not idle Normal exit (${fullscreen ? "fullscreen" : "regular"})`, async (t) => {
-      const f = await fixture(t, { fullscreen });
-      f.send(CTRL_D);
-      assert.equal(f.shutdownCalls, 1, "empty Insert must retain the SDK's default exit");
-      f.send(ESC);
-      const text = f.main.getText();
-      f.send(CTRL_U, CTRL_D);
-      assert.equal(f.shutdownCalls, 1, "idle Normal half-page keys must never reach app.exit");
-      assert.equal(f.main.getText(), text);
-      assert.equal(f.main[EDITOR_MODE]().state, "normal");
+    it(`main CtrlU/D safely consume Insert and Normal input without editing or exiting (${fullscreen ? "fullscreen without checkpoints" : "regular"})`, async (t) => {
+      const f = await fixture(t, { fullscreen, bindings: HALF_PAGE_BINDINGS });
+      const renderer = f.interactive.renderer;
+      for (const initialMode of ["insert", "normal"] as const) {
+        for (const text of ["", "alpha"]) {
+          f.main[EDITOR_SNAPSHOT].restore({ version: 1, text, cursor: { line: 0, col: text ? 2 : 0 }, mode: initialMode });
+          f.frame();
+          const before = f.main[EDITOR_SNAPSHOT].capture();
+          const start = renderer instanceof TuiAltScreen ? renderer.viewportTop : undefined;
+          f.send(CTRL_U, CTRL_D, "\x1b[117;5u", "\x1b[100;5u", "\x1b[117;5:2u", "\x1b[100;5:2u", "\x1b[117;5:3u", "\x1b[100;5:3u");
+          assert.deepEqual(f.main[EDITOR_SNAPSHOT].capture(), before);
+          if (renderer instanceof TuiAltScreen) {
+            assert.equal(renderer.viewportTop, start, "no checkpoint geometry must not fall back to native half-page scrolling");
+          }
+          assert.equal(f.shutdownCalls, 0, "even empty Insert Ctrl+D must never reach app.exit");
+        }
+      }
     });
   }
+
+  it("filters only Ctrl+D from configured app.exit and preserves a different exit binding", async (t) => {
+    const f = await fixture(t, { bindings: { "app.exit": ["ctrl+d", "ctrl+q"] } });
+    f.send(CTRL_D, "\x1b[100;5u", "\x1b[100;5:2u", "\x1b[100;5:3u");
+    assert.equal(f.shutdownCalls, 0);
+    f.send("\x11");
+    assert.equal(f.shutdownCalls, 1, "the keybinding wrapper must not disable app.exit as an action");
+  });
 
   for (const bindings of [undefined, HALF_PAGE_BINDINGS]) {
     it(`main fullscreen navigates explicit checkpoints, even with conflicting native keys (${bindings ? "configured" : "default"})`, async (t) => {
@@ -488,48 +526,90 @@ describe("Pi SDK 1.2.0 loader and terminal input lifecycle", { concurrency: fals
       document.addChild(new AssistantMessageComponent({ role: "assistant", content: [{ type: "text", text: "Concluding response" }], stopReason: "stop" } as never));
       document.addChild(filler());
       f.frame();
-      f.send(ESC);
       const renderer = f.interactive.renderer;
       assert.ok(renderer instanceof TuiAltScreen);
       const snap = captureTranscript(renderer)!;
       assert.ok(snap, "real layout must expose accurate transcript geometry");
       const targets = snap.blocks.filter(block => block.checkpoint).map(block => Math.max(0, block.start - 1));
       assert.equal(targets.length, 3);
-      for (const target of [...targets].reverse()) {
-        f.send(CTRL_U);
-        assert.equal(renderer.viewportTop, target);
+      const keyEvents = [
+        { up: CTRL_U, down: CTRL_D },
+        { up: "\x1b[117;5u", down: "\x1b[100;5u" },
+        { up: "\x1b[117;5:2u", down: "\x1b[100;5:2u" },
+      ];
+      for (const initialMode of ["insert", "normal"] as const) {
+        for (const text of ["", "draft"]) {
+          for (const keys of keyEvents) {
+            f.main[EDITOR_SNAPSHOT].restore({ version: 1, text, cursor: { line: 0, col: text ? 2 : 0 }, mode: initialMode });
+            const before = f.main[EDITOR_SNAPSHOT].capture();
+            f.viewport.scrollTo(Number.MAX_SAFE_INTEGER, { disableFollow: true });
+            f.frame();
+            for (const target of [...targets].reverse()) {
+              f.send(keys.up);
+              assert.equal(renderer.viewportTop, target, `${initialMode} must navigate checkpoints, not half pages`);
+            }
+            f.send(keys.up);
+            assert.equal(renderer.viewportTop, targets[0]);
+            for (const target of targets.slice(1)) {
+              f.send(keys.down);
+              assert.equal(renderer.viewportTop, target);
+            }
+            f.send(keys.up);
+            assert.equal(renderer.viewportTop, targets[1]);
+            f.send("\x1b[117;5:3u", "\x1b[100;5:3u");
+            assert.equal(renderer.viewportTop, targets[1], "releases must not navigate at an interior checkpoint");
+            assert.equal(f.viewport.isFollowingEnd, false);
+            assert.deepEqual(f.main[EDITOR_SNAPSHOT].capture(), before, "navigation must preserve the draft, cursor and mode");
+            assert.equal(f.shutdownCalls, 0);
+          }
+        }
       }
+
+      f.main[EDITOR_SNAPSHOT].restore({ version: 1, text: "", cursor: { line: 0, col: 0 }, mode: "insert" });
+      f.main.setAutocompleteProvider({
+        async getSuggestions() {
+          return { items: [{ value: "/help", label: "/help" }], prefix: "/he" };
+        },
+        applyCompletion() { throw new Error("checkpoint keys must not accept autocomplete"); },
+      });
+      f.send("/", "h", "e");
+      await new Promise<void>(resolve => setTimeout(resolve, 40));
+      assert.equal(f.main.isShowingAutocomplete(), true, "use a real SDK autocomplete list");
+      f.frame();
+      const before = f.main[EDITOR_SNAPSHOT].capture();
       f.send(CTRL_U);
       assert.equal(renderer.viewportTop, targets[0]);
-      for (const target of targets.slice(1)) {
-        f.send(CTRL_D);
-        assert.equal(renderer.viewportTop, target);
-      }
-      f.send(CTRL_U);
-      const interior = renderer.viewportTop;
-      assert.equal(interior, targets[1]);
-      f.send("\x1b[100;5:3u");
-      assert.equal(renderer.viewportTop, interior, "release must not navigate at an interior checkpoint");
-      assert.equal(f.viewport.isFollowingEnd, false);
-      assert.equal(f.main.getText(), "draft");
+      f.send(CTRL_D);
+      assert.equal(renderer.viewportTop, targets[1]);
+      assert.deepEqual(f.main[EDITOR_SNAPSHOT].capture(), before);
+      assert.equal(f.main[EDITOR_MODE]().state, "insert");
+      assert.equal(f.main.isShowingAutocomplete(), true);
       assert.equal(f.shutdownCalls, 0);
     });
   }
 
-  it("fullscreen checkpoint keys leave Insert, Visual, EX and pending input with the editor", async (t) => {
+  it("fullscreen checkpoint keys leave Visual, EX and pending input local and never exit", async (t) => {
     const f = await fixture(t, { fullscreen: true, draft: "alpha" });
+    const document = f.interactive.documentContainer;
+    const filler = document.children[0]!;
+    document.clear();
+    document.addChild(new UserMessageComponent("A reachable checkpoint that modal input must not visit"));
+    document.addChild(filler);
+    f.frame();
     const renderer = f.interactive.renderer;
     assert.ok(renderer instanceof TuiAltScreen);
     const start = renderer.viewportTop;
-    f.send(CTRL_U);
-    assert.equal(f.main.getText(), "", "Insert Ctrl+U must keep native delete-to-line-start");
-    assert.equal(renderer.viewportTop, start);
-    for (const prefix of [[ESC, "v"], [ESC, ":"], [ESC, "d"], [ESC, "2"]]) {
-      f.main[EDITOR_SNAPSHOT].restore({ version: 1, text: "alpha", cursor: { line: 0, col: 0 }, mode: "insert" });
-      f.send(...prefix);
-      assert.notEqual(f.main[EDITOR_MODE]().state, "normal");
-      f.send(CTRL_U);
-      assert.equal(renderer.viewportTop, start, "non-idle modal states must not scroll the transcript");
+    for (const key of [CTRL_U, CTRL_D, "\x1b[117;5u", "\x1b[100;5u", "\x1b[117;5:2u", "\x1b[100;5:2u"]) {
+      for (const text of ["", "alpha"]) {
+        for (const prefix of [[ESC, "v"], [ESC, ":"], [ESC, "d"], [ESC, "2"]]) {
+          f.main[EDITOR_SNAPSHOT].restore({ version: 1, text, cursor: { line: 0, col: 0 }, mode: "insert" });
+          f.send(...prefix);
+          assert.notEqual(f.main[EDITOR_MODE]().state, "normal");
+          f.send(key);
+          assert.equal(renderer.viewportTop, start, "non-idle modal states must not scroll the transcript");
+          assert.equal(f.shutdownCalls, 0, "local modal dispatch must never leak Ctrl+D to app.exit");
+        }
+      }
     }
     assert.equal(f.shutdownCalls, 0);
   });
@@ -620,18 +700,17 @@ describe("Pi SDK 1.2.0 loader and terminal input lifecycle", { concurrency: fals
     assert.deepEqual(f.terminal.cursorShapes(), before, "never-focused editors must not reset another editor's cursor");
   });
 
-  it("configured fullscreen CtrlU/D reach Insert, edit EX and cancel pending without native viewport scrolling", async (t) => {
+  it("configured fullscreen CtrlU/D edit EX and cancel pending without native viewport scrolling or exit", async (t) => {
     const f = await fixture(t, { fullscreen: true, bindings: HALF_PAGE_BINDINGS, draft: "alpha" });
+    const document = f.interactive.documentContainer;
+    const filler = document.children[0]!;
+    document.clear();
+    document.addChild(new UserMessageComponent("A reachable checkpoint that pending input must not visit"));
+    document.addChild(filler);
+    f.frame();
     const renderer = f.interactive.renderer;
     assert.ok(renderer instanceof TuiAltScreen);
     const start = renderer.viewportTop;
-    f.send(CTRL_U);
-    assert.equal(f.main.getText(), "", "configured native binding must not steal Insert delete-to-line-start");
-    assert.equal(renderer.viewportTop, start);
-    f.main[EDITOR_SNAPSHOT].restore({ version: 1, text: "alpha", cursor: { line: 0, col: 0 }, mode: "insert" });
-    f.send(CTRL_D);
-    assert.equal(f.main.getText(), "lpha", "configured native binding must not steal Insert delete-char-forward");
-    assert.equal(renderer.viewportTop, start);
     for (const key of [CTRL_U, CTRL_D]) {
       for (const prefix of [["2"], ["d"], ["g"], ["r"], ["f"], [":", "w"]]) {
         f.main[EDITOR_SNAPSHOT].restore({ version: 1, text: "", cursor: { line: 0, col: 0 }, mode: "normal" });

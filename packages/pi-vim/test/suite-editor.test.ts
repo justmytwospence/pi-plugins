@@ -482,12 +482,12 @@ describe("main editor Ctrl+U / Ctrl+D", () => {
   it("consumes the keys without a scrollable TUI (regular mode)", async () => {
     const installed = await started();
     const editor = installed.editorFactory()(stubTui, stubTheme, stubKeybindings);
-    seed(editor, "hello world");
-    editor.handleInput("$");
-    editor.handleInput(CTRL_U);
-    editor.handleInput(CTRL_D);
-    assert.equal(editor.getText(), "hello world");
-    assert.equal(mode(editor).state, "normal");
+    for (const initialMode of ["insert", "normal"] as const) {
+      editor[EDITOR_SNAPSHOT].restore({ version: 1, text: "hello world", cursor: { line: 0, col: 3 }, mode: initialMode });
+      const before = editor[EDITOR_SNAPSHOT].capture();
+      sendKeys(editor, [CTRL_U, CTRL_D, "\x1b[117;5:3u", "\x1b[100;5:3u"]);
+      assert.deepEqual(editor[EDITOR_SNAPSHOT].capture(), before);
+    }
   });
 
   it("hands idle Normal / and ? to copy mode only when it answers", async () => {
@@ -520,14 +520,46 @@ describe("main editor Ctrl+U / Ctrl+D", () => {
     assert.equal(editor.getText(), "hello ");
   });
 
-  it("keeps Insert mode on the editor (Ctrl+U deletes to line start)", async () => {
+  for (const initialMode of ["insert", "normal"] as const) {
+    for (const text of ["", "hello world"]) {
+      it(`navigates without changing ${text ? "a nonempty" : "an empty"} ${initialMode} draft for raw and Kitty input`, async () => {
+        const installed = await started();
+        const { tui, scrolls } = scrollableTui();
+        const editor = installed.editorFactory()(tui, stubTheme, stubKeybindings);
+        editor.setTranscriptNavigationFn(direction => scrolls.push(direction));
+        editor[EDITOR_SNAPSHOT].restore({ version: 1, text, cursor: { line: 0, col: text ? 3 : 0 }, mode: initialMode });
+        const before = editor[EDITOR_SNAPSHOT].capture();
+        let exits = 0;
+        editor.onCtrlD = () => { exits++; };
+        sendKeys(editor, [CTRL_U, CTRL_D, "\x1b[117;5u", "\x1b[100;5u", "\x1b[117;5:2u", "\x1b[100;5:2u"]);
+        assert.deepEqual(scrolls, [-1, 1, -1, 1, -1, 1]);
+        // Insert adds its own dispatch guard. Normal releases are filtered by
+        // the real TUI before editor dispatch; sdk-integration covers that path.
+        if (initialMode === "insert") {
+          sendKeys(editor, ["\x1b[117;5:3u", "\x1b[100;5:3u"]);
+          assert.deepEqual(scrolls, [-1, 1, -1, 1, -1, 1], "release events must not navigate");
+        }
+        assert.deepEqual(editor[EDITOR_SNAPSHOT].capture(), before, "navigation must preserve cursor and modal draft state");
+        assert.equal(exits, 0);
+        assert.equal(installed.shutdownCalls, 0);
+      });
+    }
+  }
+
+  it("navigates from Insert autocomplete without accepting, deleting or closing the draft", async () => {
     const installed = await started();
-    const { tui, scrolls } = scrollableTui();
-    const editor = installed.editorFactory()(tui, stubTheme, stubKeybindings);
-    for (const char of "hello world") editor.handleInput(char);
-    editor.handleInput(CTRL_U);
-    assert.deepEqual(scrolls, []);
-    assert.equal(editor.getText(), "");
+    const editor = installed.editorFactory()(stubTui, stubTheme, stubKeybindings);
+    const directions: number[] = [];
+    editor.setTranscriptNavigationFn(direction => directions.push(direction));
+    editor.setText("/help");
+    const internal = editor as unknown as { autocompleteState: string | null; autocompleteList: object };
+    internal.autocompleteState = "regular";
+    internal.autocompleteList = {};
+    const before = editor[EDITOR_SNAPSHOT].capture();
+    sendKeys(editor, [CTRL_U, CTRL_D]);
+    assert.deepEqual(directions, [-1, 1]);
+    assert.deepEqual(editor[EDITOR_SNAPSHOT].capture(), before);
+    assert.equal(mode(editor).autocomplete, true);
     assert.equal(mode(editor).state, "insert");
   });
 
