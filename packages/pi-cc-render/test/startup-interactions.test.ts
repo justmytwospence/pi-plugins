@@ -132,19 +132,20 @@ describe("interactive startup sections", () => {
     component.dispose();
   });
 
-  test("a same-width row change replaces hit maps with only retained model routes", () => {
+  test("same-width viewport changes and Ctrl+O use only final custom-section hits, then restore them", () => {
     const actions = vi.fn();
     const width = 46;
     let availableRows = layoutSection(section, width, theme).lines.length;
-    const getSection = (renderWidth: number) => planSplashSections({ Models: section }, renderWidth, theme, availableRows).Models;
+    const getSection = (renderWidth: number, expanded: boolean) => expanded
+      ? section : planSplashSections({ Models: section }, renderWidth, theme, availableRows).Models;
     const component = createInteractiveSection(getSection, () => theme, actions);
     const full = component.render(width);
     expect(full).toEqual(layoutSection(section, width, theme).lines);
     availableRows -= 2;
     const short = component.render(width);
-    expect(short).toHaveLength(availableRows);
-    expect(short.join("\n")).toMatch(/\+\d+ hidden · \/model/);
-    const retained = getSection(width)!;
+    expect(short.length).toBeLessThanOrEqual(availableRows);
+    expect(short.join("\n")).toMatch(/\+\d+ hidden/);
+    const retained = getSection(width, false)!;
     const hits = layoutSection(retained, width, theme).hits;
     const expected = retained.groups.flatMap((group) => group.actions ?? []).map((action) => JSON.stringify(action));
     expect([...new Set(hits.map((hit) => JSON.stringify(hit.action)))].sort()).toEqual(expected.sort());
@@ -153,8 +154,44 @@ describe("interactive startup sections", () => {
       expect(actions).toHaveBeenLastCalledWith(hit.action);
     }
     expect(component.handleMouse?.(mouse(2, short.length - 1, width))).toBeUndefined();
+    component.setExpanded(true);
+    expect(component.expanded).toBe(true);
+    expect(component.handleMouse?.(mouse(hits[0]?.startCol ?? 2, hits[0]?.row ?? 2, width))).toBeUndefined();
+    expect(component.render(width)).toEqual(full);
+    for (const hit of layoutSection(section, width, theme).hits) {
+      expect(component.handleMouse?.(mouse(hit.startCol, hit.row, width))).toEqual({ handled: true, render: false });
+      expect(actions).toHaveBeenLastCalledWith(hit.action);
+    }
+    component.setExpanded(false);
+    expect(component.handleMouse?.(mouse(2, 2, width))).toBeUndefined();
+    expect(component.render(width)).toEqual(short);
     availableRows += 2;
     expect(component.render(width)).toEqual(full);
+    component.dispose();
+  });
+
+  test("initial global expansion applies to custom MCP/Models and both modes use actionable final rectangles", () => {
+    const actions = vi.fn();
+    const full: ResourceSection = { title: "MCP", count: 3, layout: "columns", groups: [
+      { label: "project", items: ["needs-auth"], actions: [mcp("needs-auth")], prefixes: [{ text: "◆", color: "warning" }] },
+      { label: "user", items: ["optional-1", "optional-2"], actions: [mcp("optional-1"), mcp("optional-2")] },
+    ] };
+    const width = 46;
+    const planned = planSplashSections({ MCP: full }, width, theme, 3).MCP!;
+    expect(planned.groups.find((group) => group.label === "project")?.items).toEqual(["needs-auth"]);
+    const component = createInteractiveSection((_width, expanded) => expanded ? full : planned, () => theme, actions, true);
+    expect(component.expanded).toBe(true);
+    for (const [expanded, shown] of [[true, full], [false, planned], [true, full]] as const) {
+      component.setExpanded(expanded);
+      expect(component.handleMouse?.(mouse(2, 2, width))).toBeUndefined();
+      expect(component.render(width)).toEqual(layoutSection(shown, width, theme).lines);
+      const hits = layoutSection(shown, width, theme).hits;
+      for (const hit of hits) {
+        expect(component.handleMouse?.(mouse(hit.startCol, hit.row, width))).toEqual({ handled: true, render: false });
+        expect(actions).toHaveBeenLastCalledWith(hit.action);
+      }
+      expect(component.handleMouse?.(mouse(width - 1, 2, width))).toBeUndefined();
+    }
     component.dispose();
   });
 

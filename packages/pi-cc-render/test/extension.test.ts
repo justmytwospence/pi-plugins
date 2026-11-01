@@ -269,7 +269,7 @@ describe("extension factory", () => {
       ui: { requestRender: () => undefined },
     };
     let header: any;
-    const native = (title: string) => ({ setExpanded() {}, state: { expanded: false }, render() {
+    const native = (title: string) => ({ setExpanded(expanded: boolean) { this.state.expanded = expanded; }, state: { expanded: false }, render() {
       return [`[${title}] ${this.state.expanded ? "expanded detail" : "native"}`];
     } });
     let context = native("Context");
@@ -290,24 +290,27 @@ describe("extension factory", () => {
       expect(header({}, { fg: (_color: string, text: string) => text, bold: (text: string) => text }).render(120)).toEqual([]);
       mode.loadedResourcesContainer.children = nativeChildren();
       replaceSections(mode, { force: true, extensions: [] });
-      expect(mode.loadedResourcesContainer.children[0]).toBe(context);
+      expect(renderLines()[0]).toContain("[Extensions] native");
       const first = lines();
-      const headings = ["Context 1", "[Skills] native", "[Prompts] native", "[Extensions] native", "[Extension issues] native diagnostic", "Starting context", "Models 2"];
+      const headings = ["[Extensions] native", "Context 1", "[Skills] native", "[Prompts] native", "[Extension issues] native diagnostic", "Starting context", "Models 2"];
       const positions = headings.map((heading) => first.indexOf(heading));
       expect(positions.every((position, index) => position >= 0 && (!index || position > positions[index - 1]!))).toBe(true);
       const rows = renderLines();
       const mapAt = rows.findIndex((row: string) => row.includes("Starting context"));
       const modelsAt = rows.findIndex((row: string) => row.includes("Models 2"));
-      expect(rows[0]).toContain("Context 1");
+      expect(rows[0]).toContain("[Extensions] native");
+      expect(rows.find((row: string) => row.includes("Context 1"))).toBeDefined();
       expect(rows[mapAt - 1]).toBe("");
       expect(rows[mapAt - 2]).not.toBe("");
       expect(rows[modelsAt - 1]).toBe("");
       expect(rows[modelsAt - 2]).not.toBe("");
       expect(rows.at(-1)).not.toBe("");
       expect(first).toContain("Starting context ·");
-      context.state.expanded = true;
-      expect(lines()).toContain("[Context] expanded detail");
-      context.state.expanded = false;
+      context.setExpanded(true);
+      expect(lines()).toContain("■ Context 1 · ~12 tok");
+      expect(lines()).toContain("■ AGENTS.md  ~12");
+      expect(lines()).not.toContain("[Context] expanded detail");
+      context.setExpanded(false);
       expect(first).not.toContain("Sources · occupied context");
       expect(first).not.toContain("loading");
       expect(attachStartupHost(mode).contextSnapshot?.attribution.files).toBe(true);
@@ -335,7 +338,7 @@ describe("extension factory", () => {
       // Pi clears and reconstructs the native sections on reload/resume; our insertion stays singular.
       mode.loadedResourcesContainer.children = nativeChildren();
       replaceSections(mode, { force: true, extensions: [] });
-      expect(mode.loadedResourcesContainer.children[0]).toBe(context);
+      expect(renderLines()[0]).toContain("[Extensions] native");
       expect(lines().match(/Starting context/g)).toHaveLength(1);
       expect(lines().indexOf("[Extension issues] native diagnostic")).toBeLessThan(lines().indexOf("Starting context"));
       expect(lines().indexOf("Starting context")).toBeLessThan(lines().indexOf("Models 2"));
@@ -347,7 +350,7 @@ describe("extension factory", () => {
     }
   });
 
-  test("startup budgets the actual dock, chart, spacers and diagnostics at the rendered width; native expansion is untouched", async () => {
+  test("startup budgets the real viewport and Ctrl+O expands every section in custom format", async () => {
     const { replaceSections, stopStartupResources, renderSection } = await import("../src/feature/shell/startup-resources.ts");
     const { attachStartupHost, disposeStartupHost } = await import("../src/feature/shell/startup-state.ts");
     const { mcpState } = await import("../src/feature/shell/mcp-servers.ts");
@@ -355,7 +358,7 @@ describe("extension factory", () => {
     let dockRows = 4;
     const terminal = { rows: 100, columns: 180 };
     const plain = { fg: (_color: string, value: string) => value, bold: (value: string) => value };
-    const native = (title: string) => ({ state: { expanded: false }, setExpanded() {}, render() {
+    const native = (title: string) => ({ state: { expanded: false }, setExpanded(expanded: boolean) { this.state.expanded = expanded; }, render() {
       return this.state.expanded ? [`[${title}] native expanded`, "native item A", "native item B", "native item C"] : [`[${title}] native collapsed`];
     } });
     const context = native("Context");
@@ -408,24 +411,34 @@ describe("extension factory", () => {
         expect(short.join("\n")).toContain("Extensions 44");
         expect(short.join("\n")).toContain("MCP 10");
         expect(short.join("\n")).toMatch(/\+\d+ hidden/);
-        expect(short.join("\n")).toContain("extension-0");
-        context.state.expanded = true;
-        const expanded = render(width);
-        expect(expanded).toContain("native item C");
-        expect(expanded.join("\n")).toContain("[Context] native expanded");
-        context.state.expanded = false;
+        expect(short.join("\n")).toContain("Context 1");
+        const expandable = children.filter((child) => typeof child.setExpanded === "function");
+        expect(expandable).toHaveLength(6); // Four native hooks, MCP and Models.
+        for (const child of expandable) child.setExpanded(true);
+        const expanded = render(width).join("\n");
+        for (const heading of ["Context 1", "Skills 2", "Prompts 1", "Extensions 44", "MCP 10", "Models 14"]) expect(expanded).toContain(heading);
+        for (const item of ["AGENTS.md", "extension-0", "extension-43", "server-0", "server-9", "model-0", "model-13"]) expect(expanded).toContain(item);
+        expect(expanded).not.toContain("native expanded");
+        expect(expanded).not.toContain("+44 hidden");
+        expect(expanded).toContain("[Extension issues] native diagnostic");
+        expect(expanded).toContain("No attributed sources");
+        for (const child of expandable) child.setExpanded(false);
+        expect(render(width)).toEqual(short);
+        context.setExpanded(true);
+        expect(render(width).join("\n")).toContain("AGENTS.md");
+        context.setExpanded(false);
         dockRows++;
         const changedDock = render(width);
         expect(changedDock.length).toBeLessThanOrEqual(short.length);
         dockRows--;
         terminal.rows = actual;
         expect(render(width)).toEqual(full);
-        context.state.expanded = true;
-        expect(render(width)).toContain("native item C");
-        expect(render(width).join("\n")).not.toContain("[Context] native collapsed");
-        context.state.expanded = false;
+        context.setExpanded(true);
+        expect(render(width).join("\n")).not.toContain("[Context] native expanded");
+        context.setExpanded(false);
       }
       expect(renderSection(host.resourceSections!.Models!, 46, plain).join("\n")).toContain("model-13");
+      terminal.rows = 200;
       host.resourceSections!.Models = { title: "Models", count: 1, layout: "columns", groups: [
         { label: "test", items: ["replacement-model"], actions: [{ kind: "model", provider: "test", id: "replacement-model" }] },
       ] };

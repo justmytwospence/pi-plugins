@@ -26,18 +26,18 @@ import { createInteractiveSection, createSplashActionController } from "./startu
 export { GLYPHS } from "./startup-style.ts";
 
 /**
- * Readable replacement for the collapsed startup listing ([Context] / [Skills] / [Prompts] / [Extensions]).
+ * Readable replacement for the startup listing ([Extensions] / [Context] / [Skills] / [Prompts]).
  *
  * Pi prints each section as one comma-joined run of labels, which for extensions means a wall of repeated
  * `owner/repo:packages/pi-x/src` paths. Here every section gets a heading with a count, and every section
- * (Context, Skills, Prompts, Extensions, MCP) is split the same way: by level (project, then user, then
+ * (Extensions, Context, Skills, Prompts, MCP) is split the same way: by level (project, then user, then
  * path or extension), each level labelled with its count even when it is the only one. Inside a level,
  * local entries come first, then packages (one sub-heading per package with several entries, the rest
  * together under `packages`), as pi's own expanded listing nests them. Entries show by short name in
  * aligned columns.
  * Context files and skills are what the model carries in every request, so they also show an estimated
  * token cost: a total on the heading, per-file counts for context files (largest first) and a count
- * after every skill, colored by weight (dim, muted, warning, error). The expanded view (ctrl+o) is left to pi.
+ * after every skill, colored by weight (dim, muted, warning, error). Ctrl+O reveals the full custom listing.
  */
 
 type Scope = "user" | "project" | "path";
@@ -56,8 +56,10 @@ export type ResourceGroup = {
 	/** Sub-heading; undefined when the section needs none. */
 	label?: string;
 	items: string[];
-	/** Original count while a responsive splash retains only some entries. */
+	/** Original count, including entries represented by a folded heading. */
 	count?: number;
+	/** Entire subtree represented by this heading; no individual entries are hidden. */
+	foldedCount?: number;
 	/** Groups nested under this one, after its own items (a level's packages). */
 	children?: ResourceGroup[];
 	/** Estimated tokens per item, parallel to `items`; present only when the section measures them. */
@@ -89,6 +91,8 @@ export type ResourceMark = { text: string; color: string; highlight?: boolean };
 export type ResourceSection = {
 	title: string;
 	count: number;
+	/** Entire section represented by its heading; notes and attention remain visible. */
+	foldedCount?: number;
 	/** Estimated tokens the whole section adds to every request; shown on the heading when above zero. */
 	tokens?: number;
 	/** The model's context window, when known; colors the heading total by its share of it. */
@@ -274,21 +278,34 @@ function allGroups(groups: ResourceGroup[]): ResourceGroup[] {
 /** Column-major grid (reads down, like `ls`) that never splits an entry and never exceeds `width`. */
 export function layoutGrid(items: string[], width: number, indent: number): string[] {
 	if (items.length === 0) return [];
-	const cell = Math.max(...items.map((item) => visibleWidth(item))) + COLUMN_GAP;
 	const available = Math.max(1, width - indent);
-	const maxColumns = Math.max(1, Math.floor((available + COLUMN_GAP) / cell));
-	const rows = Math.ceil(items.length / Math.min(maxColumns, items.length));
-	const columns = Math.ceil(items.length / rows);
+	let best: { rows: number; lengths: number[]; widths: number[] } | undefined;
+	for (let columns = 1; columns <= items.length; columns++) {
+		const base = Math.floor(items.length / columns);
+		const lengths = Array.from({ length: columns }, (_, index) => base + (index < items.length % columns ? 1 : 0));
+		let offset = 0;
+		const widths = lengths.map((length) => {
+			const natural = Math.max(...items.slice(offset, offset + length).map((item) => visibleWidth(item)));
+			offset += length;
+			return natural;
+		});
+		const needed = widths.reduce((sum, size) => sum + size, 0) + COLUMN_GAP * (columns - 1);
+		if (needed > available && columns !== 1) continue;
+		const rows = lengths[0]!;
+		if (!best || rows < best.rows || (rows === best.rows && columns < best.lengths.length)) best = { rows, lengths, widths };
+	}
+	const { rows, lengths, widths } = best!;
+	const starts = lengths.map((length, index) => lengths.slice(0, index).reduce((sum, count) => sum + count, 0));
 	const lines: string[] = [];
 	for (let row = 0; row < rows; row++) {
 		let line = " ".repeat(indent);
-		for (let column = 0; column < columns; column++) {
-			const item = items[column * rows + row];
+		for (let column = 0; column < lengths.length; column++) {
+			const item = row < lengths[column]! ? items[starts[column]! + row] : undefined;
 			if (item === undefined) continue;
-			const last = column === columns - 1 || items[(column + 1) * rows + row] === undefined;
-			line += last ? item : item + " ".repeat(cell - visibleWidth(item));
+			const next = lengths.slice(column + 1).some((length) => row < length);
+			line += item + (next ? " ".repeat(widths[column]! - visibleWidth(item) + COLUMN_GAP) : "");
 		}
-		lines.push(truncateToWidth(line, width));
+		lines.push(truncateToWidth(line.trimEnd(), width));
 	}
 	return lines;
 }
@@ -327,8 +344,14 @@ type CellHit = { row: number; startCol: number; endCol: number; action: SplashAc
 type Block = { lines: string[]; hits: CellHit[]; width: number; height: number; columns: number };
 type Candidate = { columns: number; rows: number; width: number; lengths: number[]; widths: Array<{ name: number; count: number; total: number }> };
 
+function groupHeading(group: ResourceGroup, available: number, theme: StartupTheme): string {
+	const suffix = ` ${theme.fg("dim", String(groupCount(group)))}${group.foldedCount ? theme.fg("dim", ` · +${group.foldedCount} hidden`) : ""}`;
+	const label = theme.fg("accent", group.label ?? "");
+	return `${group.foldedCount ? truncateToWidth(label, Math.max(0, available - visibleWidth(suffix)), "…") : label}${suffix}`;
+}
+
 function candidateShapes(group: ResourceGroup, available: number, theme: StartupTheme, category?: ResourceSection["category"]): { cells: Cell[]; heading: string; shapes: Candidate[] } {
-	const heading = `${theme.fg("accent", group.label ?? "")} ${theme.fg("dim", String(group.count ?? group.items.length))}`;
+	const heading = groupHeading(group, available, theme);
 	const cells: Cell[] = markedItems(group, theme).map((name, index) => {
 		const right = rightText(group, index);
 		return {
@@ -339,7 +362,7 @@ function candidateShapes(group: ResourceGroup, available: number, theme: Startup
 		};
 	});
 	const shapes: Candidate[] = [];
-	for (let columns = 1; columns <= Math.max(1, Math.floor(cells.length / 3)); columns++) {
+	for (let columns = 1; columns <= Math.max(1, Math.floor(cells.length / 2)); columns++) {
 		const rows = Math.ceil(cells.length / columns);
 		const base = Math.floor(cells.length / columns);
 		const lengths = Array.from({ length: columns }, (_, index) => base + (index < cells.length % columns ? 1 : 0));
@@ -502,10 +525,7 @@ function renderGroup(group: ResourceGroup, indent: number, ctx: RenderContext): 
 	const lines: string[] = [];
 	const nested = group.label !== undefined;
 	if (nested) {
-		lines.push(truncateToWidth(
-			`${" ".repeat(indent)}${ctx.theme.fg("accent", group.label!)} ${ctx.theme.fg("dim", String(groupCount(group)))}`,
-			ctx.width,
-		));
+		lines.push(truncateToWidth(`${" ".repeat(indent)}${groupHeading(group, Math.max(0, ctx.width - indent), ctx.theme)}`, ctx.width));
 	}
 	const inner = nested ? indent + INDENT : indent;
 	lines.push(...renderGroupItems(group, inner, ctx));
@@ -540,7 +560,7 @@ export function layoutSection(section: ResourceSection, width: number, theme: St
 	const attention = section.attention ? ` ${theme.fg("warning", `· ${section.attention}`)}` : "";
 	const legend = (section.legend ?? []).map((part) => ` ${theme.fg("dim", "·")} ${theme.fg(part.color, part.text)}`).join("");
 	const swatch = section.category ? `${categoryStyle(theme, section.category).swatch("■")} ` : "";
-	const heading = `${swatch}${theme.bold(theme.fg("mdHeading", section.title))} ${theme.fg("dim", String(section.count))}${cost}${attention}${legend}`;
+	const heading = `${swatch}${theme.bold(theme.fg("mdHeading", section.title))} ${theme.fg("dim", String(section.count))}${cost}${attention}${legend}${section.foldedCount ? theme.fg("dim", ` · +${section.foldedCount} hidden`) : ""}`;
 	const ctx: RenderContext = {
 		section,
 		width,
@@ -550,7 +570,7 @@ export function layoutSection(section: ResourceSection, width: number, theme: St
 	};
 	const lines = [truncateToWidth(heading, width)];
 	const hits: SplashHit[] = [];
-	if (section.layout === "columns") {
+	if (section.layout === "columns" && section.groups.length > 0) {
 		const columns = layoutColumns(section.groups, INDENT, ctx);
 		hits.push(...columns.hits.map((hit) => ({ ...hit, row: hit.row + 1 })));
 		lines.push(...columns.lines);
@@ -565,92 +585,116 @@ export function renderSection(section: ResourceSection, width: number, theme: St
 	return layoutSection(section, width, theme).lines;
 }
 
-export type SplashCandidate = { section: ResourceSection; rows: number; hidden: number; losses: number[] };
+export type SplashCandidate = { section: ResourceSection; rows: number; hidden: number; losses: [number, number, number]; folds: number; order: string };
+type FoldVariant = { groups: ResourceGroup[]; hidden: number; losses: [number, number, number]; folds: number; order: string };
+const CANDIDATE_LIMIT = 256;
 
-/** One candidate per hidden-entry count, in a deterministic priority order. Original group headings,
- * metadata arrays and section counts survive filtering; the measured row count includes the notice. */
-export function splashSectionCandidates(name: string, original: ResourceSection, width: number, theme: StartupTheme): SplashCandidate[] {
-	const priority = (name: string, group: ResourceGroup, index: number): number => {
-		if (name === "Models" && group.marks?.[index]?.highlight) return 0;
-		if (name === "Models" && group.prefixes?.[index]?.text === GLYPHS.favorite.text) return 1;
-		if (name === "MCP" && (group.prefixes?.[index]?.text === GLYPHS.attention.text || group.prefixes?.[index]?.text === GLYPHS.failed.text)) return 2;
-		return ({ Context: 3, Skills: 4, Models: 5, MCP: 6, Prompts: 7, Extensions: 8 } as Record<string, number>)[name] ?? 8;
-	};
-	const entries: Array<{ key: string; rank: number; order: number }> = [];
-	const visit = (groups: ResourceGroup[], parent = "") => groups.forEach((group, position) => {
-		const path = `${parent}/${position}`;
-		group.items.forEach((_, index) => entries.push({ key: `${path}/${index}`, rank: priority(name, group, index), order: entries.length }));
-		visit(group.children ?? [], path);
+/** Protect the current model's provider and problem MCP scopes before minimizing hidden entries. */
+function foldLosses(name: string, group: ResourceGroup): [number, number, number] {
+	const own: [number, number, number] = [0, 0, 0];
+	group.items.forEach((_, index) => {
+		if (name === "Models") {
+			if (group.marks?.[index]?.highlight) own[0]++;
+			if (group.prefixes?.[index]?.text === GLYPHS.favorite.text) own[2]++;
+		}
+		if (name === "MCP" && (group.prefixes?.[index]?.text === GLYPHS.attention.text || group.prefixes?.[index]?.text === GLYPHS.failed.text)) own[1]++;
 	});
-	visit(original.groups);
-	const removal = [...entries].sort((a, b) => b.rank - a.rank || b.order - a.order);
-	const result: SplashCandidate[] = [];
-	for (let hidden = 0; hidden <= entries.length; hidden++) {
-		const removed = new Set(removal.slice(0, hidden).map((entry) => entry.key));
-		const filter = (groups: ResourceGroup[], parent = ""): ResourceGroup[] => groups.map((group, position) => {
-			const path = `${parent}/${position}`;
-			const keep = group.items.map((_, index) => index).filter((index) => !removed.has(`${path}/${index}`));
-			const aligned = <T>(values: T[] | undefined) => values?.filter((_, index) => keep.includes(index));
-			return {
-				...group, count: groupCount(group), items: aligned(group.items)!,
-				...(group.tokens ? { tokens: aligned(group.tokens) } : {}),
-				...(group.marks ? { marks: aligned(group.marks) } : {}),
-				...(group.prefixes ? { prefixes: aligned(group.prefixes) } : {}),
-				...(group.right ? { right: aligned(group.right) } : {}),
-				...(group.tones ? { tones: aligned(group.tones) } : {}),
-				...(group.actions ? { actions: aligned(group.actions) } : {}),
-				...(group.children ? { children: filter(group.children, path) } : {}),
-			};
-		});
-		const route = name === "Models" ? "/model" : name === "MCP" ? "/mcp" : "Ctrl+O";
-		const section = hidden === 0 ? original : {
-			...original, groups: filter(original.groups),
-			notes: [...(original.notes ?? []), { text: `+${hidden} hidden · ${route} to see all`, color: "dim" }],
-		};
-		const losses = Array<number>(9).fill(0);
-		for (const entry of removal.slice(0, hidden)) losses[entry.rank]!++;
-		result.push({ section, rows: renderSection(section, width, theme).length, hidden, losses });
+	for (const child of group.children ?? []) {
+		const nested = foldLosses(name, child);
+		for (let index = 0; index < 3; index++) own[index]! += nested[index]!;
 	}
-	return result;
+	return own;
 }
 
-/** Minimize hidden entries over width-specific, actually rendered candidate rows. A row-indexed
- * dynamic program bounds the search while allowing non-monotone grid/column packing. */
+function compareFoldScore(a: { hidden: number; losses: [number, number, number]; folds: number; order: string }, b: typeof a): number {
+	return (a.losses[0] + a.losses[1]) - (b.losses[0] + b.losses[1])
+		|| a.hidden - b.hidden || a.losses[2] - b.losses[2] || a.folds - b.folds || a.order.localeCompare(b.order);
+}
+
+/** Exact for ordinary inventories; keep a deterministic beam when subgroup combinations exceed 256. */
+export function splashSectionCandidates(name: string, original: ResourceSection, width: number, theme: StartupTheme): SplashCandidate[] {
+	const rowsFor = (groups: ResourceGroup[]) => renderSection({ ...original, groups }, width, theme).length;
+	const bounded = (variants: FoldVariant[]): FoldVariant[] => {
+		if (variants.length <= CANDIDATE_LIMIT) return variants;
+		return variants.sort((a, b) => (a.losses[0] + a.losses[1]) - (b.losses[0] + b.losses[1])
+			|| a.hidden - b.hidden || rowsFor(a.groups) - rowsFor(b.groups)
+			|| a.folds - b.folds || a.order.localeCompare(b.order)).slice(0, CANDIDATE_LIMIT);
+	};
+	const add = (base: FoldVariant, variant: FoldVariant): FoldVariant => ({
+		groups: [...base.groups, ...variant.groups], hidden: base.hidden + variant.hidden,
+		losses: base.losses.map((value, index) => value + variant.losses[index]!) as [number, number, number],
+		folds: base.folds + variant.folds, order: base.order + variant.order,
+	});
+	const empty = (): FoldVariant => ({ groups: [], hidden: 0, losses: [0, 0, 0], folds: 0, order: "" });
+	const combine = (groups: ResourceGroup[]): FoldVariant[] => {
+		let variants = [empty()];
+		for (const group of groups) {
+			const children = group.children ? combine(group.children) : [empty()];
+			const keep = children.map((child): FoldVariant => ({
+				...child, groups: [child.hidden ? { ...group, children: child.groups } : group], order: `0${child.order}`,
+			}));
+			const count = groupCount(group);
+			const fold: FoldVariant[] = group.label === undefined || count === 0 ? [] : [{
+				groups: [{ label: group.label, items: [], count, foldedCount: count }],
+				hidden: count, losses: foldLosses(name, group), folds: 1, order: "1",
+			}];
+			variants = bounded(variants.flatMap((variant) => [...keep, ...fold].map((choice) => add(variant, choice))));
+		}
+		return variants;
+	};
+	const groupVariants = combine(original.groups);
+	const result = groupVariants.map((variant): SplashCandidate => {
+		const section = variant.hidden ? { ...original, groups: variant.groups } : original;
+		return { section, rows: renderSection(section, width, theme).length, hidden: variant.hidden,
+			losses: variant.losses, folds: variant.folds, order: variant.order };
+	});
+	if (original.count > 0) {
+		const losses = original.groups.reduce<[number, number, number]>((sum, group) => {
+			const part = foldLosses(name, group);
+			return sum.map((value, index) => value + part[index]!) as [number, number, number];
+		}, [0, 0, 0]);
+		const section = { ...original, groups: [], foldedCount: original.count };
+		result.push({ section, rows: renderSection(section, width, theme).length, hidden: original.count,
+			losses, folds: 1, order: "2" });
+	}
+	if (result.length <= CANDIDATE_LIMIT) return result;
+	// Reserve a safe shortest alternative even if the beam favored every protected source.
+	const whole = result.pop()!;
+	return [...result.sort((a, b) => (a.losses[0] + a.losses[1]) - (b.losses[0] + b.losses[1])
+		|| a.hidden - b.hidden || a.rows - b.rows || a.folds - b.folds || a.order.localeCompare(b.order)).slice(0, CANDIDATE_LIMIT - 1), whole];
+}
+
+/** Width-measured row DP: each row count retains its best protected/hidden/favorite/fold outcome. */
 export function planSplashSections(
 	sections: Record<string, ResourceSection>, width: number, theme: StartupTheme, availableRows: number,
 ): Record<string, ResourceSection> {
-	const names = ["Context", "Skills", "Prompts", "Extensions", "MCP", "Models"].filter((name) => sections[name]);
+	const names = ["Extensions", "Context", "Skills", "Prompts", "MCP", "Models"].filter((name) => sections[name]);
 	if (names.reduce((sum, name) => sum + renderSection(sections[name]!, width, theme).length, 0) <= availableRows) {
 		return Object.fromEntries(names.map((name) => [name, sections[name]!]));
 	}
 	const options = names.map((name) => splashSectionCandidates(name, sections[name]!, width, theme));
-	const better = (a: { hidden: number; losses: number[] }, b: typeof a): boolean => {
-		if (a.hidden !== b.hidden) return a.hidden < b.hidden;
-		for (let index = 0; index < a.losses.length; index++) {
-			if (a.losses[index] !== b.losses[index]) return a.losses[index]! < b.losses[index]!;
-		}
-		return false;
-	};
-	type Choice = { hidden: number; losses: number[]; picked: SplashCandidate[] };
-	let frontier = new Map<number, Choice>([[0, { hidden: 0, losses: Array(9).fill(0), picked: [] }]]);
+	type Choice = { hidden: number; losses: [number, number, number]; folds: number; order: string; picked: SplashCandidate[] };
+	let frontier = new Map<number, Choice>([[0, { hidden: 0, losses: [0, 0, 0], folds: 0, order: "", picked: [] }]]);
 	for (const sectionOptions of options) {
 		const next = new Map<number, Choice>();
 		for (const [rows, state] of frontier) for (const option of sectionOptions) {
 			const total = rows + option.rows;
-			const candidate = {
+			const candidate: Choice = {
 				hidden: state.hidden + option.hidden,
-				losses: state.losses.map((value, index) => value + option.losses[index]!),
+				losses: state.losses.map((value, index) => value + option.losses[index]!) as [number, number, number],
+				folds: state.folds + option.folds, order: `${state.order}/${option.order}`,
 				picked: [...state.picked, option],
 			};
 			const existing = next.get(total);
-			if (!existing || better(candidate, existing)) next.set(total, candidate);
+			if (!existing || compareFoldScore(candidate, existing) < 0) next.set(total, candidate);
 		}
 		frontier = next;
 	}
 	const fitting = [...frontier].filter(([rows]) => rows <= availableRows);
+	// When even every heading is too tall, the shortest safe custom listing scrolls in Pi.
 	const chosen = fitting.length
-		? fitting.sort((a, b) => better(a[1], b[1]) ? -1 : better(b[1], a[1]) ? 1 : a[0] - b[0])[0]![1]
-		: [...frontier].sort((a, b) => a[0] - b[0] || (better(a[1], b[1]) ? -1 : 1))[0]?.[1];
+		? fitting.sort((a, b) => compareFoldScore(a[1], b[1]) || a[0] - b[0])[0]![1]
+		: [...frontier].sort((a, b) => a[0] - b[0] || compareFoldScore(a[1], b[1]))[0]?.[1];
 	return Object.fromEntries(names.map((name, index) => [name, chosen?.picked[index]?.section ?? sections[name]!]));
 }
 
@@ -1178,7 +1222,7 @@ export function watchMcpState(mode: any, component: unknown, update: (entries: M
 	return stop;
 }
 
-/** Replaces collapsed native sections; the native expanded content and diagnostics remain untouched. */
+/** Renders native and custom splash sections in the same format in both expansion states; diagnostics remain native. */
 export function replaceSections(mode: any, options: unknown, pi?: ExtensionAPI): void {
 	stopStartupResources();
 	const children: any[] = mode?.loadedResourcesContainer?.children;
@@ -1255,16 +1299,22 @@ export function replaceSections(mode: any, options: unknown, pi?: ExtensionAPI):
 	// The first section (or an interactive section) plans from a render-time viewport width.
 	// Measure the other children through their original renderers, never through our wrappers:
 	// rendering loadedResourcesContainer here would recurse into the planner.
-	const selected = (name: string, width: number) => {
+	const selected = (name: string, width: number, expanded: boolean) => {
 		ensurePlan(width);
-		return planned[name];
+		return expanded ? (name === "MCP" ? section() : host.resourceSections?.[name]) : planned[name];
 	};
-	const interactive = (getSection: (width: number) => ResourceSection | undefined) =>
-		controller ? createInteractiveSection(getSection, theme, (action) => void controller.activate(action)) : {
-			render(width: number) { const value = getSection(width); return value ? renderSection(value, width, theme()) : []; },
+	const initialExpanded = !!mode.getStartupExpansionState?.();
+	const interactive = (getSection: (width: number, expanded: boolean) => ResourceSection | undefined) => {
+		if (controller) return createInteractiveSection(getSection, theme, (action) => void controller.activate(action), initialExpanded);
+		let expanded = initialExpanded;
+		return {
+			get expanded() { return expanded; },
+			setExpanded(next: boolean) { expanded = next; },
+			render(width: number) { const value = getSection(width, expanded); return value ? renderSection(value, width, theme()) : []; },
 			invalidate() {},
 		};
-	const modelComponent = interactive((width) => selected("Models", width));
+	};
+	const modelComponent = interactive((width, expanded) => selected("Models", width, expanded));
 	const modelSpacer = { render: () => host.resourceSections?.Models ? [""] : [], invalidate() {} };
 	const mapComponent = {
 		render(width: number) {
@@ -1275,16 +1325,24 @@ export function replaceSections(mode: any, options: unknown, pi?: ExtensionAPI):
 		},
 		invalidate() {},
 	};
-	// Pi puts a Spacer before its first native section. The custom splash starts with
-	// Context, so only remove that leading blank while the splash is enabled.
+	// Pi puts a Spacer before its first native section. Keep the introductory section flush left.
 	if (config.showStartupHeader && children[0]?.constructor?.name === "Spacer" && children[1] === titled[0]?.[0]) {
 		children.shift();
 	}
-	const anchor = titled.find(([, title]) => title === "Extensions") ?? titled[titled.length - 1];
-	const mcpAt = anchor ? children.indexOf(anchor[0]) + 2 : children.length;
-	const component = interactive((width) => selected("MCP", width));
+	// Keep Extensions ahead of the context-related resources. Pi's diagnostics stay in
+	// their native relative order; MCP follows the entire native listing before the map.
+	const extension = titled.find(([, title]) => title === "Extensions")?.[0];
+	const first = titled.find(([, title]) => title !== "Extensions")?.[0];
+	const extensionAt = extension ? children.indexOf(extension) : -1;
+	const firstAt = first ? children.indexOf(first) : -1;
+	if (extensionAt > firstAt && firstAt >= 0) {
+		const length = children[extensionAt + 1]?.constructor?.name === "Spacer" ? 2 : 1;
+		const moved = children.splice(extensionAt, length);
+		children.splice(firstAt, 0, ...moved);
+	}
+	const component = interactive((width, expanded) => selected("MCP", width, expanded));
 	const spacer = { render: () => mcpEntries.length > 0 || statuses.size > 0 ? [""] : [], invalidate() {} };
-	children.splice(mcpAt, 0, component, spacer);
+	children.push(component, spacer);
 	// Native sections (including diagnostics) end in a Spacer; when MCP is last its
 	// conditional spacer serves the same purpose. Neither leaves a blank after Models.
 	children.push(mapComponent, modelSpacer, modelComponent);
@@ -1304,13 +1362,22 @@ export function replaceSections(mode: any, options: unknown, pi?: ExtensionAPI):
 		for (const child of children) {
 			if (child === component || child === modelComponent) continue;
 			const title = titled.find(([original]) => original === child)?.[1];
-			if (title && full[title] && !child.state?.expanded) flexible[title] = full[title];
-			else splashFixed += height(native.get(child) ? { render: native.get(child) } : child, width);
+			if (title && full[title]) {
+				if (child.state?.expanded) splashFixed += renderSection(full[title], width, theme()).length;
+				else flexible[title] = full[title];
+			} else splashFixed += height(native.get(child) ? { render: native.get(child) } : child, width);
 		}
-		if (full.MCP) flexible.MCP = full.MCP;
-		if (full.Models) flexible.Models = full.Models;
+		if (full.MCP) {
+			if (component.expanded) splashFixed += renderSection(full.MCP, width, theme()).length;
+			else flexible.MCP = full.MCP;
+		}
+		if (full.Models) {
+			if (modelComponent.expanded) splashFixed += renderSection(full.Models, width, theme()).length;
+			else flexible.Models = full.Models;
+		}
 		// All splash-owned spacers and the map are included exactly once above.
-		const key = JSON.stringify([generation, width, rows, fixed, splashFixed, flexible]);
+		const expansions = [...titled.map(([child]) => !!child.state?.expanded), component.expanded, modelComponent.expanded];
+		const key = JSON.stringify([generation, width, rows, fixed, splashFixed, expansions, flexible]);
 		if (key === planKey) return;
 		planKey = key;
 		planned = { ...full, ...planSplashSections(flexible, width, theme(), rows - fixed - splashFixed) };
@@ -1332,9 +1399,8 @@ export function replaceSections(mode: any, options: unknown, pi?: ExtensionAPI):
 		child.render = (width: number) => {
 			ensurePlan(width);
 			const section = host.resourceSections?.[title!];
-			return child.state?.expanded || !section
-				? expandedRender(width)
-				: renderSection(planned[title!] ?? section, width, theme());
+			return !section ? expandedRender(width)
+				: renderSection(child.state?.expanded ? section : planned[title!] ?? section, width, theme());
 		};
 	}
 }

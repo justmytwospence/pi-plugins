@@ -1,6 +1,6 @@
 import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import { formatContextWindow, formatTokens } from "./startup-resources.ts";
-import { CATEGORIES, categoryStyle, type ContextCategory, type ContextTheme } from "./startup-style.ts";
+import { CATEGORIES, categoryBlockStyle, categoryStyle, type CategoryBlockKind, type ContextCategory, type ContextTheme } from "./startup-style.ts";
 import { ESTIMATE_CAVEAT, type ContextSource, type StartupContextSnapshot } from "./startup-context.ts";
 
 export type ContextRectangle = { x: number; y: number; width: number; height: number; source: ContextSource };
@@ -94,28 +94,38 @@ function categoryTiles(sources: ContextSource[], width: number, height: number):
 	return layoutContextTreemap(categories, width, height);
 }
 
-/** Shade only the largest one or two sources if they occupy at least a quarter of a category.
- * Smaller sources share the lighter remainder; lengths use actual weights, never a fake minimum.
- * MCP uses server totals, not individual declarations, when several servers contribute.
+/** Divide one category into its two leading sources (when each fits four cells) and their remainder.
+ * MCP's leaves are server totals, not the declarations nested within each server.
  */
-function dominanceGlyphs(sources: ContextSource[], tile: ContextRectangle): string[] {
+export function categoryShareBlocks(sources: ContextSource[], tile: ContextRectangle): Array<{ kind: CategoryBlockKind; start: number; width: number; tokens: number }> {
 	const categorySources = sources.filter((source) => source.category === tile.source.category);
-	const leaves = positive(tile.source.category === "mcp" && categorySources.length > 1
+	const leaves = positive(tile.source.category === "mcp"
 		? categorySources
 		: categorySources.flatMap((source) => source.children?.length ? source.children : [source]));
-	const glyphs = Array<string>(tile.width).fill("▒");
-	if (leaves.length <= 1) return glyphs.fill("█");
-	const largest = leaves.filter((leaf) => leaf.tokens >= tile.source.tokens / 4 &&
-		Math.round(tile.width * leaf.tokens / tile.source.tokens) >= 4).slice(0, 2);
-	let cumulative = 0;
-	let previous = 0;
-	for (const [index, leaf] of largest.entries()) {
-		cumulative += leaf.tokens;
-		const end = Math.min(tile.width, Math.round(tile.width * cumulative / tile.source.tokens));
-		glyphs.fill(index === 0 ? "█" : "▓", previous, end);
-		previous = end;
+	if (!tile.width || !tile.source.tokens) return [];
+	if (leaves.length === 1) return [{ kind: "first", start: 0, width: tile.width, tokens: tile.source.tokens }];
+	const blocks: Array<{ kind: CategoryBlockKind; start: number; width: number; tokens: number }> = [];
+	let start = 0;
+	let shownTokens = 0;
+	for (const [index, leaf] of leaves.slice(0, 2).entries()) {
+		const share = Math.round(tile.width * leaf.tokens / tile.source.tokens);
+		const end = Math.min(tile.width, Math.round(tile.width * (shownTokens + leaf.tokens) / tile.source.tokens));
+		if (share < 4 || end - start < 4) break;
+		blocks.push({ kind: index === 0 ? "first" : "second", start, width: end - start, tokens: leaf.tokens });
+		start = end;
+		shownTokens += leaf.tokens;
 	}
-	return glyphs;
+	if (start < tile.width) blocks.push({ kind: "remainder", start, width: tile.width - start, tokens: Math.max(0, tile.source.tokens - shownTokens) });
+	return blocks;
+}
+
+function paintShareBlock(theme: ContextTheme, category: ContextCategory, block: ReturnType<typeof categoryShareBlocks>[number], total: number): string {
+	const paint = categoryBlockStyle(theme, category, block.kind);
+	if (!paint) return categoryStyle(theme, category).swatch(({ first: "█", second: "▓", remainder: "░" }[block.kind]).repeat(block.width));
+	const percent = `${Math.round(100 * block.tokens / total)}%`;
+	const label = block.width >= visibleWidth(percent) + 2 ? percent : "";
+	const left = Math.floor((block.width - visibleWidth(label)) / 2);
+	return paint(`${" ".repeat(left)}${label}${" ".repeat(block.width - left - visibleWidth(label))}`);
 }
 
 /** Resource map rendering only; collection and cache updates happen in the owner tick, never here. */
@@ -139,11 +149,14 @@ export function renderContextTreemap(snapshot: StartupContextSnapshot, width: nu
 	} else if (snapshot.sources.length) {
 		type Cell = { char: string; category?: ContextCategory };
 		const labels: Cell[] = Array.from({ length: width }, () => ({ char: " " }));
-		const bar: Cell[] = Array.from({ length: width }, () => ({ char: " " }));
+		const bar = Array<string>(width).fill(" ");
 		const named = new Set<ContextCategory>();
 		const complete = new Set<ContextCategory>();
 		for (const rect of categoryTiles(snapshot.sources, width, 1)) {
-			for (const [offset, char] of dominanceGlyphs(snapshot.sources, rect).entries()) bar[rect.x + offset] = { char, category: rect.source.category };
+			for (const block of categoryShareBlocks(snapshot.sources, rect)) {
+				bar.fill("", rect.x + block.start, rect.x + block.start + block.width);
+				bar[rect.x + block.start] = paintShareBlock(theme, rect.source.category, block, rect.source.tokens);
+			}
 			const full = `${rect.source.label} ~${formatTokens(rect.source.tokens)}`;
 			const label = rect.width >= visibleWidth(full) + 2 ? full : rect.width >= visibleWidth(rect.source.label) + 2 ? rect.source.label : "";
 			if (label) {
@@ -172,10 +185,15 @@ export function renderContextTreemap(snapshot: StartupContextSnapshot, width: nu
 			return fit(output, width);
 		};
 		if (named.size) lines.push(paint(labels));
-		lines.push(paint(bar));
+		lines.push(fit(bar.join(""), width));
 		const missing = [...totals(snapshot.sources)].filter(([category]) => !complete.has(category));
-		if (missing.length) appendWrapped(lines, missing.map(([category, tokens]) =>
-			categoryStyle(theme, category).swatch(`■ ${CATEGORIES[category].label} ~${formatTokens(tokens)}`)), width);
+		if (missing.length) {
+			// These are totals for categories too narrow to show their full name and cost above the bar.
+			const key = missing.map(([category, tokens]) =>
+				categoryStyle(theme, category).swatch(`■ ${CATEGORIES[category].label} ~${formatTokens(tokens)}`));
+			key[0] = `${theme.fg("dim", width >= 80 ? "Small category totals: " : "Key: ")}${key[0]}`;
+			appendWrapped(lines, key, width);
+		}
 	} else lines.push(fit("No attributed sources", width));
 	for (const caveat of snapshot.caveats) {
 		// The approximate token notation and docs retain the caveat without a repeated startup line.

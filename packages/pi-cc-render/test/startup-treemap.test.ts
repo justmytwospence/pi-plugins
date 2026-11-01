@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
-import { parseColor, stripTerminalSequences, visibleWidth } from "@earendil-works/pi-tui";
-import { capacitySegments, layoutContextTreemap, renderContextTreemap } from "../src/feature/shell/startup-treemap.ts";
-import { categoryStyle } from "../src/feature/shell/startup-style.ts";
+import { backgroundAnsi, foregroundAnsi, mixColors, parseColor, stripTerminalSequences, visibleWidth } from "@earendil-works/pi-tui";
+import { capacitySegments, categoryShareBlocks, layoutContextTreemap, renderContextTreemap } from "../src/feature/shell/startup-treemap.ts";
+import { categoryBlockStyle, categoryStyle } from "../src/feature/shell/startup-style.ts";
 import { ESTIMATE_CAVEAT, type ContextSource, type StartupContextSnapshot } from "../src/feature/shell/startup-context.ts";
 
 const source = (id: string, tokens: number, category: ContextSource["category"] = "files"): ContextSource => ({ id, label: id, category, tokens });
@@ -13,6 +13,12 @@ const theme = (name: string) => ({
 	fg: (_token: string, text: string) => text,
 	colors: {
 		mdLink: parseColor(name === "dark" ? "#4488cc" : "#224488"),
+		accent: parseColor(name === "dark" ? "#5588bb" : "#224488"),
+		customMessageLabel: parseColor(name === "dark" ? "#aa77cc" : "#663399"),
+		syntaxNumber: parseColor(name === "dark" ? "#cc8844" : "#884422"),
+		syntaxKeyword: parseColor(name === "dark" ? "#aa66cc" : "#663388"),
+		muted: parseColor(name === "dark" ? "#999999" : "#777777"),
+		dim: parseColor(name === "dark" ? "#666666" : "#999999"),
 		userMessageBg: parseColor(name === "dark" ? "#111111" : "#eeeeee"),
 		text: parseColor(name === "dark" ? "#eeeeee" : "#111111"),
 	},
@@ -58,57 +64,144 @@ describe("context treemap", () => {
 		expect(capacitySegments(snapshot([source("a", 1)]), 46)).toEqual([]);
 		expect(capacitySegments(snapshot([source("a", 250)], 100), 100)).toEqual([{ category: "files", width: 100 }]);
 	});
-	it("shows a labeled color strip and a deliberate key for small categories", () => {
+	it("allocates exact cumulative category cells to leading sources and aggregates small ones", () => {
+		const files = source("files", 1000);
+		const tile = { x: 0, y: 0, width: 100, height: 1, source: files };
+		const children = [source("first", 620), source("second", 240), source("third", 140)];
+		expect(categoryShareBlocks([{ ...files, children }], tile)).toEqual([
+			{ kind: "first", start: 0, width: 62, tokens: 620 },
+			{ kind: "second", start: 62, width: 24, tokens: 240 },
+			{ kind: "remainder", start: 86, width: 14, tokens: 140 },
+		]);
+		const split = [source("a", 500), source("b", 480), source("tiny", 20)];
+		expect(categoryShareBlocks([{ ...files, children: split }], { ...tile, width: 60 })).toEqual([
+			{ kind: "first", start: 0, width: 30, tokens: 500 },
+			{ kind: "second", start: 30, width: 29, tokens: 480 },
+			{ kind: "remainder", start: 59, width: 1, tokens: 20 },
+		]);
+		const small = [source("first", 940), source("second", 35), source("third", 25)];
+		expect(categoryShareBlocks([{ ...files, children: small }], { ...tile, width: 60 })).toEqual([
+			{ kind: "first", start: 0, width: 56, tokens: 940 },
+			{ kind: "remainder", start: 56, width: 4, tokens: 60 },
+		]);
+		const balanced = Array.from({ length: 10 }, (_, i) => source(`tool${i}`, 100));
+		expect(categoryShareBlocks([{ ...files, children: balanced }], { ...tile, width: 60 })).toEqual([
+			{ kind: "first", start: 0, width: 6, tokens: 100 },
+			{ kind: "second", start: 6, width: 6, tokens: 100 },
+			{ kind: "remainder", start: 12, width: 48, tokens: 800 },
+		]);
+		expect(categoryShareBlocks([source("only", 1000)], { ...tile, width: 3 })).toEqual([{ kind: "first", start: 0, width: 3, tokens: 1000 }]);
+		// Cumulative rounding can give a source an extra cell; it cannot give a small source an invented four-cell shade.
+		for (let width = 1; width <= 180; width++) {
+			const blocks = categoryShareBlocks([{ ...files, children: split }], { ...tile, width });
+			expect(blocks.reduce((sum, block) => sum + block.width, 0)).toBe(width);
+			if (blocks.at(-1)?.kind === "remainder") expect(blocks.reduce((sum, block) => sum + block.tokens, 0)).toBe(1000);
+			for (const [index, block] of blocks.entries()) {
+				expect(block.start).toBe(blocks.slice(0, index).reduce((sum, previous) => sum + previous.width, 0));
+				if (block.kind !== "remainder") expect(block.width).toBeGreaterThanOrEqual(4);
+			}
+		}
+	});
+	it("paints three current-theme tints with category-relative labels at dark/light client widths", () => {
+		const files = { ...source("files", 1000), children: [source("a", 620), source("b", 240), source("c", 140)] };
+		for (const name of ["dark", "light"]) {
+			const current = theme(name);
+			for (const [kind, blend] of [["first", 0.08], ["second", 0.45], ["remainder", 0.78]] as const) {
+				const tint = mixColors(current.colors.mdLink, current.colors.userMessageBg, blend);
+				const painted = categoryBlockStyle(current, "files", kind)!("  62%  ");
+				expect(painted).toContain(backgroundAnsi(tint, "truecolor"));
+				// The saturated leading tint needs the dark background as text; pale tints need normal text.
+				expect(painted).toContain(foregroundAnsi(kind === "first" ? current.colors.userMessageBg : current.colors.text, "truecolor"));
+			}
+			for (const width of [46, 120, 180]) {
+				const lines = renderContextTreemap(snapshot([files], 200_000), width, current);
+				const strip = stripTerminalSequences(lines[2]!);
+				expect(strip).toContain("62%");
+				expect(strip).toContain("24%");
+				expect(strip).toContain("14%");
+				expect(lines[2]!.match(/\x1b\[48;2;/g)).toHaveLength(3);
+				expect(lines[2]).not.toContain("█");
+				expect(lines[2]).not.toContain("┃");
+				expect(visibleWidth(lines[2]!)).toBe(width);
+			}
+			const modified = { ...current, colors: { ...current.colors, mdLink: parseColor("#b63030") } };
+			expect(categoryBlockStyle(modified, "files", "first")!("x")).not.toBe(categoryBlockStyle(current, "files", "first")!("x"));
+		}
+	});
+	it("keeps category labels, keys, estimates and server-level MCP shares without extra rows", () => {
 		const joined = "\u{1F469}\u200D\u{1F4BB}".repeat(6);
 		const sources: ContextSource[] = [
 			{ id: "files", category: "files", label: "Files", tokens: 6500, children: [source(joined, 4800), source("e\u0301".repeat(6), 1700)] },
-			source("system", 3300, "system"),
-			source("skills", 1900, "skills"),
-			source("tools", 6300, "tools"),
+			source("system", 3300, "system"), source("skills", 1900, "skills"), source("tools", 6300, "tools"),
 		];
 		const lines = renderContextTreemap(snapshot(sources, 1_048_576), 120, theme("light"));
-		const strip = lines.slice(1, 3).map(stripTerminalSequences).join("\n");
-		for (const label of ["Files", "System", "Tools"]) expect(strip).toContain(label);
+		const label = stripTerminalSequences(lines[1]!);
+		for (const name of ["Files", "System", "Tools"]) expect(label).toContain(name);
 		expect(lines.join("\n")).toContain("Skills ~1.9k");
-		expect(strip).not.toContain("┃");
-		expect(strip).toContain("▓");
-		expect(strip).not.toContain(joined);
 		expect(lines[0]).toContain("2% of 1M (~18k)");
 		expect(lines.join("\n")).not.toContain("Capacity ·");
 		expect(lines.join("\n")).not.toContain("Sources ·");
 		expect(lines.slice(1, 3)).toHaveLength(2);
-		expect(lines.every((line) => visibleWidth(line) <= 120)).toBe(true);
-		const medium = renderContextTreemap(snapshot(sources, 1_048_576), 100, theme("light"));
-		for (const label of ["Files", "System", "Skills", "Tools"]) expect(medium.join("\n")).toContain(label);
-		expect(stripTerminalSequences(medium[2]!)).toMatch(/█+▓+.*█/);
-		expect(medium.every((line) => visibleWidth(line) <= 100)).toBe(true);
+		expect(lines[2]).toContain("\x1b[48;2;");
+		expect(lines.join("\n")).not.toContain(joined);
 		const manyMcp = [source("one", 700, "mcp"), source("two", 300, "mcp")];
-		const mcpTile = stripTerminalSequences(renderContextTreemap(snapshot(manyMcp, 200_000), 46, theme("dark"))[1]!);
-		expect(mcpTile).toContain("MCP");
-		expect(mcpTile).not.toContain("one");
-		expect(mcpTile).not.toContain("two");
-		const childSplit = { ...snapshot([{ id: "files", label: "Files", category: "files" as const, tokens: 1000, children: [source("a", 500), source("b", 480), source("too small", 20)] }], 200_000) };
-		const split = renderContextTreemap(childSplit, 60, theme("light"))[2]!;
-		expect(stripTerminalSequences(split)).toMatch(/^█{30}▓{29}▒$/);
-		expect(split).not.toContain("\x1b[48;2"); // foreground-only bars never expose a pale background gap
-		const tiny = renderContextTreemap(snapshot([{ id: "files", label: "Files", category: "files", tokens: 1000, children: [source("a", 990), source("tiny one", 5), source("tiny two", 5)] }], 200_000), 60, theme("light"));
-		expect(stripTerminalSequences(tiny[2]!)).toMatch(/^█+▒?$/);
-		const balanced = renderContextTreemap(snapshot([{ id: "tools", label: "Tools", category: "tools", tokens: 1000, children: Array.from({ length: 10 }, (_, i) => source(`tool${i}`, 100, "tools")) }], 200_000), 60, theme("light"));
-		expect(stripTerminalSequences(balanced[2]!)).toBe("▒".repeat(60));
-		const mcp = renderContextTreemap(snapshot([
+		const mcpTile = renderContextTreemap(snapshot(manyMcp, 200_000), 46, theme("dark"));
+		expect(stripTerminalSequences(mcpTile[1]!)).toContain("MCP");
+		expect(stripTerminalSequences(mcpTile[2]!)).toContain("70%");
+		expect(stripTerminalSequences(mcpTile[2]!)).toContain("30%");
+		const mcp = [
 			{ ...source("large server", 700, "mcp"), children: [source("a", 350, "mcp"), source("b", 350, "mcp")] },
 			{ ...source("small server", 300, "mcp"), children: [source("c", 300, "mcp")] },
-		], 200_000), 60, theme("light"));
-		expect(stripTerminalSequences(mcp[2]!)).toBe(`${"█".repeat(42)}${"▓".repeat(18)}`); // MCP weights are per server, not individual declarations.
+		];
+		expect(categoryShareBlocks([mcp[0]!], { x: 0, y: 0, width: 10, height: 1, source: source("mcp", 700, "mcp") }))
+			.toEqual([{ kind: "first", start: 0, width: 10, tokens: 700 }]);
+		expect(categoryShareBlocks(mcp, { x: 0, y: 0, width: 60, height: 1, source: source("mcp", 1000, "mcp") })).toEqual([
+			{ kind: "first", start: 0, width: 42, tokens: 700 }, { kind: "second", start: 42, width: 18, tokens: 300 },
+		]);
 		const narrow = renderContextTreemap(snapshot(sources, 200_000), 24, theme("light"));
 		expect(narrow.join("\n")).toContain("Skills ~1.9k");
 		expect(narrow.every((line) => visibleWidth(line) <= 24)).toBe(true);
+		const noBar = renderContextTreemap(snapshot(sources, 200_000), 23, theme("light"));
+		expect(noBar.join("\n")).toContain("Skills ~1.9k");
+		expect(noBar.every((line) => !line.includes("\x1b[48;"))).toBe(true);
 	});
-	it("colors labels and strip segments with the active theme's foreground, without a pale fill", () => {
-		for (const name of ["dark", "light"]) {
-			const current = { ...theme(name), fg: (token: string, text: string) => `<${name}:${token}>${text}</>` };
-			expect(categoryStyle(current, "files").swatch("█")).toBe(`<${name}:mdLink>█</>`);
-			expect(categoryStyle(current, "tools").swatch("┃")).toBe(`<${name}:syntaxNumber>┃</>`);
+	it("labels the small-category line as a key for the bar rather than another context cost", () => {
+		const sources = [source("mcp", 8800, "mcp"), source("tools", 7700, "tools"),
+			source("files", 6500), source("system", 3300, "system"), source("skills", 1900, "skills")];
+		const lines = renderContextTreemap(snapshot(sources, 1_048_576), 100, theme("dark")).map(stripTerminalSequences);
+		expect(lines).toHaveLength(4); // summary, category labels, strip, and its existing key
+		expect(lines[3]).toMatch(/^Small category totals: ■ System ~3\.3k  ■ Skills ~1\.9k$/);
+		const narrow = renderContextTreemap(snapshot(sources, 1_048_576), 46, theme("dark")).map(stripTerminalSequences);
+		expect(narrow.join("\n")).toContain("Key: ■");
+		expect(narrow.every((line) => visibleWidth(line) <= 46)).toBe(true);
+	});
+	it("omits percent text unless its own block has two padding cells", () => {
+		const files = { ...source("files", 100), children: [source("first", 70), source("second", 30)] };
+		const narrow = renderContextTreemap(snapshot([source("system", 300, "system"), files], 200_000), 24, theme("dark"));
+		// Files occupies six cells: its four-cell first block cannot fit "70%" plus two padding cells.
+		expect(stripTerminalSequences(narrow[2]!)).not.toContain("70%");
+		expect(stripTerminalSequences(narrow[2]!)).not.toContain("30%");
+		const crowded = { ...source("files", 100), children: [source("first", 75), source("second", 25)] };
+		const lines = renderContextTreemap(snapshot([source("system", 200, "system"), crowded], 200_000), 24, theme("light"));
+		expect(stripTerminalSequences(lines[2]!)).toContain("75%");
+		expect(stripTerminalSequences(lines[2]!)).not.toContain("25%");
+		expect(visibleWidth(lines[2]!)).toBe(24);
+		const tile = { x: 0, y: 0, width: 8, height: 1, source: source("files", 100) };
+		expect(categoryShareBlocks([crowded], tile)).toEqual([
+			{ kind: "first", start: 0, width: 6, tokens: 75 }, { kind: "remainder", start: 6, width: 2, tokens: 25 },
+		]);
+	});
+	it("falls back to contrasting category-colored glyphs when concrete theme colors are missing", () => {
+		const files = { ...source("files", 1000), children: [source("a", 500), source("b", 480), source("tiny", 20)] };
+		for (const current of [
+			{ fg: (_color: string, text: string) => `\x1b[36m${text}\x1b[39m` },
+			{ ...theme("light"), colors: { mdLink: parseColor("#999999"), text: parseColor("#111111") } },
+		]) {
+			expect(categoryBlockStyle(current, "files", "first")).toBeUndefined();
+			const lines = renderContextTreemap(snapshot([files], 200_000), 60, current);
+			expect(stripTerminalSequences(lines[2]!)).toMatch(/█{30}▓{29}░/);
+			expect(lines[2]).not.toContain("\x1b[48;");
+			expect(visibleWidth(lines[2]!)).toBe(60);
 		}
 	});
 	it("renders narrow fallback, occupancy map, overage and bounded wide/ANSI labels", () => {

@@ -412,7 +412,10 @@ describe("startup resources", () => {
     const section = buildMcpSection(entries, () => "connected", undefined, () => 1)!;
     const wide = renderSection(section, 100, plainTheme);
     expect(wide.length).toBeLessThan(entries.length + 2);
-    expect(wide[2]).toMatch(/server-0.*server-4.*server-7/);
+    expect(wide).toHaveLength(4); // Five real two-entry columns at 100 cells.
+    expect(wide[2]).toMatch(/server-0.*server-2.*server-4.*server-6.*server-8/);
+    expect(renderSection(section, 89, plainTheme)).toHaveLength(4); // Five 15-cell names/counts, four gaps, two-cell indent.
+    expect(renderSection(section, 88, plainTheme).length).toBeGreaterThan(4);
     const narrow = renderSection(section, 40, plainTheme);
     expect(narrow).toHaveLength(7);
     expect(narrow[2]).toMatch(/server-0.*server-5/);
@@ -548,28 +551,28 @@ describe("startup resources", () => {
     expect(section.groups.map((group) => group.label)).toEqual(["anthropic", "openai"]);
     expect(section.groups[0]!.marks![0]).toEqual({ ...GLYPHS.live, highlight: true });
     expect(section.groups[0]!.prefixes![0]).toEqual(GLYPHS.favorite);
-    expect(GLYPHS.favorite).toEqual({ text: "☆", color: "muted" });
+    expect(GLYPHS.favorite).toEqual({ text: "★", color: "muted" });
     expect(section.groups[1]!.actions![0]).toEqual({ kind: "model", provider: "openai", id: "gpt-6.1-sol", thinkingLevel: "high" });
     expect(renderSection(section, 80, plainTheme)).toEqual([
       "Models 3",
       "  anthropic 2               openai 1",
-      "  ☆ claude-opus-5-5 ●  1M   ☆ gpt-6.1-sol:high  922K",
+      "  ★ claude-opus-5-5 ●  1M   ★ gpt-6.1-sol:high  922K",
       "    claude-haiku-5-5   1M",
     ]);
     // Too narrow for both: providers wrap onto their own bands.
     expect(renderSection(section, 40, plainTheme)).toEqual([
       "Models 3",
       "  anthropic 2",
-      "  ☆ claude-opus-5-5 ●  1M",
+      "  ★ claude-opus-5-5 ●  1M",
       "    claude-haiku-5-5   1M",
       "  openai 1",
-      "  ☆ gpt-6.1-sol:high  922K",
+      "  ★ gpt-6.1-sol:high  922K",
     ]);
     const colored: StartupTheme = { fg: (name, text) => `\x1b[${name === "muted" ? 90 : name === "success" ? 32 : 33}m${text}\x1b[0m`, bold: (text) => text };
     const coloredModels = renderSection(section, 80, colored).join("\n");
-    expect(coloredModels).toContain("\x1b[90m☆\x1b[0m");
+    expect(coloredModels).toContain("\x1b[90m★\x1b[0m");
     expect(coloredModels).toContain("\x1b[32mclaude-opus-5-5\x1b[0m \x1b[32m●\x1b[0m");
-    expect(coloredModels).not.toContain("\x1b[33m☆\x1b[0m");
+    expect(coloredModels).not.toContain("\x1b[33m★\x1b[0m");
     expect(buildModelsSection([])).toBeUndefined();
     const google = buildModelsSection([
       { provider: "google", id: "antigravity-gemini-4-argon" },
@@ -676,13 +679,25 @@ describe("startup resources", () => {
     expect(sliceByColumn(lines[2]!, leftEdge, rightEdge - leftEdge).trim()).toBe("");
   });
 
+  test("ten differently sized MCP server names use five columns at screenshot width", () => {
+    const tools = new Map(Object.entries({ "chrome-live": 30, context7: 2, garmin: 163, inoreader: 33,
+      obsidian: 18, paperless: 22, strava: 33, tabpfn: 6, telebrowser: 0, vercel: 0 }));
+    const entries = [...tools.keys()].map((name) => ({ name, level: "user" as const }));
+    const section = buildMcpSection(entries, (name) => tools.get(name) ? "connected" : "disconnected",
+      undefined, (name) => tools.get(name))!;
+    const lines = renderSection(section, 100, plainTheme);
+    expect(lines).toHaveLength(4);
+    expect(lines[2]).toMatch(/chrome-live.*garmin.*obsidian.*strava.*telebrowser/);
+    expect(lines[3]).toMatch(/context7.*inoreader.*paperless.*tabpfn.*vercel/);
+    expect(lines.every((line) => visibleWidth(line) <= 100)).toBe(true);
+  });
+
   test("a long column uses quotient/remainder splits under its heading", async () => {
     const items = Array.from({ length: 10 }, (_, i) => `m${i}`);
     const lines = renderSection({ title: "C", count: items.length, layout: "columns", groups: [{ label: "p", items }] }, 80, plainTheme);
-    expect(lines).toHaveLength(6);
-    expect(lines[2]).toBe("  m0   m4   m7");
-    expect(lines[4]).toBe("  m2   m6   m9");
-    expect(lines[5]).toBe("  m3");
+    expect(lines).toHaveLength(4);
+    expect(lines[2]).toBe("  m0   m2   m4   m6   m8");
+    expect(lines[3]).toBe("  m1   m3   m5   m7   m9");
   });
 
   test("balanced one-scope MCP columns use available width without stealing metadata", async () => {
@@ -690,13 +705,13 @@ describe("startup resources", () => {
     for (const count of [4, 8, 10, 17]) {
       const section = buildMcpSection(Array.from({ length: count }, (_, n) => ({ name: `s${n}`, level: "user" as const })), () => "connected", undefined, () => 1)!;
       const wide = renderSection(section, 180, plainTheme);
-      const columns = Math.max(1, Math.floor(count / 3));
+      const columns = count === 17 ? 6 : Math.max(1, Math.floor(count / 2));
       expect(wide).toHaveLength(2 + Math.ceil(count / columns));
       const firstData = wide[2]!;
       const cells = (line: string) => line.match(/■ ● s\d+\s+1(?:\s|$)/g) ?? [];
       expect(cells(firstData)).toHaveLength(columns);
-      if (count === 10) expect(wide.slice(2).map((line) => cells(line).length)).toEqual([3, 3, 3, 1]);
-      if (count === 17) expect(wide.slice(2).map((line) => cells(line).length)).toEqual([5, 5, 5, 2]);
+      if (count === 10) expect(wide.slice(2).map((line) => cells(line).length)).toEqual([5, 5]);
+      if (count === 17) expect(wide.slice(2).map((line) => cells(line).length)).toEqual([6, 6, 5]);
       expect(wide.every((line) => visibleWidth(line) <= 180)).toBe(true);
       for (const width of [46, 120, 180]) {
         const { lines, hits } = layoutSection(section, width, plainTheme);
@@ -788,15 +803,17 @@ describe("startup resources", () => {
     }
   });
 
-  test("responsive candidates hide the fewest entries at the actual width, not whole sections", () => {
+  test("responsive candidates fold whole groups and preserve protected sources at the actual width", () => {
     const extensions: ResourceSection = { title: "Extensions", count: 44, layout: "grid", category: "tools", groups: [
-      { label: "user", items: Array.from({ length: 44 }, (_, i) => `extension-${String(i).padStart(2, "0")}`) },
+      { label: "user", items: ["local-00", "local-01", "local-02", "local-03"], children: Array.from({ length: 4 }, (_, child) => ({
+        label: `package-${child}`, items: Array.from({ length: 10 }, (_, i) => `extension-${child}-${String(i).padStart(2, "0")}`),
+      })) },
     ] };
     const models: ResourceSection = { title: "Models", count: 14, layout: "columns", groups: [
       { label: "provider", items: Array.from({ length: 14 }, (_, i) => `model-${String(i).padStart(2, "0")}`),
         actions: Array.from({ length: 14 }, (_, i) => ({ kind: "model" as const, provider: "provider", id: `model-${String(i).padStart(2, "0")}` })),
         marks: [{ text: "●", color: "success", highlight: true }, ...Array(13).fill(undefined)],
-        prefixes: [undefined, { text: "☆", color: "muted" }, ...Array(12).fill(undefined)],
+        prefixes: [undefined, { text: "★", color: "muted" }, ...Array(12).fill(undefined)],
         right: Array(14).fill("200K") },
     ] };
     const mcp = buildMcpSection(Array.from({ length: 10 }, (_, i) => ({ name: `server-${i}`, level: "user" as const })),
@@ -808,56 +825,144 @@ describe("startup resources", () => {
     const prompts: ResourceSection = { title: "Prompts", count: 2, layout: "grid", groups: [{ label: "project", items: ["/a", "/b"] }] };
     const sections = { Context: context, Skills: skills, Prompts: prompts, Extensions: extensions, MCP: mcp, Models: models };
     const names = Object.keys(sections) as Array<keyof typeof sections>;
-    const count = (section: ResourceSection) => section.groups.reduce((total, group) => total + group.items.length + (group.children ?? []).reduce((sum, child) => sum + child.items.length, 0), 0);
+    const score = (choices: ReturnType<typeof splashSectionCandidates>) => ({
+      protected: choices.reduce((sum, choice) => sum + choice.losses[0] + choice.losses[1], 0),
+      hidden: choices.reduce((sum, choice) => sum + choice.hidden, 0),
+      favorites: choices.reduce((sum, choice) => sum + choice.losses[2], 0),
+      folds: choices.reduce((sum, choice) => sum + choice.folds, 0),
+      order: choices.map((choice) => choice.order).join("/"),
+    });
+    const compare = (a: ReturnType<typeof score>, b: ReturnType<typeof score>) =>
+      a.protected - b.protected || a.hidden - b.hidden || a.favorites - b.favorites || a.folds - b.folds || a.order.localeCompare(b.order);
+    const checkAtomic = (source: ResourceSection, candidate: ResourceSection) => {
+      expect(candidate.count).toBe(source.count);
+      expect(candidate.tokens).toBe(source.tokens);
+      expect(candidate.notes).toEqual(source.notes);
+      const check = (originalGroups: ResourceSection["groups"], chosenGroups: ResourceSection["groups"]) => {
+        expect(chosenGroups.map((group) => group.label)).toEqual(originalGroups.map((group) => group.label));
+        for (const [index, group] of chosenGroups.entries()) {
+          const original = originalGroups[index]!;
+          if (group.foldedCount) {
+            expect(group.items).toEqual([]);
+            expect(group.children ?? []).toEqual([]);
+            expect(group.foldedCount).toBe(group.count);
+          } else {
+            expect(group.items).toEqual(original.items);
+            for (const property of ["tokens", "marks", "prefixes", "right", "tones", "actions"] as const) {
+              expect(group[property]).toEqual(original[property]);
+            }
+            check(original.children ?? [], group.children ?? []);
+          }
+        }
+      };
+      if (candidate.foldedCount) {
+        expect(candidate.groups).toEqual([]);
+        expect(candidate.foldedCount).toBe(source.count);
+      } else check(source.groups, candidate.groups);
+    };
     for (const width of [46, 80, 120, 180]) {
       const fullRows = names.reduce((sum, name) => sum + renderSection(sections[name], width, plainTheme).length, 0);
-      const unchanged = planSplashSections(sections, width, plainTheme, fullRows);
-      for (const name of names) expect(unchanged[name]).toBe(sections[name]);
+      for (const name of names) expect(planSplashSections(sections, width, plainTheme, fullRows)[name]).toBe(sections[name]);
       const options = names.map((name) => splashSectionCandidates(name, sections[name], width, plainTheme));
+      for (const [index, variants] of options.entries()) for (const candidate of variants) {
+        checkAtomic(sections[names[index]!]!, candidate.section);
+        expect(candidate.rows).toBe(renderSection(candidate.section, width, plainTheme).length);
+        if (candidate.hidden) expect(renderSection(candidate.section, width, plainTheme).join("\n")).toMatch(/\+\d+ hidden/);
+      }
       for (const budget of [fullRows - 4, fullRows - 9]) {
         const planned = planSplashSections(sections, width, plainTheme, budget);
         const used = names.reduce((sum, name) => sum + renderSection(planned[name]!, width, plainTheme).length, 0);
         expect(used).toBeLessThanOrEqual(budget);
-        // Independent bounded knapsack over the declared per-section candidate sets.
-        let possible = new Map<number, number>([[0, 0]]);
-        for (const choices of options) {
-          const next = new Map<number, number>();
-          for (const [rows, hidden] of possible) for (const choice of choices) {
-            const total = rows + choice.rows;
-            next.set(total, Math.min(next.get(total) ?? Infinity, hidden + choice.hidden));
+        const selected = names.map((name, index) => options[index]!.find((choice) => JSON.stringify(choice.section) === JSON.stringify(planned[name]))!);
+        expect(selected.every(Boolean)).toBe(true);
+        let minimum: ReturnType<typeof score> | undefined;
+        const exhaustive = (index: number, rows: number, picked: typeof selected) => {
+          if (rows > budget) return;
+          if (index === names.length) {
+            const current = score(picked);
+            if (!minimum || compare(current, minimum) < 0) minimum = current;
+            return;
           }
-          possible = next;
-        }
-        const minimum = Math.min(...[...possible].filter(([rows]) => rows <= budget).map(([, hidden]) => hidden));
-        expect(names.reduce((sum, name) => sum + sections[name].count - count(planned[name]!), 0)).toBe(minimum);
+          for (const choice of options[index]!) exhaustive(index + 1, rows + choice.rows, [...picked, choice]);
+        };
+        exhaustive(0, 0, []);
+        expect(compare(score(selected), minimum!)).toBe(0);
         for (const name of names) {
           const original = sections[name];
           const chosen = planned[name]!;
-          const lines = layoutSection(chosen, width, plainTheme);
-          const hidden = original.count - count(chosen);
-          expect(chosen.count).toBe(original.count);
-          expect(chosen.groups.map((group) => group.label)).toEqual(original.groups.map((group) => group.label));
-          expect(lines.lines[0]).toContain(`${name} ${original.count}`);
-          expect(lines.lines.every((line) => visibleWidth(line) <= width)).toBe(true);
-          if (hidden) expect(lines.lines.join("\n")).toContain(`+${hidden} hidden`);
-          for (const hit of lines.hits) {
-            expect(sliceByColumn(lines.lines[hit.row]!, hit.startCol, hit.endCol - hit.startCol).trim()).not.toBe("");
-            expect(hit.endCol).toBeLessThanOrEqual(width);
-          }
+          checkAtomic(original, chosen);
+          const layout = layoutSection(chosen, width, plainTheme);
+          expect(layout.lines[0]).toContain(`${name} ${original.count}`);
+          expect(layout.lines.every((line) => visibleWidth(line) <= width)).toBe(true);
+          for (const hit of layout.hits) expect(sliceByColumn(layout.lines[hit.row]!, hit.startCol, hit.endCol - hit.startCol).trim()).not.toBe("");
         }
         expect(planned.Context!.notes).toContainEqual({ text: "diagnostic retained", color: "warning" });
-        if (planned.Models!.groups[0]!.items.length) expect(planned.Models!.groups[0]!.items).toContain("model-00");
-        if (planned.Models!.groups[0]!.items.length > 1) expect(planned.Models!.groups[0]!.items).toContain("model-01");
-        if (planned.MCP!.groups[0]!.items.length) expect(planned.MCP!.groups[0]!.items).toContain("server-0");
-        const retained = planned.Models!.groups[0]!;
-        for (const [index, item] of retained.items.entries()) {
-          expect(retained.actions![index]).toMatchObject({ id: item });
-          expect(retained.right![index]).toBe("200K");
-        }
+        if (planned.Models!.groups.length && !planned.Models!.groups[0]!.foldedCount) expect(planned.Models!.groups[0]!.items).toContain("model-00");
+        if (planned.MCP!.groups.length && !planned.MCP!.groups[0]!.foldedCount) expect(planned.MCP!.groups[0]!.items).toContain("server-0");
       }
       const impossible = planSplashSections(sections, width, plainTheme, 0);
       expect(impossible.Context!.notes).toContainEqual({ text: "diagnostic retained", color: "warning" });
       expect(renderSection(impossible.Models!, width, plainTheme)[0]).toContain("Models 14");
+    }
+  });
+
+  test("grid charges each natural column separately, preserves column-major order and ANSI/Unicode bounds", () => {
+    const values = ["a", "b", "c", "d", "界界界界界界", "f", "g", "h"];
+    const ansi = values.map((value) => `\x1b[32m${value}\x1b[39m`);
+    const lines = layoutGrid(ansi, 26, 2);
+    expect(lines).toHaveLength(2); // Per-column widths 1 + 1 + 12 + 1 plus three gaps fit.
+    expect(lines.map((line) => line.replace(/\x1b\[[0-9;]*m/g, ""))).toEqual([
+      "  a   c   界界界界界界   g", "  b   d   f              h",
+    ]);
+    expect(lines.every((line) => visibleWidth(line) <= 26)).toBe(true);
+    expect(layoutGrid(["界界界界界界"], 7, 2)[0] && visibleWidth(layoutGrid(["界界界界界界"], 7, 2)[0]!)).toBeLessThanOrEqual(7);
+  });
+
+  test("scope-local lists stay whole while child packages fold; large subgroup beams stay bounded and scroll safely", () => {
+    const scope: ResourceSection = { title: "Extensions", count: 29, layout: "grid", groups: [{ label: "user", items: ["local-a", "local-b", "local-c"],
+      children: Array.from({ length: 13 }, (_, i) => ({ label: `package-${i}`, items: [`item-${i}-a`, `item-${i}-b`] })) }] };
+    const wide = splashSectionCandidates("Extensions", scope, 120, plainTheme);
+    expect(wide).toHaveLength(256);
+    expect(splashSectionCandidates("Extensions", scope, 120, plainTheme)).toEqual(wide);
+    expect(wide.some((choice) => choice.section.foldedCount === 29 && choice.section.groups.length === 0)).toBe(true);
+    for (const choice of wide) {
+      const group = choice.section.groups[0];
+      if (group && !group.foldedCount) {
+        expect(group.items).toEqual(["local-a", "local-b", "local-c"]);
+        for (const child of group.children ?? []) {
+          expect(child.items.length).toBe(child.foldedCount ? 0 : 2);
+          if (child.foldedCount) expect(renderSection(choice.section, 120, plainTheme).join("\n")).toContain(`${child.label} 2 · +2 hidden`);
+        }
+      }
+    }
+    const longName: ResourceSection = { title: "Extensions", count: 2, layout: "grid", groups: [
+      { label: "a-very-long-package-name-that-needs-truncation-at-narrow-widths", items: ["alpha", "beta"] },
+    ] };
+    const folded = splashSectionCandidates("Extensions", longName, 46, plainTheme).find((choice) => choice.section.groups[0]?.foldedCount)!;
+    expect(renderSection(folded.section, 46, plainTheme)[1]).toContain("· +2 hidden");
+    const impossible = planSplashSections({ Extensions: scope }, 46, plainTheme, 0).Extensions!;
+    expect(impossible.foldedCount).toBe(29);
+    expect(renderSection(impossible, 46, plainTheme)).toEqual(["Extensions 29 · +29 hidden"]);
+  });
+
+  test("protected current-model and MCP problem scopes win over a smaller hidden count", () => {
+    const models: ResourceSection = { title: "Models", count: 4, layout: "columns", groups: [
+      { label: "current-provider", items: ["current", "favorite"], marks: [{ text: "●", color: "success", highlight: true }, undefined],
+        prefixes: [undefined, { text: "★", color: "muted" }] },
+      { label: "other-provider", items: ["other-1", "other-2"] },
+    ] };
+    const mcp = buildMcpSection([
+      { name: "problem", level: "project" }, { name: "healthy-1", level: "user" }, { name: "healthy-2", level: "user" },
+    ], (name) => name === "problem" ? "needs-auth" : "connected")!;
+    for (const width of [46, 80, 120, 180]) {
+      const full = renderSection(models, width, plainTheme).length + renderSection(mcp, width, plainTheme).length;
+      const options = [splashSectionCandidates("Models", models, width, plainTheme), splashSectionCandidates("MCP", mcp, width, plainTheme)];
+      const fit = options[0]!.flatMap((a) => options[1]!.map((b) => [a, b] as const)).filter(([a, b]) => a.rows + b.rows <= full - 2 && a.losses[0] + b.losses[1] === 0);
+      if (!fit.length) continue;
+      const planned = planSplashSections({ Models: models, MCP: mcp }, width, plainTheme, full - 2);
+      expect(planned.Models!.groups.find((group) => group.label === "current-provider")?.items).toContain("current");
+      expect(planned.MCP!.groups.find((group) => group.label === "project")?.items).toContain("problem");
+      expect(planned.MCP!.legend).toEqual(mcp.legend);
     }
   });
 
@@ -904,7 +1009,7 @@ describe("startup resources", () => {
       plainTheme,
     );
     expect(lines[0]).toBe("Skills 3 · ~400 tok");
-    expect(lines[1]).toBe(`  apple ~20   bee ~${HEAVY_SKILL_TOKENS + 50}    cat ~30`);
+    expect(lines[1]).toBe(`  apple ~20   bee ~${HEAVY_SKILL_TOKENS + 50}   cat ~30`);
     expect(skillTokenColor(20)).toBe("dim");
     expect(skillTokenColor(MEDIUM_SKILL_TOKENS)).toBe("muted");
     expect(skillTokenColor(HEAVY_SKILL_TOKENS)).toBe("warning");

@@ -5,10 +5,12 @@ import type { StartupHostState } from "./startup-state.ts";
 
 /** Display-only section: Container/viewport routing supplies component-local coordinates. */
 export function createInteractiveSection(
-	getSection: (width: number) => ResourceSection | undefined,
+	getSection: (width: number, expanded: boolean) => ResourceSection | undefined,
 	getTheme: () => StartupTheme,
 	actions: (action: SplashAction) => void,
-): Component & { dispose(): void } {
+	initialExpanded = false,
+): Component & { readonly expanded: boolean; setExpanded(expanded: boolean): void; dispose(): void } {
+	let expanded = initialExpanded;
 	let width: number | undefined;
 	let hits: SplashHit[] = [];
 	let height = 0;
@@ -19,11 +21,17 @@ export function createInteractiveSection(
 		height = 0;
 	};
 	return {
+		get expanded() { return expanded; },
+		setExpanded(nextExpanded) {
+			if (expanded === nextExpanded) return;
+			expanded = nextExpanded;
+			invalidate();
+		},
 		render(nextWidth) {
 			if (disposed) return [];
 			// Recompute lines and hit rectangles together, including after a theme change or resize.
 			invalidate();
-			const section = getSection(nextWidth);
+			const section = getSection(nextWidth, expanded);
 			const layout = section ? layoutSection(section, nextWidth, getTheme()) : { lines: [], hits: [] };
 			width = nextWidth;
 			hits = layout.hits;
