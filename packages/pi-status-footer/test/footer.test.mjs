@@ -2283,8 +2283,10 @@ test("provider snapshots select Google pools, child sources and invalidate chang
     await h.handlers.get("model_select")({}, h.ctx);
     await vi.waitFor(() => assert.match(plain(h.footer.render(180).join("\n")), /Google · limits unavailable/));
     assert.doesNotMatch(plain(h.footer.render(180).join("\n")), /30% used|80% used/);
-    await h.commands.get("status").handler("details", h.ctx);
-    assert.match(h.notices.at(-1), /Vault custody/);
+    await vi.waitFor(async () => {
+      await h.commands.get("status").handler("details", h.ctx);
+      assert.match(h.notices.at(-1), /Vault custody/);
+    });
     assert.doesNotMatch(h.notices.at(-1), /ya29\.firstToken|30% used/);
 
     oauth = true; token = "ya29.secondToken"; h.ctx.model = claude;
@@ -2294,6 +2296,57 @@ test("provider snapshots select Google pools, child sources and invalidate chang
     assert.doesNotMatch(plain(h.footer.render(180).join("\n")), /30% used|80% used|weekly unknown/);
     await h.commands.get("status").handler("details", h.ctx);
     assert.doesNotMatch(h.notices.at(-1), /ya29\.(firstToken|secondToken)/);
+  } finally {
+    await h.handlers.get("session_shutdown")({}, h.ctx);
+    globalThis.fetch = realFetch;
+  }
+});
+
+test("Google model fallback never borrows another model's quota in child chrome or during a model switch", async () => {
+  const realFetch = globalThis.fetch;
+  let releaseSecond;
+  const secondModels = new Promise((resolve) => { releaseSecond = resolve; });
+  let modelRequests = 0;
+  globalThis.fetch = async (url) => {
+    if (url.endsWith("loadCodeAssist")) return new Response(JSON.stringify({ cloudaicompanionProject: "synthetic-project" }));
+    if (url.endsWith("retrieveUserQuotaSummary")) return new Response("{}", { status: 404 });
+    if (url.endsWith("fetchAvailableModels")) {
+      modelRequests++;
+      if (modelRequests === 1) return new Response(JSON.stringify({ models: { "gemini-pro": { quotaInfo: { remainingFraction: 0.5 } } } }));
+      return secondModels;
+    }
+    throw new Error("unexpected external request");
+  };
+  const h = host();
+  const gemini = { provider: "google", id: "antigravity-gemini-pro", contextWindow: 1000 };
+  const flash = { ...gemini, id: "antigravity-gemini-flash" };
+  h.ctx.model = gemini;
+  h.ctx.modelRegistry.find = () => h.ctx.model;
+  h.ctx.modelRegistry.isUsingOAuth = () => true;
+  h.ctx.modelRegistry.getApiKeyForProvider = async () => "ya29.syntheticToken";
+  try {
+    await h.handlers.get("session_start")({}, h.ctx);
+    await vi.waitFor(() => assert.match(plain(h.footer.render(180).join("\n")), /Google\s+model 50% used/));
+    const chrome = { version: 1 };
+    h.pi.events.emit("pi-plugins.session-chrome.v1", chrome);
+    const child = { cwd: h.ctx.cwd, provider: "google", model: flash.id,
+      context: { tokens: 10, contextWindow: 1000, percent: 1 }, totals: fixture().totals };
+    assert.match(plain(chrome.service.footer(child, 180, theme).join("\n")), /Google · limits unavailable/);
+    assert.doesNotMatch(plain(chrome.service.footer(child, 180, theme).join("\n")), /50% used/);
+    h.ctx.model = flash;
+    await h.handlers.get("model_select")({}, h.ctx);
+    await vi.waitFor(() => assert.equal(modelRequests, 2));
+    assert.match(plain(h.footer.render(180).join("\n")), /Google · limits unavailable/);
+    assert.doesNotMatch(plain(h.footer.render(180).join("\n")), /50% used/);
+    await h.commands.get("status").handler("details", h.ctx);
+    assert.match(h.notices.at(-1), /google \(Google Antigravity subscription\): limits unavailable: Google quota has not been observed for the selected model/);
+    assert.doesNotMatch(h.notices.at(-1), /50% used/);
+    releaseSecond(new Response(JSON.stringify({ models: { "gemini-flash": { quotaInfo: { remainingFraction: 0.25 } } } })));
+    await vi.waitFor(() => assert.match(plain(h.footer.render(180).join("\n")), /Google\s+model 75% used/));
+    assert.match(plain(chrome.service.footer({ ...child, model: gemini.id }, 180, theme).join("\n")), /Google · limits unavailable/);
+    assert.match(plain(chrome.service.footer(child, 180, theme).join("\n")), /Google\s+model 75% used/);
+    await h.commands.get("status").handler("details", h.ctx);
+    assert.match(h.notices.at(-1), /Gemini antigravity-gemini-flash model 75% used/);
   } finally {
     await h.handlers.get("session_shutdown")({}, h.ctx);
     globalThis.fetch = realFetch;

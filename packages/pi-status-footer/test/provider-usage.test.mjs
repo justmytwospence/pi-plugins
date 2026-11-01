@@ -52,8 +52,11 @@ describe("provider usage parsers", () => {
 
   it("parses model fallback without inventing a window duration", () => {
     const payload = { models: { "claude-sonnet": { quotaInfo: { remainingFraction: 0.25, resetTime: reset } } } };
-    assert.deepEqual(parseGoogleModels(payload, "antigravity-claude-sonnet", now).windows, [{ label: "model", pool: "third-party", used: 75, reset: Date.parse(reset) }]);
-    assert.deepEqual(parseGoogleModels({ models: { "antigravity-gemini-pro": { quotaInfo: { resetTime: reset } } } }, google.model, now).windows, [{ label: "model", pool: "Gemini", reset: Date.parse(reset) }]);
+    assert.deepEqual(parseGoogleModels(payload, "antigravity-claude-sonnet", now).windows, [{ label: "model", model: "antigravity-claude-sonnet", pool: "third-party", used: 75, reset: Date.parse(reset) }]);
+    const fallback = parseGoogleModels({ models: { "antigravity-gemini-pro": { quotaInfo: { resetTime: reset } } } }, google.model, now);
+    assert.deepEqual(fallback.windows, [{ label: "model", model: google.model, pool: "Gemini", reset: Date.parse(reset) }]);
+    assert.deepEqual(selectGooglePool(fallback, google.model), fallback.windows);
+    assert.deepEqual(selectGooglePool(fallback, "antigravity-gemini-flash"), [], "another model in the same pool cannot borrow a model-specific reading");
     for (const value of [null, {}, { models: { "gemini-pro": { quotaInfo: { remainingFraction: Infinity } } } }]) assert.equal(parseGoogleModels(value, google.model, now).state, "unavailable");
   });
 
@@ -117,7 +120,7 @@ describe("collector", () => {
       calls.push({ url, init });
       return calls.length === 1 ? json({ cloudaicompanionProject: "synthetic-project" }) : calls.length === 2 ? json({}, status) : json({ models: { "gemini-pro": { quotaInfo: { remainingFraction: 0.5 } } } });
     } });
-    assert.deepEqual((await collector.refresh(google)).windows, [{ label: "model", pool: "Gemini", used: 50 }]);
+    assert.deepEqual((await collector.refresh(google)).windows, [{ label: "model", model: google.model, pool: "Gemini", used: 50 }]);
     assert.match(calls[2].url, /fetchAvailableModels$/);
     assert.deepEqual(JSON.parse(calls[2].init.body), { project: "synthetic-project" });
     collector.dispose();

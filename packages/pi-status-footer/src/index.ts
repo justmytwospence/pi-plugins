@@ -1651,6 +1651,7 @@ export default function statusFooter(pi: ExtensionAPI): void {
     } : { provider, source: "Codex", state: "unavailable", windows: [], reason: "Codex subscription usage has not been observed." };
     const cached = providerReadings.get(provider);
     if (cached) return cached;
+    if (provider === "google") return { provider, source: "Google Antigravity subscription", state: "unavailable", windows: [], reason: "Google quota has not been observed for the selected model." };
     const model = providerModels.get(provider);
     return dispatchProviderUsage({ provider, sourceId: provider, model: modelId ?? model?.id,
       baseUrl: model?.baseUrl, auth: provider === "google" ? { kind: "vault" } : { kind: "api-key" } }, Date.now()) ??
@@ -1661,7 +1662,7 @@ export default function statusFooter(pi: ExtensionAPI): void {
       const reading = cachedUsage(id, selected);
       if (id !== "google" || reading.state !== "ready") return reading;
       const windows = selectGooglePool(reading, selected ?? providerModels.get(id)?.id ?? "");
-      return windows.length ? { ...reading, windows } : { ...reading, state: "unavailable", windows: [], reason: "No quota window matches the selected Google model pool." };
+      return windows.length ? { ...reading, windows } : { ...reading, state: "unavailable", windows: [], reason: reading.windows.some((window) => window.model) ? "No quota has been observed for the selected Google model." : "No quota window matches the selected Google model pool." };
     };
     const active = forRow(provider, modelId);
     if (!showAll) return { rows: [active], more: 0 };
@@ -2044,10 +2045,13 @@ export default function statusFooter(pi: ExtensionAPI): void {
         const providerIds = new Set(orderedProviders());
         if (context.model?.provider) providerIds.add(context.model.provider);
         const accountDetails = [...providerIds].sort((a, b) => usageOrder(a) - usageOrder(b) || a.localeCompare(b)).flatMap((id) => {
-          const reading = cachedUsage(id, context.model?.provider === id ? context.model.id : undefined);
+          const selected = context.model?.provider === id ? context.model.id : providerModels.get(id)?.id;
+          const cached = cachedUsage(id, selected);
+          const reading = id === "google" && cached.state === "ready" && cached.windows.some((window) => window.model) && !selectGooglePool(cached, selected ?? "").length
+            ? { ...cached, state: "unavailable" as const, windows: [], reason: "No quota has been observed for the selected Google model." } : cached;
           const prefix = `${id} (${reading.source}): `;
           const status = reading.state === "ready" ? reading.windows.map((window) =>
-            `${window.pool ? `${window.pool} ` : ""}${window.label} ${window.used === undefined ? "unknown" : `${percent(window.used)} used`}${window.reset === undefined ? "" : `; reset ${new Date(window.reset).toISOString()}`}`).join("; ") || "windows unknown" :
+            `${window.pool ? `${window.pool} ` : ""}${window.model ? `${window.model} ` : ""}${window.label} ${window.used === undefined ? "unknown" : `${percent(window.used)} used`}${window.reset === undefined ? "" : `; reset ${new Date(window.reset).toISOString()}`}`).join("; ") || "windows unknown" :
             reading.state === "not-applicable" ? "no account quota" : `limits unavailable${reading.reason ? `: ${clean(reading.reason)}` : ""}`;
           return [`${prefix}${status}${reading.observedAt === undefined ? "" : `; observed ${new Date(reading.observedAt).toISOString()}`}${reading.detailsUrl ? `; ${reading.detailsUrl}` : ""}`];
         });

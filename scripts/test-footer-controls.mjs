@@ -1,9 +1,13 @@
 // Regression fixture for the real interactive footer input route. No agent turn is started.
 // Select another host with PI_TEST_SDK_ROOT=/absolute/path/to/pi-coding-agent.
 import assert from 'node:assert/strict';
+import childProcess from 'node:child_process';
 import { mkdtempSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
-import { findPackageJSON } from 'node:module';
-import { tmpdir } from 'node:os';
+import http from 'node:http';
+import https from 'node:https';
+import { findPackageJSON, syncBuiltinESMExports } from 'node:module';
+import net from 'node:net';
+import { homedir, tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { stripVTControlCharacters } from 'node:util';
@@ -14,6 +18,65 @@ const sdkRoot = realpathSync(process.env.PI_TEST_SDK_ROOT
   : resolve(dirname(fileURLToPath(import.meta.resolve('@earendil-works/pi-coding-agent'))), '..'));
 assert.equal(JSON.parse(readFileSync(join(sdkRoot, 'package.json'), 'utf8')).name,
   '@earendil-works/pi-coding-agent', 'PI_TEST_SDK_ROOT must be the SDK package root');
+// Install the sandbox BEFORE importing the SDK or extensions: their module initializers
+// must not see a host login, Keychain helper, CLI, or network transport.
+const temp = mkdtempSync(join(tmpdir(), 'pi-footer-controls-'));
+const originalEnv = { ...process.env };
+const originalFetch = globalThis.fetch;
+const originalConnect = net.Socket.prototype.connect;
+const originalHttp = [http.request, http.get, https.request, https.get];
+const originalChild = Object.fromEntries(['spawn', 'exec', 'execFile', 'spawnSync', 'execSync', 'execFileSync']
+  .map(name => [name, childProcess[name]]));
+const audit = { network: 0, forbiddenCli: 0, securityShim: 0, hostCredentialLookups: 0 };
+const bin = join(temp, 'bin');
+mkdirSync(bin);
+// Only inert executables are resolvable via PATH. The security shim also proves
+// that an attempted Keychain query never reaches the real macOS binary.
+for (const name of ['security', 'git']) writeFileSync(join(bin, name),
+  `#!/bin/sh\n${name === 'security' ? 'printf x >> "$PI_FOOTER_SECURITY_AUDIT"\n' : ''}exit 1\n`, { mode: 0o700 });
+for (const name of Object.keys(process.env)) {
+  if (/(?:^|_)(?:API_KEY|TOKEN|SECRET|PASSWORD|CREDENTIALS?|AUTH|ACCESS_KEY|PRIVATE_KEY)(?:_|$)/i.test(name))
+    delete process.env[name];
+}
+Object.assign(process.env, {
+  HOME: join(temp, 'home'), USERPROFILE: join(temp, 'home'),
+  XDG_CONFIG_HOME: join(temp, 'config'), XDG_DATA_HOME: join(temp, 'data'),
+  XDG_STATE_HOME: join(temp, 'state'), XDG_CACHE_HOME: join(temp, 'cache'),
+  APPDATA: join(temp, 'data'), LOCALAPPDATA: join(temp, 'cache'), CLAUDE_CONFIG_DIR: join(temp, 'claude'),
+  CODEX_HOME: join(temp, 'codex'), PI_CODING_AGENT_DIR: join(temp, 'agent'),
+  PI_OFFLINE: '1', PATH: bin, PI_FOOTER_SECURITY_AUDIT: join(temp, 'security-audit'),
+});
+for (const name of ['PI_STATUS_FOOTER_CLAUDE_USAGE_CMD', 'PI_SIDEBAR_FAMILY', 'PI_SIDEBAR_GUARD',
+  'AWS_PROFILE', 'AWS_CONFIG_FILE', 'GOOGLE_APPLICATION_CREDENTIALS', 'AZURE_CONFIG_DIR']) delete process.env[name];
+assert.equal(homedir(), join(temp, 'home'), 'SDK homedir must resolve inside the fixture');
+for (const name of ['home', 'config', 'data', 'state', 'cache', 'claude', 'codex', 'agent'])
+  mkdirSync(join(temp, name));
+writeFileSync(join(temp, 'agent', 'settings.json'), JSON.stringify({ piVim: { clipboardMirror: false } }));
+writeFileSync(join(temp, 'agent', 'keybindings.json'), JSON.stringify({
+  'app.model.select': 'alt+p', 'app.thinking.cycle': 'ctrl+t',
+}));
+const noNetwork = () => { audit.network++; throw new Error('footer fixture forbids external network I/O'); };
+globalThis.fetch = noNetwork;
+net.Socket.prototype.connect = function (...args) {
+  // Sidebar's process-local Unix sockets are part of the actual UI lifecycle.
+  if (typeof args[0] === 'string' || (args[0] && typeof args[0] === 'object' &&
+      typeof args[0].path === 'string' && args[0].port === undefined && args[0].host === undefined))
+    return originalConnect.apply(this, args);
+  return noNetwork();
+};
+for (const module of [http, https]) for (const name of ['request', 'get']) module[name] = noNetwork;
+for (const name of Object.keys(originalChild)) childProcess[name] = function (file, ...args) {
+  if ((name === 'spawn' || name === 'execFile' || name === 'spawnSync' || name === 'execFileSync') &&
+      (file === 'git' || file === 'security')) {
+    if (file === 'security') audit.securityShim++;
+    return originalChild[name].call(this, file, ...args);
+  }
+  if (typeof file === 'string' && /(?:^|\/)security$/.test(file)) audit.hostCredentialLookups++;
+  audit.forbiddenCli++;
+  throw new Error(`footer fixture forbids external CLI: ${name}`);
+};
+syncBuiltinESMExports();
+
 const sdkUrl = pathToFileURL(join(sdkRoot, 'dist/index.js'));
 function hostDependency(name) {
   const manifestPath = findPackageJSON(name, sdkUrl);
@@ -35,20 +98,7 @@ const paths = ['pi-vim', 'pi-stash', 'pi-status-footer', 'pi-cc-render', 'pi-sid
   .map(name => resolve(root, `packages/${name}/src/index.ts`));
 const actionsChannel = 'pi-plugins.footer-actions.v1';
 const flowChannel = 'pi-plugins.workflow-flow.v1';
-const temp = mkdtempSync(join(tmpdir(), 'pi-footer-controls-'));
-const originalEnv = Object.fromEntries(['PI_CODING_AGENT_DIR', 'PI_OFFLINE', 'XDG_CACHE_HOME', 'PI_SIDEBAR_FAMILY', 'PI_SIDEBAR_GUARD']
-  .map(key => [key, process.env[key]]));
 const previousKeys = getKeybindings();
-process.env.PI_CODING_AGENT_DIR = join(temp, 'agent');
-process.env.XDG_CACHE_HOME = join(temp, 'cache');
-process.env.PI_OFFLINE = '1';
-delete process.env.PI_SIDEBAR_FAMILY;
-delete process.env.PI_SIDEBAR_GUARD;
-mkdirSync(process.env.PI_CODING_AGENT_DIR);
-writeFileSync(join(process.env.PI_CODING_AGENT_DIR, 'settings.json'), JSON.stringify({ piVim: { clipboardMirror: false } }));
-writeFileSync(join(process.env.PI_CODING_AGENT_DIR, 'keybindings.json'), JSON.stringify({
-  'app.model.select': 'alt+p', 'app.thinking.cycle': 'ctrl+t',
-}));
 initTheme('dark', false);
 
 class MemoryTerminal {
@@ -383,10 +433,29 @@ finally {
   }
   try {
     setKeybindings(previousKeys);
-    for (const [key, value] of Object.entries(originalEnv)) {
-      if (value === undefined) delete process.env[key]; else process.env[key] = value;
-    }
-    rmSync(temp, { recursive: true, force: true });
+    assert.equal(audit.network, 0, 'no code may attempt an external network request');
+    assert.equal(audit.hostCredentialLookups, 0, 'no real host Keychain executable may be invoked');
+    assert.equal(audit.forbiddenCli, 0, 'no unapproved external CLI may run');
+    if (process.platform === 'darwin') {
+      assert.ok(audit.securityShim > 0, 'the real quota path must exercise the isolated security shim');
+      const shimRuns = readFileSync(process.env.PI_FOOTER_SECURITY_AUDIT, 'utf8').length;
+      assert.ok(shimRuns > 0 && shimRuns <= audit.securityShim,
+        'Keychain attempts must use the inert shim (some pending children may be killed on reload)');
+    } else assert.equal(audit.securityShim, 0, 'non-macOS hosts must not attempt a Keychain lookup');
   } catch (error) { failure ??= error; }
+  finally {
+    try {
+      globalThis.fetch = originalFetch;
+      net.Socket.prototype.connect = originalConnect;
+      for (const [module, offset] of [[http, 0], [https, 2]]) {
+        module.request = originalHttp[offset]; module.get = originalHttp[offset + 1];
+      }
+      Object.assign(childProcess, originalChild);
+      syncBuiltinESMExports();
+      for (const key of Object.keys(process.env)) if (!(key in originalEnv)) delete process.env[key];
+      Object.assign(process.env, originalEnv);
+      rmSync(temp, { recursive: true, force: true });
+    } catch (error) { failure ??= error; }
+  }
 }
 if (failure) throw failure;

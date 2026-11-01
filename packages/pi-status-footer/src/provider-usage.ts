@@ -2,7 +2,7 @@ import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 
 export type UsageState = "ready" | "unavailable" | "not-applicable";
-export type UsageWindow = { label: string; used?: number; reset?: number; pool?: string };
+export type UsageWindow = { label: string; used?: number; reset?: number; pool?: string; model?: string };
 export type ProviderUsage = { provider: string; source: string; state: UsageState; observedAt?: number; windows: UsageWindow[]; reason?: string; detailsUrl?: string };
 
 export type UsageSource = {
@@ -58,7 +58,7 @@ export function parseGoogleSummary(payload: unknown, observedAt: number): Provid
 /** Select the active Antigravity model's pool without discarding the detail readings. */
 export function selectGooglePool(usage: ProviderUsage, model: string): UsageWindow[] {
   const pool = model.startsWith("antigravity-gemini-") ? "Gemini" : model.startsWith("antigravity-claude-") ? "third-party" : undefined;
-  return pool ? usage.windows.filter(window => window.pool === pool) : [];
+  return pool ? usage.windows.filter(window => window.pool === pool && (!window.model || window.model === model)) : [];
 }
 
 /** A model quota has no established window duration. */
@@ -69,7 +69,7 @@ export function parseGoogleModels(payload: unknown, model: string, observedAt: n
   const quota = object(entry?.quotaInfo);
   const percent = used(quota?.remainingFraction), reset = resetTime(quota?.resetTime);
   if (!quota || (percent === undefined && reset === undefined)) return unavailable("google", GOOGLE_SOURCE, "Google returned no quota for the active model.");
-  return { provider: "google", source: GOOGLE_SOURCE, state: "ready", observedAt, windows: [{ label: "model", pool: id.startsWith("claude-") ? "third-party" : "Gemini", ...(percent === undefined ? {} : { used: percent }), ...(reset === undefined ? {} : { reset }) }] };
+  return { provider: "google", source: GOOGLE_SOURCE, state: "ready", observedAt, windows: [{ label: "model", model, pool: id.startsWith("claude-") ? "third-party" : "Gemini", ...(percent === undefined ? {} : { used: percent }), ...(reset === undefined ? {} : { reset }) }] };
 }
 
 /** Muse CLI's successful allowance schema has not been verified. */
