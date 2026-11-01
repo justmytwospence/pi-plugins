@@ -178,7 +178,7 @@ describe("extension factory", () => {
     let renders = 0;
     const mode = { sessionManager: { getSessionId: () => id.value }, ui: { requestRender: () => renders++ } };
     const state = attachStartupHost(mode);
-    const snapshot = { stage: "starting" as const, modelLabel: "test/model", usedEstimate: 0, sources: [], attribution: { files: true, skills: true }, caveats: [] };
+    const snapshot = { stage: "starting" as const, modelLabel: "test/model", usedEstimate: 0, sources: [], toolDeclarationsKnown: false, mcpOriginsKnown: false, attribution: { files: true, skills: true }, caveats: [] };
     state.contextSnapshot = snapshot;
     let factory: any;
     const ctx = { hasUI: true, sessionManager: mode.sessionManager, ui: {
@@ -354,7 +354,15 @@ describe("extension factory", () => {
     const { replaceSections, stopStartupResources, renderSection } = await import("../src/feature/shell/startup-resources.ts");
     const { attachStartupHost, disposeStartupHost } = await import("../src/feature/shell/startup-state.ts");
     const { mcpState } = await import("../src/feature/shell/mcp-servers.ts");
+    const { collectStartupContext } = await import("../src/feature/shell/startup-context.ts");
     vi.useFakeTimers();
+    const visible = { name: "mcp__server_0__lookup", description: "Look up a document", parameters: { type: "object" } };
+    const hidden = { name: "mcp__server_0__internal", description: "Internal tool", parameters: { type: "object" } };
+    const declarations = [visible, hidden];
+    const registry = [{ name: visible.name, namespace: { name: "mcp__server_0" } }];
+    const hiddenDeclarations = new Set([hidden.name]);
+    const tokens = Math.ceil(JSON.stringify(visible).length / 4);
+    const draft = "keep this editor draft";
     let dockRows = 4;
     const terminal = { rows: 100, columns: 180 };
     const plain = { fg: (_color: string, value: string) => value, bold: (value: string) => value };
@@ -368,7 +376,8 @@ describe("extension factory", () => {
     let sessionId = "responsive-session";
     const mode: any = {
       sessionManager: { getSessionId: () => sessionId, getCwd: () => temp },
-      session: { promptTemplates: [], scopedModels: [], getAllTools: () => [], resourceLoader: {
+      session: { promptTemplates: [], scopedModels: [], getAllTools: () => registry,
+        agent: { state: { tools: declarations } }, _hiddenDeclarations: hiddenDeclarations, resourceLoader: {
         agentDir: temp, getSystemPromptSource: () => undefined, getAppendSystemPromptSources: () => [],
         getAgentsFiles: () => ({ agentsFiles: [] }), getSkills: () => ({ skills: [] }), getExtensions: () => ({ extensions: [] }),
       }, extensionRunner: { runtime: { mcpServers: { list: () => Array.from({ length: 10 }, (_, i) => ({ name: `server-${i}` })) } } } },
@@ -376,7 +385,7 @@ describe("extension factory", () => {
       settingsManager: { isProjectTrusted: () => false },
       ui: { terminal, requestRender: vi.fn() },
       headerContainer: { render: () => ["header", "header"] }, chatContainer: { render: () => ["chat"] },
-      editorContainer: { render: () => Array(dockRows).fill("editor") },
+      editor: { getText: () => draft }, editorContainer: { render: () => Array(dockRows).fill("editor") },
       footerContainer: { render: () => ["footer"] }, statusContainer: { render: () => ["status"] },
       pendingMessagesContainer: { render: () => [] }, widgetContainerAbove: { render: () => ["widget"] }, widgetContainerBelow: { render: () => [] },
     };
@@ -384,8 +393,8 @@ describe("extension factory", () => {
     try {
       replaceSections(mode, { force: true, extensions: [] });
       const host = attachStartupHost(mode);
-      host.contextSnapshot = { stage: "starting", modelLabel: "test/model", usedEstimate: 100, sources: [],
-        attribution: { files: false, skills: false }, caveats: [] };
+      host.contextSnapshot = collectStartupContext({ systemPrompt: "", messages: [], declarations, hiddenDeclarations, registry });
+      mcpState.outcome("server-0", "connected");
       host.resourceSections = {
         Context: { title: "Context", count: 1, layout: "columns", groups: [{ label: "user", items: ["AGENTS.md"] }] },
         Skills: { title: "Skills", count: 2, layout: "grid", groups: [{ label: "user", items: ["a", "b"] }] },
@@ -406,7 +415,8 @@ describe("extension factory", () => {
         const short = render(width);
         expect(short.length + 2 + 1 + dockRows + 1 + 1 + 1).toBeLessThanOrEqual(terminal.rows);
         expect(short.join("\n")).toContain("[Extension issues] native diagnostic");
-        expect(short.join("\n")).toContain("No attributed sources");
+        expect(short.join("\n")).toContain("MCP");
+        expect(short.join("\n")).toContain(`~${tokens} tok`);
         expect(short.join("\n")).toContain("Models 14");
         expect(short.join("\n")).toContain("Extensions 44");
         expect(short.join("\n")).toContain("MCP 10");
@@ -421,7 +431,8 @@ describe("extension factory", () => {
         expect(expanded).not.toContain("native expanded");
         expect(expanded).not.toContain("+44 hidden");
         expect(expanded).toContain("[Extension issues] native diagnostic");
-        expect(expanded).toContain("No attributed sources");
+        expect(expanded).toContain(`■ server-0  1 · ~${tokens} tok`);
+        expect(expanded).toContain(`MCP ~${tokens}`);
         for (const child of expandable) child.setExpanded(false);
         expect(render(width)).toEqual(short);
         context.setExpanded(true);
@@ -440,11 +451,17 @@ describe("extension factory", () => {
       expect(renderSection(host.resourceSections!.Models!, 46, plain).join("\n")).toContain("model-13");
       terminal.rows = 200;
       host.resourceSections!.Models = { title: "Models", count: 1, layout: "columns", groups: [
-        { label: "test", items: ["replacement-model"], actions: [{ kind: "model", provider: "test", id: "replacement-model" }] },
+        { label: "test", items: ["replacement-model"], marks: [{ text: "●", color: "success" }],
+          actions: [{ kind: "model", provider: "test", id: "replacement-model" }] },
       ] };
       expect(render(46).join("\n")).toContain("replacement-model");
+      expect(render(46).join("\n")).toContain(`■ server-0  1 · ~${tokens} tok`);
       mcpState.outcome("server-0", "needs-auth");
-      expect(render(46).join("\n")).toContain("◆ server-0");
+      const afterAuth = render(46).join("\n");
+      expect(afterAuth).toContain("□ server-0");
+      expect(afterAuth).not.toContain(`1 · ~${tokens} tok`);
+      expect(afterAuth).toContain("replacement-model ●");
+      expect(mode.editor.getText()).toBe(draft);
       sessionId = "next-session";
       expect(render(46).join("\n")).toContain("[Context] native collapsed");
       expect(attachStartupHost(mode).resourceSections).toBeUndefined();

@@ -33,11 +33,14 @@ class MemoryTerminal {
 }
 
 const snapshot = {
-  stage: 'starting', modelLabel: 'Claude Opus', thinkingLevel: 'high', contextWindow: 200_000, usedEstimate: 4100,
+  stage: 'starting', modelLabel: 'Claude Opus', thinkingLevel: 'high', contextWindow: 200_000, usedEstimate: 4700,
+  toolDeclarationsKnown: true, mcpOriginsKnown: true,
   sources: [
     { id: 'system', category: 'system', label: 'System', tokens: 1400 },
     { id: 'files', category: 'files', label: 'Files', tokens: 900 },
     { id: 'tools', category: 'tools', label: 'Tools', tokens: 1000 },
+    { id: 'mcp:example-docs', category: 'mcp', label: 'example-docs', tokens: 420 },
+    { id: 'mcp:example-search', category: 'mcp', label: 'example-search', tokens: 180 },
     { id: 'history', category: 'history', label: 'History', tokens: 800 },
   ],
   caveats: ['Estimated from loaded content; request hooks and provider framing may add tokens.'],
@@ -49,7 +52,7 @@ const models = buildModelsSection([
 { provider: 'anthropic', id: 'claude-opus-5-5' });
 const mcp = buildMcpSection([
   { name: 'example-docs', level: 'project' }, { name: 'example-search', level: 'project' },
-], () => 'connected', () => undefined, () => 2);
+], () => 'connected', () => undefined, () => 2, snapshot);
 assert.ok(models && mcp, 'real resource builders must produce models and MCP sections');
 const resources = [
   { title: 'Extensions', count: 1, layout: 'grid', category: 'tools', groups: [{ label: 'project', items: ['example-extension'] }] },
@@ -86,6 +89,14 @@ export async function startupSplashScreens({
     assert.match(lines[positions[5]], /Claude Opus:high/u, 'the summary keeps the model and effort');
     assert.ok(positions.every((position, index) => position >= 0 && (!index || position > positions[index - 1])),
       `startup listing follows resources → map → Models at width ${width}: ${JSON.stringify(positions)}`);
+    for (const [server, tokens] of [['example-docs', 420], ['example-search', 180]]) {
+      const row = lines.find(line => line.includes(server));
+      assert.ok(row, `${server} is rendered at width ${width}`);
+      assert.match(row, new RegExp(`(?:^|\\s)■\\s+${server}\\s+2 · ~${tokens} tok(?:\\s|$)`, 'u'),
+        `${server} has one connected square and both metrics at width ${width}`);
+      assert.doesNotMatch(row, /[■□●○◌◆✕]\s+[■□●○◌◆✕]/u,
+        `${server} has no duplicate category or status glyph at width ${width}`);
+    }
     assert.match(lines[0], /Extensions/u, 'Extensions starts the listing without a leading blank');
     assert.notEqual(lines.at(-1), '', 'Models ends the listing without a trailing blank');
   }

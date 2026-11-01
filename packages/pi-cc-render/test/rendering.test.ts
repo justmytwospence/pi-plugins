@@ -399,6 +399,7 @@ describe("startup header", () => {
     const snapshot = {
       stage: "starting" as const, modelLabel: "provider/model", thinkingLevel: "high", contextWindow: 200_000,
       usedEstimate: 5_000,
+      toolDeclarationsKnown: false, mcpOriginsKnown: false,
       attribution: { files: true, skills: true },
       sources: [
         { id: "system", category: "system" as const, label: "System", tokens: 3_000 },

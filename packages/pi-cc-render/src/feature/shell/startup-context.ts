@@ -9,6 +9,8 @@ export type StartupContextSnapshot = {
 	contextWindow?: number;
 	usedEstimate: number;
 	sources: ContextSource[];
+	toolDeclarationsKnown: boolean;
+	mcpOriginsKnown: boolean;
 	/** True only when the effective prompt and that category's source metadata are known. */
 	attribution: { files: boolean; skills: boolean };
 	caveats: string[];
@@ -106,22 +108,27 @@ export function collectStartupContext(input: StartupContextInput): StartupContex
 		const children = [...allocated.values()].filter((item) => item.category === category && item.tokens > 0);
 		if (children.length) sources.push({ id: category, category, label: category === "files" ? "Files" : "Skills", tokens: children.reduce((n, item) => n + item.tokens, 0), children });
 	}
-	if (!input.declarations || !input.hiddenDeclarations) caveats.push("Tool declarations unavailable.");
+	const toolDeclarationsKnown = input.declarations !== undefined && input.hiddenDeclarations !== undefined;
+	let mcpOriginsKnown = toolDeclarationsKnown;
+	if (!toolDeclarationsKnown) caveats.push("Tool declarations unavailable.");
 	else {
-		const hidden = new Set(input.hiddenDeclarations);
+		const hidden = new Set(input.hiddenDeclarations!);
 		const registry = new Map(input.registry?.map((item) => [item.name, item]) ?? []);
 		const groups = new Map<string, ContextSource>();
-		for (const tool of input.declarations) {
+		for (const tool of input.declarations!) {
 			if (hidden.has(tool.name)) continue;
 			const tokens = charsToTokens(JSON.stringify({ name: tool.name, description: tool.description, parameters: tool.parameters }));
 			const metadata = registry.get(tool.name);
 			const mcpName = tool.name.match(/^mcp__(.+?)__(?:.+)$/)?.[1];
 			const namespace = typeof metadata?.namespace === "string" ? metadata.namespace : metadata?.namespace?.name;
+			const hasOrigin = [namespace, metadata?.sourceInfo?.path, metadata?.sourceInfo?.source].some((value) => typeof value === "string" && value.length > 0);
+			if (!mcpName && !hasOrigin) mcpOriginsKnown = false;
 			const mcp = !!mcpName || namespace?.startsWith("mcp__") || metadata?.sourceInfo?.source === "mcp" || metadata?.sourceInfo?.path?.startsWith("mcp:");
 			const category = mcp ? "mcp" : "tools";
 			const server = namespace?.match(/^mcp__(.+)$/)?.[1] || metadata?.sourceInfo?.path?.match(/^mcp:(.+?)(?:\/|$)/)?.[1] || mcpName;
-			const key = mcp ? `mcp:${server || "unknown"}` : "tools";
-			const group = groups.get(key) ?? { id: key, category, label: mcp ? server || "MCP" : "Tools", tokens: 0, children: [] };
+			// A server literally named "unknown" must not absorb MCP tools with no server origin.
+			const key = mcp && !server ? "mcp:unknown:unattributed" : mcp ? `mcp:${server}` : "tools";
+			const group = groups.get(key) ?? { id: mcp ? `mcp:${server || "unknown"}` : key, category, label: mcp ? server || "MCP" : "Tools", tokens: 0, children: [] };
 			group.tokens += tokens;
 			group.children!.push({ id: `tool:${tool.name}`, category, label: tool.name, tokens });
 			groups.set(key, group);
@@ -138,7 +145,7 @@ export function collectStartupContext(input: StartupContextInput): StartupContex
 	}
 	const usedEstimate = sources.reduce((sum, source) => sum + source.tokens, 0);
 	if (contextWindow && usedEstimate > contextWindow) caveats.push(`over by ~${usedEstimate - contextWindow}`);
-	return { stage, modelLabel: labelOf(input.model), ...(input.thinkingLevel ? { thinkingLevel: input.thinkingLevel } : {}), contextWindow, usedEstimate, sources, attribution, caveats };
+	return { stage, modelLabel: labelOf(input.model), ...(input.thinkingLevel ? { thinkingLevel: input.thinkingLevel } : {}), contextWindow, usedEstimate, sources, toolDeclarationsKnown, mcpOriginsKnown, attribution, caveats };
 }
 
 const cache = new WeakMap<object, { digest: string; snapshot: StartupContextSnapshot }>();
@@ -149,7 +156,7 @@ export function resetStartupContext(mode: any): void {
 /** Read-only host adapter; never runs request hooks or walks the filesystem. */
 export function readStartupContext(mode: any): StartupContextSnapshot {
 	const session = mode?.session;
-	if (!session) return { stage: "initializing", modelLabel: "Model unknown", usedEstimate: 0, sources: [], attribution: { files: false, skills: false }, caveats: [ESTIMATE_CAVEAT] };
+	if (!session) return { stage: "initializing", modelLabel: "Model unknown", usedEstimate: 0, sources: [], toolDeclarationsKnown: false, mcpOriginsKnown: false, attribution: { files: false, skills: false }, caveats: [ESTIMATE_CAVEAT] };
 	try {
 		const loader = session.resourceLoader;
 		let options: any;

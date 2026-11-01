@@ -52,10 +52,37 @@ describe("startup context attribution", () => {
 			{ name: "unused", sourceInfo: { path: "builtin:unused" } },
 		] };
 		const snapshot = collectStartupContext(input);
+		expect(snapshot.toolDeclarationsKnown).toBe(true);
+		expect(snapshot.mcpOriginsKnown).toBe(false);
 		expect(snapshot.sources.find((source) => source.id === "tools")?.children?.map((item) => item.label)).toEqual(["codemode"]);
 		expect(snapshot.sources.find((source) => source.id === "mcp:search")?.children?.map((item) => item.label)).toEqual(["mcp__search__query"]);
 		expect(snapshot.usedEstimate).toBe(input.declarations.slice(0, 2).reduce((sum, item) => sum + Math.ceil(JSON.stringify(item).length / 4), 0));
 		total(snapshot);
+	});
+	it("tracks declaration and visible origin availability independently of prompt and history", () => {
+		const empty = collectStartupContext({ declarations: [], hiddenDeclarations: [] });
+		expect(empty.stage).toBe("unavailable");
+		expect([empty.toolDeclarationsKnown, empty.mcpOriginsKnown]).toEqual([true, true]);
+		for (const input of [{ hiddenDeclarations: [] }, { declarations: [] }]) {
+			const snapshot = collectStartupContext(input);
+			expect([snapshot.toolDeclarationsKnown, snapshot.mcpOriginsKnown]).toEqual([false, false]);
+		}
+		const declarations = [
+			{ name: "mcp__server__visible", description: "", parameters: {} },
+			{ name: "ordinary", description: "", parameters: {} },
+			{ name: "mcp__server__hidden", description: "", parameters: {} },
+		];
+		const incomplete = collectStartupContext({ declarations, hiddenDeclarations: ["mcp__server__hidden"] });
+		expect([incomplete.toolDeclarationsKnown, incomplete.mcpOriginsKnown]).toEqual([true, false]);
+		expect(incomplete.sources.find((source) => source.id === "mcp:server")?.children?.map((child) => child.label)).toEqual(["mcp__server__visible"]);
+		for (const metadata of [{ namespace: { name: "builtin" } }, { sourceInfo: { path: "builtin:ordinary" } }, { sourceInfo: { source: "builtin" } }]) {
+			const known = collectStartupContext({ declarations, hiddenDeclarations: ["mcp__server__hidden"], registry: [{ name: "ordinary", ...metadata }] });
+			expect([known.toolDeclarationsKnown, known.mcpOriginsKnown]).toEqual([true, true]);
+		}
+		const hiddenUnknown = collectStartupContext({ declarations: [declarations[1]!], hiddenDeclarations: ["ordinary"] });
+		expect(hiddenUnknown.mcpOriginsKnown).toBe(true);
+		expect(hiddenUnknown.sources).toEqual([]);
+		expect([readStartupContext({}).toolDeclarationsKnown, readStartupContext({}).mcpOriginsKnown]).toEqual([false, false]);
 	});
 	it("uses projected model messages, excludes old system and !!, counts images without usage or details", () => {
 		const snapshot = collectStartupContext({ ...base(), messages: [

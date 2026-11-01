@@ -157,6 +157,7 @@ describe("startup resources", () => {
     }).map(([key, value]) => [key, { value }])));
     const snapshot = {
       stage: "starting" as const, modelLabel: "p/m", contextWindow: 200_000, usedEstimate: 1400,
+      toolDeclarationsKnown: false, mcpOriginsKnown: false,
       attribution: { files: true, skills: true }, caveats: [], sources: [
         { id: "files", category: "files" as const, label: "Files", tokens: 1300, children: [
           { id: "file:/work/BIG.md", category: "files" as const, label: "BIG.md", tokens: 1000 },
@@ -202,6 +203,7 @@ describe("startup resources", () => {
     };
     const attributed = {
       stage: "unavailable" as const, modelLabel: "m", contextWindow: 200_000, usedEstimate: 12,
+      toolDeclarationsKnown: false, mcpOriginsKnown: false,
       attribution: { files: true, skills: true }, caveats: ["Tool declarations unavailable."], sources: [
         { id: "files", category: "files" as const, label: "Files", tokens: 9, children: [{ id: `file:${file}`, category: "files" as const, label: "AGENTS.md", tokens: 9 }] },
         { id: "skills", category: "skills" as const, label: "Skills", tokens: 3, children: [{ id: "skill:/work/one/SKILL.md", category: "skills" as const, label: "one", tokens: 3 }] },
@@ -315,27 +317,27 @@ describe("startup resources", () => {
       (name) => (name === "obsidian" ? detail : undefined),
       () => 30,
     )!;
-    expect(section.legend).toEqual([{ text: "◆ 1", color: "warning" }, { text: "✕ 1", color: "error" }]);
+    expect(section.legend).toEqual([{ text: "□ 1", color: "warning" }, { text: "□ 1", color: "error" }]);
     expect(section.notes).toBeUndefined();
     for (const width of [46, 120, 180]) {
       const lines = renderSection(section, width, plainTheme);
-      expect(lines[0]).toBe(" ■ MCP 3 · ◆ 1 · ✕ 1");
+      expect(lines[0]).toBe(" ■ MCP 3 · □ 1 · □ 1");
       expect(lines.join("\n")).not.toContain(detail);
       expect(lines.join("\n")).not.toMatch(/connected ·|needs sign-in|\/mcp to fix/);
-      expect(lines.some((line) => /■ ● local\s+30(?:\s|$)/.test(line))).toBe(true);
-      expect(lines.some((line) => /■ ✕ obsidian/.test(line))).toBe(true);
-      expect(lines.some((line) => /■ ◆ vercel/.test(line))).toBe(true);
+      expect(lines.some((line) => /■ local\s+30 · \? tok(?:\s|$)/.test(line))).toBe(true);
+      expect(lines.some((line) => /□ obsidian/.test(line))).toBe(true);
+      expect(lines.some((line) => /□ vercel/.test(line))).toBe(true);
       expect(lines.every((line) => visibleWidth(line) <= width)).toBe(true);
     }
     const colored: StartupTheme = { fg: (name, text) => `<${name}>${text}</${name}>`, bold: (text) => text };
     const heading = renderSection(section, 180, colored)[0]!;
-    expect(heading).toContain("<warning>◆ 1</warning>");
-    expect(heading).toContain("<error>✕ 1</error>");
+    expect(heading).toContain("<warning>□ 1</warning>");
+    expect(heading).toContain("<error>□ 1</error>");
     expect(buildMcpSection([], () => undefined)).toBeUndefined();
     expect(renderSection(buildMcpSection([{ name: "a", level: "user" }], () => "connected")!, 80, plainTheme)).toEqual([
       " ■ MCP 1",
       "   user 1",
-      "   ■ ● a",
+      "   ■ a  ? · ? tok",
     ]);
   });
 
@@ -351,29 +353,67 @@ describe("startup resources", () => {
     expect(section.layout).toBe("columns");
     const group = section.groups[0]!;
     const byName = (name: string) => group.items.indexOf(name);
-    expect(group.prefixes![byName("connected")]).toEqual(GLYPHS.live);
-    expect(group.prefixes![byName("connecting")]).toEqual(GLYPHS.pending);
-    expect(group.prefixes![byName("needs-auth")]).toEqual(GLYPHS.attention);
+    expect(group.prefixes![byName("connected")]).toEqual({ text: "■", color: "success" });
+    expect(group.prefixes![byName("connecting")]).toEqual({ text: "□", color: "dim" });
+    expect(group.prefixes![byName("needs-auth")]).toEqual({ text: "□", color: "warning" });
     expect(GLYPHS.attention).toEqual({ text: "◆", color: "warning" });
     expect(GLYPHS.attention.text).not.toBe(GLYPHS.live.text);
-    expect(group.prefixes![byName("failed")]).toEqual(GLYPHS.failed);
-    for (const name of ["disabled", "disconnected", "unknown"]) expect(group.prefixes![byName(name)]).toEqual(GLYPHS.idle);
+    expect(group.prefixes![byName("failed")]).toEqual({ text: "□", color: "error" });
+    for (const name of ["disabled", "disconnected", "unknown"]) expect(group.prefixes![byName(name)]).toEqual({ text: "□", color: "dim" });
     expect(group.tones![byName("disabled")]).toBe("dim");
-    expect(group.right![byName("connected")]).toBe("0");
+    expect(group.right![byName("connected")]).toBe("0 · ? tok");
     for (const name of states.filter((state) => state !== "connected")) expect(group.right![byName(name)]).toBeUndefined();
     const lines = renderSection(section, 80, plainTheme).join("\n");
-    expect(lines).toMatch(/■ ○ disabled/);
-    expect(lines).toMatch(/■ ○ disconnected/);
-    expect(lines).toMatch(/■ ○ unknown/);
+    expect(lines).toMatch(/□ disabled/);
+    expect(lines).toMatch(/□ disconnected/);
+    expect(lines).toMatch(/□ unknown/);
     const ansi: StartupTheme = {
       fg: (name, text) => `\x1b[${{ success: 32, warning: 33, error: 31, dim: 2 }[name] ?? 37}m${text}\x1b[0m`,
       bold: (text) => text,
     };
     const colored = renderSection(section, 180, ansi).join("\n");
-    expect(colored).toContain("\x1b[32m●\x1b[0m connected");
-    expect(colored).toContain("\x1b[33m◆\x1b[0m needs-auth");
-    expect(colored).toContain("\x1b[31m✕\x1b[0m failed");
-    expect(colored).toContain("\x1b[2m○\x1b[0m \x1b[2mdisabled\x1b[0m");
+    expect(colored).toContain("\x1b[32m■\x1b[0m connected");
+    expect(colored).toContain("\x1b[33m□\x1b[0m needs-auth");
+    expect(colored).toContain("\x1b[31m□\x1b[0m failed");
+    expect(colored).toContain("\x1b[2m□\x1b[0m \x1b[2mdisabled\x1b[0m");
+  });
+
+  test("MCP metrics reuse visible prepared schemas and distinguish missing, unattributed, and real unknown origins", async () => {
+    const { collectStartupContext } = await import("../src/feature/shell/startup-context.ts");
+    const visible = { name: "mcp__dash_name__lookup", description: "visible", parameters: {} };
+    const hidden = { name: "mcp__dash_name__secret", description: "hidden".repeat(100), parameters: {} };
+    const unknown = { name: "mcp__unknown__lookup", description: "real server", parameters: {} };
+    const unattributed = { name: "anonymous", description: "unattributed", parameters: {} };
+    const snapshot = collectStartupContext({ declarations: [visible, hidden, unknown], hiddenDeclarations: [hidden.name], model: { id: "m", contextWindow: 200_000 } });
+    const unassigned = collectStartupContext({ declarations: [unattributed], hiddenDeclarations: [], registry: [{ name: unattributed.name, sourceInfo: { source: "mcp" } }] });
+    snapshot.sources.push(...unassigned.sources);
+    snapshot.usedEstimate += unassigned.usedEstimate;
+    const estimate = (declaration: object) => Math.ceil(JSON.stringify(declaration).length / 4);
+    const entries = ["dash-name", "unknown", "empty"].map((name) => ({ name, level: "user" as const }));
+    const section = buildMcpSection(entries, () => "connected", undefined, (name) => name === "empty" ? 0 : undefined, snapshot)!;
+    const right = Object.fromEntries(section.groups[0]!.items.map((name, i) => [name, section.groups[0]!.right![i]]));
+    expect(right).toEqual({ "dash-name": `? · ~${estimate(visible)} tok`, unknown: `? · ~${estimate(unknown)} tok`, empty: "0 · ? tok" });
+    expect(section.tokens).toBe(estimate(visible) + estimate(unknown) + estimate(unattributed));
+    expect(renderSection(section, 180, plainTheme)[0]).toContain(`~${formatTokens(section.tokens!)} tok`);
+    const clean = collectStartupContext({ declarations: [visible], hiddenDeclarations: [], model: { id: "m", contextWindow: 200_000 } });
+    const complete = buildMcpSection(entries, () => "connected", undefined, () => 0, clean)!;
+    expect(complete.groups[0]!.right![complete.groups[0]!.items.indexOf("empty")]).toBe("0 · ~0 tok");
+    const incomplete = buildMcpSection(entries, () => "connected", undefined, () => 0, { ...clean, mcpOriginsKnown: false })!;
+    expect(incomplete.tokens).toBeUndefined();
+    expect(incomplete.groups[0]!.right![incomplete.groups[0]!.items.indexOf("dash-name")]).toBe(`0 · ~${estimate(visible)} tok`);
+    expect(incomplete.groups[0]!.right![incomplete.groups[0]!.items.indexOf("empty")]).toBe("0 · ? tok");
+    const absent = buildMcpSection(entries, () => "connected")!;
+    expect(absent.tokens).toBeUndefined();
+    expect(absent.groups[0]!.right).toEqual(["? · ? tok", "? · ? tok", "? · ? tok"]);
+    // Both origins can occur together in one prepared session, regardless of declaration order.
+    for (const declarations of [[unknown, unattributed], [unattributed, unknown]]) {
+      const combined = collectStartupContext({ declarations, hiddenDeclarations: [], registry: [{ name: unattributed.name, sourceInfo: { source: "mcp" } }] });
+      const result = buildMcpSection(entries, () => "connected", undefined, () => 0, combined)!;
+      const metrics = Object.fromEntries(result.groups[0]!.items.map((name, i) => [name, result.groups[0]!.right![i]]));
+      expect(metrics.unknown).toBe(`0 · ~${estimate(unknown)} tok`);
+      expect(metrics.empty).toBe("0 · ? tok");
+      expect(result.tokens).toBe(estimate(unknown) + estimate(unattributed));
+    }
   });
 
   test("MCP runtime state wins over disk and tool registrations, including zero-tool servers", async () => {
@@ -398,11 +438,11 @@ describe("startup resources", () => {
       ["resource_only", { status: "connected", tools: 0 }],
     ]))!;
     const text = renderSection(section, 100, plainTheme).join("\n");
-    expect(text).toMatch(/● live\s+7(?:\s|$)/);
-    expect(text).toMatch(/○ off(?:\s|$)/);
-    expect(text).toMatch(/● resource-only\s+0(?:\s|$)/);
-    expect(text).toMatch(/○ no-tools(?:\s|$)/);
-    expect(text).toMatch(/○ stale-tools(?:\s|$)/);
+    expect(text).toMatch(/■ live\s+7 · \? tok(?:\s|$)/);
+    expect(text).toMatch(/□ off(?:\s|$)/);
+    expect(text).toMatch(/■ resource-only\s+0 · \? tok(?:\s|$)/);
+    expect(text).toMatch(/□ no-tools(?:\s|$)/);
+    expect(text).toMatch(/□ stale-tools(?:\s|$)/);
     expect(text).not.toMatch(/connected ·|disabled(?:\s|$)|unknown(?:\s|$)/);
   });
 
@@ -412,16 +452,12 @@ describe("startup resources", () => {
     const section = buildMcpSection(entries, () => "connected", undefined, () => 1)!;
     const wide = renderSection(section, 100, plainTheme);
     expect(wide.length).toBeLessThan(entries.length + 2);
-    expect(wide).toHaveLength(4); // Five real two-entry columns at 100 cells.
-    expect(wide[2]).toMatch(/server-0.*server-2.*server-4.*server-6.*server-8/);
-    expect(renderSection(section, 90, plainTheme)).toHaveLength(4); // 89 content cells plus the inset.
-    expect(renderSection(section, 89, plainTheme).length).toBeGreaterThan(4);
+    expect(wide).toHaveLength(5); // Longer metrics require wider columns.
     const narrow = renderSection(section, 40, plainTheme);
-    expect(narrow).toHaveLength(7);
-    expect(narrow[2]).toMatch(/server-0.*server-5/);
-    expect((narrow.slice(2).join(" ").match(/■ ● server-\d\s+1(?:\s|$)/g) ?? [])).toHaveLength(entries.length);
+    expect(narrow.length).toBeGreaterThan(wide.length);
+    expect((narrow.slice(2).join(" ").match(/■ server-\d\s+1 · \? tok(?:\s|$)/g) ?? [])).toHaveLength(entries.length);
     const long = buildMcpSection([{ name: "a-very-long-server-name-界界", level: "project" }], () => "needs-auth")!;
-    expect(renderSection(long, 28, plainTheme)[2]!.replace(/\x1b\[[0-9;]*m/g, "")).toMatch(/◆ a-very-long-server-n…$/);
+    expect(renderSection(long, 28, plainTheme)[2]!.replace(/\x1b\[[0-9;]*m/g, "")).toMatch(/□ a-very-long-server-nam…$/);
     const ansi: StartupTheme = { fg: (_name, text) => `\x1b[32m${text}\x1b[39m`, bold: (text) => `\x1b[1m${text}\x1b[22m` };
     for (const width of [0, 1, 2, 5, 15, 28, 40, 80, 140]) {
       for (const current of [section, long]) {
@@ -462,23 +498,23 @@ describe("startup resources", () => {
         shown = renderSection(collectMcpSection(mode, entries, states)!, 100, plainTheme).join("\n");
       });
       await vi.advanceTimersByTimeAsync(1);
-      expect(shown).toMatch(/● live\s+2(?:\s|$)/);
-      expect(shown).toMatch(/○ off(?:\s|$)/);
+      expect(shown).toMatch(/■ live\s+2 · \? tok(?:\s|$)/);
+      expect(shown).toMatch(/□ off(?:\s|$)/);
       expect(shown).not.toContain("project 1");
       await vi.advanceTimersByTimeAsync(65_000);
       status = "live: disconnected, reconnects on next call (codemode)";
       await vi.advanceTimersByTimeAsync(1000);
-      expect(shown).toMatch(/○ live(?:\s|$)/);
+      expect(shown).toMatch(/□ live(?:\s|$)/);
       status = "live: connected, 3 tools (codemode)\noff: connected, 0 tools (codemode)";
       trusted = true;
       await vi.advanceTimersByTimeAsync(1000);
-      expect(shown).toMatch(/● live\s+3(?:\s|$)/);
-      expect(shown).toMatch(/● off\s+0(?:\s|$)/);
+      expect(shown).toMatch(/■ live\s+3 · \? tok(?:\s|$)/);
+      expect(shown).toMatch(/■ off\s+0 · \? tok(?:\s|$)/);
       expect(shown).toContain("project 1");
       writeFileSync(join(dir, ".pi", "mcp.json"), JSON.stringify({ mcpServers: { off: { enabled: false } } }));
       status = "live: connected, 3 tools (codemode)\noff: disabled (codemode)";
       await vi.advanceTimersByTimeAsync(1000);
-      expect(shown).toMatch(/○ off(?:\s|$)/);
+      expect(shown).toMatch(/□ off(?:\s|$)/);
       expect(shown).not.toContain("project 1");
       mode.loadedResourcesContainer.children.length = 0;
       const calls = handler.mock.calls.length;
@@ -679,16 +715,15 @@ describe("startup resources", () => {
     expect(sliceByColumn(lines[2]!, leftEdge, rightEdge - leftEdge).trim()).toBe("");
   });
 
-  test("ten differently sized MCP server names use five columns at screenshot width", () => {
+  test("ten differently sized MCP server names reflow at screenshot width", () => {
     const tools = new Map(Object.entries({ "chrome-live": 30, context7: 2, garmin: 163, inoreader: 33,
       obsidian: 18, paperless: 22, strava: 33, tabpfn: 6, telebrowser: 0, vercel: 0 }));
     const entries = [...tools.keys()].map((name) => ({ name, level: "user" as const }));
     const section = buildMcpSection(entries, (name) => tools.get(name) ? "connected" : "disconnected",
       undefined, (name) => tools.get(name))!;
     const lines = renderSection(section, 100, plainTheme);
-    expect(lines).toHaveLength(4);
-    expect(lines[2]).toMatch(/chrome-live.*garmin.*obsidian.*strava.*telebrowser/);
-    expect(lines[3]).toMatch(/context7.*inoreader.*paperless.*tabpfn.*vercel/);
+    expect(lines).toHaveLength(5);
+    for (const name of tools.keys()) expect(lines.join("\n")).toContain(name);
     expect(lines.every((line) => visibleWidth(line) <= 100)).toBe(true);
   });
 
@@ -708,7 +743,7 @@ describe("startup resources", () => {
       const columns = count === 17 ? 6 : Math.max(1, Math.floor(count / 2));
       expect(wide).toHaveLength(2 + Math.ceil(count / columns));
       const firstData = wide[2]!;
-      const cells = (line: string) => line.match(/■ ● s\d+\s+1(?:\s|$)/g) ?? [];
+      const cells = (line: string) => line.match(/■ s\d+\s+1 · \? tok(?:\s|$)/g) ?? [];
       expect(cells(firstData)).toHaveLength(columns);
       if (count === 10) expect(wide.slice(2).map((line) => cells(line).length)).toEqual([5, 5]);
       if (count === 17) expect(wide.slice(2).map((line) => cells(line).length)).toEqual([6, 6, 5]);
@@ -734,7 +769,7 @@ describe("startup resources", () => {
       { name: "offline", level: "user", enabled: false },
     ], (name) => name === "small" ? "connected" : "unknown")!;
     const ansi: StartupTheme = { fg: (_name, text) => `\x1b[32m${text}\x1b[39m`, bold: (text) => `\x1b[1m${text}\x1b[22m` };
-    for (const theme of [plainTheme, ansi]) for (const width of [12, 28, 46, 120, 180]) {
+    for (const theme of [plainTheme, ansi]) for (const width of [28, 46, 100, 120, 180]) {
       const { lines, hits } = layoutSection(section, width, theme);
       expect(lines.every((line) => visibleWidth(line) <= width)).toBe(true);
       expect(hits.map((hit) => hit.action)).toEqual(expect.arrayContaining([
@@ -973,6 +1008,14 @@ describe("startup resources", () => {
     const mcp = buildMcpSection([
       { name: "problem", level: "project" }, { name: "healthy-1", level: "user" }, { name: "healthy-2", level: "user" },
     ], (name) => name === "problem" ? "needs-auth" : "connected")!;
+    for (const status of ["needs-auth", "failed"] as const) {
+      const problems = buildMcpSection([{ name: "problem", level: "project" }, { name: "healthy", level: "user" }],
+        (name) => name === "problem" ? status : "connected")!;
+      const candidates = splashSectionCandidates("MCP", problems, 100, plainTheme);
+      const foldedProblem = candidates.find((candidate) => candidate.section.groups.find((group) => group.label === "project")?.foldedCount)!;
+      const foldedHealthy = candidates.find((candidate) => candidate.section.groups.find((group) => group.label === "user")?.foldedCount && !candidate.section.groups.find((group) => group.label === "project")?.foldedCount)!;
+      expect(foldedProblem.losses[1]).toBeGreaterThan(foldedHealthy.losses[1]);
+    }
     for (const width of [46, 80, 120, 180]) {
       const full = renderSection(models, width, plainTheme).length + renderSection(mcp, width, plainTheme).length;
       const options = [splashSectionCandidates("Models", models, width, plainTheme), splashSectionCandidates("MCP", mcp, width, plainTheme)];

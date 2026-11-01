@@ -7,6 +7,7 @@ import { ESTIMATE_CAVEAT, type ContextSource, type StartupContextSnapshot } from
 const source = (id: string, tokens: number, category: ContextSource["category"] = "files"): ContextSource => ({ id, label: id, category, tokens });
 const snapshot = (sources: ContextSource[], contextWindow?: number): StartupContextSnapshot => ({
 	stage: "starting", modelLabel: "p/m", contextWindow, usedEstimate: sources.reduce((sum, item) => sum + item.tokens, 0), sources,
+	toolDeclarationsKnown: false, mcpOriginsKnown: false,
 	attribution: { files: true, skills: true }, caveats: [ESTIMATE_CAVEAT],
 });
 const theme = (name: string) => ({

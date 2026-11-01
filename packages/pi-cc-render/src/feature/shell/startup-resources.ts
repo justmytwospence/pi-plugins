@@ -355,7 +355,7 @@ function candidateShapes(group: ResourceGroup, available: number, theme: Startup
 	const cells: Cell[] = markedItems(group, theme).map((name, index) => {
 		const right = rightText(group, index);
 		return {
-			name: `${category ? `${categoryStyle(theme, category).swatch("■")} ` : ""}${prefixText(group, index, theme)}${name}`,
+			name: `${category && category !== "mcp" ? `${categoryStyle(theme, category).swatch("■")} ` : ""}${prefixText(group, index, theme)}${name}`,
 			count: right?.text ?? "",
 			color: right?.color ?? "dim",
 			...(group.actions?.[index] ? { action: group.actions[index] } : {}),
@@ -608,7 +608,7 @@ function foldLosses(name: string, group: ResourceGroup): [number, number, number
 			if (group.marks?.[index]?.highlight) own[0]++;
 			if (group.prefixes?.[index]?.text === GLYPHS.favorite.text) own[2]++;
 		}
-		if (name === "MCP" && (group.prefixes?.[index]?.text === GLYPHS.attention.text || group.prefixes?.[index]?.text === GLYPHS.failed.text)) own[1]++;
+		if (name === "MCP" && (group.prefixes?.[index]?.color === "warning" || group.prefixes?.[index]?.color === "error")) own[1]++;
 	});
 	for (const child of group.children ?? []) {
 		const nested = foldLosses(name, child);
@@ -861,14 +861,36 @@ export function collectSections(mode: any, options?: { extensions?: any[] }, sna
 const MCP_LEVELS: McpLevel[] = ["project", "user", "extension"];
 
 const MCP_GLYPHS: Record<McpStatus, ResourceMark> = {
-	connected: GLYPHS.live,
-	"needs-auth": GLYPHS.attention,
-	failed: GLYPHS.failed,
-	connecting: GLYPHS.pending,
-	disabled: GLYPHS.idle,
-	disconnected: GLYPHS.idle,
-	unknown: GLYPHS.idle,
+	connected: { text: "■", color: "success" },
+	"needs-auth": { text: "□", color: "warning" },
+	failed: { text: "□", color: "error" },
+	connecting: { text: "□", color: "dim" },
+	disabled: { text: "□", color: "dim" },
+	disconnected: { text: "□", color: "dim" },
+	unknown: { text: "□", color: "dim" },
 };
+
+/** Reuse the chart's prepared direct-schema estimate; an unassigned source is never charged to a server. */
+function mcpSchemaMetrics(snapshot?: StartupContextSnapshot): {
+	complete: boolean; total: number; byServer: Map<string, number>; unattributed: boolean;
+} {
+	const byServer = new Map<string, number>();
+	let total = 0;
+	let unattributed = false;
+	if (!snapshot?.toolDeclarationsKnown) return { complete: false, total, byServer, unattributed };
+	for (const source of snapshot.sources) {
+		if (source.category !== "mcp") continue;
+		total += source.tokens;
+		if (!source.id.startsWith("mcp:") || source.id === "mcp:unknown" && source.label === "MCP") {
+			unattributed = true;
+			continue;
+		}
+		const server = normalizeMcpName(source.id.slice(4));
+		if (!server) { unattributed = true; continue; }
+		byServer.set(server, (byServer.get(server) ?? 0) + source.tokens);
+	}
+	return { complete: snapshot?.mcpOriginsKnown === true, total, byServer, unattributed };
+}
 
 /** The servers configured for this session, each with the level it is active at. */
 export function collectMcpEntries(mode: any, cache?: McpConfigCache): McpEntry[] {
@@ -886,14 +908,16 @@ export function collectMcpEntries(mode: any, cache?: McpConfigCache): McpEntry[]
 	}
 }
 
-/** One entry per row, state on the left and known tool count on the right, in adaptive scope columns. */
+/** One connection square per row; connected servers show live tool counts and estimated direct-schema tokens. */
 export function buildMcpSection(
 	entries: McpEntry[],
 	status: (name: string) => McpStatus | undefined,
 	_detail: (name: string) => string | undefined = () => undefined,
 	tools: (name: string) => number | undefined = () => undefined,
+	snapshot?: StartupContextSnapshot,
 ): ResourceSection | undefined {
 	if (entries.length === 0) return undefined;
+	const schema = mcpSchemaMetrics(snapshot);
 	const sorted = [...entries].sort((a, b) => compareNames(a.name, b.name));
 	const groups: ResourceGroup[] = [];
 	let needAuth = 0;
@@ -906,8 +930,12 @@ export function buildMcpSection(
 			const state = states[index]!;
 			if (state === "needs-auth") needAuth++;
 			if (state === "failed") failed++;
-			const count = state === "connected" ? tools(entry.name) : undefined;
-			return count === undefined ? undefined : String(count);
+			if (state !== "connected") return undefined;
+			const count = tools(entry.name);
+			const attributed = schema.byServer.get(normalizeMcpName(entry.name));
+			const tokens = attributed !== undefined ? `~${formatTokens(attributed)}`
+				: schema.complete && !schema.unattributed ? "~0" : "?";
+			return `${count === undefined ? "?" : count} · ${tokens} tok`;
 		});
 		groups.push({
 			label: level,
@@ -919,14 +947,15 @@ export function buildMcpSection(
 		});
 	}
 	const legend: ResourceMark[] = [];
-	if (needAuth) legend.push({ text: `${GLYPHS.attention.text} ${needAuth}`, color: GLYPHS.attention.color });
-	if (failed) legend.push({ text: `${GLYPHS.failed.text} ${failed}`, color: GLYPHS.failed.color });
+	if (needAuth) legend.push({ text: `□ ${needAuth}`, color: "warning" });
+	if (failed) legend.push({ text: `□ ${failed}`, color: "error" });
 	return {
 		title: "MCP",
 		count: entries.length,
 		layout: "columns",
 		groups,
 		category: "mcp",
+		...(schema.complete ? { tokens: schema.total, contextWindow: snapshot?.contextWindow } : {}),
 		...(legend.length > 0 ? { legend } : {}),
 	};
 }
@@ -936,6 +965,7 @@ export function collectMcpSection(
 	mode: any,
 	entries: McpEntry[] = collectMcpEntries(mode),
 	statuses: ReadonlyMap<string, McpObservation> = new Map(),
+	snapshot: StartupContextSnapshot = readStartupContext(mode),
 ): ResourceSection | undefined {
 	const effective = entries.map((entry) => {
 		const observed = statuses.get(normalizeMcpName(entry.name));
@@ -953,6 +983,7 @@ export function collectMcpSection(
 		(name) => observation(name)?.status ?? mcpState.status(name),
 		(name) => observation(name) ? observation(name)?.detail : mcpState.detail(name),
 		(name) => observation(name)?.tools ?? counts.get(normalizeMcpName(name)),
+		snapshot,
 	);
 }
 
@@ -1276,7 +1307,7 @@ export function replaceSections(mode: any, options: unknown, pi?: ExtensionAPI):
 			refresh();
 		}).catch(() => { verifiedGoogle = []; }).finally(() => { checkingGoogle = false; });
 	};
-	const section = () => collectMcpSection(mode, mcpEntries, statuses);
+	const section = () => collectMcpSection(mode, mcpEntries, statuses, host.contextSnapshot ?? readStartupContext(mode));
 	const theme = () => hostTheme?.() ?? PLAIN_THEME;
 	const refresh = () => {
 		const current = attachStartupHost(mode);
@@ -1331,6 +1362,7 @@ export function replaceSections(mode: any, options: unknown, pi?: ExtensionAPI):
 		render(width: number) {
 			return renderContextTreemap(host.contextSnapshot ?? {
 				stage: "initializing", modelLabel: "Model unknown", usedEstimate: 0, sources: [],
+				toolDeclarationsKnown: false, mcpOriginsKnown: false,
 				attribution: { files: false, skills: false }, caveats: [],
 			}, width, theme());
 		},
