@@ -161,7 +161,7 @@ describe("context treemap", () => {
 		const narrow = renderContextTreemap(snapshot(sources, 200_000), 24, theme("light"));
 		expect(narrow.join("\n")).toContain("Skills ~1.9k");
 		expect(narrow.every((line) => visibleWidth(line) <= 24)).toBe(true);
-		const noBar = renderContextTreemap(snapshot(sources, 200_000), 23, theme("light"));
+		const noBar = renderContextTreemap(snapshot(sources, 200_000), 24, theme("light"));
 		expect(noBar.join("\n")).toContain("Skills ~1.9k");
 		expect(noBar.every((line) => !line.includes("\x1b[48;"))).toBe(true);
 	});
@@ -170,22 +170,22 @@ describe("context treemap", () => {
 			source("files", 6500), source("system", 3300, "system"), source("skills", 1900, "skills")];
 		const lines = renderContextTreemap(snapshot(sources, 1_048_576), 100, theme("dark")).map(stripTerminalSequences);
 		expect(lines).toHaveLength(4); // summary, category labels, strip, and its existing key
-		expect(lines[3]).toMatch(/^Small category totals: ■ System ~3\.3k  ■ Skills ~1\.9k$/);
+		expect(lines[3]).toMatch(/^ Small category totals: ■ System ~3\.3k  ■ Skills ~1\.9k$/);
 		const narrow = renderContextTreemap(snapshot(sources, 1_048_576), 46, theme("dark")).map(stripTerminalSequences);
 		expect(narrow.join("\n")).toContain("Key: ■");
 		expect(narrow.every((line) => visibleWidth(line) <= 46)).toBe(true);
 	});
 	it("omits percent text unless its own block has two padding cells", () => {
 		const files = { ...source("files", 100), children: [source("first", 70), source("second", 30)] };
-		const narrow = renderContextTreemap(snapshot([source("system", 300, "system"), files], 200_000), 24, theme("dark"));
+		const narrow = renderContextTreemap(snapshot([source("system", 300, "system"), files], 200_000), 25, theme("dark"));
 		// Files occupies six cells: its four-cell first block cannot fit "70%" plus two padding cells.
 		expect(stripTerminalSequences(narrow[2]!)).not.toContain("70%");
 		expect(stripTerminalSequences(narrow[2]!)).not.toContain("30%");
 		const crowded = { ...source("files", 100), children: [source("first", 75), source("second", 25)] };
-		const lines = renderContextTreemap(snapshot([source("system", 200, "system"), crowded], 200_000), 24, theme("light"));
+		const lines = renderContextTreemap(snapshot([source("system", 200, "system"), crowded], 200_000), 25, theme("light"));
 		expect(stripTerminalSequences(lines[2]!)).toContain("75%");
 		expect(stripTerminalSequences(lines[2]!)).not.toContain("25%");
-		expect(visibleWidth(lines[2]!)).toBe(24);
+		expect(visibleWidth(lines[2]!)).toBe(25);
 		const tile = { x: 0, y: 0, width: 8, height: 1, source: source("files", 100) };
 		expect(categoryShareBlocks([crowded], tile)).toEqual([
 			{ kind: "first", start: 0, width: 6, tokens: 75 }, { kind: "remainder", start: 6, width: 2, tokens: 25 },
@@ -199,10 +199,26 @@ describe("context treemap", () => {
 		]) {
 			expect(categoryBlockStyle(current, "files", "first")).toBeUndefined();
 			const lines = renderContextTreemap(snapshot([files], 200_000), 60, current);
-			expect(stripTerminalSequences(lines[2]!)).toMatch(/█{30}▓{29}░/);
+			expect(stripTerminalSequences(lines[2]!)).toMatch(/^ █{30}▓{28}░$/);
 			expect(lines[2]).not.toContain("\x1b[48;");
 			expect(visibleWidth(lines[2]!)).toBe(60);
 		}
+	});
+	it("reserves one left cell on every rendered line at viewport boundaries", () => {
+		const sources = [source("system", 300, "system"), source("file", 200)];
+		for (const width of [0, 1, 24, 46, 120]) {
+			const lines = renderContextTreemap(snapshot(sources, 200_000), width, theme("dark"));
+			if (width <= 1) expect(lines).toEqual([]);
+			else expect(lines.length).toBeGreaterThan(0);
+			for (const line of lines) {
+				expect(visibleWidth(line)).toBeLessThanOrEqual(width);
+				if (stripTerminalSequences(line).trim()) expect(line.startsWith(" ")).toBe(true);
+			}
+		}
+		const fallback = renderContextTreemap(snapshot(sources, 200_000), 24, theme("dark"));
+		const chart = renderContextTreemap(snapshot(sources, 200_000), 25, theme("dark"));
+		expect(fallback.every((line) => !line.includes("\x1b[48;"))).toBe(true);
+		expect(chart.some((line) => line.includes("\x1b[48;"))).toBe(true);
 	});
 	it("renders narrow fallback, occupancy map, overage and bounded wide/ANSI labels", () => {
 		const sources = [source("寬界 context", 300, "system"), source("file", 200, "files")];
@@ -211,7 +227,7 @@ describe("context treemap", () => {
 			expect(lines[0]).toContain("250%");
 			expect(lines.filter((line) => visibleWidth(line) > width).map((line) => ({ width, length: visibleWidth(line), line }))).toEqual([]);
 			expect(lines.join("\n").includes("over by")).toBe(false); // Caveats are supplied by collector, not inferred during rendering.
-			if (width >= 24) expect(lines.join("\n")).not.toContain("Sources · occupied context");
+			if (width >= 25) expect(lines.join("\n")).not.toContain("Sources · occupied context");
 		}
 		for (let width = 1; width <= 200; width++) {
 			const lines = renderContextTreemap(snapshot(sources, 200), width, theme("dark"));

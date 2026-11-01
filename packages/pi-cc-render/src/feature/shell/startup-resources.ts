@@ -553,6 +553,17 @@ function countColumn(groups: ResourceGroup[], indent: number): number {
 }
 
 export function layoutSection(section: ResourceSection, width: number, theme: StartupTheme): SectionLayout {
+	const available = Math.max(0, Math.floor(width));
+	if (!available) return { lines: [], hits: [] };
+	const content = layoutSectionContent(section, available - 1, theme);
+	return {
+		lines: content.lines.map((line) => ` ${line}`),
+		hits: content.hits.map((hit) => ({ ...hit, startCol: hit.startCol + 1, endCol: hit.endCol + 1 })),
+	};
+}
+
+/** Reserve Pi's one-cell left inset before measuring columns and clickable regions. */
+function layoutSectionContent(section: ResourceSection, width: number, theme: StartupTheme): SectionLayout {
 	if (width <= 0) return { lines: [], hits: [] };
 	const cost = section.tokens !== undefined
 		? ` ${theme.fg(windowShareColor(section.tokens, section.contextWindow), `· ~${formatTokens(section.tokens)} tok`)}`

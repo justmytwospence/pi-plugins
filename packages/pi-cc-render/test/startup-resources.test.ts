@@ -88,7 +88,7 @@ describe("startup resources", () => {
         80,
         plainTheme,
       ),
-    ).toEqual(["Extensions 3", "  project 1", "    x", "  user 2", "    me/repo 2", "      a   b"]);
+    ).toEqual([" Extensions 3", "   project 1", "     x", "   user 2", "     me/repo 2", "       a   b"]);
   });
 
   test("context files are placed by level", async () => {
@@ -120,7 +120,7 @@ describe("startup resources", () => {
       80,
       plainTheme,
     );
-    expect(lines).toEqual(["Extensions 3", "  user 3", "    me/repo 2", "      a   b", "    packages 1", "      solo"]);
+    expect(lines).toEqual([" Extensions 3", "   user 3", "     me/repo 2", "       a   b", "     packages 1", "       solo"]);
   });
 
   test("collects sections from a mode built on pi's own path helpers", () => {
@@ -319,7 +319,7 @@ describe("startup resources", () => {
     expect(section.notes).toBeUndefined();
     for (const width of [46, 120, 180]) {
       const lines = renderSection(section, width, plainTheme);
-      expect(lines[0]).toBe("■ MCP 3 · ◆ 1 · ✕ 1");
+      expect(lines[0]).toBe(" ■ MCP 3 · ◆ 1 · ✕ 1");
       expect(lines.join("\n")).not.toContain(detail);
       expect(lines.join("\n")).not.toMatch(/connected ·|needs sign-in|\/mcp to fix/);
       expect(lines.some((line) => /■ ● local\s+30(?:\s|$)/.test(line))).toBe(true);
@@ -333,9 +333,9 @@ describe("startup resources", () => {
     expect(heading).toContain("<error>✕ 1</error>");
     expect(buildMcpSection([], () => undefined)).toBeUndefined();
     expect(renderSection(buildMcpSection([{ name: "a", level: "user" }], () => "connected")!, 80, plainTheme)).toEqual([
-      "■ MCP 1",
-      "  user 1",
-      "  ■ ● a",
+      " ■ MCP 1",
+      "   user 1",
+      "   ■ ● a",
     ]);
   });
 
@@ -414,14 +414,14 @@ describe("startup resources", () => {
     expect(wide.length).toBeLessThan(entries.length + 2);
     expect(wide).toHaveLength(4); // Five real two-entry columns at 100 cells.
     expect(wide[2]).toMatch(/server-0.*server-2.*server-4.*server-6.*server-8/);
-    expect(renderSection(section, 89, plainTheme)).toHaveLength(4); // Five 15-cell names/counts, four gaps, two-cell indent.
-    expect(renderSection(section, 88, plainTheme).length).toBeGreaterThan(4);
+    expect(renderSection(section, 90, plainTheme)).toHaveLength(4); // 89 content cells plus the inset.
+    expect(renderSection(section, 89, plainTheme).length).toBeGreaterThan(4);
     const narrow = renderSection(section, 40, plainTheme);
     expect(narrow).toHaveLength(7);
     expect(narrow[2]).toMatch(/server-0.*server-5/);
     expect((narrow.slice(2).join(" ").match(/■ ● server-\d\s+1(?:\s|$)/g) ?? [])).toHaveLength(entries.length);
     const long = buildMcpSection([{ name: "a-very-long-server-name-界界", level: "project" }], () => "needs-auth")!;
-    expect(renderSection(long, 28, plainTheme)[2]!.replace(/\x1b\[[0-9;]*m/g, "")).toMatch(/◆ a-very-long-server-na…$/);
+    expect(renderSection(long, 28, plainTheme)[2]!.replace(/\x1b\[[0-9;]*m/g, "")).toMatch(/◆ a-very-long-server-n…$/);
     const ansi: StartupTheme = { fg: (_name, text) => `\x1b[32m${text}\x1b[39m`, bold: (text) => `\x1b[1m${text}\x1b[22m` };
     for (const width of [0, 1, 2, 5, 15, 28, 40, 80, 140]) {
       for (const current of [section, long]) {
@@ -554,19 +554,19 @@ describe("startup resources", () => {
     expect(GLYPHS.favorite).toEqual({ text: "★", color: "muted" });
     expect(section.groups[1]!.actions![0]).toEqual({ kind: "model", provider: "openai", id: "gpt-6.1-sol", thinkingLevel: "high" });
     expect(renderSection(section, 80, plainTheme)).toEqual([
-      "Models 3",
-      "  anthropic 2               openai 1",
-      "  ★ claude-opus-5-5 ●  1M   ★ gpt-6.1-sol:high  922K",
-      "    claude-haiku-5-5   1M",
+      " Models 3",
+      "   anthropic 2               openai 1",
+      "   ★ claude-opus-5-5 ●  1M   ★ gpt-6.1-sol:high  922K",
+      "     claude-haiku-5-5   1M",
     ]);
     // Too narrow for both: providers wrap onto their own bands.
     expect(renderSection(section, 40, plainTheme)).toEqual([
-      "Models 3",
-      "  anthropic 2",
-      "  ★ claude-opus-5-5 ●  1M",
-      "    claude-haiku-5-5   1M",
-      "  openai 1",
-      "  ★ gpt-6.1-sol:high  922K",
+      " Models 3",
+      "   anthropic 2",
+      "   ★ claude-opus-5-5 ●  1M",
+      "     claude-haiku-5-5   1M",
+      "   openai 1",
+      "   ★ gpt-6.1-sol:high  922K",
     ]);
     const colored: StartupTheme = { fg: (name, text) => `\x1b[${name === "muted" ? 90 : name === "success" ? 32 : 33}m${text}\x1b[0m`, bold: (text) => text };
     const coloredModels = renderSection(section, 80, colored).join("\n");
@@ -617,7 +617,7 @@ describe("startup resources", () => {
         },
       },
     };
-    expect(renderSection(collectModelsSection(mode)!, 80, plainTheme)).toEqual(["Models 2", "  p 2", "  alpha ●  128K", "  beta     128K"]);
+    expect(renderSection(collectModelsSection(mode)!, 80, plainTheme)).toEqual([" Models 2", "   p 2", "   alpha ●  128K", "   beta     128K"]);
   });
 
   test("the current generation keeps the newest of each family and drops a generation behind", async () => {
@@ -696,8 +696,8 @@ describe("startup resources", () => {
     const items = Array.from({ length: 10 }, (_, i) => `m${i}`);
     const lines = renderSection({ title: "C", count: items.length, layout: "columns", groups: [{ label: "p", items }] }, 80, plainTheme);
     expect(lines).toHaveLength(4);
-    expect(lines[2]).toBe("  m0   m2   m4   m6   m8");
-    expect(lines[3]).toBe("  m1   m3   m5   m7   m9");
+    expect(lines[2]).toBe("   m0   m2   m4   m6   m8");
+    expect(lines[3]).toBe("   m1   m3   m5   m7   m9");
   });
 
   test("balanced one-scope MCP columns use available width without stealing metadata", async () => {
@@ -743,7 +743,7 @@ describe("startup resources", () => {
         { kind: "mcp", name: "offline" },
       ]));
       for (const hit of hits) {
-        expect(hit.startCol).toBeGreaterThanOrEqual(2);
+        expect(hit.startCol).toBeGreaterThanOrEqual(3);
         expect(hit.endCol).toBeLessThanOrEqual(width);
         expect(hit.endCol).toBeGreaterThan(hit.startCol);
         expect(hit.row).toBeGreaterThan(0);
@@ -762,17 +762,17 @@ describe("startup resources", () => {
     ], Array.from({ length: 17 }, (_, n) => ({ provider: "google", id: `antigravity-gemini-${n}-flash` })))!;
     const mcp = buildMcpSection(Array.from({ length: 17 }, (_, n) => ({ name: `s${n}`, level: "user" as const })), () => "connected", undefined, () => 1)!;
     const stacked = buildModelsSection(screenshotModels, screenshotModels)!;
-    const widths = [...Array.from({ length: 200 }, (_, n) => n + 1), 240];
+    const widths = [...Array.from({ length: 201 }, (_, n) => n), 240];
     for (const width of widths) for (const section of [models, mcp, stacked]) {
       const layout = layoutSection(section, width, plainTheme);
       const { lines, hits } = layout;
       expect(layoutSection(section, width, plainTheme), `${section.title} deterministic at ${width}`).toEqual(layout);
-      expect(lines.every((line) => visibleWidth(line) <= width), `${section.title} at ${width}`).toBe(true);
+      expect(lines.every((line) => visibleWidth(line) <= width && (!line.trim() || line.startsWith(" "))), `${section.title} at ${width}`).toBe(true);
       const actions = new Map<string, typeof hits>();
       for (const hit of hits) {
         expect(hit.row, `${section.title} at ${width}`).toBeGreaterThan(0);
         expect(hit.row).toBeLessThan(lines.length);
-        expect(hit.startCol).toBeGreaterThanOrEqual(0);
+        expect(hit.startCol).toBeGreaterThanOrEqual(1);
         expect(hit.endCol).toBeLessThanOrEqual(width);
         expect(hit.endCol).toBeGreaterThan(hit.startCol);
         expect(sliceByColumn(lines[hit.row]!, hit.startCol, hit.endCol - hit.startCol).trim()).not.toBe("");
@@ -799,6 +799,25 @@ describe("startup resources", () => {
         const expected = section.groups.flatMap((group) => group.actions ?? []).map((action) => JSON.stringify(action));
         expect([...actions.keys()].sort(), `${section.title} missing/repeated action at ${width}`).toEqual(expected.sort());
         expect(lines[0]).toContain(`${section.title} ${section.count}`);
+      }
+    }
+  });
+
+  test("inset shifts the model name and count hit rectangles and leaves the gutter inert", () => {
+    const section: ResourceSection = { title: "Models", count: 1, layout: "columns", groups: [{
+      label: "p", items: ["alpha"], right: ["128K"], actions: [{ kind: "model", provider: "p", id: "alpha" }],
+    }] };
+    for (const width of [0, 1, 24, 46, 120]) {
+      const { lines, hits } = layoutSection(section, width, plainTheme);
+      expect(lines.every((line) => visibleWidth(line) <= width && (!line.trim() || line.startsWith(" ")))).toBe(true);
+      expect(hits.every((hit) => hit.startCol > 0 && hit.endCol <= width)).toBe(true);
+      if (width <= 1) expect({ lines, hits }).toEqual({ lines: [], hits: [] });
+      else {
+        expect(lines).toEqual([" Models 1", "   p 1", "   alpha  128K"]);
+        expect(hits.map(({ row, startCol, endCol }) => ({ row, startCol, endCol }))).toEqual([
+          { row: 2, startCol: 3, endCol: 8 }, { row: 2, startCol: 10, endCol: 14 },
+        ]);
+        expect(hits.some((hit) => hit.startCol <= 0 && hit.endCol > 0)).toBe(false);
       }
     }
   });
@@ -942,7 +961,7 @@ describe("startup resources", () => {
     expect(renderSection(folded.section, 46, plainTheme)[1]).toContain("· +2 hidden");
     const impossible = planSplashSections({ Extensions: scope }, 46, plainTheme, 0).Extensions!;
     expect(impossible.foldedCount).toBe(29);
-    expect(renderSection(impossible, 46, plainTheme)).toEqual(["Extensions 29 · +29 hidden"]);
+    expect(renderSection(impossible, 46, plainTheme)).toEqual([" Extensions 29 · +29 hidden"]);
   });
 
   test("protected current-model and MCP problem scopes win over a smaller hidden count", () => {
@@ -989,10 +1008,10 @@ describe("startup resources", () => {
       plainTheme,
     );
     expect(lines).toEqual([
-      "Context 2 · ~1.5k tok",
-      "  project 2    user 1",
-      "  a.md  ~100   ~/big.md  ~1.4k",
-      "  b.md   ~20",
+      " Context 2 · ~1.5k tok",
+      "   project 2    user 1",
+      "   a.md  ~100   ~/big.md  ~1.4k",
+      "   b.md   ~20",
     ]);
   });
 
@@ -1008,8 +1027,8 @@ describe("startup resources", () => {
       80,
       plainTheme,
     );
-    expect(lines[0]).toBe("Skills 3 · ~400 tok");
-    expect(lines[1]).toBe(`  apple ~20   bee ~${HEAVY_SKILL_TOKENS + 50}   cat ~30`);
+    expect(lines[0]).toBe(" Skills 3 · ~400 tok");
+    expect(lines[1]).toBe(`   apple ~20   bee ~${HEAVY_SKILL_TOKENS + 50}   cat ~30`);
     expect(skillTokenColor(20)).toBe("dim");
     expect(skillTokenColor(MEDIUM_SKILL_TOKENS)).toBe("muted");
     expect(skillTokenColor(HEAVY_SKILL_TOKENS)).toBe("warning");

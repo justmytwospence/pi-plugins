@@ -130,8 +130,13 @@ function paintShareBlock(theme: ContextTheme, category: ContextCategory, block: 
 
 /** Resource map rendering only; collection and cache updates happen in the owner tick, never here. */
 export function renderContextTreemap(snapshot: StartupContextSnapshot, width: number, theme: ContextTheme): string[] {
-	width = Math.max(0, Math.floor(width));
-	if (!width) return [];
+	const available = Math.max(0, Math.floor(width));
+	if (available <= 1) return [];
+	return renderContextTreemapContent(snapshot, available - 1, theme).map((line) => ` ${line}`);
+}
+
+/** Match Pi's one-cell left inset without allowing the occupied strip to exceed the viewport. */
+function renderContextTreemapContent(snapshot: StartupContextSnapshot, width: number, theme: ContextTheme): string[] {
 	const lines: string[] = [];
 	if (snapshot.stage === "initializing") return [fit("Starting context · loading…", width)];
 	const window = snapshot.contextWindow;

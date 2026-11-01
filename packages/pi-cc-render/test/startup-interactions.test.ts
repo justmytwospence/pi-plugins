@@ -29,7 +29,8 @@ describe("interactive startup sections", () => {
     const lines = component.render(width);
     const hits = hitsAt(width);
     expect(hits).toHaveLength(10);
-    expect(lines.every((line) => visibleWidth(line) <= width)).toBe(true);
+    expect(lines.every((line) => line.startsWith(" ") && visibleWidth(line) <= width)).toBe(true);
+    expect(hits.every((hit) => hit.startCol > 0)).toBe(true);
     for (const hit of hits) {
       expect(component.handleMouse?.(mouse(hit.startCol, hit.row, width))).toEqual({ handled: true, render: false });
       expect(actions).toHaveBeenLastCalledWith(hit.action);

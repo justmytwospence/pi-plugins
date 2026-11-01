@@ -420,12 +420,17 @@ describe("startup header", () => {
       expect(output).not.toContain("Sources ·");
       expect(output).not.toContain("Capacity ·");
       expect(output).not.toContain("There are many agent harnesses");
-      expect(lines.every((line) => visibleWidth(line) <= width)).toBe(true);
+      expect(lines.every((line) => visibleWidth(line) <= width && (!stripTerminalSequences(line).trim() || line.startsWith(" ")))).toBe(true);
+    }
+    for (const width of [0, 1, 24, 46, 120]) {
+      const lines = renderHeaderLines(width, theme, snapshot);
+      expect(lines.every((line) => visibleWidth(line) <= width && (!stripTerminalSequences(line).trim() || line.startsWith(" ")))).toBe(true);
+      if (width <= 1) expect(lines).toEqual([]);
     }
     const retained = renderHeaderLines(120, theme, { ...snapshot, stage: "context" });
-    expect(plain(retained)[0]).toMatch(/^Context ·/);
+    expect(plain(retained)[0]).toMatch(/^ Context ·/);
     const loading = renderHeaderLines(46, theme, { ...snapshot, stage: "initializing" });
-    expect(plain(loading)).toEqual(["Starting context · loading…"]);
+    expect(plain(loading)).toEqual([" Starting context · loading…"]);
   });
 });
 
