@@ -1,6 +1,6 @@
-// A display-only footer. No model requests or prompt modifications; the editor
-// is kept (whichever one other extensions installed) and only its two border
-// lines are redrawn to carry the context gauge. Credentials are sent only to their own
+// A footer with optional owner-provided controls. No model requests or prompt
+// modifications; the installed editor is retained, its native actions reused,
+// and its two border lines redrawn to carry the context gauge. Credentials are sent only to their own
 // provider's usage endpoint: Pi's Codex OAuth token (from Pi's model registry,
 // to ChatGPT's usage endpoint, as Codex CLI's /status) and Pi's Anthropic OAuth
 // token (from Pi's model registry, to Anthropic's OAuth usage endpoint, as Claude
@@ -20,6 +20,9 @@ import { SHOW_TIMER_AFTER_MS, WORKING_REFRESH_MS, WORKING_STATS_CHANNEL, working
 import { WORKING_MESSAGE_EVENT, type WorkingMessageClaim } from "./working-message.ts";
 import { SESSION_CHROME_CHANNEL, type SessionChromeOverrides, type SessionChromeRequest } from "./session-chrome.ts";
 import { WORKFLOW_EXPLANATIONS, workflowBadge } from "./workflow-ui.ts";
+import { queryFlow, type FlowSnapshot } from "./flow-contract.ts";
+import { queryFooterActions, type FooterAction, type FooterActionId } from "./footer-actions.ts";
+import { createFooterActionController, createFooterComponent, type FooterEditor, type FooterTui, type FooterHit, type FooterLayout } from "./interactions.ts";
 
 export * from "./mcp.ts";
 export * from "./working.ts";
@@ -64,7 +67,15 @@ export interface GitInfo {
   unavailable?: boolean;
   notRepository?: boolean;
 }
+export type FooterControlId = FooterActionId | "model.open" | "reasoning.cycle";
+/** Detached presentation metadata, never provider callbacks. */
+export type FooterControlState = Partial<Record<FooterControlId, Pick<FooterAction, "key" | "active">>>;
 export interface Snapshot {
+  flow?: FlowSnapshot;
+  actions?: FooterControlState;
+  primaryKeys?: { model?: string; workflow?: string; approvals?: string };
+  /** Other-session chrome is string-only: no inherited controls or primary hints. */
+  readOnly?: boolean;
   cwd: string; model: string; provider: string; thinking?: string; oauth: boolean;
   sessionName?: string; phase?: string; queued: boolean;
   context: { tokens: number | null; contextWindow: number; percent: number | null };
@@ -282,7 +293,7 @@ export function absorbStatuses(statuses: ReadonlyMap<string, string>, options: {
     }
     const lean = key === "lean-context" ? /^lean: (.+)$/.exec(plainText) : null;
     if (lean) { result.lean = lean[1]; continue; }
-    const cache = key === "cache-guard" ? /^cache (\d+:\d\d|\d+h\d\dm|cold(?: \(model\)|\?)?)$/.exec(plainText) : null;
+    const cache = key === "cache-guard" ? /^cache (~?(?:\d+:\d\d|\d+h\d\dm)|cold(?: \(model\)|\?)?)$/.exec(plainText) : null;
     if (cache) { result.cache = cache[1]; continue; }
     const billed = key === "anthropic-billing" ? /^extra usage x(\d+)$/.exec(plainText) : null;
     if (billed && options.claudeRow) { result.extraBilled = +billed[1]; continue; }
@@ -654,10 +665,26 @@ export function parseGitStatus(output: string | Buffer): GitInfo {
   return git;
 }
 
-interface Segment { text: string; short?: string; priority: number; separatorAfter?: string }
-// Drop secondary statistics before shrinking the important gauges. Ordering
-// remains stable; every final line is cell-bounded.
-export function fitSegments(segments: Segment[], width: number, theme: Paint): string {
+type SegmentHit = Omit<FooterHit, "row">;
+interface Segment { text: string; short?: string; priority: number; separatorAfter?: string; hits?: SegmentHit[]; shortHits?: SegmentHit[] }
+interface Part { text: string; action?: string }
+function partsSegment(parts: Part[], priority: number, short?: Part[]): Segment {
+  const compose = (parts: Part[]) => {
+    let col = 0;
+    const hits: SegmentHit[] = [];
+    for (const part of parts) {
+      const endCol = col + visibleWidth(part.text);
+      if (part.action && endCol > col) hits.push({ startCol: col, endCol, action: part.action });
+      col = endCol;
+    }
+    return { text: parts.map((part) => part.text).join(""), hits };
+  };
+  const full = compose(parts), shortened = short && compose(short);
+  return { ...full, priority, ...(shortened ? { short: shortened.text, shortHits: shortened.hits } : {}) };
+}
+// Drop secondary statistics before shrinking the important gauges. The same
+// fitting decisions produce both the text and its final ANSI/cell-aware hits.
+export function fitSegmentLayout(segments: Segment[], width: number, theme: Paint): { text: string; hits: SegmentHit[] } {
   const items = segments.filter((s) => s.text).map((s) => ({ ...s }));
   const separator = theme.fg("dim", " · ");
   const join = () => items.map((s, i) => s.text + (i < items.length - 1 ? s.separatorAfter ?? separator : "")).join("");
@@ -667,13 +694,26 @@ export function fitSegments(segments: Segment[], width: number, theme: Paint): s
   }
   for (const item of [...items].sort((a, b) => a.priority - b.priority)) {
     if (visibleWidth(join()) <= width) break;
-    if (item.short !== undefined) item.text = item.short;
+    if (item.short !== undefined) { item.text = item.short; item.hits = item.shortHits; }
   }
   while (visibleWidth(join()) > width && items.length > 1) {
     const least = Math.min(...items.map((s) => s.priority));
     items.splice(items.findIndex((s) => s.priority === least), 1);
   }
-  return truncateToWidth(join(), Math.max(0, width), "…");
+  const text = join(), limit = Math.max(0, width);
+  // Truncation can only remain once a single segment survives. A partial label
+  // is not a control (nor is the ellipsis); no stale range extends past it.
+  if (visibleWidth(text) > limit) return { text: truncateToWidth(text, limit, "…"), hits: [] };
+  let col = 0;
+  const hits: SegmentHit[] = [];
+  items.forEach((item, i) => {
+    for (const hit of item.hits ?? []) hits.push({ ...hit, startCol: col + hit.startCol, endCol: col + hit.endCol });
+    col += visibleWidth(item.text) + (i < items.length - 1 ? visibleWidth(item.separatorAfter ?? separator) : 0);
+  });
+  return { text, hits };
+}
+export function fitSegments(segments: Segment[], width: number, theme: Paint): string {
+  return fitSegmentLayout(segments, width, theme).text;
 }
 
 function thinkingColor(level: string): Parameters<Paint["fg"]>[0] {
@@ -903,16 +943,40 @@ const MODE_COLORS: Record<PermissionModeStatus["kind"], Parameters<Paint["fg"]>[
 const HERDR_BLOCKED_EVENT = "herdr:blocked";
 
 export function renderFooter(snapshot: Snapshot, width: number, theme: Paint): string[] {
-  if (width <= 0) return [];
+  return layoutFooter(snapshot, width, theme).lines;
+}
+
+export function layoutFooter(snapshot: Snapshot, width: number, theme: Paint): FooterLayout {
+  if (width <= 0) return { lines: [], hits: [] };
   const s = snapshot, g = s.git;
   // Shared inset, but natural spacing rather than padded label columns.
   const inset = width >= 60 ? 1 : 0;
   width -= inset * 2;
   const accountLabel = (text: string) => clean(text).replace(/^(Claude|Codex) acct$/, "$1");
   const label = (text: string) => `${theme.fg("muted", accountLabel(text))} `;
-  const rows: string[] = [];
+  const rows: string[] = [], hits: FooterHit[] = [];
   const sep = theme.fg("dim", " · ");
+  const action = (id: FooterControlId) => !s.readOnly && s.actions?.[id] ? id : undefined;
   const row = (icon: string, render: (width: number) => string) => iconRow(icon, width, theme, render);
+  const controlRow = (icon: string, segments: Segment[], key?: string, control?: string) => {
+    const prefix = `${theme.fg("dim", icon)}${ICON_GAP}`, prefixWidth = visibleWidth(prefix);
+    const contentWidth = Math.max(0, width - prefixWidth);
+    const hint = !s.readOnly && key ? clean(key) : "";
+    // Hints occupy one shared right rail, not a content segment. Preserve real
+    // state before key labels when fewer than 18 content cells remain.
+    const reserve = hint && contentWidth - visibleWidth(hint) - 2 >= 18 ? visibleWidth(hint) + 2 : 0;
+    const fitted = fitSegmentLayout(segments, contentWidth - reserve, theme);
+    const offset = inset + prefixWidth;
+    const rowIndex = rows.length;
+    for (const hit of fitted.hits) hits.push({ ...hit, row: rowIndex, startCol: offset + hit.startCol, endCol: offset + hit.endCol });
+    let text = prefix + fitted.text;
+    if (reserve) {
+      const startCol = width - visibleWidth(hint);
+      text += " ".repeat(Math.max(2, startCol - visibleWidth(text))) + theme.fg("dim", hint);
+      if (control) hits.push({ row: rowIndex, startCol: inset + startCol, endCol: inset + width, action: control });
+    }
+    rows.push(text);
+  };
   if (s.stash) rows.push(row(ICONS.stash, (w) => stashRow(s.stash?.text, w, theme)));
   // Minimal suffix; path, staging and tracking details stay in /status.
   const outsideGit = g.notRepository && !g.unavailable;
@@ -931,16 +995,23 @@ export function renderFooter(snapshot: Snapshot, width: number, theme: Paint): s
   const branchShort = outsideGit ? "" : `${branchIcon}${theme.fg("muted", truncateToWidth(clean(g.branch ?? ""), 14))}${suffix}`;
   const phaseText = s.phase ? theme.fg(s.phase === "error" ? "error" : "warning", s.phase) : "";
   const model = theme.bold(theme.fg("accent", shortModel(s.model)));
-  const auto = s.autoEffort ? `${sep}${theme.fg("dim", `auto${s.autoEffortDetail ? ` ${clean(s.autoEffortDetail)}` : ""}`)}` : "";
-  const reasoning = s.thinking
-    ? `${theme.fg("dim", `${ICONS.reasoning} `)}${theme.fg("muted", "reasoning")} ${theme.bold(theme.fg(thinkingColor(s.thinking), clean(s.thinking)))}${auto}`
-    : "";
+  const automatic = s.actions?.["effort.toggle"]?.active ?? s.autoEffort;
+  const reasoningParts: Part[] = s.thinking ? [
+    { text: `${theme.fg("dim", `${ICONS.reasoning} `)}${theme.fg("muted", "reasoning")} ` },
+    ...(automatic ? [{ text: theme.fg("dim", "auto"), action: action("effort.toggle") }, { text: theme.fg("dim", " → ") }] : []),
+    { text: theme.bold(theme.fg(thinkingColor(s.thinking), clean(s.thinking))), action: action("reasoning.cycle") },
+    ...(!automatic && action("effort.toggle") ? [{ text: sep }, { text: theme.fg("dim", "auto off"), action: action("effort.toggle") }] : []),
+  ] : [];
+  const reasoning = reasoningParts.map((part) => part.text).join("");
   const identity = `${model}${reasoning ? `${sep}${reasoning}` : ""}`;
   const modeColor = s.mode ? MODE_COLORS[s.mode.kind] : "muted";
   const approval = s.mode && s.mode.kind !== "chat" && s.mode.kind !== "plan" ? s.mode : undefined;
   // A defined exec detail (even empty) takes precedence over explicit and legacy workflow status.
   const legacyWorkflow = s.mode?.kind === "chat" || s.mode?.kind === "plan" ? { kind: s.mode.kind, key: s.mode.key } : undefined;
-  const workflow: WorkflowStatus | undefined = s.exec !== undefined ? { kind: "exec" } : s.workflow ?? legacyWorkflow;
+  const linked = !s.readOnly && s.flow?.operatingMode === "linked";
+  const flowState = linked ? s.flow!.blocked ? "Linked blocked" : !s.flow!.ready || !s.flow!.guardAvailable ? "Linked unavailable" : s.flow!.transitioning ? "Linked changing" : "" : "";
+  const flowStateText = flowState ? theme.fg(s.flow!.blocked || !s.flow!.guardAvailable ? "error" : "warning", flowState) : "";
+  const workflow: WorkflowStatus | undefined = linked ? { kind: s.flow!.workflow } : s.exec !== undefined ? { kind: "exec" } : s.workflow ?? legacyWorkflow;
   rows.push(row(ICONS.project, (w) => fitSegments([
     { text: project, priority: 60 },
     { text: branch, short: branchShort, priority: g.conflicts ? 110 : 70 },
@@ -953,48 +1024,65 @@ export function renderFooter(snapshot: Snapshot, width: number, theme: Paint): s
     const ctx = used === null ? "" : `${theme.fg("muted", "Context")} ${theme.bold(theme.fg(used < 70 ? "muted" : heat(used), percent(used)))}${theme.fg("dim", " used")}`;
     const compact = row(ICONS.project, (w) => fitSegments([
       { text: workflow ? workflowBadge(theme, workflow.kind) : "", priority: 130 },
+      { text: flowStateText, priority: 140 },
       { text: project, priority: 60 },
       { text: branch, short: branchShort, priority: 40 },
       { text: identity, short: model, priority: 100 },
       { text: ctx, priority: 90 },
       { text: phaseText, priority: 120 },
     ], w, theme));
-    return [" ".repeat(inset) + truncateToWidth(compact, width)];
+    return { lines: [" ".repeat(inset) + truncateToWidth(compact, width)], hits: [] };
   }
-  rows.push(row(ICONS.model, (w) => fitSegments([
-    { text: identity, short: model, priority: 100 },
-    { text: phaseText, priority: 120 },
-    { text: s.queued ? theme.fg("warning", "queued") : "", priority: 115 },
-  ], w, theme)));
   // Each provider owns its axis. Legacy chat/plan labels never invent approvals.
   // Gate judgments (including plan+yolo) attach only to the approvals row.
   const gateStatus = approval ? s.statuses.find((status) => /^Gate /.test(stripVTControlCharacters(status))) : undefined;
   const statuses = gateStatus ? s.statuses.filter((status) => status !== gateStatus) : s.statuses;
   const negotiation = s.exec ? /^(implementing|consulting|review \d+|revising(?: · \d+ findings)?|paused(?: · (?:user needed|review unavailable))?)(?: · (.*))?$/u.exec(clean(s.exec)) : null;
-  if (workflow) {
-    const badge = workflowBadge(theme, workflow.kind);
-    const phase = negotiation?.[1] ?? (s.exec ? clean(s.exec).split(" · ")[0] : "");
-    const detail = negotiation ? negotiation[2] : s.exec ? clean(s.exec).split(" · ").slice(1).join(" · ") : "";
-    rows.push(row(ICONS.workflow, (w) => fitSegments([
-      { text: badge, priority: 130 },
-      { text: phase ? theme.fg("muted", phase) : "", priority: 120 },
-      { text: theme.fg("muted", detail || (phase ? "" : WORKFLOW_EXPLANATIONS[workflow.kind])), priority: 70 },
-      { text: theme.fg("dim", workflow.kind === "exec" ? "/plan-exec" : workflow.key ?? ""), priority: 30 },
-    ], w, theme)));
+  const execPhase = negotiation?.[1] ?? (s.exec ? clean(s.exec).split(" · ")[0] : "");
+  const execDetail = negotiation ? negotiation[2] : s.exec ? clean(s.exec).split(" · ").slice(1).join(" · ") : "";
+  const workflowAction = action(workflow?.kind === "exec" ? "execution.status" : "workflow.cycle");
+  const identitySegments = [
+    partsSegment([{ text: model, action: action("model.open") }], 100),
+    partsSegment(reasoningParts, 65),
+    // Trend is already expressed by auto → effort; retain quota-policy notes
+    // independently so they can yield before model/reasoning at narrow widths.
+    { text: automatic && s.autoEffortDetail?.includes("limited:") ? theme.fg("dim", clean(s.autoEffortDetail.replace(/^[↑↓→],?\s*/, ""))) : "", priority: 25 },
+    { text: phaseText, priority: 120 },
+    { text: s.queued ? theme.fg("warning", "queued") : "", priority: 115 },
+  ];
+  if (linked && workflow) {
+    const flow = s.flow!;
+    controlRow(ICONS.workflow, [
+      partsSegment([{ text: workflowBadge(theme, workflow.kind), action: workflowAction }], 130),
+      { text: flowStateText, priority: 140 },
+      partsSegment([{ text: theme.fg("muted", clean(flow.selectedFlow?.provider ?? s.provider)), action: action("model.open") }], 75),
+      ...identitySegments,
+      { text: execPhase ? theme.fg("muted", execPhase) : "", short: theme.fg("muted", execPhase.split(" · ")[0]), priority: 120 },
+      { text: execDetail ? theme.fg("muted", execDetail) : "", priority: 60 },
+      { text: flow.blocked ? theme.fg("error", clean(flow.blocked)) : "", priority: 20 },
+    ], s.primaryKeys?.model, action("model.open"));
+  } else {
+    controlRow(ICONS.model, identitySegments, s.primaryKeys?.model, action("model.open"));
+    if (workflow) controlRow(ICONS.workflow, [
+      partsSegment([{ text: workflowBadge(theme, workflow.kind), action: workflowAction }], 130),
+      { text: execPhase ? theme.fg("muted", execPhase) : "", short: theme.fg("muted", execPhase.split(" · ")[0]), priority: 120 },
+      { text: theme.fg("muted", execDetail || (execPhase ? "" : WORKFLOW_EXPLANATIONS[workflow.kind])), priority: 70 },
+    ], workflow.kind === "exec" ? "/plan-exec" : s.primaryKeys?.workflow ?? workflow.key, workflowAction);
   }
-  if (approval) rows.push(row(ICONS.gate, (w) => fitSegments([
-    { text: `${theme.fg("muted", "Approvals")}${sep}${theme.fg(modeColor, MODE_NAMES[approval.kind] + (approval.kind === "manual" || approval.kind === "acceptEdits" ? " (legacy)" : ""))}`, priority: 120 },
+  if (approval) controlRow(ICONS.gate, [
+    partsSegment([
+      { text: theme.fg("muted", "Approvals") }, { text: sep },
+      { text: theme.fg(modeColor, MODE_NAMES[approval.kind] + (approval.kind === "manual" || approval.kind === "acceptEdits" ? " (legacy)" : "")), action: action("approvals.open") },
+    ], 120),
     { text: gateStatus ? clean(gateStatus) : "", short: gateStatus?.replace(/^Gate (\d+) auto · (\d+) pushed back · (\d+) asked$/u, "Gate $1/$2/$3"), priority: 60 },
-    { text: approval.key ? theme.fg("dim", clean(approval.key)) : "", priority: 30 },
-  ], w, theme)));
+  ], s.primaryKeys?.approvals ?? approval.key, action("approvals.open"));
 
   const context = s.context.percent;
   const ctxValue = context === null ? theme.fg("muted", "unknown") : theme.bold(theme.fg(context < 70 ? "muted" : heat(context), percent(context)));
-  const cache = s.cache ? clean(s.cache) : "";
-  const cacheNote = cache === "cold (model)" ? "model changed" : cache === "cold?" ? "unconfirmed" : "";
-  const cacheValue = cache.startsWith("cold") ? "❄" : cache;
-  const ctxShort = `${theme.fg("muted", "Context")} ${ctxValue}`;
-  const ctxLong = `${label("Context")}${ctxValue}${context === null ? "" : theme.fg("dim", " used")}${context === null || s.borderGauge ? "" : ` ${gauge(theme, context)}`}`;
+  const cache = s.cache ? clean(s.cache) : s.actions?.["cache.status"] ? "unknown" : "";
+  const cacheNote = cache === "cold (model)" ? "model changed" : "";
+  const cacheValue = cache === "cold?" || cache === "unknown" ? "unknown" : cache.startsWith("cold") ? "cold" : cache;
+  const ctxParts: Part[] = [{ text: label("Context") }, { text: ctxValue, action: action("context.open") }];
   // What fills the context besides the conversation: MCP servers (our chip, or the
   // status of an extension that publishes its own, which already carries the plug)
   // and loaded skills. Each keeps its icon inline.
@@ -1002,14 +1090,15 @@ export function renderFooter(snapshot: Snapshot, width: number, theme: Paint): s
   const mcpStatus = statuses.find((status) => stripVTControlCharacters(status).startsWith(`${ICONS.mcp} `));
   const mcpText = mcpStatus ? inline(ICONS.mcp, mcpStatus.replace(`${ICONS.mcp} `, "")) : s.mcp ? inline(ICONS.mcp, mcpChip(s.mcp, theme)) : "";
   const skillsText = s.skills ? inline(ICONS.skills, `${theme.fg("muted", "Skills")} ${s.skills}`) : "";
-  rows.push(row(ICONS.context, (w) => fitSegments([
-    { text: ctxLong, short: ctxShort, priority: 100 },
+  controlRow(ICONS.context, [
+    partsSegment([...ctxParts, { text: `${context === null ? "" : theme.fg("dim", " used")}${context === null || s.borderGauge ? "" : ` ${gauge(theme, context)}`}` }], 100, ctxParts),
     { text: s.lean ? theme.fg("muted", `Lean ${clean(s.lean)}`) : "", priority: 20 },
-    // Green denotes a warm cache; ❄ (cold) means the next prompt re-caches the whole history.
-    { text: cache ? `${theme.fg("muted", "Cache")} ${theme.fg(cache.startsWith("cold") ? "warning" : "success", cacheValue)}${cacheNote ? `${sep}${theme.fg("dim", cacheNote)}` : ""}` : "", priority: 30 },
-    { text: mcpText, priority: 25 },
-    { text: skillsText, priority: 15 },
-  ], w, theme)));
+    partsSegment([{ text: cache ? `${theme.fg("muted", "Cache")} ${theme.fg(cacheValue === "unknown" ? "muted" : cacheValue === "cold" ? "warning" : "success", cacheValue)}` : "", action: action("cache.status") }], 30),
+    { text: cacheNote ? theme.fg("dim", cacheNote) : "", priority: 10 },
+    // Inline icons and their gaps are not controls; only the visible chip is.
+    partsSegment(mcpText ? [{ text: `${theme.fg("dim", ICONS.mcp)} ` }, { text: mcpStatus ? mcpStatus.replace(`${ICONS.mcp} `, "").replace(/[\r\n\t]/g, " ") : mcpChip(s.mcp!, theme), action: action("mcp.open") }] : [], 25),
+    partsSegment(skillsText ? [{ text: `${theme.fg("dim", ICONS.skills)} ` }, { text: `${theme.fg("muted", "Skills")} ${s.skills}`, action: action("context.skills") }] : [], 15),
+  ]);
   for (const m of s.marimo ?? []) rows.push(row(ICONS.marimo, (w) => marimoRow(m, w, theme)));
   if (s.lens) { const l = s.lens; rows.push(row(ICONS.lens, (w) => lensRow(l, w, theme))); }
   if (s.bg?.length) { const bg = s.bg; rows.push(row(ICONS.bg, (w) => bgRow(bg, w, theme))); }
@@ -1082,7 +1171,7 @@ export function renderFooter(snapshot: Snapshot, width: number, theme: Paint): s
     const text = `${label(s.unavailableQuota)}${theme.fg("dim", "limits unavailable")}`;
     rows.push(row(ICONS.limits, (w) => truncateToWidth(text, w)));
   }
-  return rows.map((row) => " ".repeat(inset) + truncateToWidth(row, width));
+  return { lines: rows.map((row) => " ".repeat(inset) + truncateToWidth(row, width)), hits };
 }
 
 // pi-stash keeps its prompt in a process-global PromptStash under this symbol.
@@ -1109,11 +1198,33 @@ export default function statusFooter(pi: ExtensionAPI): void {
   let mcpTimer: ReturnType<typeof setInterval> | undefined, mcp: McpCount | undefined, mcpBusy = false;
   let requestRender: (() => void) | undefined;
   let releaseFooter: (() => void) | undefined;
-  /** The footer's data from pi (branch, extension statuses), for the session-chrome service. */
-  let footerSource: { getGitBranch(): string | null; getExtensionStatuses(): ReadonlyMap<string, string> } | undefined;
   let git: GitInfo = { ...emptyGit(), unavailable: true }, gitBusy = false, gitChecked = 0;
   let quotaBusy = false, quotaChecked = 0;
   let borderGauge = false;
+  let mainEditor: FooterEditor | undefined, mainTui: FooterTui | undefined;
+  let mainKeys: { getKeys?(action: "app.model.select"): readonly string[] } | undefined;
+  let releaseInput: (() => void) | undefined;
+  let promptDepth = 0, interactionGeneration = 0;
+  let discoveredActions: ReturnType<typeof queryFooterActions> = {};
+  let discoveredFlow: FlowSnapshot | undefined;
+  let prepared: Snapshot | undefined;
+  let refreshSnapshot: (() => void) | undefined;
+  const interactions = createFooterActionController({
+    getEditor: () => mainEditor, getTui: () => mainTui, getGeneration: () => interactionGeneration,
+    isCurrent: () => active && enabled && !!ctx,
+    getBlocked: () => blockedHolds, getPromptDepth: () => promptDepth,
+    isIdle: () => ctx?.isIdle() === true,
+    // Keyboard dispatch must see the current coordinator state, not the last
+    // painted snapshot. This is interaction-time discovery, never rendering.
+    isLinked: () => {
+      if (!active || !ctx) return false;
+      try { return queryFlow(pi.events)?.operatingMode === "linked"; }
+      catch { return true; } // Never turn a failed coordinator query into a free model picker.
+    },
+    getActions: () => discoveredActions,
+    notify: (message, type) => ctx?.ui.notify(message, type),
+    refresh: () => requestRender?.(),
+  });
   let codexBusy = false, codexChecked = 0, codexAbort: AbortController | undefined;
   let codexTimeout: ReturnType<typeof setTimeout> | undefined, codexAccount: string | undefined;
   let claude: Quota | undefined, claudeHeaders: Quota | undefined, codex: Quota | undefined;
@@ -1381,7 +1492,7 @@ export default function statusFooter(pi: ExtensionAPI): void {
       footer(session, width, theme) {
         if (!current()) return [];
         try {
-          return renderFooter(snapshot(footerSource?.getGitBranch() ?? null, footerSource?.getExtensionStatuses() ?? new Map(), session), width, liftAccent(theme));
+          return prepared ? renderFooter(childSnapshot(prepared, session), width, liftAccent(theme)) : [];
         } catch {
           return [];
         }
@@ -1444,11 +1555,11 @@ export default function statusFooter(pi: ExtensionAPI): void {
       if (next?.connected !== mcp?.connected || next?.total !== mcp?.total) { mcp = next; requestRender?.(); }
     } catch { /* The footer must not fail over a tool list or config read. */ } finally { if (epoch === generation) mcpBusy = false; }
   };
-  /** Main's snapshot, or (with `session`) another session's in main's surroundings (session-chrome.ts). */
-  const snapshot = (branch: string | null, statuses: ReadonlyMap<string, string>, session?: SessionChromeOverrides): Snapshot => {
+  /** Main's detached presentation snapshot, prepared only outside rendering. */
+  const snapshot = (branch: string | null, statuses: ReadonlyMap<string, string>): Snapshot => {
     if (!ctx) throw new Error("Footer rendered outside its session lifecycle");
     const current = ctx;
-    const provider = session ? session.provider : current.model?.provider ?? "no provider";
+    const provider = current.model?.provider ?? "no provider";
     const quotas: Quota[] = [];
     let unavailableQuota: string | undefined;
     if (provider === "anthropic" || showAll) {
@@ -1459,7 +1570,24 @@ export default function statusFooter(pi: ExtensionAPI): void {
       else unavailableQuota = unavailableQuota ? `${unavailableQuota} / Codex acct` : "Codex acct";
     } else if (showAll && codex) quotas.push(codex);
     const absorbed = absorbStatuses(statuses, { claudeRow: quotas.some((q) => q.source === "Claude acct") });
+    const controls: FooterControlState = {};
+    for (const [id, descriptor] of Object.entries(discoveredActions)) {
+      if (descriptor) controls[id as FooterActionId] = { key: descriptor.key, active: descriptor.active };
+    }
+    // Native capability/focus interfaces are required; an unsupported editor
+    // never advertises a button that would have to rewrite a draft to work.
+    const nativeControls = typeof mainTui?.getFocusedComponent === "function" && typeof mainTui?.hasOverlay === "function" &&
+      typeof mainEditor?.actionHandlers?.get === "function";
+    if (nativeControls && mainEditor?.actionHandlers?.get("app.model.select") &&
+      (discoveredFlow?.operatingMode !== "linked" || discoveredActions["flow.open"])) controls["model.open"] = {};
+    if (nativeControls && mainEditor?.actionHandlers?.get("app.thinking.cycle")) controls["reasoning.cycle"] = {};
     const main: Snapshot = {
+      flow: discoveredFlow, actions: controls,
+      primaryKeys: {
+        model: controls["model.open"] ? mainKeys?.getKeys?.("app.model.select")?.[0] : undefined,
+        workflow: discoveredActions["workflow.cycle"] ? discoveredActions["workflow.cycle"].key ?? "" : absorbed.workflow?.key,
+        approvals: discoveredActions["approvals.open"] ? discoveredActions["approvals.open"].key ?? "" : absorbed.mode?.key,
+      },
       cwd: current.cwd, provider, model: current.model?.id ?? "no model",
       thinking: current.model?.reasoning ? pi.getThinkingLevel() : undefined,
       oauth: current.model ? current.modelRegistry.isUsingOAuth(current.model) : false,
@@ -1475,16 +1603,32 @@ export default function statusFooter(pi: ExtensionAPI): void {
       skills: pi.getCommands().filter((command) => command.source === "skill").length,
       now: Date.now(),
     };
-    if (!session) return main;
-    const model = current.modelRegistry.find?.(session.provider, session.model);
+    return main;
+  };
+  const childSnapshot = (main: Snapshot, session: SessionChromeOverrides): Snapshot => {
+    // Shared account readings are already cached; select the child's provider
+    // without registry/command discovery on the caller's rendering stack.
+    const quotas: Quota[] = [];
+    let unavailableQuota: string | undefined;
+    if (session.provider === "anthropic" || showAll) {
+      if (claude) quotas.push(claude); else unavailableQuota = "Claude acct";
+    }
+    if (session.provider === "openai-codex") {
+      if (codex) quotas.unshift(codex);
+      else unavailableQuota = unavailableQuota ? `${unavailableQuota} / Codex acct` : "Codex acct";
+    } else if (showAll && codex) quotas.push(codex);
     return {
       ...main,
+      // Main's mutable controls and policy are not the viewed agent's state.
+      flow: undefined, actions: undefined, primaryKeys: undefined, readOnly: true,
+      workflow: undefined, mode: undefined, exec: undefined,
+      autoEffort: undefined, autoEffortDetail: undefined, cache: undefined, lean: undefined,
       cwd: session.cwd, provider: session.provider, model: session.model, thinking: session.thinking,
-      oauth: model ? current.modelRegistry.isUsingOAuth(model) : false,
+      oauth: false, quotas, unavailableQuota,
       sessionName: session.sessionName, phase: session.phase, queued: session.queued === true,
       context: session.context, totals: session.totals, cacheHit: undefined,
       // Main's git status describes main's directory only.
-      git: path.resolve(session.cwd) === path.resolve(current.cwd) ? main.git : { ...emptyGit(), unavailable: true },
+      git: path.resolve(session.cwd) === path.resolve(main.cwd) ? main.git : { ...emptyGit(), unavailable: true },
       borderGauge: session.borderGauge === true,
     };
   };
@@ -1494,24 +1638,64 @@ export default function statusFooter(pi: ExtensionAPI): void {
     const epoch = generation;
     ctx.ui.setFooter((tui, theme, footerData) => {
       if (!active || epoch !== generation) return { render: () => [], invalidate() {} };
-      let disposed = false;
+      let disposed = false, scheduled = false;
       const current = () => !disposed && active && epoch === generation;
-      const render = () => { if (current()) tui.requestRender(); };
-      const unsubscribe = footerData.onBranchChange(() => { if (current()) { void updateGit(true); render(); } });
+      // getGitBranch can initialize SDK disk-backed state. Read it here and on
+      // its subscription, never from render (including child chrome).
+      let branch = footerData.getGitBranch();
+      const refresh = (clock = true) => {
+        if (!current()) return;
+        discoveredFlow = queryFlow(pi.events, true);
+        discoveredActions = queryFooterActions(pi.events);
+        const next = snapshot(branch, footerData.getExtensionStatuses());
+        if (!clock && prepared) next.now = prepared.now;
+        if (JSON.stringify(next) === JSON.stringify(prepared)) return;
+        component.invalidate();
+        prepared = next;
+        tui.requestRender();
+      };
+      const render = () => { if (current()) { refresh(); tui.requestRender(); } };
+      // SDK status updates request a render but have no public change event.
+      // Coalesce discovery after that frame, then repaint only on an actual
+      // snapshot change. Provider callbacks, command lookup and usage getters
+      // are therefore always outside the renderer's call stack.
+      const schedule = () => {
+        if (scheduled || !current()) return;
+        scheduled = true;
+        queueMicrotask(() => {
+          scheduled = false;
+          if (!current()) return;
+          try { refresh(false); }
+          catch {
+            // A failed optional publisher must not become an unhandled async
+            // exception. Retain the last frame but retire its callable actions.
+            discoveredActions = {};
+            component.invalidate();
+          }
+        });
+      };
+      const component = createFooterComponent((width) => {
+        schedule();
+        return current() && prepared ? layoutFooter(prepared, width, liftAccent(theme)) : { lines: [], hits: [] };
+      }, () => `${interactionGeneration}:${tui.terminal?.columns}:${tui.terminal?.rows}`,
+      (action) => interactions.available(action), (action) => interactions.activate(action));
+      const unsubscribe = footerData.onBranchChange(() => { if (current()) { branch = footerData.getGitBranch(); void updateGit(true); render(); } });
       const dispose = () => {
         if (disposed) return;
         disposed = true;
         if (requestRender === render) requestRender = undefined;
         if (releaseFooter === dispose) releaseFooter = undefined;
-        if (footerSource === footerData) footerSource = undefined;
+        if (refreshSnapshot === render) refreshSnapshot = undefined;
+        component.dispose();
         unsubscribe();
       };
       requestRender = render;
       releaseFooter = dispose;
-      footerSource = footerData;
+      refreshSnapshot = render;
+      refresh();
       return {
-        render(width: number) { return current() ? renderFooter(snapshot(footerData.getGitBranch(), footerData.getExtensionStatuses()), width, liftAccent(theme)) : []; },
-        invalidate() {}, // Colors are evaluated on every render, never cached.
+        ...component,
+        invalidate() { component.invalidate(); schedule(); },
         dispose,
       };
     });
@@ -1541,6 +1725,14 @@ export default function statusFooter(pi: ExtensionAPI): void {
       // A foreign factory may itself capture the outgoing context.
       if (!currentSession()) return new CustomEditor(tui, theme, keybindings);
       const editor = previous?.(tui, theme, keybindings) ?? new CustomEditor(tui, theme, keybindings);
+      releaseInput?.();
+      mainEditor = editor as FooterEditor; mainTui = tui; mainKeys = keybindings;
+      releaseInput = typeof editor.handleInput === "function" ? interactions.wrapEditor(mainEditor, tui) : undefined;
+      // Pi installs native action-map entries just after this factory returns.
+      queueMicrotask(() => {
+        if (!currentSession()) return;
+        try { refreshSnapshot?.(); } catch { discoveredActions = {}; }
+      });
       borderGauge = drawGaugeOnBorders(editor,
         () => currentSession() && enabled && ctx ? ctx.getContextUsage()?.percent ?? null : null,
         () => currentSession() && ctx ? liftAccent(ctx.ui.theme) : undefined);
@@ -1560,10 +1752,13 @@ export default function statusFooter(pi: ExtensionAPI): void {
     // Invalidate and detach everything locally before any cleanup can throw or
     // re-enter us. Saved callbacks must stay inert even after another start.
     const context = ctx, interval = timer, timeout = codexTimeout, controller = codexAbort;
-    const footer = releaseFooter, editor = releaseEditor, processes = [...children];
+    const footer = releaseFooter, editor = releaseEditor, input = releaseInput, processes = [...children];
     const runInterval = workingTimer, mcpInterval = mcpTimer, shownWorking = workingShown;
-    active = false; generation++;
+    active = false; generation++; interactionGeneration++;
     ctx = undefined; requestRender = undefined;
+    mainEditor = undefined; mainTui = undefined; mainKeys = undefined; releaseInput = undefined;
+    refreshSnapshot = undefined; prepared = undefined; discoveredActions = {}; discoveredFlow = undefined;
+    promptDepth = 0; blockedHolds = 0;
     timer = undefined; codexTimeout = undefined; codexAbort = undefined;
     workingTimer = undefined; mcpTimer = undefined; runStarted = 0; workingShown = undefined; working.reset();
     workingClaims.clear();
@@ -1581,6 +1776,7 @@ export default function statusFooter(pi: ExtensionAPI): void {
     if (controller) cleanup(() => controller.abort());
     for (const child of processes) cleanup(() => { child.kill(); });
     // Own disposal too: setFooter may throw before Pi calls dispose().
+    if (input) cleanup(input);
     if (footer) cleanup(footer);
     if (context) cleanup(() => context.ui.setFooter(undefined));
     if (editor && restoreEditor) cleanup(editor);
@@ -1635,6 +1831,12 @@ export default function statusFooter(pi: ExtensionAPI): void {
   pi.on("session_info_changed", () => requestRender?.());
   pi.on("session_tree", (_event, context) => {
     if (!active) return;
+    // Branch navigation keeps the editor but retires pending action ownership.
+    // Do not invalidate the session's gauge/factory closures by bumping their epoch.
+    interactionGeneration++;
+    releaseInput?.();
+    releaseInput = mainEditor && mainTui && typeof mainEditor.handleInput === "function"
+      ? interactions.wrapEditor(mainEditor, mainTui) : undefined;
     ctx = context; phase = undefined;
     restorePreferences(context); account(); attach(); requestRender?.();
   });
@@ -1649,8 +1851,8 @@ export default function statusFooter(pi: ExtensionAPI): void {
     ctx = context; account(); void updateGit(true); void updateQuota(); void updateCodex(CODEX_ACTIVE_TTL_MS); void updateMcp();
     requestRender?.();
   });
-  pi.on("ui_prompt_start", () => { if (active) { phase = "waiting"; requestRender?.(); } });
-  pi.on("ui_prompt_end", () => { if (active) { phase = undefined; requestRender?.(); } });
+  pi.on("ui_prompt_start", () => { if (active) { promptDepth++; phase = "waiting"; requestRender?.(); } });
+  pi.on("ui_prompt_end", () => { if (active) { promptDepth = Math.max(0, promptDepth - 1); phase = promptDepth ? "waiting" : undefined; requestRender?.(); } });
   pi.on("session_before_compact", () => { if (active) { phase = "compacting"; requestRender?.(); } });
   pi.on("session_compact", () => { if (active) { phase = undefined; account(); requestRender?.(); } });
   pi.on("session_compact_failed", () => { if (active) { phase = "compact failed"; requestRender?.(); } });

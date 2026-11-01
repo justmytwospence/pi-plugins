@@ -1,17 +1,55 @@
 // Real Pi loader, AgentSession, branch navigation and reload. All model transports are local.
+// Select another host with PI_TEST_SDK_ROOT=/absolute/path/to/pi-coding-agent.
 import assert from 'node:assert/strict';
-import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import http from 'node:http';
+import https from 'node:https';
+import { findPackageJSON, syncBuiltinESMExports } from 'node:module';
+import net from 'node:net';
 import { tmpdir } from 'node:os';
 import { basename, dirname, resolve } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import tls from 'node:tls';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { createJiti } from 'jiti';
-import { createAssistantMessageEventStream } from '@earendil-works/pi-ai';
-import { ModelRuntime, SessionManager, SettingsManager, createAgentSessionServices, createAgentSessionFromServices, createAgentSessionRuntime, initTheme } from '@earendil-works/pi-coding-agent';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
+const sdkRoot = realpathSync(process.env.PI_TEST_SDK_ROOT
+  ? resolve(process.env.PI_TEST_SDK_ROOT)
+  : resolve(dirname(fileURLToPath(import.meta.resolve('@earendil-works/pi-coding-agent'))), '..'));
+const sdkManifest = JSON.parse(readFileSync(resolve(sdkRoot, 'package.json'), 'utf8'));
+assert.equal(sdkManifest.name, '@earendil-works/pi-coding-agent', 'PI_TEST_SDK_ROOT must be the SDK package root');
+const sdkUrl = pathToFileURL(resolve(sdkRoot, 'dist/index.js'));
+function hostDependency(name) {
+  // pi-ai has import-only exports; resolve its package from the chosen host, not a component.
+  const manifestPath = findPackageJSON(name, sdkUrl);
+  const manifest = JSON.parse(readFileSync(manifestPath, 'utf8'));
+  assert.equal(manifest.name, name);
+  return pathToFileURL(resolve(dirname(manifestPath), manifest.exports?.['.']?.import ?? manifest.main));
+}
+const aiUrl = hostDependency('@earendil-works/pi-ai');
+const tuiUrl = hostDependency('@earendil-works/pi-tui');
+const agentCoreUrl = hostDependency('@earendil-works/pi-agent-core');
+// Match the SDK loader's compatibility entrypoint and subpath aliases in direct TS imports too.
+const aliases = Object.fromEntries(['@earendil-works', '@mariozechner'].flatMap(scope => [
+  [`${scope}/pi-coding-agent`, fileURLToPath(sdkUrl)],
+  [`${scope}/pi-agent-core`, fileURLToPath(agentCoreUrl)],
+  [`${scope}/pi-tui`, fileURLToPath(tuiUrl)],
+  [`${scope}/pi-ai/providers/all`, fileURLToPath(new URL('./providers/all.js', aiUrl))],
+  [`${scope}/pi-ai/compat`, fileURLToPath(new URL('./compat.js', aiUrl))],
+  [`${scope}/pi-ai/oauth`, fileURLToPath(new URL('./oauth.js', aiUrl))],
+  [`${scope}/pi-ai`, fileURLToPath(new URL('./compat.js', aiUrl))],
+]));
+const jiti = createJiti(import.meta.url, { alias: aliases });
 const temp = mkdtempSync(resolve(tmpdir(), 'pi-suite-mode-flow-'));
 const cwd = process.cwd();
-const originalEnv = Object.fromEntries(['HOME', 'PI_CODING_AGENT_DIR', 'XDG_CONFIG_HOME'].map(key => [key, process.env[key]]));
+const originalEnv = Object.fromEntries(['HOME', 'PI_CODING_AGENT_DIR', 'XDG_CONFIG_HOME', 'PI_OFFLINE'].map(key => [key, process.env[key]]));
+const networkAttempts = [];
+const restoreNetwork = [];
+// emit() is synchronous; the provider attaches the actual completion promise to the request.
+const emitWorkflow = async (api, channel, request = {}) => {
+  api.events.emit(channel, request);
+  if (request.result) await request.result;
+};
 const planningId = 'claude-opus-4-5';
 const implementationId = 'claude-sonnet-4-5';
 let session;
@@ -34,8 +72,51 @@ try {
   process.env.HOME = temp;
   process.env.PI_CODING_AGENT_DIR = temp;
   process.env.XDG_CONFIG_HOME = resolve(temp, 'xdg');
+  process.env.PI_OFFLINE = '1';
+  // Fail even swallowed network attempts, and install the tripwires before loading the SDK.
+  for (const [object, key] of [[globalThis, 'fetch'], [http, 'request'], [http, 'get'],
+    [https, 'request'], [https, 'get'], [net.Socket.prototype, 'connect'], [tls, 'connect']]) {
+    const original = object[key];
+    object[key] = () => {
+      networkAttempts.push(key);
+      throw new Error(`Mode-flow integration forbids network ${key}`);
+    };
+    restoreNetwork.push(() => { object[key] = original; });
+  }
+  syncBuiltinESMExports();
+  const sdk = await import(sdkUrl.href);
+  const { createAssistantMessageEventStream } = await import(aiUrl.href);
+  const { Text } = await import(tuiUrl.href);
+  const { AgentSession, ModelRuntime, SessionManager, SettingsManager, createAgentSessionServices,
+    createAgentSessionFromServices, createAgentSessionRuntime, initTheme } = sdk;
+  // Exercise bare imports through the actual selected SDK loader, not just our path resolver.
+  const identityFixture = resolve(temp, 'host-identity.ts');
+  writeFileSync(identityFixture, `
+import { AgentSession, ModelRuntime } from '@earendil-works/pi-coding-agent';
+import { createAssistantMessageEventStream } from '@earendil-works/pi-ai';
+import { Text } from '@earendil-works/pi-tui';
+export { AgentSession, ModelRuntime, createAssistantMessageEventStream, Text };
+export default function (pi) {
+  pi.events.on('test:host-identity', request => {
+    Object.assign(request, { AgentSession, ModelRuntime, createAssistantMessageEventStream, Text });
+  });
+}
+`);
+  const identityBus = sdk.createEventBus();
+  const loaded = await sdk.discoverAndLoadExtensions([identityFixture], temp, temp, identityBus);
+  assert.deepEqual(loaded.errors, [], 'host identity fixture loads through the selected SDK');
+  assert.equal(loaded.extensions.length, 1);
+  const loaderIdentity = {};
+  identityBus.emit('test:host-identity', loaderIdentity);
+  const expectedIdentity = { AgentSession, ModelRuntime, createAssistantMessageEventStream, Text };
+  const jitiIdentity = await jiti.import(identityFixture);
+  for (const [name, value] of Object.entries(expectedIdentity)) {
+    assert.equal(loaderIdentity[name], value, `SDK loader uses the selected host's ${name}`);
+    assert.equal(jitiIdentity[name], value, `direct TS imports use the selected host's ${name}`);
+  }
+  console.log(`PASS actual Pi host identity: SDK ${sdkManifest.version} at ${sdkRoot}, SDK/pi-ai/tui and direct TS imports`);
   initTheme('dark', false);
-  const models = await ModelRuntime.create({ agentDir: temp });
+  const models = await ModelRuntime.create({ agentDir: temp, allowModelNetwork: false });
   await models.setRuntimeApiKey('anthropic', 'test-placeholder');
   // A conservative unavailable-classifier response also ensures no fallback can spend money.
   models.classify = async () => ({ answers: {}, stopReason: 'error', errorMessage: 'Local integration classifier' });
@@ -199,29 +280,29 @@ try {
         assert.equal(branchData('plan-mode:inline')?.active, true, 'startup preserves an existing standalone plan');
         await reload();
         check('plan');
-        api.events.emit('workflow-mode:set', { mode: 'work' });
+        await emitWorkflow(api, 'workflow-mode:set', { mode: 'work' });
         api.events.emit('permission-mode:set', { mode: 'auto' });
       }
       check('work', 'auto');
-      api.events.emit('workflow-mode:set', { mode: 'work' });
+      await emitWorkflow(api, 'workflow-mode:set', { mode: 'work' });
       api.events.emit('permission-mode:set', { mode: 'auto' });
       check('work', 'auto'); // No-op setters must not create transcript markers.
       if (hasGate) {
         api.events.emit('permission-mode:cycle', {});
         check('work');
-        api.events.emit('workflow-mode:cycle', {});
+        await emitWorkflow(api, 'workflow-mode:cycle', {});
         check('chat');
-        api.events.emit('workflow-mode:cycle', {});
+        await emitWorkflow(api, 'workflow-mode:cycle', {});
         check(hasPlan ? 'plan' : 'work');
-        api.events.emit('workflow-mode:set', { mode: 'work' });
+        await emitWorkflow(api, 'workflow-mode:set', { mode: 'work' });
         check('work');
       }
       // A custom marker gives real /tree a stable leaf even before any model turn.
       const workLeaf = destination(manager.appendCustomEntry('test:work-marker', {}));
       if (!hasPlan) {
-        api.events.emit('workflow-mode:set', { mode: 'plan' });
+        await emitWorkflow(api, 'workflow-mode:set', { mode: 'plan' });
         check('work');
-        api.events.emit('workflow-mode:set', { mode: 'chat' });
+        await emitWorkflow(api, 'workflow-mode:set', { mode: 'chat' });
         check('chat');
         const chatLeaf = destination(manager.appendCustomEntry('test:chat-marker', {}));
         await go(workLeaf);
@@ -246,7 +327,7 @@ try {
         }
         let chatLeaf;
         if (hasGate) {
-          api.events.emit('workflow-mode:set', { mode: 'chat' });
+          await emitWorkflow(api, 'workflow-mode:set', { mode: 'chat' });
           check('chat');
           chatLeaf = destination(manager.appendCustomEntry('test:chat-marker', {}));
           await go(workLeaf);
@@ -339,8 +420,8 @@ try {
         assert(execLeaf.entryIds.includes(planLeaf.id), 'plan target is an ancestor of exec');
         assert(execLeaf.entryIds.includes(workLeaf.id), 'work target is an ancestor of exec');
         if (hasGate) {
-          api.events.emit('workflow-mode:cycle', {});
-          api.events.emit('workflow-mode:set', { mode: 'work' });
+          await emitWorkflow(api, 'workflow-mode:cycle', {});
+          await emitWorkflow(api, 'workflow-mode:set', { mode: 'work' });
           check('exec');
           assert(notifications.some(message => message.includes('/plan-exec stop')));
           api.events.emit('permission-mode:cycle', {});
@@ -435,7 +516,7 @@ try {
   }
   // Conversation recovery runs through real AgentSessions, including the reviewer. Only the
   // provider transport and native selections are scripted; no exec handler is called directly.
-  const { registerExec } = await createJiti(import.meta.url).import('../packages/pi-plan-mode/src/exec.ts');
+  const { registerExec } = await jiti.import('../packages/pi-plan-mode/src/exec.ts');
   for (const scenario of ['human-answer', 'failed-review']) {
     const label = `conversation-${scenario}`;
     const reviewers = [];
@@ -632,7 +713,7 @@ try {
   }
   // /planners' fresh path really replaces the SDK runtime: do not simulate session_start
   // on the old extension objects (that would hide stale-context and load-order bugs).
-  const { createCustomSelectorHarness } = await createJiti(import.meta.url).import('../packages/pi-plan-mode/test/support.ts');
+  const { createCustomSelectorHarness } = await jiti.import('../packages/pi-plan-mode/test/support.ts');
   for (const names of [['tool-gate', 'plan-mode'], ['plan-mode', 'tool-gate']]) {
     for (const activation of ['success', 'false', 'invalid', 'throw', 'keep-A', 'keep-M']) {
       const keep = activation.startsWith('keep-');
@@ -923,6 +1004,7 @@ try {
       }
     }
   }
+  assert.deepEqual(networkAttempts, [], 'all model transports remain local');
   if (failures.length) throw new AggregateError(failures, `${failures.length} mode-flow scenarios failed`);
 } finally {
   await session?.dispose();
@@ -931,4 +1013,6 @@ try {
     if (value === undefined) delete process.env[key]; else process.env[key] = value;
   }
   rmSync(temp, { recursive: true, force: true });
+  for (const restore of restoreNetwork.reverse()) restore();
+  syncBuiltinESMExports();
 }

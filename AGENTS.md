@@ -2,6 +2,10 @@
 
 This repository is the development source for the Pi extension suite. Add or change components under `packages/<name>/`, not in the retained standalone repositories or Pi's installed checkout. Keep plugins independently usable; optional sibling integrations must remain optional. The root `pi` manifest exposes distinct entry points for selection through `pi config`.
 
+## Footer integration
+
+When adding or changing functionality anywhere under `packages/`, read `packages/pi-status-footer/AGENTS.md`, assess footer impact, and update relevant state publications, controls, rendering, tests and public documentation in the same logical change. Those component-local instructions apply to integration work in sibling plugins; discovering them must not depend on editing the footer first. If there is no footer impact, explicitly state that assessment in the completion response.
+
 ## Checks
 
 - Root: `npm ci`, then `npm test` for actual Pi loader selection/registration tests.

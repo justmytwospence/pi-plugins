@@ -1268,6 +1268,38 @@ test("a handoff preserves history and continues on the target model with exactly
   assert.equal(await emit("agent_before_settle", { outcome: "completed" }), undefined, "only once");
 });
 
+test("an awaited gate exit uses the approval result instead of steering another planner request", async () => {
+  const h = await setup({ gate: true, models: true, select: ["Yes, hand off to Claude Sonnet 5.5 (high)"] });
+  const ctx = h.context.ctx as ExtensionContext;
+  await h.mock.commands.get("plan")?.handler("", ctx);
+  writeFileSync(h.inline().planFile, "# Handoff plan\n\nImplement locally.\n");
+  await h.emit("before_agent_start", { prompt: "approve" });
+  ctx.isIdle = () => false;
+  h.mock.eventBus.on(MODE_SET, (data) => {
+    const request = data as { mode: string; result?: Promise<boolean> };
+    request.result = Promise.resolve().then(() => {
+      h.mock.eventBus.emit(MODE_CHANGED, { mode: request.mode, source: "transition" });
+      return true;
+    });
+  });
+  const before = h.mock.sentMessages.length;
+  const result = await h.tool(EXIT_TOOL).execute("approval", {}, undefined, undefined, ctx);
+  assert.equal(result.terminate, true);
+  assert.equal(result.details.outcome, "handoff");
+  assert.equal(h.inline().active, false);
+  assert.equal(
+    h.mock.sentMessages
+      .slice(before)
+      .some(({ message }) => (message as { customType?: string }).customType === NOTICE_TYPE),
+    false,
+    "the awaited gate transition must not queue a redundant exit reminder",
+  );
+  const settled = await h.emit("agent_before_settle", { outcome: "completed" });
+  assert.equal(settled.continue, true);
+  assert.equal(settled.entries[0].data.implementerModel, "anthropic/claude-sonnet-5-5");
+  assert.equal(await h.emit("agent_before_settle", { outcome: "completed" }), undefined);
+});
+
 test("a handoff does nothing, and says so, when the turn did not complete", async () => {
   const { mock, context, tool, emit, inline } = await setup({
     models: true,

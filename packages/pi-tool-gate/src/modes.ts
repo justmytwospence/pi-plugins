@@ -1,7 +1,9 @@
 // Independent workflow and approval state. Both providers are optional; no sibling imports.
 // Event bus contract (shared with pi-plan-mode):
-//   workflow-mode:set           any -> gate { mode: work|chat|plan } requests a base transition
-//   workflow-mode:cycle         any -> gate {} requests the next base workflow
+//   workflow-mode:set           any -> gate { mode: work|chat|plan, result?: Promise<boolean> } requests an awaited base transition
+//   workflow-mode:cycle         any -> gate { result?: Promise<boolean> } requests the next base workflow
+//     The gate assigns result synchronously. Await that promise, never event emission itself.
+//     Legacy callers may ignore it; the gate handles failures internally.
 //   workflow-mode:changed       gate -> all { mode: work|chat|plan|exec, previous?, cycle: BaseWorkflowMode[], key?, source: transition|restore }
 //     Restore/capability announcements are snapshots, never user transitions.
 //   workflow-mode:plan-provider plan -> gate { planFile? } announces plan support and its file
@@ -16,6 +18,8 @@
 
 export type WorkflowMode = "work" | "chat" | "plan" | "exec";
 export type BaseWorkflowMode = Exclude<WorkflowMode, "exec">;
+export interface WorkflowSetRequest { mode: BaseWorkflowMode; result?: Promise<boolean> }
+export interface WorkflowCycleRequest { result?: Promise<boolean> }
 export const APPROVAL_MODES = ["auto", "bypassPermissions", "default", "acceptEdits"] as const;
 export type ApprovalMode = (typeof APPROVAL_MODES)[number];
 export type LegacyCombinedMode = ApprovalMode | "chat" | "plan";

@@ -2,12 +2,16 @@
 // look (pi-subagents' subagent sessions) draws this footer and editor gauge for it. Discovery is a
 // synchronous request over `pi.events`: the consumer emits `{ version: 1 }` on
 // `SESSION_CHROME_CHANNEL`; pi-status-footer sets `service` before `emit` returns while the footer
-// is on. Consumers copy these declarations structurally.
+// is on. Consumers copy these declarations structurally. Other-session chrome is
+// read-only: string rows and gauge decoration only, never main's flow/action
+// metadata, primary key hints, or handlers. A child's editor keeps its own input
+// ownership; displaying this service cannot invoke main's controls.
 import type { Paint, Totals } from "./index.ts";
 
 export const SESSION_CHROME_CHANNEL = "pi-plugins.session-chrome.v1";
 
-/** What differs between main and the session shown: everything else (accounts, statuses, git) stays main's. */
+/** Session-owned telemetry for a read-only view. Shared accounts/notices and directory-matched git
+ * stay main's; main's controls, workflow, reasoning policy and cache state never carry over. */
 export interface SessionChromeOverrides {
   cwd: string;
   provider: string;
@@ -23,7 +27,7 @@ export interface SessionChromeOverrides {
 }
 
 export interface SessionChromeService {
-  /** The footer's rows for that session, as main's footer draws them. */
+  /** Read-only rows for that session; no inherited main-session control hints or hit map. */
   footer(session: SessionChromeOverrides, width: number, theme: Paint): string[];
   /** Draw the context gauge on an editor's borders while `used()` gives a percentage; false if it has no border hooks. */
   gauge(editor: unknown, used: () => number | null, theme: () => Paint | undefined): boolean;

@@ -101,31 +101,61 @@ export function promptGuidelines(delegation: unknown): string[] {
  * `subagents:role-model`: another extension asks which model and effort a role gets for a parent on
  * `parent` (pi-plan-mode, for the model that implements a handed-off plan). Answered synchronously by
  * setting `reply`, with no Jev call: the role's profile on the parent's provider, else the balanced
- * tier, else the parent's model, as an implicit pick resolves it.
+ * tier, else the parent's model, as an implicit pick resolves it. With `availableModels`, only
+ * requested physical chat models present in the registry may be returned; an empty set denies all.
  */
 export const ROLE_MODEL = "subagents:role-model";
+/** Notification only: `{ ready: true }` after session startup, `{ ready: false }` on teardown. */
+export const ROLE_MODEL_READY = "subagents:role-model-ready";
 export interface RoleModelRequest {
   role: string;
   /** `provider/id` */
   parent: string;
   thinking?: string;
+  /** Destination for user/project agent and tier discovery; defaults to the live session's cwd. */
+  cwd?: string;
+  /** Caller's authenticated availability snapshot (e.g. getAvailable()), intersected with the registry. */
+  availableModels?: readonly { provider: string; id: string }[];
   reply?: { model: string; thinking: string; source: ChoiceSource["model"] };
 }
 export function roleModel(
   data: unknown,
   agents: readonly AgentDef[],
   config: Pick<SubagentsConfig, "tiers" | "providerTiers" | "tierDescriptions">,
-  available: readonly AvailableModel[],
+  available: readonly (AvailableModel & { api?: string; type?: string })[],
   fallbackThinking: string,
 ): RoleModelRequest["reply"] | undefined {
   if (!data || typeof data !== "object") return undefined;
   const request = data as Partial<RoleModelRequest>;
   if (request.reply) return undefined;
   if (typeof request.role !== "string" || typeof request.parent !== "string" || !/^[^/]+\/.+/u.test(request.parent)) return undefined;
+  if (request.cwd !== undefined && (typeof request.cwd !== "string" || !request.cwd.trim())) return undefined;
+  let allowed: Set<string> | undefined;
+  if (request.availableModels !== undefined) {
+    if (!Array.isArray(request.availableModels) || !request.availableModels.every((model) =>
+      model && typeof model === "object" && typeof model.provider === "string" && model.provider.trim() && !model.provider.includes("/")
+      && typeof model.id === "string" && model.id.trim())) return undefined;
+    const requested = new Set(request.availableModels.map((model) => `${model.provider}/${model.id}`));
+    const provider = request.parent.split("/")[0]!;
+    // Ids from a caller do not grant registry membership or supply model capability metadata.
+    available = available.filter((model) => model.provider === provider && model.api !== "pi-virtual"
+      && (model.type === undefined || model.type === "chat") && requested.has(`${model.provider}/${model.id}`));
+    if (!available.length) return undefined;
+    allowed = new Set(available.map((model) => `${model.provider}/${model.id}`));
+    // An unavailable file default must not hide a usable tier/parent. Profile-family fallback
+    // remains agentDefaults' job; configured tiers are filtered before provider presets apply.
+    const inRegistry = (model: string) => allowed!.has(model);
+    agents = agents.map((agent) => agent.model && !inRegistry(agent.model) ? { ...agent, model: undefined } : agent);
+    const tiersInRegistry = (tiers: Partial<Record<Tier, string>>) =>
+      Object.fromEntries(Object.entries(tiers).filter(([, model]) => inRegistry(model)));
+    config = { ...config, tiers: tiersInRegistry(config.tiers), providerTiers: {
+      [provider]: tiersInRegistry(config.providerTiers[provider] ?? {}),
+    } };
+  }
   const tiers = { models: providerTiers(request.parent, config.tiers, config.providerTiers, available), descriptions: config.tierDescriptions };
   const thinking = request.thinking || fallbackThinking;
   const resolved = resolve({ agent: request.role }, agents, undefined, tiers, { model: request.parent, thinking }, { available });
-  if ("error" in resolved || !resolved.model) return undefined;
+  if ("error" in resolved || !resolved.model || (allowed && !allowed.has(resolved.model))) return undefined;
   return { model: resolved.model, thinking: resolved.thinking, source: resolved.source.model };
 }
 
@@ -614,9 +644,14 @@ export default function subagents(pi: ExtensionAPI) {
   };
   pi.events.on(ROLE_MODEL, (data) => {
     const ctx = sessionCtx;
-    if (!live || !ctx) return;
-    const reply = roleModel(data, discoverAgents(ctx.cwd), config, (ctx.modelRegistry?.getAll?.() ?? []) as AvailableModel[], pi.getThinkingLevel());
-    if (reply) (data as RoleModelRequest).reply = reply;
+    const owner = lifetime.signal;
+    if (!live || !ctx || owner.aborted) return;
+    const cwd = (data as Partial<RoleModelRequest> | undefined)?.cwd;
+    if (cwd !== undefined && (typeof cwd !== "string" || !cwd.trim())) return;
+    const destination = cwd === undefined ? ctx.cwd : path.resolve(ctx.cwd, cwd);
+    const roleConfig = cwd === undefined ? config : loadConfig("pi-subagents", DEFAULT_CONFIG, destination);
+    const reply = roleModel(data, discoverAgents(destination), roleConfig, ctx.modelRegistry?.getAll?.() ?? [], pi.getThinkingLevel());
+    if (reply && live && !owner.aborted && sessionCtx === ctx) (data as RoleModelRequest).reply = reply;
   });
   /**
    * Results owed to the agent. Sent only while pi is idle: a follow-up queued during a turn is
@@ -1109,6 +1144,7 @@ export default function subagents(pi: ExtensionAPI) {
   pi.on("session_start", (_event, ctx) => {
     lifetime.abort();
     lifetime = new AbortController();
+    const owner = lifetime.signal;
     if (autoCheck) clearImmediate(autoCheck);
     autoCheck = undefined;
     waitingHolds.clear();
@@ -1152,6 +1188,7 @@ export default function subagents(pi: ExtensionAPI) {
     }
     refreshUI();
     scheduleAutoView();
+    if (!owner.aborted) safely(() => pi.events.emit(ROLE_MODEL_READY, { ready: true }));
   });
 
   pi.on("before_agent_start", () => setMainRequestActive(true));
@@ -1179,6 +1216,7 @@ export default function subagents(pi: ExtensionAPI) {
   pi.on("session_shutdown", (event, ctx) => {
     const reason = (event as { reason?: string } | undefined)?.reason;
     lifetime.abort();
+    safely(() => pi.events.emit(ROLE_MODEL_READY, { ready: false }));
     if (autoCheck) clearImmediate(autoCheck);
     autoCheck = undefined;
     autoViewing = undefined;

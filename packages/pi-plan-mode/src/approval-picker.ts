@@ -8,12 +8,16 @@ import {
   visibleWidth,
   wrapTextWithAnsi,
 } from "@earendil-works/pi-tui";
-import type { ModelSpec, ModelSpecThinkingLevel } from "./implementation-models.js";
+import type { FlowState } from "./flow-contract.js";
+import { formatModelKey, type ModelSpec, type ModelSpecThinkingLevel } from "./implementation-models.js";
 import { modelCatalog, normalizeEffort } from "./model-catalog.js";
 
 export const OPTION_MAX = 42;
 export const HERE = "Yes, implement here";
 export const COMPACT_HERE = "Yes, compact plan and implement here";
+export const LINKED_EXECUTE = "Execute with linked worker";
+export const LINKED_COMPACT = "Compact first, then execute";
+export const LINKED_FRESH = "Execute in a fresh conversation";
 export const EDIT = "Edit the plan";
 export const SAVE = "Save for later";
 export const KEEP = "No, keep planning";
@@ -33,7 +37,14 @@ export function handoffLabel(name: string, effort?: string): string {
 export type ApprovalChoice =
   | { kind: "here" }
   | { kind: "compact-here" }
-  | { kind: "handoff"; target: ModelSpec; targetName: string }
+  | {
+      kind: "handoff";
+      target: ModelSpec;
+      targetName: string;
+      intent?: "independent" | "linked-execution";
+      flow?: FlowState;
+      context?: "keep" | "compact" | "clear";
+    }
   | { kind: "edit" }
   | { kind: "save" }
   | { kind: "keep" };
@@ -42,6 +53,10 @@ export interface ApprovalInput {
   planning?: ModelSpec;
   targets: Array<{ target: ModelSpec; targetName: string }>;
   defaultThinkingLevel?: ModelSpecThinkingLevel;
+  intent?: "independent" | "linked-execution";
+  flow?: FlowState;
+  /** Only advertised when the optional approved-plan host handoff is available. */
+  freshTarget?: { target: ModelSpec; targetName: string };
 }
 
 export interface ApprovalResult {
@@ -61,11 +76,15 @@ export function createApprovalState(): ApprovalState {
 
 const modelId = (spec: ModelSpec) => JSON.stringify([spec.provider, spec.modelId]);
 type Row = { id: string; choice: ApprovalChoice; label: string; model?: ModelSpec };
+// Fresh starts with the worker suggestion; editing its effort must not change in-place effort.
+const effortId = (row: Row) =>
+  `${row.choice.kind === "handoff" && row.choice.context === "clear" ? "fresh:" : ""}${row.model ? modelId(row.model) : ""}`;
 type Catalog = Pick<ReturnType<typeof modelCatalog>, "efforts">;
 
 /** A single inline Pi-layout component, also exported for remote-client rendering fixtures. */
 export class ApprovalPicker implements Component {
   private readonly rows: [Row, ...Row[]];
+  private readonly question: string;
   private finished = false;
   private readonly onAbort = () => this.finish(undefined);
 
@@ -79,23 +98,46 @@ export class ApprovalPicker implements Component {
     private readonly done: (result: ApprovalResult | undefined) => void,
     private readonly signal?: AbortSignal,
   ) {
-    this.rows = [
-      { id: "here", choice: { kind: "here" }, label: HERE, model: input.planning },
-      { id: "compact-here", choice: { kind: "compact-here" }, label: COMPACT_HERE, model: input.planning },
-      ...input.targets.map(({ target, targetName }) => ({
-        id: `handoff:${modelId(target)}`,
-        choice: { kind: "handoff" as const, target, targetName },
-        label: handoffLabel(targetName),
-        model: target,
-      })),
+    const linked = input.intent === "linked-execution";
+    const worker = linked ? input.targets[0] : undefined;
+    this.question = linked
+      ? `${APPROVAL_QUESTION} ${worker ? `Linked worker: ${clean(formatModelKey(worker.target))}.` : "Linked worker unavailable."}`
+      : APPROVAL_QUESTION;
+    const executionRows: Row[] = linked
+      ? worker
+        ? (["keep", "compact", ...(input.freshTarget ? ["clear" as const] : [])] as const).map((context) => ({
+            id: `linked:${context}:${modelId(worker.target)}`,
+            choice: {
+              kind: "handoff",
+              ...(context === "clear" ? (input.freshTarget ?? worker) : worker),
+              intent: "linked-execution",
+              ...(input.flow ? { flow: structuredClone(input.flow) } : {}),
+              context,
+            },
+            label: context === "keep" ? LINKED_EXECUTE : context === "compact" ? LINKED_COMPACT : LINKED_FRESH,
+            model: context === "clear" ? input.freshTarget?.target : worker.target,
+          }))
+        : []
+      : [
+          { id: "here", choice: { kind: "here" }, label: HERE, model: input.planning },
+          { id: "compact-here", choice: { kind: "compact-here" }, label: COMPACT_HERE, model: input.planning },
+          ...input.targets.map(({ target, targetName }) => ({
+            id: `handoff:${modelId(target)}`,
+            choice: { kind: "handoff" as const, target, targetName },
+            label: handoffLabel(targetName),
+            model: target,
+          })),
+        ];
+    const remainingRows: [Row, ...Row[]] = [
       { id: "edit", choice: { kind: "edit" }, label: EDIT },
       { id: "save", choice: { kind: "save" }, label: SAVE },
       { id: "keep", choice: { kind: "keep" }, label: KEEP },
     ];
-    if (!this.rows.some((row) => row.id === state.selectedId)) state.selectedId = "here";
+    this.rows = [...executionRows, ...remainingRows] as [Row, ...Row[]];
+    if (!this.rows.some((row) => row.id === state.selectedId)) state.selectedId = this.rows[0].id;
     for (const row of this.rows) {
       if (!row.model) continue;
-      const id = modelId(row.model);
+      const id = effortId(row);
       const levels = this.levels(row);
       const initial =
         row.choice.kind === "handoff"
@@ -116,11 +158,13 @@ export class ApprovalPicker implements Component {
   }
 
   private effort(row: Row) {
-    return row.model ? this.state.efforts.get(modelId(row.model)) : undefined;
+    return row.model ? this.state.efforts.get(effortId(row)) : undefined;
   }
 
   private label(row: Row): string {
-    return row.choice.kind === "handoff" ? handoffLabel(row.choice.targetName, this.effort(row)) : row.label;
+    return row.choice.kind === "handoff" && row.choice.intent !== "linked-execution"
+      ? handoffLabel(row.choice.targetName, this.effort(row))
+      : row.label;
   }
 
   private result(row: Row): ApprovalResult {
@@ -152,7 +196,7 @@ export class ApprovalPicker implements Component {
     const rule = this.theme.fg("border", "─".repeat(Math.max(0, width)));
     const contentWidth = Math.max(1, width - 2);
     // A separate arrow-prefixed effort row looks like an option to Collie's screen reader.
-    const question = wrapTextWithAnsi(`${APPROVAL_QUESTION} ${effort}`, contentWidth).map(
+    const question = wrapTextWithAnsi(`${this.question} ${effort}`, contentWidth).map(
       (line) => ` ${this.theme.fg("accent", this.theme.bold(line))}`,
     );
     return [
@@ -214,7 +258,7 @@ export class ApprovalPicker implements Component {
             ? 0
             : levels.length - 1
           : (current + (matchesKey(data, "right") ? 1 : -1) + levels.length) % levels.length;
-      this.state.efforts.set(modelId(row.model), levels[next]);
+      this.state.efforts.set(effortId(row), levels[next]);
     } else {
       return; // The review viewport's independent Ctrl+U/D listener remains in charge.
     }
@@ -234,7 +278,7 @@ export class ApprovalPicker implements Component {
       // RPC has no initial-selection option; put the retained action first for Enter.
       const currentLabel = labels[this.rows.indexOf(this.selected)] as string;
       const actions = [currentLabel, ...labels.filter((label) => label !== currentLabel)];
-      const selected = await ctx.ui.select(APPROVAL_QUESTION, actions, { signal: this.signal });
+      const selected = await ctx.ui.select(this.question, actions, { signal: this.signal });
       if (this.signal?.aborted || selected === undefined) return undefined;
       const row = this.rows[labels.indexOf(selected)];
       if (!row) return undefined;
@@ -248,7 +292,7 @@ export class ApprovalPicker implements Component {
         if (selectedEffort === undefined) continue;
         if (!options.includes(selectedEffort)) return undefined;
         this.state.efforts.set(
-          modelId(row.model),
+          effortId(row),
           selectedEffort === "Model default" ? undefined : (selectedEffort as ModelSpecThinkingLevel),
         );
       }

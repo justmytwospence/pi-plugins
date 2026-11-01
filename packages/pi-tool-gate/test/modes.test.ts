@@ -9,7 +9,10 @@ import {
   nextApproval, nextWorkflow, parseApproval, parseLegacyCombinedMode, parseWorkflow, PLAN_PROVIDER,
   restoreBranchModes, workflowCycle, workflowStatus, modeStatus, WORKFLOW_CHANGED, WORKFLOW_CYCLE,
   WORKFLOW_ENTRY, WORKFLOW_QUERY, WORKFLOW_SET, WORKFLOW_STATUS_KEY,
+  type WorkflowSetRequest, type WorkflowCycleRequest,
 } from "../src/modes.ts";
+import { FLOW_ENTRY, queryFlow, requestWorkflow } from "../src/flow-contract.ts";
+import { queryFooterActions } from "../src/footer-actions.ts";
 import { fakeJev, harness, userEntry } from "./harness.ts";
 
 let configDir: string;
@@ -217,7 +220,7 @@ describe("workflow and approval ownership", () => {
   test("bare pickers have undecorated short rows and use the blocked helper", async () => {
     const { h, ctx } = await start(setup());
     h.pi.events.emit(PLAN_PROVIDER, { planFile: "/tmp/plan.md" });
-    for (const [command, options, answer] of [["mode", ["Work", "Chat", "Plan"], "Chat"], ["approvals", ["Auto", "Yolo"], "Yolo"]] as const) {
+    for (const [command, options, answer] of [["mode", ["Work", "Chat", "Plan", "Operating mode..."], "Chat"], ["approvals", ["Auto", "Yolo"], "Yolo"]] as const) {
       ctx.ui.selectAnswers.push(answer);
       const before = h.events.length;
       await h.commands.get(command).handler("", ctx);
@@ -554,6 +557,103 @@ describe("visible workflow transitions", () => {
     }
     expect(theme.fg).not.toHaveBeenCalled();
     expect(theme.bold).not.toHaveBeenCalled();
+  });
+});
+
+describe("flow commands, protocol and optional footer actions", () => {
+  test("legacy workflow requests return an awaitable result without losing synchronous Independent behavior", async () => {
+    const { h, ctx } = await start(setup());
+    const set: WorkflowSetRequest = { mode: "chat" };
+    h.pi.events.emit(WORKFLOW_SET, set);
+    expect(set.result).toBeInstanceOf(Promise);
+    expect(ctx.ui.status.get(WORKFLOW_STATUS_KEY)).toContain("chat");
+    expect(await set.result).toBe(true);
+    const cycle: WorkflowCycleRequest = {};
+    h.pi.events.emit(WORKFLOW_CYCLE, cycle);
+    expect(await cycle.result).toBe(true);
+    expect(await requestWorkflow(h.pi.events, "plan")).toMatchObject({ ok: false });
+    expect(await requestWorkflow(h.pi.events, "chat")).toMatchObject({ ok: true, snapshot: { operatingMode: "independent", workflow: "chat" } });
+  });
+  test("queries and actions are absent before startup, pure when ready, and stale after tree/shutdown", async () => {
+    const s = setup();
+    expect(queryFlow(s.h.pi.events)).toBeUndefined();
+    expect(queryFooterActions(s.h.pi.events)).toEqual({});
+    await start(s);
+    const before = s.h.entries.length;
+    const snapshot = queryFlow(s.h.pi.events, true);
+    expect(snapshot).toMatchObject({ operatingMode: "independent", ready: true, workflow: "work" });
+    const actions = queryFooterActions(s.h.pi.events);
+    expect(Object.keys(actions)).toEqual(["workflow.cycle", "workflow.open", "flow.open", "approvals.open"]);
+    expect(actions["workflow.cycle"]?.key).toBe("shift+tab");
+    expect(actions["approvals.open"]?.key).toBe("alt+a");
+    expect(s.h.entries).toHaveLength(before);
+    s.ctx.ui.selectAnswers.push(undefined);
+    await actions["approvals.open"]!.run();
+    expect(s.ctx.ui.selects.at(-1)).toEqual({ title: "Approvals", options: ["Auto", "Yolo"] });
+    expect(s.ctx.ui.status.get(MODE_STATUS_KEY)).toContain("auto");
+    await s.h.emit("session_tree", {}, s.ctx);
+    const selects = s.ctx.ui.selects.length;
+    await actions["approvals.open"]!.run();
+    expect(s.ctx.ui.selects).toHaveLength(selects);
+    await s.h.emit("session_shutdown", {}, s.ctx);
+    expect(queryFlow(s.h.pi.events)).toBeUndefined();
+    expect(queryFooterActions(s.h.pi.events)).toEqual({});
+  });
+  test("Independent operating picker is short and cannot change models without a ready role provider", async () => {
+    const s = await start(setup());
+    s.ctx.isIdle = () => true;
+    s.ctx.model = { provider: "test", id: "local" };
+    s.ctx.modelRegistry = { getAvailable: async () => [{ ...s.ctx.model, api: "openai-completions" }] };
+    await s.h.commands.get("flow").handler("", s.ctx);
+    expect(s.ctx.ui.selects.at(-1)).toEqual({ title: "Operating mode", options: ["Independent", "Flow status"] });
+    await s.h.commands.get("flow").handler("linked", s.ctx);
+    expect(s.ctx.ui.notes.at(-1)?.message).toMatch(/Role defaults unavailable/u);
+    expect(queryFlow(s.h.pi.events)?.operatingMode).toBe("independent");
+    expect(s.h.entries.some(entry => entry.customType === FLOW_ENTRY)).toBe(false);
+    await s.h.commands.get("flow").handler("status", s.ctx);
+    expect(s.ctx.ui.notes.at(-1)?.message).toMatch(/Available flows: none.*Role defaults unavailable/su);
+  });
+  test("malformed restored Linked stays locked and blocks every prompt source and tool until explicit recovery", async () => {
+    const s = await start(setup([
+      entry(WORKFLOW_ENTRY, { version: 1, mode: "plan" }),
+      entry(APPROVAL_ENTRY, { version: 1, mode: "bypassPermissions" }),
+      entry(FLOW_ENTRY, { version: 1, operatingMode: "linked", revision: 8 }),
+    ]));
+    s.ctx.isIdle = () => true;
+    expect(queryFlow(s.h.pi.events)).toMatchObject({ operatingMode: "linked", blocked: expect.stringContaining("missing or invalid") });
+    expect(s.ctx.ui.status.get("tool-gate:flow")).toBe("Linked blocked · /flow");
+    queryFlow(s.h.pi.events, true);
+    expect(s.ctx.ui.status.get("tool-gate:flow")).toBeUndefined();
+    for (const source of ["interactive", "rpc", "extension"]) expect(await s.h.emit("input", { text: "act", source }, s.ctx)).toEqual({ action: "handled" });
+    expect(await s.h.emit("tool_call", call("read", { path: "src/a.ts" }), s.ctx)).toMatchObject({ block: true, reason: expect.stringContaining("missing or invalid") });
+    s.ctx.abort = vi.fn(); // This factory-only host has no captured native session.
+    await s.h.emit("before_agent_start", {}, s.ctx);
+    expect(s.ctx.abort).toHaveBeenCalledOnce();
+    expect(s.ctx.ui.status.get(WORKFLOW_STATUS_KEY)).toContain("plan");
+    await s.h.commands.get("flow").handler("independent", s.ctx);
+    expect(queryFlow(s.h.pi.events)).toMatchObject({ operatingMode: "independent", workflow: "plan" });
+    expect(await s.h.emit("input", { text: "act", source: "extension" }, s.ctx)).toBeUndefined();
+    expect(s.ctx.ui.status.get(MODE_STATUS_KEY)).toContain("yolo");
+    expect(s.h.entries.filter(e => e.customType === WORKFLOW_ENTRY || e.customType === APPROVAL_ENTRY)).toEqual([]);
+  });
+  test("Linked Exec pickers offer status and Independent, not new workflows or providers", async () => {
+    const s = await start(setup([
+      entry("plan-mode:exec", { active: true, planFile: "/tmp/approved.md" }),
+      entry(FLOW_ENTRY, { version: 1, operatingMode: "linked", revision: 1 }),
+    ]));
+    s.ctx.isIdle = () => true;
+    const status = vi.fn();
+    s.h.pi.events.on("pi-plugins.footer-actions.v1", (request: any) => { request.actions["execution.status"] = { label: "Execution status", run: status }; });
+    const actions = queryFooterActions(s.h.pi.events);
+    expect(actions["workflow.cycle"]?.key).toBeUndefined();
+    await actions["workflow.cycle"]!.run();
+    expect(status).toHaveBeenCalledTimes(1);
+    for (const command of ["mode", "flow"]) {
+      await s.h.commands.get(command).handler("", s.ctx);
+      expect(s.ctx.ui.selects.at(-1)?.options).toEqual(["Execution status", "Use Independent mode"]);
+    }
+    await s.h.commands.get("flow").handler("independent", s.ctx);
+    expect(queryFlow(s.h.pi.events)).toMatchObject({ operatingMode: "independent", workflow: "exec" });
   });
 });
 

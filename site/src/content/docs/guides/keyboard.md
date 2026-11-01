@@ -136,7 +136,8 @@ These keys are **local to the named focused surface**, not global shortcuts. No 
 | Task / focus | Controls | Owner / configuration |
 | --- | --- | --- |
 | Enter plan mode in the main chat | `/plan [task]`; optionally a configured `toggleShortcut` | [pi-plan-mode](/plugins/pi-plan-mode/); no shortcut by default. With gate, the configured key cycles gate modes instead. |
-| Choose workflow at the main prompt | `/mode [work\|chat\|plan]`; Shift+Tab **after remapping the stock conflict** | [pi-tool-gate](/plugins/pi-tool-gate/), `workflowShortcut` (default `shift+tab`, empty string disables); plan requires pi-plan-mode. Exec is entered by a distinct-model handoff, not the cycle. |
+| Choose operating mode at the main prompt | `/flow`, `/flow status`, `/flow independent`, `/flow linked [provider]` | [pi-tool-gate](/plugins/pi-tool-gate/); Independent is the default. Linked uses a captured provider-local role flow; selecting that provider again refreshes it. No new global flow key. |
+| Choose workflow at the main prompt | `/mode [work\|chat\|plan]`; Shift+Tab **after remapping the stock conflict** | pi-tool-gate, `workflowShortcut` (default `shift+tab`, empty string disables); plan requires pi-plan-mode. Linked keeps the cycle within the selected provider. Exec needs plan approval, never the cycle. |
 | Choose approvals at the main prompt | `/approvals [auto\|yolo]`; Alt+A | pi-tool-gate, `approvalShortcut` (default `alt+a`, empty string disables); independent of workflow, including exec. |
 | Move between planner lanes/actions | Tab / Shift+Tab | `/planners`; not effort/permission cycling inside that screen. |
 | Read a planner lane | Ctrl+U/D; Left/Right plan/chat on an empty line; Ctrl+O tool output; Ctrl+T thinking | Planner screen owns these; Ctrl+O and Ctrl+T match stock Pi. Typed input steers that lane. |
@@ -152,6 +153,18 @@ These keys are **local to the named focused surface**, not global shortcuts. No 
 | Record review progress | `r` checks/folds a file; `:mark` advances the live review mark | `:mark` confirms and stays open. Closing never marks reviewed. `?` shows the full viewer keymap. |
 
 [Background workflows](/recipes/background-work/) explain consuming completed child results with `bg_wait` instead of receiving a second completion. The wait owns the working message above footer statistics until it releases; the task keeps running if you press Escape.
+
+## Model, reasoning and footer controls
+
+**Independent is the default.** `app.model.select` opens Pi's normal model selector. With the custom [pi-status-footer](/plugins/pi-status-footer/) enabled and tool-gate in **Linked**, that same configured action opens the combined workflow/flow picker through the focused main editor. It does not register a replacement global shortcut or bypass Vim, history or autocomplete ownership. Use `/mode` or `/flow` when the optional footer integration is absent.
+
+Linked maps Work/Chat to `general`, Plan to `planner`, and approved Exec to `worker`, all within the selected provider. Free `/model` and model-cycle attempts are rejected before ordinary model API mutation; they **never silently unlink**. Use `/flow independent` explicitly to regain free model selection. Changing provider or entering Linked requires idle and is unavailable during Exec; leaving Linked preserves the current model, reasoning, workflow, approvals and Exec lifecycle. `/flow status` explains unavailable or blocked flows; select a valid provider or Independent to recover.
+
+`app.thinking.cycle` continues to cycle reasoning in either mode, and auto effort remains independently toggleable. Linkage is models-only, not a reasoning lock. Exec requires explicit plan approval even when planner and worker use the same physical model; its footer badge inspects status/recovery instead of cycling or launching it.
+
+Footer control rows show one primary effective key at the right: the first configured model-selector key, the provider's workflow key on Independent's separate workflow row, and its approvals key. The Independent Exec row shows `/plan-exec`. Very narrow layouts may omit a hint to keep important state. **Alt+P below is a personal model-selector binding, not a suite default.** Context, cache, skills and MCP do not receive invented global keys.
+
+In fullscreen Pi, plain single clicks on visible footer values invoke the same owner controls: model/provider opens a picker, reasoning cycles, `auto`/`auto off` toggles effort, the base-workflow badge cycles, and Approvals opens its picker. Context, Skills and Cache inspect; MCP opens its native manager when the optional bridge is available. Padding, separators and omitted/truncated labels are inert. Dialogs, overlays, native selectors and blocked holds suspend clicks; selection gestures are not remapped. Regular terminal mode stays keyboard-operated, and other-session chrome is read-only. See the [footer reference](/plugins/pi-status-footer/#fullscreen-clicks) for optional-provider and focus limits.
 
 ## Use pickers, questions and overlays
 

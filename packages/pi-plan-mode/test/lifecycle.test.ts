@@ -364,8 +364,14 @@ for (const superseded of ["branch", "shutdown", "workflow"] as const) {
     };
     const publications: unknown[] = [];
     f.mock.eventBus.on("workflow-mode:exec", (data) => publications.push(data));
-    // Suspend the bootstrap handler, as runtime replacement can interrupt lifecycle dispatch.
-    const starting = f.mock.events.get("session_start")?.[0]?.({}, f.context.ctx);
+    await f.event("session_start");
+    assert.equal(switches, 0, "bootstrap waits until all providers finish session_start");
+    assert.equal(
+      entries.some((entry) => entry.customType === "plan-implementation-runtime-consumed"),
+      false,
+    );
+    // Suspend the awaited post-start boundary, as replacement can interrupt discovery too.
+    const starting = f.event("resources_discover");
     await tick();
     assert.equal(switches, 1);
     assert.equal(entries.filter((entry) => entry.customType === "plan-implementation-runtime-consumed").length, 1);
@@ -390,6 +396,11 @@ test("a consumed fresh bootstrap restores exec in a new runtime without activati
   const entries: ReturnType<typeof createMockPi>["entries"] = [bootstrapRecord()];
   const first = await bootstrapRuntime(entries);
   await first.event("session_start");
+  assert.equal(
+    entries.some((entry) => entry.customType === EXEC_ENTRY),
+    false,
+  );
+  await first.event("resources_discover");
   const snapshots = entries.filter((entry) => entry.customType === EXEC_ENTRY);
   assert.ok(snapshots.length >= 1);
   const latest = snapshots.at(-1)?.data as ExecState;
@@ -404,6 +415,7 @@ test("a consumed fresh bootstrap restores exec in a new runtime without activati
   const publications: unknown[] = [];
   reloaded.mock.eventBus.on("workflow-mode:exec", (data) => publications.push(data));
   await reloaded.event("session_start");
+  await reloaded.event("resources_discover");
   assert.deepEqual(entries.slice(0, saved.length), saved);
   const restored = entries.filter((entry) => entry.customType === EXEC_ENTRY).at(-1)?.data as typeof latest;
   assert.deepEqual(restored, latest);
@@ -423,6 +435,7 @@ test("reload leaves an interrupted legacy exchange paused with its identity and 
   const entries: ReturnType<typeof createMockPi>["entries"] = [bootstrapRecord()];
   const first = await bootstrapRuntime(entries);
   await first.event("session_start");
+  await first.event("resources_discover");
   const saved = structuredClone(entries.filter((entry) => entry.customType === EXEC_ENTRY).at(-1)?.data as ExecState);
   saved.returnTo = "legacy-planning-leaf";
   const negotiation = saved.negotiation!;
@@ -441,6 +454,7 @@ test("reload leaves an interrupted legacy exchange paused with its identity and 
   const reloaded = await bootstrapRuntime(entries);
   reloaded.mock.rawPi.setModel = () => assert.fail("reload must not change the model");
   await reloaded.event("session_start");
+  await reloaded.event("resources_discover");
   const restored = entries.filter((entry) => entry.customType === EXEC_ENTRY).at(-1)?.data as ExecState;
   assert.equal(restored.active, true);
   assert.equal(restored.pendingReturn, undefined);

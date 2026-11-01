@@ -1,6 +1,6 @@
 ---
 title: Tool gate
-description: Choose workflow and approvals independently; auto combines fixed checks, paid Jev judgments and human approval.
+description: Keep models independent or link workflow to provider-local role defaults; choose tool approvals separately.
 plugin: pi-tool-gate
 ---
 
@@ -8,10 +8,10 @@ plugin: pi-tool-gate
 
 - **Use it for:** Choose an approval policy for tool calls, escalating risky operations without treating the gate as a sandbox.
 - **Enable:** Select `packages/pi-tool-gate/src/index.ts` with [`pi config`](/guides/install/#enable-an-explicit-subset).
-- **Controls:** `/mode`, `/approvals`, `/gate`, `/gate rules`; Shift+Tab cycles workflow after remapping stock `app.thinking.cycle`; Alt+A toggles approvals.
+- **Controls:** `/flow` selects Independent or a provider's Linked flow; `/mode`, `/approvals`, `/gate`, `/gate rules`. Shift+Tab cycles workflow after remapping stock `app.thinking.cycle`; Alt+A toggles approvals.
 - **Settings:** `tool-gate.json` shared/user/project layers, including `permissions` allow/ask/deny rules; default auto mode, paid Jev on, pushback on, 8000 ms classifier timeout (one retry on timeout).
 - **Requirements, cost & privacy:** Pi classifier/provider access for Jev; proposed arguments and clipped user intent can leave the machine. Fixed checks and manual mode are local.
-- **Integrations & limits:** Optional plan mode, footer and Herdr blocked state. The stock conflict skips shortcut registration; calls needing an unavailable classifier are blocked.
+- **Integrations & limits:** Independent works alone. Linked needs pi-subagents' role defaults and the supported model guard; Plan/Exec need pi-plan-mode. Footer and Herdr are optional. Stock conflicts skip shortcut registration; calls needing an unavailable classifier are blocked.
 
 Tool gate separates workflow from approvals and, in auto mode, reduces routine approval interruptions while escalating risky calls. It is an approval policy inside Pi, **not a sandbox**, a complete secret scanner or a guarantee that every dangerous operation will be caught.
 
@@ -23,13 +23,51 @@ Classifier judgments require Pi 0.99 or newer and credentials for the configured
 
 **Jev calls are paid external requests.** Most gray-area calls require one judgment; an initially held call can make another request for a suggested workaround. Even a fixed-rule hold can use that workaround request. Classified calls add reported classifier usage to their tool result. Costs depend on volume and input, not just how many approval dialogs appear.
 
+## Independent and Linked operating modes
+
+**Independent is the default**, including for older sessions without a flow record. Models and workflow remain separately selectable; enabling this feature does not change your installed model or global defaults. **Linked** selects one provider-local flow: the workflow chooses its physical model from the existing [pi-subagents](/plugins/pi-subagents/) role defaults, including user and project agent overrides.
+
+| Workflow | Role used by Linked |
+| --- | --- |
+| Work and Chat | `general` (the same assignment for both) |
+| Plan | `planner` |
+| Exec | `worker`, only after plan approval |
+
+General uses the role resolver's balanced-tier fallback, not the code-explorer role. Resolution uses a medium effort fallback and offers a provider only when every assignment is an authenticated, available physical chat model within that provider. There is no cross-provider fallback, virtual model entry, named-preset collection or per-prompt model classifier.
+
+Selecting a provider captures its resolved assignments in a branch-local snapshot. Workflow changes and resume reuse that snapshot; changing role files does not silently change an active flow. **Select the same provider again to refresh its role defaults.** `/flow status` reports assignments and unavailable-provider reasons.
+
+| Command | Effect |
+| --- | --- |
+| `/flow` | Open **Operating mode**: Independent or one Linked choice per available provider. |
+| `/flow status` | Inspect the current mode, assignments and availability/blocking reasons. |
+| `/flow independent` | Explicitly return to free model selection. |
+| `/flow linked` | Select or refresh the current provider's flow. |
+| `/flow linked <provider>` | Select or refresh that provider's flow. |
+
+User-initiated flow selection requires idle. Changing provider preserves the current base workflow; entering Linked or changing provider is refused during Exec. Leaving Linked is allowed once idle and preserves model, reasoning, workflow, approvals and any active Exec lifecycle. Tool-owned Plan entry and approved execution use awaited lifecycle transitions rather than waiting for a new user turn.
+
+**Reasoning is not linked.** The role's effort is a suggestion on initial activation, not a setting reapplied on every phase or provider change. Native reasoning controls and [auto effort](/plugins/pi-auto-effort/) remain available; the destination model's supported-level clamping still applies. Approvals remain separate too.
+
+### Strict model selection and recovery
+
+Linked never silently switches to Independent after a free model attempt. Native `/model`, model cycling and extension calls through ordinary model APIs are rejected before mutation, even when selecting the current physical model:
+
+> Linked mode chooses the model for this workflow. Use /flow independent to choose a model.
+
+Rejected attempts leave the current model, workflow, branch records, defaults and model scope unchanged. With the custom [status footer](/plugins/pi-status-footer/) enabled, the configured `app.model.select` action instead opens the combined workflow/flow picker while Linked; no reserved native key is overwritten. Without that integration, use `/mode` or `/flow`.
+
+The guard is a maintained adapter around the host SDK's `AgentSession.setModel` and `cycleModel`, supporting SDK 1.2.0 and 1.4.0. A capture-only adapter around `_bindExtensionCore` identifies the actual session so blocked runs can call public `AgentSession.abort()` without the terminal UI's queue-clearing behavior. Accepted background results and drafts are preserved; blocked custom-message triggers cannot bypass the pause or start paid requests. Reload drains an already-entered model setter before the replacement runtime reconciles its state. It is not a public veto hook or a sandbox for arbitrary third-party code: direct in-process state writes are outside its boundary. Initial construction and restored sessions are reconciled separately. If the adapter or role-default provider is unavailable, Independent still works and Linked activation reports an error rather than claiming enforcement.
+
+Restoration keeps a missing or invalid Linked assignment **blocked**, not silently replaced with another model/provider or unlinked. Ordinary prompts and tool calls are held until recovery. Inspect `/flow status`, then select a valid `/flow linked <provider>` or explicitly use `/flow independent`; recovery commands remain available.
+
 ## Workflow and approvals
 
-The independent defaults are **work + auto**. `/mode` selects work, chat or plan; after an [explicit stock-key remap](/guides/keyboard/#resolve-the-two-stock-conflicts), Shift+Tab cycles them. Plan requires [pi-plan-mode](/plugins/pi-plan-mode/); without it the cycle is work → chat → work. Chat blocks calls not recognized as reads. Plan allows edits to its plan file and judges shell commands through its existing policy under either approval setting. These are best-effort guards, not a sandbox; hints, configured bypasses and shell classification have limits.
+The workflow/approval defaults are **work + auto**. `/mode` selects work, chat or plan; after an [explicit stock-key remap](/guides/keyboard/#resolve-the-two-stock-conflicts), Shift+Tab cycles them. Plan requires [pi-plan-mode](/plugins/pi-plan-mode/); without it the cycle is work → chat → work. Chat blocks calls not recognized as reads. Plan allows edits to its plan file and judges shell commands through its existing policy under either approval setting. These are best-effort guards, not a sandbox; hints, configured bypasses and shell classification have limits.
 
 `/approvals` selects auto or yolo; Alt+A toggles them independently, including in plan or exec. Auto uses the checks below. Yolo bypasses ordinary approvals but not deny rules, critical-removal protections or chat/plan guards. Legacy manual and accept-edits remain explicit compatibility values and are restored from older sessions; Alt+A selects auto from either. `/mode auto|yolo|manual|accept-edits` changes approvals only.
 
-A distinct-model handoff enters exec; ordinary same-model approval returns to work. Exec is not in the cycle: `/plan-exec` shows status and `/plan-exec stop` leaves it. The active branch restores both axes and legacy combined records. Without a UI, calls that would ask are blocked.
+In Independent, a distinct-model approved handoff enters Exec; ordinary same-model approval returns to Work. In Linked, approving the linked worker starts Exec **even if planner and worker are the same physical model**. Exec is never a model-picker choice or part of the workflow cycle: `/plan-exec` shows status/recovery and `/plan-exec stop` requests a stop. Linked completion and stop activate Work's assigned model before leaving Exec; an unavailable Work model leaves execution paused for recovery. The active branch restores flow, workflow and approvals, including legacy records. Without a UI, calls that would ask are blocked.
 
 Pi's stock Shift+Tab is reserved for `app.thinking.cycle`; current Pi **skips** the conflicting extension shortcut. Move the stock action, for example to `alt+t`, or choose a different `workflowShortcut`, then `/reload`. `/mode` remains available without a shortcut.
 
@@ -51,7 +89,9 @@ By default, a held call first returns an explanation to the agent rather than as
 
 The interactive dialog shows the call and why it was held. Its rows are **Allow once**, then, when rules can name the call, **Allow rule for this session**, **in this project** and **everywhere**, **Edit the rule...**, then **Block** and **Block with a message**, whose text goes to the agent with the refusal. The rule itself is in the question (`Rule: Bash(git push:*)`), not in the rows, which stay under 42 characters so phone clients read them. Fixed-rule holds, including downloaded code, offer only Allow once and the blocks. Esc blocks; `n` opens the message field; Ctrl+O expands long content. Bash is displayed as a command, file edits as a diff, and other tool arguments as JSON. RPC and forwarded subagent questions use a simpler presentation.
 
-- `/mode [work|chat|plan]` selects workflow; `/approvals [auto|yolo]` selects approvals. Without arguments each opens a picker.
+- `/mode [work|chat|plan]` selects workflow within the current operating mode. In Independent its picker also offers **Operating mode...**. In Linked it shows the current provider's workflow/model choices, **Change provider...** and **Use Independent mode**. Active Exec offers status/recovery, not a launch or workflow-cycle option.
+- `/approvals [auto|yolo]` selects approvals; without arguments it opens a picker. The footer's Approvals control opens this picker rather than toggling Yolo.
+- `/flow` selects the operating mode; see [flow commands](#independent-and-linked-operating-modes).
 - `/gate` or `/gate status` shows the mode, counts, classifier settings, project rules, permission rules and folder grant counts.
 - `/gate rules` lists the permission rules and folder grants by list and scope, and offers to remove or add one; `/gate rules list|add|remove ...` do the same with arguments. `/gate grants` is the same command.
 - `/gate on` switches to auto mode; `/gate off` to yolo mode.
@@ -164,4 +204,4 @@ When Jev is unavailable or returns an incomplete or invalid verdict, calls route
 
 The classifier can receive the active branch's stored approved-plan snapshot, capped at 12,000 characters, rather than the mutable plan file. The next user message expires it; a fresh approval can establish a new snapshot. It is context subordinate to current instructions and explicit rules, not blanket permission.
 
-Headless pi-subagents cancel approval dialogs and report a permission blocker to the parent; they never approve a gated action automatically. The `herdr:blocked` event marks an open dialog for a listening Herdr integration; without a listener it has no effect. Status footer shows workflow as a bold `WORK`, `CHAT`, `PLAN` or `EXEC` landmark and approvals separately, preserving the gate's status notice; it is not required. Badge hues depend on the theme, and the explanation and key hint stay subdued. See [Troubleshooting](/guides/troubleshooting/) and the [source and tests](https://github.com/justmytwospence/pi-plugins/tree/main/packages/pi-tool-gate) for exact bypasses and failure behavior.
+Headless pi-subagents cancel approval dialogs and report a permission blocker to the parent; they never approve a gated action automatically. The `herdr:blocked` event marks an open dialog for a listening Herdr integration; without a listener it has no effect. Status footer shows workflow as a bold `WORK`, `CHAT`, `PLAN` or `EXEC` landmark and approvals separately, preserving the gate's status notice; it is not required. Independent keeps model and workflow rows separate; Linked combines them into one provider/model/workflow row. The native footer can show a short Linked provider status when no custom footer claims that display. Badge hues depend on the theme, and the explanation and key hint stay subdued. See [Troubleshooting](/guides/troubleshooting/) and the [source and tests](https://github.com/justmytwospence/pi-plugins/tree/main/packages/pi-tool-gate) for exact bypasses and failure behavior.

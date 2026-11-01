@@ -1,4 +1,5 @@
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
+import type { FlowSnapshot, FlowState } from "./flow-contract.js";
 
 export const MAX_PENDING_IMPLEMENTATION_MODEL_IDENTIFIER_LENGTH = 512;
 
@@ -121,10 +122,49 @@ export function subagentRoleModel(
   return { provider: spec.provider, modelId: spec.modelId, ...(level ? { thinkingLevel: level } : {}) };
 }
 
-export type ImplementationSource = "map" | "default";
+export type ImplementationSource = "map" | "default" | "linked";
 export interface ImplementationChoice {
   spec: ModelSpec;
   source: ImplementationSource;
+  intent?: "independent" | "linked-execution";
+  flow?: FlowState;
+}
+
+/** The selected flow's worker only; same-model execution is still an explicit linked handoff. */
+export function linkedImplementationChoice(
+  snapshot: FlowSnapshot | undefined,
+  available: readonly AvailableImplementationModel[],
+): ImplementationChoice | undefined {
+  if (snapshot?.operatingMode !== "linked" || !snapshot.ready || snapshot.blocked || !snapshot.guardAvailable) {
+    return undefined;
+  }
+  const flow = snapshot.selectedFlow;
+  const worker = flow?.roles.exec;
+  if (
+    !worker ||
+    worker.provider !== flow.provider ||
+    !available.some((model) => model.provider === worker.provider && model.id === worker.modelId)
+  ) {
+    return undefined;
+  }
+  const thinkingLevel = (MODEL_SPEC_THINKING_LEVELS as readonly unknown[]).includes(worker.suggestedThinking)
+    ? (worker.suggestedThinking as ModelSpecThinkingLevel)
+    : undefined;
+  return {
+    spec: {
+      provider: worker.provider,
+      modelId: worker.modelId,
+      ...(thinkingLevel ? { thinkingLevel } : {}),
+    },
+    source: "linked",
+    intent: "linked-execution",
+    flow: structuredClone({
+      version: snapshot.version,
+      operatingMode: snapshot.operatingMode,
+      selectedFlow: flow,
+      revision: snapshot.revision,
+    }),
+  };
 }
 
 type ModelFamily = "astra" | "sol" | "terra" | "fable" | "opus" | "sonnet";

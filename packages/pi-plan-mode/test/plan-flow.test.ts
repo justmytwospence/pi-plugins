@@ -799,6 +799,11 @@ async function freshHandoff(author = "M") {
   assert.ok(!replacement.mock.entries.some((entry) => entry.customType === "plan-mode:exec"));
   const event = async (name: string) => {
     for (const handler of replacement.mock.events.get(name) ?? []) await handler({}, replacement.context.ctx);
+    // The real SDK awaits resource discovery after every provider's startup,
+    // before the fresh-session callback can send its implementation prompt.
+    if (name === "session_start")
+      for (const handler of replacement.mock.events.get("resources_discover") ?? [])
+        await handler({}, replacement.context.ctx);
   };
   const handoff = child;
   const callback = (

@@ -6,7 +6,7 @@
 // handleMouse (fullscreen mode enables mouse tracking; in normal mode only the keyboard applies).
 //
 // Ported from pi-cc-extensions (MIT, minuque).
-import type { ExtensionAPI, ExtensionCommandContext, Theme } from "@earendil-works/pi-coding-agent";
+import type { BuildSystemPromptOptions, ExtensionAPI, ExtensionCommandContext, ExtensionContext, Theme } from "@earendil-works/pi-coding-agent";
 import { getMarkdownTheme } from "@earendil-works/pi-coding-agent";
 import { Key, Markdown, matchesKey, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import type { TUI, TuiMouseEvent, TuiMouseEventResult } from "@earendil-works/pi-tui";
@@ -20,6 +20,9 @@ import {
   normalizePreviewText,
   type PreviewKey,
 } from "./breakdown.ts";
+
+import { queryContextMetadata } from "./context-metadata.ts";
+import { FOOTER_ACTIONS_CHANNEL, type FooterActionsRequest } from "./footer-actions.ts";
 
 export * from "./breakdown.ts";
 
@@ -274,40 +277,128 @@ function showUsageDialog(
   );
 }
 
+type ContextInspection = {
+  context: ExtensionContext;
+  readOptions(): Partial<BuildSystemPromptOptions> | undefined;
+  current(): boolean;
+};
+
 export default function contextExtension(pi: ExtensionAPI): void {
+  let generation = 0;
+  let active: { ctx: ExtensionContext; id: string; busy: boolean } | undefined;
+  let unsubscribe: (() => void) | undefined;
+
+  const stop = () => {
+    generation++;
+    active = undefined;
+    unsubscribe?.();
+    unsubscribe = undefined;
+  };
+  const guard = (ctx: ExtensionContext) => {
+    const expected = generation;
+    const state = active;
+    const manager = ctx.sessionManager;
+    const id = manager.getSessionId();
+    return () => {
+      try {
+        return generation === expected && active === state && ctx.sessionManager === manager &&
+          manager.getSessionId() === id && (!state || state.ctx.sessionManager === manager && state.id === id &&
+            state.ctx.hasUI && state.ctx.mode === "tui");
+      } catch { return false; }
+    };
+  };
+
+  // The command supplies its public SDK reader; footer actions supply only the narrow optional
+  // bridge reader. Neither path dispatches a command or reconstructs prompt metadata from text.
+  async function showContext({ context: ctx, readOptions, current }: ContextInspection, initialPreview?: "skills"): Promise<void> {
+    if (!current()) return;
+    const options = readOptions();
+    if (!options || !current()) return;
+    const usage = ctx.getContextUsage();
+    const contextWindow = usage?.contextWindow ?? ctx.model?.contextWindow ?? 0;
+    const breakdown = collectContextBreakdown({
+      systemPrompt: ctx.getSystemPrompt(),
+      options,
+      tools: pi.getAllTools(),
+      entries: ctx.sessionManager.buildContextEntries(),
+    });
+    const report = assembleReport(breakdown, usage, contextWindow);
+    if (!current()) return;
+
+    if (!ctx.hasUI || ctx.mode !== "tui") {
+      ctx.ui.notify(formatReport(report), "info");
+      return;
+    }
+
+    const previews: Preview[] = [
+      { key: "systemPrompt", label: "System prompt", title: "System Prompt", content: breakdown.previews.systemPrompt },
+      { key: "memoryFiles", label: "Memory", title: "Memory Files", content: breakdown.previews.memoryFiles },
+      { key: "skills", label: "Skills", title: "Skills", content: breakdown.previews.skills },
+      { key: "tools", label: "Tools definition", title: "Tool Definitions", content: breakdown.previews.tools },
+      { key: "toolResults", label: "Tool results", title: "Tool Results", content: breakdown.previews.toolResults },
+      { key: "contextFiles", label: "Context", title: "Conversation Context", content: breakdown.previews.contextFiles },
+    ];
+    const selected = { index: initialPreview ? previews.findIndex((preview) => preview.key === initialPreview) : 0 };
+    if (initialPreview) {
+      const preview = previews[selected.index]!;
+      await showTextPreview(ctx, preview.title, preview.content);
+      if (!current()) return;
+    }
+    while (current()) {
+      const key = await showUsageDialog(ctx, report, previews, selected);
+      if (!current() || !key) return;
+      const preview = previews.find((candidate) => candidate.key === key);
+      if (preview) {
+        await showTextPreview(ctx, preview.title, preview.content);
+        if (!current()) return;
+      }
+    }
+  }
+
   pi.registerCommand("context", {
     description: "Show how the context window is used, with previews of each part",
     handler: async (_args, ctx) => {
-      const usage = ctx.getContextUsage();
-      const contextWindow = usage?.contextWindow ?? ctx.model?.contextWindow ?? 0;
-      const breakdown = collectContextBreakdown({
-        systemPrompt: ctx.getSystemPrompt(),
-        options: ctx.getSystemPromptOptions?.() ?? {},
-        tools: pi.getAllTools(),
-        entries: ctx.sessionManager.buildContextEntries(),
-      });
-      const report = assembleReport(breakdown, usage, contextWindow);
-
-      if (!ctx.hasUI || ctx.mode !== "tui") {
-        ctx.ui.notify(formatReport(report), "info");
-        return;
-      }
-
-      const previews: Preview[] = [
-        { key: "systemPrompt", label: "System prompt", title: "System Prompt", content: breakdown.previews.systemPrompt },
-        { key: "memoryFiles", label: "Memory", title: "Memory Files", content: breakdown.previews.memoryFiles },
-        { key: "skills", label: "Skills", title: "Skills", content: breakdown.previews.skills },
-        { key: "tools", label: "Tools definition", title: "Tool Definitions", content: breakdown.previews.tools },
-        { key: "toolResults", label: "Tool results", title: "Tool Results", content: breakdown.previews.toolResults },
-        { key: "contextFiles", label: "Context", title: "Conversation Context", content: breakdown.previews.contextFiles },
-      ];
-      const selected = { index: 0 };
-      while (true) {
-        const key = await showUsageDialog(ctx, report, previews, selected);
-        if (!key) return;
-        const preview = previews.find((candidate) => candidate.key === key);
-        if (preview) await showTextPreview(ctx, preview.title, preview.content);
-      }
+      await showContext({ context: ctx, readOptions: () => ctx.getSystemPromptOptions?.() ?? {}, current: guard(ctx) });
     },
   });
+
+  pi.on("session_start", (_event, ctx) => {
+    stop();
+    if (!ctx.hasUI || ctx.mode !== "tui") return;
+    const state = { ctx, id: ctx.sessionManager.getSessionId(), busy: false };
+    active = state;
+    unsubscribe = pi.events.on(FOOTER_ACTIONS_CHANNEL, (data) => {
+      const request = data as FooterActionsRequest | undefined;
+      if (request?.version !== 1 || !request.actions || typeof request.actions !== "object" || Array.isArray(request.actions)) return;
+      try {
+        const current = guard(ctx);
+        if (active !== state || !current()) return;
+        // Discovery only: do not read prompt options, tools, history or usage until activation.
+        const read = queryContextMetadata(pi.events, ctx.sessionManager);
+        if (typeof read !== "function" || !current()) return;
+        const open = async (initialPreview?: "skills") => {
+          if (!current() || state.busy) return;
+          state.busy = true;
+          try {
+            await showContext({
+              context: ctx, current,
+              readOptions: () => {
+                const options = read();
+                // An absent/stale bridge must never become an apparently accurate empty report.
+                return options && typeof options.cwd === "string" ? options : undefined;
+              },
+            }, initialPreview);
+          } catch {
+            if (current()) ctx.ui.notify("Context metadata unavailable; use /context.", "warning");
+          } finally {
+            state.busy = false;
+          }
+        };
+        request.actions["context.open"] = { label: "Context usage", key: "/context", run: () => open() };
+        request.actions["context.skills"] = { label: "Skills in context", run: () => open("skills") };
+      } catch { /* A stale context or absent bridge publishes no controls. */ }
+    });
+  });
+  pi.on("session_tree", () => { generation++; });
+  pi.on("session_shutdown", stop);
 }

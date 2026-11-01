@@ -10,6 +10,7 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { isRecord, loadConfig } from "./config.ts";
 import { DEFAULT_EFFORT_UPDATES, type EffortUpdatesConfig, emptyState, restoreState, rewritePayload } from "./effort-updates.ts";
+import { FOOTER_ACTIONS_CHANNEL, type FooterActionsRequest } from "./footer-actions.ts";
 import { type ClassifierQuestion, type JevConfig, type JevOutcome, askJev, bool, choice } from "./jev.ts";
 import {
   DEFAULT_LIMITS,
@@ -248,6 +249,8 @@ export default function autoEffort(pi: ExtensionAPI, deps: AutoEffortDeps = {}) 
     return t;
   };
   let latestCtx: ExtensionContext | undefined;
+  // Only session lifecycle hooks publish a ready context for optional footer controls.
+  let footerCtx: ExtensionContext | undefined;
   const poller = new CodexPoller({
     fetch: deps.fetch ?? ((...args) => fetch(...args)),
     now,
@@ -364,12 +367,14 @@ export default function autoEffort(pi: ExtensionAPI, deps: AutoEffortDeps = {}) 
     config = loadConfig("auto-effort", DEFAULT_CONFIG, ctx.cwd);
     restoreFromBranch(ctx);
     pollCodex(ctx);
+    footerCtx = ctx;
   });
 
   // /tree moved the leaf: the branch below it is the history now, with its own last state.
   pi.on("session_tree", (_event, ctx) => {
     latestCtx = ctx;
     restoreFromBranch(ctx);
+    if (footerCtx) footerCtx = ctx;
   });
 
   // On models that take configuration_update items, any effort change (auto, manual, or another
@@ -393,6 +398,7 @@ export default function autoEffort(pi: ExtensionAPI, deps: AutoEffortDeps = {}) 
   pi.on("session_shutdown", () => {
     generation++;
     latestCtx = undefined;
+    footerCtx = undefined;
     ownLevel = undefined;
   });
 
@@ -520,6 +526,37 @@ export default function autoEffort(pi: ExtensionAPI, deps: AutoEffortDeps = {}) 
     await settle(ctx, outcome, judgment(outcome, false), { phase: "run", turn: event.turnIndex });
   });
 
+  const setSessionOn = (enabled: boolean, ctx: ExtensionContext) => {
+    sessionOn = enabled;
+    // An assessment in flight must not apply after the gate was switched.
+    generation++;
+    if (!sessionOn) {
+      if (pi.getThinkingLevel() !== manualLevel) setLevel(manualLevel);
+      if (pressure.tier !== "none") {
+        pressure = NO_PRESSURE;
+        emitPressure(ctx.model?.provider);
+      }
+    }
+    status(ctx);
+    ctx.ui.notify(`auto-effort ${enabled ? "on" : "off"} for this session${sessionOn ? "" : `; back to ${pi.getThinkingLevel()}`}`, "info");
+  };
+
+  pi.events.on(FOOTER_ACTIONS_CHANNEL, (data: unknown) => {
+    const ctx = footerCtx;
+    if (!ctx?.hasUI || pinned || !isRecord(data) || data.version !== 1 || !isRecord(data.actions)) return;
+    const actions = data.actions as FooterActionsRequest["actions"];
+    const mine = generation;
+    const sessionId = ctx.sessionManager.getSessionId();
+    actions["effort.toggle"] = {
+      label: "Toggle auto-effort",
+      active: active(),
+      run: () => {
+        if (footerCtx !== ctx || mine !== generation || !ctx.hasUI || ctx.sessionManager.getSessionId() !== sessionId) return;
+        setSessionOn(!active(), ctx);
+      },
+    };
+  });
+
   const OPTIONS = ["status", "limits", "on", "off", "bounds ceiling", "bounds free"];
 
   pi.registerCommand("auto-effort", {
@@ -528,18 +565,7 @@ export default function autoEffort(pi: ExtensionAPI, deps: AutoEffortDeps = {}) 
     handler: async (args, ctx) => {
       const [arg = "", value] = args.trim().split(/\s+/u);
       if (arg === "on" || arg === "off") {
-        sessionOn = arg === "on";
-        // An assessment in flight must not apply after the gate was switched.
-        generation++;
-        if (!sessionOn) {
-          if (pi.getThinkingLevel() !== manualLevel) setLevel(manualLevel);
-          if (pressure.tier !== "none") {
-            pressure = NO_PRESSURE;
-            emitPressure(ctx.model?.provider);
-          }
-        }
-        status(ctx);
-        ctx.ui.notify(`auto-effort ${arg} for this session${sessionOn ? "" : `; back to ${pi.getThinkingLevel()}`}`, "info");
+        setSessionOn(arg === "on", ctx);
         return;
       }
       if (arg === "bounds") {

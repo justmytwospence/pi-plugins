@@ -77,6 +77,25 @@ function updateHeaderSpacers(ctx: any, hidden: boolean): void {
 	}
 }
 
+/**
+ * The live host, not the optional splash mount. Manager identity keeps controls
+ * out of another session, including when two managers have the same session ID.
+ */
+export function getInteractiveModeForManager(manager: object): any | undefined {
+	const patch = patchRegistry.get<EarlyHeaderPatch>(EARLY_STARTUP_HEADER_PATCH);
+	if (!patch?.active) return;
+	let found: any;
+	for (const { mode } of patch.modes) {
+		try {
+			if ((mode.session?.sessionManager ?? mode.sessionManager) !== manager) continue;
+			// Ambiguous ownership is not a safe target for a native control.
+			if (found && found !== mode) return;
+			found = mode;
+		} catch { /* A disposed runtime is no longer a host. */ }
+	}
+	return found;
+}
+
 /** Swap the native header on insertion, before Pi's first paint. */
 export function installEarlyStartupHeader(): void {
 	const prototype = (InteractiveMode as any)?.prototype;

@@ -36,6 +36,8 @@ import {
 import { EXEC_ENTRY, type ExecState, registerExec } from "./exec.js";
 import { editExternally, externalEditorCommand, prepareEditor } from "./external-editor.js";
 import { discoverFamily, FAMILY_ENTRY, type FamilyMembership } from "./family-contract.js";
+import { FLOW_ENTRY, type FlowState, queryFlow, requestExecution } from "./flow-contract.js";
+import { discoverFreshHandoff } from "./fresh-handoff.js";
 import { directImplementationBrief, HANDOFF_MESSAGE_TYPE, implementationBrief } from "./handoff.js";
 import { HERDR_BLOCKED_CHANNEL, holdBlocked, holdWorking, isOwnEmit } from "./herdr-blocked.js";
 import {
@@ -43,6 +45,7 @@ import {
   formatModelSpec,
   type ImplementationContextChoice,
   implementationChoices,
+  linkedImplementationChoice,
   type ModelSpec,
   parseModelSpec,
   sameModel,
@@ -64,7 +67,7 @@ import {
 import { buildMcpCatalog, readConfiguredMcpServers } from "./mcp-tools.js";
 import { modelCatalog, normalizeEffort } from "./model-catalog.js";
 import { exportPlanToFile } from "./plan-export.js";
-import { plansDirectoryPath, planTitle, writePlanFile } from "./plan-file.js";
+import { plansDirectoryPath, planTitle, readPlan, writePlanFile } from "./plan-file.js";
 import { expandHome, runPlanCompleteHook } from "./plan-hook.js";
 import { consultantAccess, type OtherTool, otherTools, otherToolsNode, resolveAccess } from "./planner/access.js";
 import { type PlannerAccessConfig, PlannerAgent } from "./planner/agent.js";
@@ -612,11 +615,21 @@ export default async function plan(pi: ExtensionAPI, dependencies: PlanDependenc
 
   /** Operations owned by this runtime and branch, consumed exactly once. */
   let pendingOperation:
-    | { kind: "compact-here"; approval: Approval; epoch: number; workflowRevision: number }
-    | { kind: "handoff"; approval: Approval; who: HandoffTarget | undefined; epoch: number; workflowRevision: number }
+    | { kind: "compact-here"; approval: Approval; epoch: number; workflowRevision: number; flow?: FlowState }
+    | {
+        kind: "handoff";
+        /** Survives settle consumption, but never a new review/approval or destination. */
+        freshCurrent?: () => boolean;
+        approval: Approval;
+        who: HandoffTarget | undefined;
+        epoch: number;
+        workflowRevision: number;
+        flow?: FlowState;
+      }
     | undefined;
+  let freshApproval: Approval | undefined;
   let pendingCompaction:
-    | { marker: string; epoch: number; planFile: string; brief: string; overridden: boolean }
+    | { marker: string; epoch: number; planFile: string; brief: string; overridden: boolean; isCurrent?: () => boolean }
     | undefined;
 
   /** The session's model with its current effort, including off. */
@@ -632,6 +645,7 @@ export default async function plan(pi: ExtensionAPI, dependencies: PlanDependenc
 
   /** Stop old work without saving into the newly selected branch. */
   const clearBranch = () => {
+    freshApproval = undefined;
     pendingOperation = undefined;
     pendingCompaction = undefined;
     branchEpoch++;
@@ -659,8 +673,6 @@ export default async function plan(pi: ExtensionAPI, dependencies: PlanDependenc
     mainAgent.reset(ctx.sessionManager.getBranch());
     await loadSettings();
     if (epoch !== branchEpoch) return;
-    await applyPendingRuntime(ctx);
-    if (epoch !== branchEpoch) return;
     restoreRun(ctx);
     updateStatus();
     activity.reset();
@@ -673,6 +685,15 @@ export default async function plan(pi: ExtensionAPI, dependencies: PlanDependenc
     return sessionReady;
   };
   pi.on("session_start", (_event, ctx) => initializeSession(ctx));
+  // Every provider's session_start (including gate, role defaults, Exec and inline
+  // restoration) must finish before consuming a fresh child's one-shot bootstrap.
+  // Discovery is awaited by the host before withSession can send its first prompt.
+  pi.on("resources_discover", async (_event, ctx) => {
+    const epoch = branchEpoch;
+    await sessionReady;
+    if (!runtimeActive || epoch !== branchEpoch) return;
+    await applyPendingRuntime(ctx);
+  });
   pi.on("session_tree", (_event, ctx) => initializeSession(ctx));
   pi.on("session_shutdown", () => {
     runtimeActive = false;
@@ -706,6 +727,36 @@ export default async function plan(pi: ExtensionAPI, dependencies: PlanDependenc
     },
     ...(dependencies.createSession ? { createSession: dependencies.createSession } : {}),
     restoreModel: (ctx, spec) => applyRuntime(ctx, spec),
+    finishLinked: async (ctx, completion, commitEnd) => {
+      const epoch = branchEpoch;
+      const execution = exec.state;
+      const linked = execution?.linkedFlow;
+      const flow = queryFlow(pi.events);
+      if (
+        !linked ||
+        !flow ||
+        flow.operatingMode !== "linked" ||
+        JSON.stringify(linked.selectedFlow) !== JSON.stringify(flow.selectedFlow)
+      )
+        return false;
+      const result = await requestExecution(pi.events, {
+        phase: completion.completion === "stopped" ? "stop" : "finish",
+        expectedRevision: flow.revision,
+        planFile: execution?.planFile ?? completion.planFile ?? "",
+        commit: () => {
+          if (
+            !runtimeActive ||
+            epoch !== branchEpoch ||
+            ctx.signal?.aborted ||
+            exec.state?.negotiation?.executionId !== execution?.negotiation?.executionId
+          )
+            throw new Error("Execution completion expired.");
+          commitEnd();
+          if (exec.active) throw new Error("Execution completion expired.");
+        },
+      });
+      return result?.ok === true;
+    },
   });
 
   // Inline plan mode in your own conversation (Claude Code's): /plan, Shift+Tab, enter_plan_mode.
@@ -713,10 +764,46 @@ export default async function plan(pi: ExtensionAPI, dependencies: PlanDependenc
     safeSubcommands: () => settings.safeSubcommands,
     plansDirectory: () => settings.plansDirectory,
     approved: (plan, ctx) => hook(ctx, { id: "plan", name: "plan", revision: 1, plan, spec: undefined }),
-    implementationChoices: (ctx) => {
+    implementationChoices: (ctx, approvedPlan) => {
       const planning = sessionSpecOf(ctx);
       if (!planning) return undefined;
       const catalog = modelCatalog(ctx, "available");
+      const flow = queryFlow(pi.events);
+      if (flow?.operatingMode === "linked") {
+        const worker = linkedImplementationChoice(flow, catalog.available);
+        return {
+          planning,
+          planningName: catalog.name(planning),
+          intent: "linked-execution" as const,
+          flow: structuredClone(flow),
+          ...(worker &&
+          discoverFreshHandoff(pi.events, {
+            sessionManager: ctx.sessionManager,
+            approvedPlan,
+            // Discovery is observational, not an approval or retained scheduler.
+            isCurrent: () => false,
+          })
+            ? {
+                freshTarget: {
+                  target: normalizedSpec(
+                    ctx,
+                    worker.spec,
+                    worker.spec.thinkingLevel ?? settings.defaultImplementationThinkingLevel ?? "medium",
+                  ),
+                  targetName: catalog.name(worker.spec),
+                },
+              }
+            : {}),
+          targets: worker
+            ? [
+                {
+                  target: normalizedSpec(ctx, worker.spec, sessionSpecOf(ctx)?.thinkingLevel),
+                  targetName: catalog.name(worker.spec),
+                },
+              ]
+            : [],
+        };
+      }
       return {
         planning,
         planningName: catalog.name(planning),
@@ -728,11 +815,52 @@ export default async function plan(pi: ExtensionAPI, dependencies: PlanDependenc
         }).map(({ spec }) => ({ target: spec, targetName: catalog.name(spec) })),
       };
     },
-    handoff: (approval, who) => {
-      pendingOperation = { kind: "handoff", approval, who, epoch: branchEpoch, workflowRevision: inline.revision };
+    handoff: (approval, who, ctx) => {
+      const approved = { ...approval };
+      const target = who ? structuredClone(who) : undefined;
+      const epoch = branchEpoch;
+      const workflowRevision = inline.revision;
+      const manager = ctx.sessionManager;
+      const sessionId = manager.getSessionId?.();
+      const anchor = manager.getLeafId?.();
+      // SDK ctx.signal is lazy: retain the approving run's signal, not a later turn's.
+      const approvingSignal = ctx.signal;
+      freshApproval = target?.context === "clear" ? approved : undefined;
+      pendingOperation = {
+        kind: "handoff",
+        approval: approved,
+        who: target,
+        epoch,
+        workflowRevision,
+        flow: queryFlow(pi.events),
+        ...(target?.context === "clear"
+          ? {
+              freshCurrent: () =>
+                freshApproval === approved &&
+                runtimeActive &&
+                epoch === branchEpoch &&
+                workflowRevision === inline.revision &&
+                inline.active &&
+                inline.planFile === approved.planFile &&
+                flowCurrent(target.flow) &&
+                readPlan(approved.planFile) === approved.plan &&
+                ctx.sessionManager === manager &&
+                manager.getSessionId() === sessionId &&
+                (!anchor || manager.getBranch().some((entry) => entry.id === anchor)) &&
+                !approvingSignal?.aborted,
+            }
+          : {}),
+      };
     },
     compactHere: (approval) => {
-      pendingOperation = { kind: "compact-here", approval, epoch: branchEpoch, workflowRevision: inline.revision };
+      freshApproval = undefined;
+      pendingOperation = {
+        kind: "compact-here",
+        approval,
+        epoch: branchEpoch,
+        workflowRevision: inline.revision,
+        flow: queryFlow(pi.events),
+      };
     },
     implementHere: (ctx, approval) => {
       applyDirectEffort(ctx, approval.thinkingLevel);
@@ -747,16 +875,19 @@ export default async function plan(pi: ExtensionAPI, dependencies: PlanDependenc
   pi.on("agent_before_settle", async (event, ctx) => {
     const operation = pendingOperation;
     pendingOperation = undefined;
+    const flow = queryFlow(pi.events);
     if (
       !operation ||
       operation.epoch !== branchEpoch ||
       !runtimeActive ||
-      operation.workflowRevision !== inline.revision
+      operation.workflowRevision !== inline.revision ||
+      operation.flow?.revision !== flow?.revision ||
+      operation.flow?.operatingMode !== flow?.operatingMode
     )
       return undefined;
-    const recover = () => {
+    const recover = async () => {
       if (runtimeActive && operation.epoch === branchEpoch && operation.workflowRevision === inline.revision)
-        inline.enter(ctx, operation.approval.planFile);
+        await inline.enter(ctx, operation.approval.planFile);
     };
     if (event.outcome !== "completed" || ctx.signal?.aborted) {
       if (ctx.hasUI) {
@@ -765,7 +896,7 @@ export default async function plan(pi: ExtensionAPI, dependencies: PlanDependenc
           "warning",
         );
       }
-      recover();
+      await recover();
       return undefined;
     }
     const { approval } = operation;
@@ -791,9 +922,9 @@ export default async function plan(pi: ExtensionAPI, dependencies: PlanDependenc
       };
     }
     const { who } = operation;
-    if (!who || sameModel(who.planning, who.target)) {
+    if (!who || (who.intent !== "linked-execution" && sameModel(who.planning, who.target))) {
       ctx.ui.notify("The handoff needs a distinct model. Run /plan and approve the plan again.", "warning");
-      recover();
+      await recover();
       return undefined;
     }
     const target = normalizedSpec(
@@ -805,18 +936,21 @@ export default async function plan(pi: ExtensionAPI, dependencies: PlanDependenc
       runtimeActive &&
       operation.epoch === branchEpoch &&
       operation.workflowRevision === inline.revision &&
+      flowCurrent(who.flow) &&
       !ctx.signal?.aborted;
-    if (!(await applyRuntime(ctx, target, live)) || !live()) {
-      if (live()) recover();
+    if (!live()) return undefined;
+    if (who.intent !== "linked-execution" && (!(await applyRuntime(ctx, target, live)) || !live())) {
+      if (live()) await recover();
       return undefined;
     }
     let sessionFile: string | undefined;
     try {
-      sessionFile = writeSeededSession(
-        ctx.cwd,
-        plannerSessionDir(),
-        ctx.sessionManager.buildSessionProjection().messages,
-      );
+      if (who.context !== "clear")
+        sessionFile = writeSeededSession(
+          ctx.cwd,
+          plannerSessionDir(),
+          ctx.sessionManager.buildSessionProjection().messages,
+        );
     } catch (error: unknown) {
       if (ctx.hasUI) {
         ctx.ui.notify(
@@ -836,12 +970,80 @@ export default async function plan(pi: ExtensionAPI, dependencies: PlanDependenc
       ...(planner ? { planner } : {}),
       restore: formatModelSpec(who.planning),
       restoreName: who.planningName,
+      ...(who.intent === "linked-execution" && who.flow ? { linkedFlow: structuredClone(who.flow) } : {}),
       asks: 0,
       costUsd: 0,
     };
-    exec.begin(ctx, execState, { record: false });
+    if (who.context === "clear") {
+      const current = operation.freshCurrent;
+      if (who.intent !== "linked-execution" || !current?.()) return undefined;
+      const schedule = discoverFreshHandoff(pi.events, {
+        sessionManager: ctx.sessionManager,
+        approvedPlan: { planFile: approval.planFile, plan: approval.plan },
+        isCurrent: current,
+      });
+      // Acceptance is synchronous. Never await waitForIdle from this awaited settle hook.
+      if (
+        !schedule?.(async (replace) => {
+          if (!current()) return;
+          const consultant: ConsultantSeed = {
+            spec: formatModelSpec(who.planning),
+            name: who.planningName,
+            messages: ctx.sessionManager.buildSessionProjection().messages,
+          };
+          const brief = implementationBrief({
+            plan: approval.plan,
+            planFile: approval.planFile,
+            context: "fresh",
+            planner: consultant.name,
+            edited: approval.edited,
+          });
+          await implementFresh(
+            { sessionManager: ctx.sessionManager, ui: ctx.ui, waitForIdle: async () => {}, newSession: replace },
+            target,
+            execState,
+            brief,
+            consultant,
+            current,
+          );
+          if (freshApproval === approval) freshApproval = undefined;
+        }) &&
+        current()
+      ) {
+        freshApproval = undefined;
+        ctx.ui.notify(
+          "Fresh handoff unavailable. Stay in Plan; use /planners to approve a fresh conversation.",
+          "warning",
+        );
+      }
+      return undefined;
+    }
+    if (who.intent === "linked-execution") {
+      if (
+        !who.flow ||
+        !(await applyRuntime(ctx, target, live, {
+          flow: who.flow,
+          planFile: approval.planFile,
+          commit: () => {
+            inline.commitExecution(ctx);
+            exec.begin(ctx, execState, { record: false });
+          },
+        }))
+      )
+        return undefined;
+    } else exec.begin(ctx, execState, { record: false });
     return {
       entries: [
+        ...(who.context === "compact"
+          ? [
+              {
+                type: "compaction" as const,
+                summary: "The approved implementation plan follows.",
+                firstKeptEntryId: null,
+                details: { planMode: { direct: approval.planFile } },
+              },
+            ]
+          : []),
         { type: "custom" as const, customType: EXEC_ENTRY, data: execState },
         {
           type: "custom_message" as const,
@@ -881,7 +1083,13 @@ export default async function plan(pi: ExtensionAPI, dependencies: PlanDependenc
   pi.on("session_before_compact", (event, ctx) => {
     const pending = pendingCompaction;
     if (!pending || event.customInstructions !== pending.marker) return;
-    if (!runtimeActive || pending.epoch !== branchEpoch || event.signal.aborted || pending.overridden) {
+    if (
+      !runtimeActive ||
+      pending.epoch !== branchEpoch ||
+      event.signal.aborted ||
+      pending.overridden ||
+      pending.isCurrent?.() === false
+    ) {
       pendingCompaction = undefined;
       if (runtimeActive && pending.epoch === branchEpoch)
         ctx.ui.notify("Plan compaction was cancelled; implementation did not start.", "warning");
@@ -921,7 +1129,7 @@ export default async function plan(pi: ExtensionAPI, dependencies: PlanDependenc
         return;
       }
       const task = args.trim();
-      if (!inline.active) inline.enter(ctx);
+      if (!inline.active) await inline.enter(ctx);
       else if (!task && ctx.hasUI) {
         ctx.ui.notify(`Plan mode is on. The plan file is ${inline.planFile ?? "not chosen yet"}.`, "info");
       }
@@ -970,7 +1178,7 @@ export default async function plan(pi: ExtensionAPI, dependencies: PlanDependenc
         await initialized;
         await sessionReady;
         if (!runtimeActive || epoch !== branchEpoch) return;
-        inline.toggle(ctx);
+        await inline.toggle(ctx);
       },
     });
   }
@@ -1716,33 +1924,45 @@ export default async function plan(pi: ExtensionAPI, dependencies: PlanDependenc
       const implementPage = (first: PlanSource) => {
         let author = first;
         const ready = sources;
-        let mode: "here" | "handoff" = "here";
+        const flow = queryFlow(pi.events);
+        const linked = flow?.operatingMode === "linked";
+        const linkedFlow = linked ? structuredClone(flow) : undefined;
+        const worker = linkedImplementationChoice(flow, implementationCatalog.available);
+        let mode: "here" | "handoff" = linked ? "handoff" : "here";
+        let context: ImplementationContextChoice | "compact" = configuredImplementationContext(settings);
+        let effortTouched = false;
         const efforts = new Map<string, ModelSpec>();
         const choices = () =>
-          implementationChoices({
-            planModel: author.spec ?? sessionSpec,
-            map: settings.implementationModelMap,
-            available: implementationCatalog.available,
-          })
-            .map(({ spec }) => spec)
-            .filter((spec) => !sessionSpec || !sameModel(spec, sessionSpec));
+          linked
+            ? worker
+              ? [worker.spec]
+              : []
+            : implementationChoices({
+                planModel: author.spec ?? sessionSpec,
+                map: settings.implementationModelMap,
+                available: implementationCatalog.available,
+              })
+                .map(({ spec }) => spec)
+                .filter((spec) => !sessionSpec || !sameModel(spec, sessionSpec));
         const remembered = (spec: ModelSpec, direct = false) =>
           efforts.get(formatModelKey(spec)) ??
           normalizedSpec(
             ctx,
             spec,
-            direct ? sessionLevel : (spec.thinkingLevel ?? settings.defaultImplementationThinkingLevel ?? "medium"),
+            direct || (linked && context !== "clear")
+              ? sessionLevel
+              : (spec.thinkingLevel ?? settings.defaultImplementationThinkingLevel ?? "medium"),
           );
         const here = sessionSpec ?? firstPlanner;
-        let target = remembered(here, true);
+        let target = remembered(worker?.spec ?? here, !linked);
         const remember = () => efforts.set(formatModelKey(target), target);
         const resetTarget = () => {
           remember();
           const offered = choices();
+          if (!offered.length && linked) return;
           if (!offered.length) mode = "here";
           target = remembered(mode === "here" ? here : (offered[0] as ModelSpec), mode === "here");
         };
-        let context: ImplementationContextChoice = configuredImplementationContext(settings);
         const optionRows: OptionRow[] = [
           {
             id: "plan",
@@ -1766,22 +1986,24 @@ export default async function plan(pi: ExtensionAPI, dependencies: PlanDependenc
               mode = mode === "here" ? "handoff" : "here";
               resetTarget();
             },
-            hidden: () => choices().length === 0,
+            hidden: () => linked || choices().length === 0,
             description: "Implement normally in this conversation, or hand off to a configured model.",
           },
           {
             id: "model",
             label: "Model",
-            value: () => implementationCatalog.name(target),
+            value: () => (linked && !worker ? "unavailable" : implementationCatalog.name(target)),
             cycle: (direction) => {
-              if (mode === "here") return;
+              if (linked || mode === "here") return;
               remember();
               const offered = choices();
               const index = offered.findIndex((spec) => sameModel(spec, target));
               const next = offered[(index + direction + offered.length) % offered.length];
               if (next) target = remembered(next);
             },
-            description: "The model that implements; handoffs use only the plan author's configured targets.",
+            description: linked
+              ? "Execute with linked worker. Use /flow independent before choosing a different implementation model."
+              : "The model that implements; handoffs use only the plan author's configured targets.",
           },
           {
             id: "effort",
@@ -1797,6 +2019,7 @@ export default async function plan(pi: ExtensionAPI, dependencies: PlanDependenc
               if (levels.length) {
                 const index = Math.max(0, levels.indexOf(target.thinkingLevel ?? sessionLevel));
                 target = { ...target, thinkingLevel: levels[(index + direction + levels.length) % levels.length] };
+                effortTouched = true;
               }
             },
             description: "How hard the implementing model thinks.",
@@ -1805,17 +2028,38 @@ export default async function plan(pi: ExtensionAPI, dependencies: PlanDependenc
             id: "context",
             label: "Context",
             value: () =>
-              mode === "here"
-                ? context === "clear"
-                  ? "compact to plan (same session)"
-                  : "keep conversation"
-                : context === "clear"
-                  ? "fresh session with only the plan"
-                  : "this conversation, plus the plan",
+              context === "compact"
+                ? "compact to plan (same session)"
+                : mode === "here"
+                  ? context === "clear"
+                    ? "compact to plan (same session)"
+                    : "keep conversation"
+                  : context === "clear"
+                    ? "fresh session with only the plan"
+                    : "this conversation, plus the plan",
             cycle: () => {
-              context = context === "clear" ? "keep" : "clear";
+              context = linked
+                ? context === "keep"
+                  ? "compact"
+                  : context === "compact"
+                    ? "clear"
+                    : "keep"
+                : context === "clear"
+                  ? "keep"
+                  : "clear";
+              if (linked && worker && !effortTouched) {
+                target = normalizedSpec(
+                  ctx,
+                  worker.spec,
+                  context === "clear"
+                    ? (worker.spec.thinkingLevel ?? settings.defaultImplementationThinkingLevel ?? "medium")
+                    : sessionLevel,
+                );
+              }
             },
-            description: "Here keeps the same session. Handoff can instead start a fresh child with only the plan.",
+            description: linked
+              ? "Retain this conversation, compact to the approved plan, or start a fresh child with only the plan."
+              : "Here keeps the same session. Handoff can instead start a fresh child with only the plan.",
           },
         ];
         return new OptionsPage(theme, {
@@ -1823,12 +2067,20 @@ export default async function plan(pi: ExtensionAPI, dependencies: PlanDependenc
           context: () => `plan ${author.id}`,
           step: "Implement",
           rows: optionRows,
-          intro: () => [],
+          intro: () =>
+            linked
+              ? [
+                  worker
+                    ? `Execute with linked worker: ${implementationCatalog.name(worker.spec)}`
+                    : "Linked worker unavailable. Use /flow status or /flow independent.",
+                ]
+              : [],
           next: {
-            label: "implement",
+            label: linked ? "Execute with linked worker" : "implement",
             run: () => {
+              if (linked && !worker) return;
               close();
-              void implement(ctx, author, target, context, mode);
+              void implement(ctx, author, target, context, mode, linkedFlow);
             },
           },
           back: { label: "back to the plans", run: () => show(lanes(true)) },
@@ -2036,9 +2288,14 @@ export default async function plan(pi: ExtensionAPI, dependencies: PlanDependenc
     ctx: ExtensionCommandContext,
     source: PlanSource,
     target: ModelSpec,
-    context: ImplementationContextChoice,
+    context: ImplementationContextChoice | "compact",
     mode: "here" | "handoff",
+    linkedFlow?: FlowState,
   ) {
+    if (!flowCurrent(linkedFlow)) {
+      ctx.ui.notify("Implementation selection expired because the flow changed. Approve the plan again.", "warning");
+      return;
+    }
     const epoch = branchEpoch;
     const plan = source.plan;
     hook(ctx, source);
@@ -2046,8 +2303,8 @@ export default async function plan(pi: ExtensionAPI, dependencies: PlanDependenc
     const before = sessionSpecOf(ctx);
     const catalog = modelCatalog(ctx, "available");
     const planFile = writePlanFile(plansDirectoryPath(settings.plansDirectory), plan);
-    if (mode === "here" || (before && sameModel(before, target))) {
-      inline.work(ctx);
+    if (!linkedFlow && (mode === "here" || (before && sameModel(before, target)))) {
+      if (!(await inline.work(ctx))) return;
       disposeRun("implemented");
       applyDirectEffort(ctx, target.thinkingLevel);
       const brief = directImplementationBrief({ plan, planFile });
@@ -2055,15 +2312,25 @@ export default async function plan(pi: ExtensionAPI, dependencies: PlanDependenc
       else pi.sendUserMessage(brief);
       return;
     }
+    // Linked handoffs retain Plan guards until the coordinator commits worker + Exec.
+    if (linkedFlow) {
+      await inline.enter(ctx, planFile);
+      if (!inline.active || !flowCurrent(linkedFlow)) return;
+    }
     // A failed switch must never silently turn a handoff into ordinary execution.
     const workflowRevision = inline.revision;
     const live = () =>
-      runtimeActive && epoch === branchEpoch && workflowRevision === inline.revision && !ctx.signal?.aborted;
-    if (context !== "clear" && (!(await applyRuntime(ctx, target, live)) || !live())) {
-      if (live()) inline.enter(ctx, planFile);
+      runtimeActive &&
+      epoch === branchEpoch &&
+      workflowRevision === inline.revision &&
+      flowCurrent(linkedFlow) &&
+      !ctx.signal?.aborted;
+    if (!live()) return;
+    if (!linkedFlow && context !== "clear" && (!(await applyRuntime(ctx, target, live)) || !live())) {
+      if (live()) await inline.enter(ctx, planFile);
       return;
     }
-    disposeRun("implemented");
+    if (!linkedFlow) disposeRun("implemented");
     let planner: ExecState["planner"];
     let consultant: ConsultantSeed | undefined;
     try {
@@ -2094,6 +2361,7 @@ export default async function plan(pi: ExtensionAPI, dependencies: PlanDependenc
       planFile,
       implementer: catalog.name(target),
       implementerModel: formatModelKey(target),
+      ...(linkedFlow ? { linkedFlow: structuredClone(linkedFlow) } : {}),
       ...(planner ? { planner } : {}),
       ...(before && !sameModel(before, target)
         ? { restore: formatModelSpec(before), restoreName: catalog.name(before) }
@@ -2108,6 +2376,26 @@ export default async function plan(pi: ExtensionAPI, dependencies: PlanDependenc
       ...(planner || consultant ? { planner: planner?.name ?? consultant?.name } : {}),
     });
     if (context === "clear") return implementFresh(ctx, target, state, brief, consultant);
+    if (linkedFlow) {
+      const start = async () => {
+        if (
+          !(await applyRuntime(ctx, target, live, {
+            flow: linkedFlow,
+            planFile,
+            commit: () => {
+              inline.commitExecution(ctx);
+              exec.begin(ctx, state, { record: true });
+              disposeRun("implemented");
+            },
+          }))
+        )
+          return;
+        pi.sendUserMessage(brief);
+      };
+      if (context === "compact") compactDirect(ctx, planFile, brief, start, live);
+      else await start();
+      return;
+    }
     exec.begin(ctx, state, { record: true });
     pi.sendUserMessage(brief);
   }
@@ -2125,16 +2413,23 @@ export default async function plan(pi: ExtensionAPI, dependencies: PlanDependenc
   }
 
   /** Replace only this explicitly requested compaction; never intercept ordinary compaction. */
-  function compactDirect(ctx: ExtensionCommandContext, planFile: string, brief: string) {
+  function compactDirect(
+    ctx: ExtensionCommandContext,
+    planFile: string,
+    brief: string,
+    after?: () => Promise<void>,
+    isCurrent: () => boolean = () => true,
+  ) {
     const pending = {
       marker: `plan-mode-direct:${randomUUID()}`,
       epoch: branchEpoch,
       planFile,
       brief,
       overridden: false,
+      isCurrent,
     };
     pendingCompaction = pending;
-    const valid = () => pendingCompaction === pending && pending.epoch === branchEpoch && runtimeActive;
+    const valid = () => pendingCompaction === pending && pending.epoch === branchEpoch && runtimeActive && isCurrent();
     const fail = (error: Error) => {
       if (!valid()) return;
       pendingCompaction = undefined;
@@ -2162,7 +2457,8 @@ export default async function plan(pi: ExtensionAPI, dependencies: PlanDependenc
             );
             return;
           }
-          pi.sendUserMessage(brief);
+          if (after) void after();
+          else pi.sendUserMessage(brief);
         },
         onError: fail,
       });
@@ -2173,17 +2469,24 @@ export default async function plan(pi: ExtensionAPI, dependencies: PlanDependenc
 
   /** A fresh session (a child of this one) that gets only the plan, on `target`. */
   async function implementFresh(
-    ctx: ExtensionCommandContext,
+    ctx: Pick<ExtensionCommandContext, "sessionManager" | "ui" | "waitForIdle" | "newSession">,
     target: ModelSpec,
     state: ExecState,
     brief: string,
     consultant?: ConsultantSeed,
+    isCurrent: () => boolean = () => true,
   ) {
     const epoch = branchEpoch;
     const workflowRevision = inline.revision;
-    const recover = () => {
-      if (runtimeActive && epoch === branchEpoch && workflowRevision === inline.revision)
-        inline.enter(ctx, state.planFile);
+    const live = () =>
+      runtimeActive &&
+      epoch === branchEpoch &&
+      workflowRevision === inline.revision &&
+      flowCurrent(state.linkedFlow) &&
+      isCurrent();
+    const recover = async () => {
+      // Inline fresh handoffs retain Plan throughout; command handoffs may need recovery.
+      if (live() && !inline.active && hostCtx) await inline.enter(hostCtx, state.planFile);
     };
     const parentSession = ctx.sessionManager.getSessionFile();
     const planFile = state.planFile;
@@ -2192,9 +2495,9 @@ export default async function plan(pi: ExtensionAPI, dependencies: PlanDependenc
     let membership: FamilyMembership | undefined;
     try {
       await ctx.waitForIdle();
-      if (!runtimeActive || epoch !== branchEpoch || workflowRevision !== inline.revision) return;
+      if (!live()) return;
       membership = await discoverFamily(pi.events)?.prepareHandoff();
-      if (!runtimeActive || epoch !== branchEpoch || workflowRevision !== inline.revision) {
+      if (!live()) {
         membership?.cancel?.();
         return;
       }
@@ -2206,6 +2509,12 @@ export default async function plan(pi: ExtensionAPI, dependencies: PlanDependenc
               ...membership,
               sessionId: sessionManager.getSessionId(),
             });
+          // Seed both records before session_start, so either extension load order
+          // reconciles the worker as Exec rather than substituting Work's model.
+          if (state.linkedFlow) {
+            sessionManager.appendCustomEntry(FLOW_ENTRY, structuredClone(state.linkedFlow));
+            sessionManager.appendCustomEntry(EXEC_ENTRY, structuredClone(state));
+          }
           sessionManager.appendCustomEntry(RUNTIME_ENTRY, {
             model: formatModelSpec(target),
             exec: state,
@@ -2221,6 +2530,12 @@ export default async function plan(pi: ExtensionAPI, dependencies: PlanDependenc
           const active = latest?.type === "custom" ? (latest.data as Partial<ExecState> | undefined) : undefined;
           if (active?.active !== true || active.planFile !== planFile || active.implementerModel !== implementerModel)
             return;
+          if (
+            state.linkedFlow &&
+            (!active.negotiation?.executionId ||
+              JSON.stringify(active.linkedFlow?.selectedFlow) !== JSON.stringify(state.linkedFlow.selectedFlow))
+          )
+            return;
           sent = true;
           try {
             await fresh.sendUserMessage(brief);
@@ -2234,24 +2549,72 @@ export default async function plan(pi: ExtensionAPI, dependencies: PlanDependenc
       });
       if (result.cancelled) {
         membership?.cancel?.();
-        recover();
+        await recover();
       }
     } catch (error: unknown) {
       membership?.cancel?.();
-      if (runtimeActive && epoch === branchEpoch && workflowRevision === inline.revision) {
+      if (live()) {
         ctx.ui.notify(`Could not start a fresh session: ${errorText(error)}`, "error");
-        recover();
+        await recover();
       }
     }
   }
 
-  /** Switch to `target`'s model and effort; true when the session ends on the target model. */
+  function flowCurrent(expected: FlowState | undefined): boolean {
+    if (!expected) return queryFlow(pi.events)?.operatingMode !== "linked";
+    const current = queryFlow(pi.events);
+    return (
+      current?.operatingMode === "linked" &&
+      current.revision === expected.revision &&
+      JSON.stringify(current.selectedFlow) === JSON.stringify(expected.selectedFlow)
+    );
+  }
+
+  /** Switch only through the coordinator while Linked; lifecycle commit stays synchronous. */
   async function applyRuntime(
     ctx: ExtensionContext,
     target: ModelSpec,
     isCurrent: () => boolean = () => true,
+    linked?: { flow: FlowState; planFile: string; commit(): void },
   ): Promise<boolean> {
     const epoch = branchEpoch;
+    if (linked || queryFlow(pi.events)?.operatingMode === "linked") {
+      if (!linked || !flowCurrent(linked.flow) || !isCurrent()) return false;
+      const worker = linked.flow.selectedFlow?.roles.exec;
+      if (!worker || !sameModel(worker, target)) return false;
+      let committed = false;
+      try {
+        const result = await requestExecution(pi.events, {
+          phase: "begin",
+          expectedRevision: linked.flow.revision,
+          planFile: linked.planFile,
+          commit: () => {
+            if (
+              committed ||
+              epoch !== branchEpoch ||
+              !runtimeActive ||
+              ctx.signal?.aborted ||
+              !isCurrent() ||
+              !flowCurrent(linked.flow)
+            )
+              throw new Error("Approved plan handoff expired.");
+            if (target.thinkingLevel) pi.setThinkingLevel(target.thinkingLevel as never);
+            linked.commit();
+            committed = true;
+          },
+        });
+        if (!result?.ok && runtimeActive && epoch === branchEpoch)
+          ctx.ui.notify(
+            result?.error ?? "Linked flow coordinator unavailable. Implementation did not start.",
+            "warning",
+          );
+        return result?.ok === true && committed && epoch === branchEpoch && runtimeActive;
+      } catch (error: unknown) {
+        if (runtimeActive && epoch === branchEpoch)
+          ctx.ui.notify(`Linked execution failed: ${errorText(error)}`, "warning");
+        return false;
+      }
+    }
     const current = ctx.model;
     let onTarget = true;
     if (!current || current.provider !== target.provider || current.id !== target.modelId) {
@@ -2304,6 +2667,50 @@ export default async function plan(pi: ExtensionAPI, dependencies: PlanDependenc
       model?: unknown;
     };
     const spec = parseModelSpec(model);
+    // Linked bootstraps must never fall through to an unprivileged physical setter,
+    // including when the coordinator has not initialized yet.
+    if (savedState?.linkedFlow) {
+      pi.appendEntry(RUNTIME_CONSUMED_ENTRY, {});
+      if (
+        !spec ||
+        savedState.active !== true ||
+        !savedState.planFile ||
+        savedState.implementerModel !== formatModelKey(spec)
+      )
+        return;
+      const state = structuredClone(savedState);
+      const flow = queryFlow(pi.events);
+      if (
+        flow?.operatingMode === "linked" &&
+        JSON.stringify(flow.selectedFlow) === JSON.stringify(state.linkedFlow?.selectedFlow)
+      )
+        state.linkedFlow = structuredClone(flow);
+      if (consultant) {
+        try {
+          const sessionFile = writeSeededSession(ctx.cwd, plannerSessionDir(), consultant.messages);
+          if (sessionFile) state.planner = { spec: consultant.spec, name: consultant.name, sessionFile };
+        } catch (error: unknown) {
+          ctx.ui.notify(
+            `The planner could not be put on call (${errorText(error)}); implementing without it.`,
+            "warning",
+          );
+        }
+      }
+      if (!live()) return;
+      const activated = await applyRuntime(ctx, spec, live, {
+        flow: state.linkedFlow as FlowState,
+        planFile: state.planFile,
+        commit: () => {
+          exec.begin(ctx, state, { record: true });
+        },
+      });
+      if (!activated && live())
+        ctx.ui.notify(
+          "Linked implementation did not start. Use /flow status or /flow independent to recover.",
+          "warning",
+        );
+      return;
+    }
     pi.appendEntry(RUNTIME_CONSUMED_ENTRY, {});
     let activated = false;
     try {
@@ -2320,7 +2727,7 @@ export default async function plan(pi: ExtensionAPI, dependencies: PlanDependenc
     }
     if (!live()) return;
     if (!activated || ctx.signal?.aborted) {
-      if (typeof savedState?.planFile === "string" && savedState.planFile) inline.enter(ctx, savedState.planFile);
+      if (typeof savedState?.planFile === "string" && savedState.planFile) await inline.enter(ctx, savedState.planFile);
       ctx.ui.notify(
         "Implementation did not start. Approve the plan again to choose an implementation model.",
         "warning",

@@ -1,9 +1,11 @@
 import assert from "node:assert/strict";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { test } from "vitest";
+import type { FlowSnapshot } from "../src/flow-contract.js";
 import {
   formatModelSpec,
   implementationChoices,
+  linkedImplementationChoice,
   parseModelSpec,
   ROLE_MODEL_CHANNEL,
   snapshotAvailableImplementationModels,
@@ -130,6 +132,106 @@ test("defaults ignore other providers, display names, aliases and snapshot IDs",
     assert.deepEqual(choices(provider, planner, ["gpt-6.1-sol", "claude-sonnet-5-5"]), []);
   }
   assert.deepEqual(implementationChoices({ planModel: undefined, map: {}, available: [] }), []);
+});
+
+function linkedSnapshot(): FlowSnapshot {
+  const model = { provider: "openai-codex", modelId: "gpt-6.1-sol" };
+  return {
+    version: 1,
+    operatingMode: "linked",
+    revision: 7,
+    selectedFlow: {
+      provider: model.provider,
+      anchorModel: model.modelId,
+      roles: {
+        work: { ...model },
+        chat: { ...model },
+        plan: { ...model, suggestedThinking: "high" },
+        exec: { ...model, suggestedThinking: "medium" },
+      },
+    },
+    workflow: "plan",
+    ready: true,
+    guardAvailable: true,
+    transitioning: false,
+  };
+}
+
+const linkedAvailable = [{ provider: "openai-codex", id: "gpt-6.1-sol" }];
+
+test("linked worker includes the same physical planner with explicit execution intent and a detached state", () => {
+  const snapshot = linkedSnapshot();
+  const choice = linkedImplementationChoice(snapshot, linkedAvailable);
+  assert.deepEqual(choice, {
+    spec: { provider: "openai-codex", modelId: "gpt-6.1-sol", thinkingLevel: "medium" },
+    source: "linked",
+    intent: "linked-execution",
+    flow: {
+      version: 1,
+      operatingMode: "linked",
+      selectedFlow: snapshot.selectedFlow,
+      revision: 7,
+    },
+  });
+  assert.ok(choice?.flow?.selectedFlow);
+  assert.ok(snapshot.selectedFlow);
+  assert.notEqual(choice.flow, snapshot);
+  assert.notEqual(choice.flow.selectedFlow, snapshot.selectedFlow);
+  assert.notEqual(choice.flow.selectedFlow.roles, snapshot.selectedFlow.roles);
+  for (const role of ["work", "chat", "plan", "exec"] as const) {
+    assert.notEqual(choice.flow.selectedFlow.roles[role], snapshot.selectedFlow.roles[role]);
+  }
+  snapshot.selectedFlow.roles.exec.modelId = "changed";
+  snapshot.revision++;
+  assert.equal(choice.spec.modelId, "gpt-6.1-sol");
+  assert.equal(choice.flow.selectedFlow.roles.exec.modelId, "gpt-6.1-sol");
+  assert.equal(choice.flow.revision, 7);
+  choice.flow.selectedFlow.roles.plan.modelId = "other";
+  assert.equal(snapshot.selectedFlow.roles.plan.modelId, "gpt-6.1-sol");
+});
+
+test("linked worker requires a ready, unblocked guarded flow and never falls back to another available model", () => {
+  const snapshot = linkedSnapshot();
+  for (const unavailable of [
+    undefined,
+    { ...snapshot, operatingMode: "independent" as const },
+    { ...snapshot, ready: false },
+    { ...snapshot, blocked: "Worker unavailable" },
+    { ...snapshot, guardAvailable: false },
+    { ...snapshot, selectedFlow: undefined },
+  ]) {
+    assert.equal(linkedImplementationChoice(unavailable, linkedAvailable), undefined);
+  }
+  for (const available of [
+    [],
+    [{ provider: "openai", id: "gpt-6.1-sol" }],
+    [{ provider: "openai-codex", id: "gpt-6.1-terra" }],
+    [{ provider: "openai-codex", id: "alias", name: "gpt-6.1-sol" }],
+  ]) {
+    assert.equal(linkedImplementationChoice(snapshot, available), undefined);
+  }
+  assert.ok(snapshot.selectedFlow);
+  snapshot.selectedFlow.roles.exec.provider = "openai";
+  assert.equal(linkedImplementationChoice(snapshot, [{ provider: "openai", id: "gpt-6.1-sol" }]), undefined);
+});
+
+test("linked worker uses only its captured assignment and validates optional suggested effort", () => {
+  const snapshot = linkedSnapshot();
+  assert.ok(snapshot.selectedFlow);
+  const worker = snapshot.selectedFlow.roles.exec;
+  worker.modelId = "custom-worker";
+  for (const suggestedThinking of [undefined, "invalid", "off", "max"]) {
+    worker.suggestedThinking = suggestedThinking;
+    assert.deepEqual(
+      linkedImplementationChoice(snapshot, [...linkedAvailable, { provider: worker.provider, id: worker.modelId }])
+        ?.spec,
+      {
+        provider: worker.provider,
+        modelId: "custom-worker",
+        ...(suggestedThinking === "off" || suggestedThinking === "max" ? { thinkingLevel: suggestedThinking } : {}),
+      },
+    );
+  }
 });
 
 const opus = { provider: "anthropic", modelId: "opus", thinkingLevel: "xhigh" as const };

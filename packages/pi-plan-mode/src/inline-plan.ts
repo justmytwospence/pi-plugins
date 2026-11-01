@@ -29,6 +29,7 @@ import {
 import { Container, Spacer, Text } from "@earendil-works/pi-tui";
 import { createApprovalState, pickApproval } from "./approval-picker.js";
 import { editInTerminal, externalEditorCommand } from "./external-editor.js";
+import { type FlowState, queryFlow, requestWorkflow } from "./flow-contract.js";
 import { PLAN_STANDARD } from "./handoff.js";
 
 export { EDIT, HERE, handoffLabel, KEEP, OPTION_MAX, SAVE } from "./approval-picker.js";
@@ -81,6 +82,10 @@ export interface HandoffTarget {
   targetName: string;
   planning: ModelSpec;
   planningName: string;
+  /** Linked execution is a lifecycle even when planner and worker share a model. */
+  intent?: "independent" | "linked-execution";
+  flow?: FlowState;
+  context?: "keep" | "compact" | "clear";
 }
 
 export interface Approval {
@@ -92,7 +97,7 @@ export interface Approval {
 
 /** Whether a handoff changes model identity, independent of effort. */
 export function handsOffToAnotherModel(who: HandoffTarget): boolean {
-  return !sameModel(who.target, who.planning);
+  return who.intent === "linked-execution" || !sameModel(who.target, who.planning);
 }
 
 export interface InlineHost {
@@ -102,17 +107,23 @@ export interface InlineHost {
   /** Run the plan-complete hook for an approved plan. */
   approved(plan: string, ctx: ExtensionContext): void;
   /** The model a handoff goes to and the planning model, with names; undefined without a session model. */
-  implementationChoices(ctx: ExtensionContext):
+  implementationChoices(
+    ctx: ExtensionContext,
+    plan: Pick<Approval, "plan" | "planFile">,
+  ):
     | {
         planning: ModelSpec;
         planningName: string;
         targets: Array<{ target: ModelSpec; targetName: string }>;
         defaultThinkingLevel?: ModelSpecThinkingLevel;
+        intent?: "independent" | "linked-execution";
+        flow?: FlowState;
+        freshTarget?: { target: ModelSpec; targetName: string };
       }
     | undefined;
   compactHere(approval: Approval): void;
   /** Hand the approved plan off once this turn ends (fresh context, `who.target`'s model). */
-  handoff(approval: Approval, who: HandoffTarget | undefined): void;
+  handoff(approval: Approval, who: HandoffTarget | undefined, ctx: ExtensionContext): void;
   /** Implement it here, by the agent that planned it; returns the tool result's text. */
   implementHere(ctx: ExtensionContext, approval: Approval): string;
   /** Whether an approved plan is being implemented (exec mode). */
@@ -125,13 +136,15 @@ export interface InlinePlanMode {
   readonly active: boolean;
   readonly planFile: string | undefined;
   /** Enter plan mode (through the gate when it is there). */
-  enter(ctx: ExtensionContext, planFile?: string): void;
+  enter(ctx: ExtensionContext, planFile?: string): Promise<void>;
   /** Return to ordinary work without changing approvals. */
-  work(ctx: ExtensionContext): void;
+  work(ctx: ExtensionContext): Promise<boolean>;
+  /** The flow coordinator calls this only after activating an approved worker. */
+  commitExecution(ctx: ExtensionContext): void;
   /** A token invalidated by workflow/branch changes, for pending handoffs. */
   readonly revision: number;
   /** Toggle (alone) or cycle (with the gate): what the shortcut does. */
-  toggle(ctx: ExtensionContext): void;
+  toggle(ctx: ExtensionContext): Promise<boolean>;
 }
 
 export function enterPlanText(planFile: string, existing: boolean, gate: boolean) {
@@ -192,6 +205,9 @@ export function registerInlinePlanMode(pi: ExtensionAPI, host: InlineHost): Inli
   /** pi-tool-gate owns the mode; its current mode and cycle. */
   let gate: { mode: string; cycle: string[] } | undefined;
   let revision = 0;
+  let generation = 0;
+  /** An exit tool result supplies its own notice; do not queue a redundant planner turn. */
+  let toolExitGeneration: number | undefined;
   let branchAnchor: string | undefined;
   /** Restored this session's state (so the gate's early broadcast does not clobber it). */
   let restored = false;
@@ -292,25 +308,64 @@ export function registerInlinePlanMode(pi: ExtensionAPI, host: InlineHost): Inli
     presentTransition();
   };
 
-  const requestMode = (mode: string) => safely(() => pi.events.emit(MODE_SET, { mode }));
+  const requestMode = async (mode: "work" | "plan"): Promise<boolean> => {
+    const coordinated = requestWorkflow(pi.events, mode);
+    if (coordinated) {
+      try {
+        const result = await coordinated;
+        if (!result.ok && result.error) hostCtx?.ui.notify(result.error, "warning");
+        return result.ok;
+      } catch (error: unknown) {
+        hostCtx?.ui.notify(`Workflow transition failed: ${String(error)}`, "warning");
+        return false;
+      }
+    }
+    if (queryFlow(pi.events)?.operatingMode === "linked") return false;
+    const request: { mode: string; result?: Promise<{ ok: boolean } | boolean | undefined> } = { mode };
+    try {
+      pi.events.emit(MODE_SET, request);
+      if (request.result) {
+        const result = await request.result;
+        return typeof result === "boolean" ? result : result?.ok !== false;
+      }
+      // Older gate providers publish synchronously; standalone mode has no responder.
+      return gate === undefined || gate.mode === mode;
+    } catch (error: unknown) {
+      hostCtx?.ui.notify(`Workflow transition failed: ${String(error)}`, "warning");
+      return false;
+    }
+  };
 
-  const enter = (ctx: ExtensionContext, planFile?: string) => {
+  const requestWorkFromTool = async (): Promise<boolean> => {
+    const owner = generation;
+    toolExitGeneration = owner;
+    try {
+      return gate || queryFlow(pi.events) ? await requestMode("work") : true;
+    } finally {
+      if (toolExitGeneration === owner) toolExitGeneration = undefined;
+    }
+  };
+
+  const enter = async (ctx: ExtensionContext, planFile?: string): Promise<boolean> => {
     // Fresh handoff recovery can precede our lifecycle handler. Be ready to persist
     // the genuine transition before asking the gate to enter plan mode.
     if (!restored) restore(ctx);
     hostCtx = ctx;
     if (host.executing() || gate?.mode === "exec") {
       ctx.ui.notify(EXEC_GUIDANCE, "warning");
-      return;
+      return false;
     }
+    const enteringGeneration = generation;
+    if ((gate || queryFlow(pi.events)) && !(await requestMode("plan"))) return false;
+    if (enteringGeneration !== generation || !restored) return false;
     if (planFile && planFile !== state.planFile) {
       state.planFile = planFile;
       state.temporaryDraft = false;
       persist();
       announce();
     }
-    if (gate) requestMode("plan");
-    else enterLocal(ctx);
+    enterLocal(ctx);
+    return state.active;
   };
 
   pi.events.on(MODE_CHANGED, (data) => {
@@ -329,11 +384,12 @@ export function registerInlinePlanMode(pi: ExtensionAPI, host: InlineHost): Inli
     if (branchAnchor && !branch?.some((entry) => entry.id === branchAnchor)) restored = false;
     if (!restored) return;
     if (event.mode === "plan") enterLocal(hostCtx);
-    else exitLocal(hostCtx);
+    else exitLocal(hostCtx, event.mode === "work" && toolExitGeneration === generation ? false : undefined);
     branchAnchor = hostCtx?.sessionManager.getLeafId?.() ?? undefined;
   });
 
   const restore = (ctx: ExtensionContext) => {
+    generation++;
     restored = false;
     revision++;
     reviewViewport.end();
@@ -377,6 +433,7 @@ export function registerInlinePlanMode(pi: ExtensionAPI, host: InlineHost): Inli
   });
 
   pi.on("session_shutdown", () => {
+    generation++;
     reviewViewport.end();
     revision++;
     branchAnchor = undefined;
@@ -434,8 +491,7 @@ export function registerInlinePlanMode(pi: ExtensionAPI, host: InlineHost): Inli
       }
       if (state.active) return text("You are already in plan mode.");
       hostCtx = ctx;
-      enter(ctx);
-      if (!state.active) return text("Plan mode is not available right now.");
+      if (!(await enter(ctx))) return text("Plan mode is not available right now.");
       // The tool result is the notice.
       state.told = true;
       persist();
@@ -499,10 +555,30 @@ export function registerInlinePlanMode(pi: ExtensionAPI, host: InlineHost): Inli
       }
       if (!ctx.hasUI) return text("There is no user to approve the plan. Stay in plan mode.");
       const submittedPlan = plan;
-      const approvalRevision = revision;
-      const current = () => restored && revision === approvalRevision && state.active && !host.executing();
+      // A new review supersedes any earlier approval still waiting for idle.
+      const approvalRevision = ++revision;
+      const approvalGeneration = generation;
+      const approvalSession = ctx.sessionManager.getSessionId?.();
+      const approvalAnchor = ctx.sessionManager.getLeafId?.();
+      const approvalFlow = queryFlow(pi.events);
+      const sameDestination = () => {
+        const flow = queryFlow(pi.events);
+        return (
+          restored &&
+          generation === approvalGeneration &&
+          ctx.sessionManager.getSessionId?.() === approvalSession &&
+          (!approvalSession ||
+            !approvalAnchor ||
+            ctx.sessionManager.getBranch().some((entry) => entry.id === approvalAnchor)) &&
+          flow?.revision === approvalFlow?.revision &&
+          flow?.operatingMode === approvalFlow?.operatingMode
+        );
+      };
+      const current = () => sameDestination() && revision === approvalRevision && state.active && !host.executing();
       let edited = false;
-      const models = host.implementationChoices(ctx);
+      const models = host.implementationChoices(ctx, { plan, planFile });
+      if (approvalFlow?.operatingMode === "linked" && !models?.freshTarget)
+        ctx.ui.notify("For a fresh conversation, use /planners.", "info");
       const pickerState = createApprovalState();
       reviewViewport.begin(ctx, id);
       const releaseBlocked = holdBlocked(pi.events, "Review the plan");
@@ -522,9 +598,18 @@ export function registerInlinePlanMode(pi: ExtensionAPI, host: InlineHost): Inli
               ...(previous ? { previous, ...(changes ? { changes: [...changes] } : {}) } : {}),
             } satisfies ExitDetails,
           } as never);
-          const picked = await pickApproval(ctx, { ...models, targets: models?.targets ?? [] }, pickerState, signal);
-          if (!current())
-            return text("Plan review expired because the workflow or branch changed. Approve the plan again.");
+          const picked = await pickApproval(
+            ctx,
+            {
+              ...models,
+              ...(approvalFlow?.operatingMode === "linked" ? { intent: "linked-execution" as const } : {}),
+              targets: models?.targets ?? [],
+            },
+            pickerState,
+            signal,
+          );
+          if (!current() || readPlan(planFile) !== plan)
+            return text("Plan review expired because the plan, workflow or branch changed. Approve the plan again.");
           const choice = signal?.aborted ? undefined : picked?.choice;
           if (choice?.kind === "edit") {
             // In your external editor when one is set (pi's externalEditor, or $VISUAL / $EDITOR),
@@ -577,12 +662,18 @@ export function registerInlinePlanMode(pi: ExtensionAPI, host: InlineHost): Inli
               );
               continue;
             }
+            if (!(await requestWorkFromTool()))
+              return text(
+                `Saved the plan at ${savedFile}, but Work is unavailable. Stay in plan mode; this is not approval to implement.`,
+              );
+            if (!sameDestination()) return text("Plan review expired because the workflow or branch changed.");
             declined = undefined;
             state.planFile = undefined;
             state.temporaryDraft = false;
+            state.told = false;
             announce();
             exitLocal(ctx, false);
-            if (gate) requestMode("work");
+            persist();
             return {
               content: [
                 {
@@ -629,27 +720,34 @@ export function registerInlinePlanMode(pi: ExtensionAPI, host: InlineHost): Inli
             announce();
           }
           const approval: Approval = { plan, planFile, edited, thinkingLevel: picked?.thinkingLevel };
-          host.approved(plan, ctx);
-          declined = undefined;
-          // This result tells your agent it left plan mode.
-          exitLocal(ctx, false);
-          const mode = "work";
-          if (gate) requestMode(mode);
           const who =
             choice.kind === "handoff" && models
               ? {
                   ...models,
                   target: { ...choice.target, thinkingLevel: picked?.thinkingLevel },
                   targetName: choice.targetName,
+                  context: choice.context,
                 }
               : undefined;
+          const linked = who?.intent === "linked-execution";
+          // Keep Plan's guards through a Linked handoff. The settle transaction exits only
+          // after the coordinator activates the worker; never request the Work model here.
+          const mode = linked ? "exec" : "work";
+          if (!linked) {
+            if (!(await requestWorkFromTool()))
+              return text("Work is unavailable. Stay in plan mode and approve the plan again.");
+            if (!sameDestination()) return text("Plan review expired because the workflow or branch changed.");
+            exitLocal(ctx, false);
+          }
+          host.approved(plan, ctx);
+          declined = undefined;
           if (who && handsOffToAnotherModel(who)) {
-            host.handoff(approval, who);
+            host.handoff(approval, who, ctx);
             return {
               content: [
                 {
                   type: "text",
-                  text: `The user approved the plan and handed it off to ${who.targetName}. Implementation continues in this conversation with its history. You stay on call to answer its questions. Stop here and do nothing else.`,
+                  text: `The user approved the plan and handed it off to ${who.targetName}. ${who.context === "clear" ? "Implementation starts in a fresh conversation after this turn settles." : who.context === "compact" ? "Implementation continues in this conversation after compaction to the approved plan." : "Implementation continues in this conversation with its history."} You stay on call to answer its questions. Stop here and do nothing else.`,
                 },
               ],
               details: {
@@ -711,24 +809,44 @@ export function registerInlinePlanMode(pi: ExtensionAPI, host: InlineHost): Inli
     get planFile() {
       return state.planFile;
     },
-    enter,
-    work(ctx) {
+    async enter(ctx, planFile) {
+      await enter(ctx, planFile);
+    },
+    async work(ctx) {
+      if (!restored) restore(ctx);
       hostCtx = ctx;
-      if (gate) requestMode("work");
-      else exitLocal(ctx, false);
+      const leavingGeneration = generation;
+      if ((gate || queryFlow(pi.events)) && !(await requestMode("work"))) return false;
+      if (leavingGeneration !== generation || !restored) return false;
+      exitLocal(ctx, false);
+      return !state.active;
+    },
+    commitExecution(ctx) {
+      exitLocal(ctx, false);
     },
     get revision() {
       return revision;
     },
-    toggle(ctx) {
+    async toggle(ctx) {
       hostCtx = ctx;
       if (host.executing() || gate?.mode === "exec") {
         ctx.ui.notify(EXEC_GUIDANCE, "warning");
-        return;
+        return false;
       }
-      if (gate) safely(() => pi.events.emit(MODE_CYCLE, {}));
-      else if (state.active) exitLocal(ctx);
+      if (gate) {
+        const request: { result?: Promise<{ ok: boolean } | boolean | undefined> } = {};
+        try {
+          pi.events.emit(MODE_CYCLE, request);
+          const result = await request.result;
+          return typeof result === "boolean" ? result : result?.ok !== false;
+        } catch (error: unknown) {
+          ctx.ui.notify(`Workflow transition failed: ${String(error)}`, "warning");
+          return false;
+        }
+      }
+      if (state.active) exitLocal(ctx);
       else enterLocal(ctx);
+      return true;
     },
   };
 }

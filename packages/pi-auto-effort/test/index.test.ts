@@ -1,7 +1,9 @@
 import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { describe, expect, test } from "vitest";
+import { afterEach, describe, expect, test, vi } from "vitest";
+import * as configModule from "../src/config.ts";
+import { FOOTER_ACTIONS_CHANNEL, queryFooterActions } from "../src/footer-actions.ts";
 import autoEffort, { LEGACY_QUESTIONS, QUESTIONS, effortState, thinkingPinned } from "../src/index.ts";
 import { answers, assistantEntry, fakeJev, harness, userEntry } from "./harness.ts";
 
@@ -25,7 +27,7 @@ function setup(script: Depth[], settings: Record<string, unknown> = CEILING) {
   autoEffort(h.pi);
   const queue = [...script];
   const jev = fakeJev(() => answers(queue.shift() ?? 1));
-  const ctx = h.ctx({ cwd: project(settings), modelRegistry: jev.registry, sessionManager: { getBranch: () => [] } });
+  const ctx = h.ctx({ cwd: project(settings), modelRegistry: jev.registry, sessionManager: { getBranch: () => [], getSessionId: () => "session-1" } });
   return { h, jev, ctx };
 }
 
@@ -230,13 +232,16 @@ describe.each(["prompt", "run"])("stale %s assessment", (phase) => {
     return { h, ctx, start, finish };
   }
 
-  test.each(["session_start", "session_tree", "session_shutdown", "model_select", "thinking_level_select", "off/on", "new prompt"])("drops the callback after %s", async (change) => {
+  test.each(["session_start", "session_tree", "session_shutdown", "model_select", "thinking_level_select", "off/on", "footer off/on", "new prompt"])("drops the callback after %s", async (change) => {
     const { h, ctx, start, finish } = pending();
     await h.emit("session_start", { type: "session_start" }, ctx);
     const assessment = start();
     if (change === "off/on") {
       await h.commands.get("auto-effort").handler("off", ctx);
       await h.commands.get("auto-effort").handler("on", ctx);
+    } else if (change === "footer off/on") {
+      await queryFooterActions(h.pi.events)["effort.toggle"]!.run();
+      await queryFooterActions(h.pi.events)["effort.toggle"]!.run();
     } else if (change === "new prompt") {
       // Even a blank prompt supersedes an assessment of the previous run.
       await h.emit("before_agent_start", { prompt: " " }, ctx);
@@ -406,6 +411,153 @@ test("the footer detail never contains parentheses, so pi-status-footer can pars
   await h.emit("session_start", { type: "session_start" }, ctx);
   await h.emit("before_agent_start", { prompt: "x" }, ctx);
   expect(ctx.ui.status.get("auto-effort")).toMatch(/^effort: \S+ \(auto(?: ([^()]+))?\)$/u);
+});
+
+describe("optional footer action", () => {
+  afterEach(() => vi.restoreAllMocks());
+
+  test("publishes only its own action synchronously, once the session is ready", async () => {
+    const { h, ctx } = setup([]);
+    expect(queryFooterActions(h.pi.events)).toEqual({});
+    await h.emit("session_start", {}, ctx);
+    const other = { label: "Other provider", run: () => undefined };
+    const request = { version: 1, actions: { "context.open": other } };
+    h.pi.events.emit(FOOTER_ACTIONS_CHANNEL, request);
+    expect(request.actions).toEqual({
+      "context.open": other,
+      "effort.toggle": { label: "Toggle auto-effort", active: true, run: expect.any(Function) },
+    });
+    for (const data of [undefined, null, {}, { version: 1 }, { version: 1, actions: [] }, { version: 2, actions: {} }]) {
+      expect(() => h.pi.events.emit(FOOTER_ACTIONS_CHANNEL, data)).not.toThrow();
+    }
+    const unsupported = { version: 2, actions: {} };
+    h.pi.events.emit(FOOTER_ACTIONS_CHANNEL, unsupported);
+    expect(unsupported.actions).toEqual({});
+  });
+
+  test("querying performs no config, branch, model, network or UI work", async () => {
+    const { h, ctx, jev } = setup([]);
+    await h.emit("session_start", {}, ctx);
+    const config = vi.spyOn(configModule, "loadConfig");
+    const branch = vi.spyOn(ctx.sessionManager, "getBranch");
+    const fetch = vi.spyOn(globalThis, "fetch");
+    const notes = [...ctx.ui.notes];
+    const status = new Map(ctx.ui.status);
+    for (let i = 0; i < 3; i++) expect(queryFooterActions(h.pi.events)["effort.toggle"]?.active).toBe(true);
+    expect(config).not.toHaveBeenCalled();
+    expect(branch).not.toHaveBeenCalled();
+    expect(fetch).not.toHaveBeenCalled();
+    expect(jev.calls).toEqual([]);
+    expect(h.thinkingChanges).toEqual([]);
+    expect(h.modelChanges).toEqual([]);
+    expect(h.entries).toEqual([]);
+    expect(ctx.ui.notes).toEqual(notes);
+    expect(ctx.ui.status).toEqual(status);
+  });
+
+  test("off/on matches the command, restores the ceiling and keeps the off control available", async () => {
+    const clicked = setup([0]);
+    const commanded = setup([0]);
+    for (const { h, ctx } of [clicked, commanded]) {
+      await h.emit("session_start", {}, ctx);
+      await h.emit("before_agent_start", { prompt: "trivial" }, ctx);
+      expect(h.thinking).toBe("low");
+    }
+    for (const enabled of [false, true]) {
+      await queryFooterActions(clicked.h.pi.events)["effort.toggle"]!.run();
+      await commanded.h.commands.get("auto-effort").handler(enabled ? "on" : "off", commanded.ctx);
+      expect(queryFooterActions(clicked.h.pi.events)["effort.toggle"]?.active).toBe(enabled);
+      expect(clicked.h.thinking).toBe("high");
+      expect(clicked.h.thinkingChanges).toEqual(commanded.h.thinkingChanges);
+      expect(clicked.ctx.ui.notes).toEqual(commanded.ctx.ui.notes);
+      expect(clicked.ctx.ui.status).toEqual(commanded.ctx.ui.status);
+      expect(clicked.h.entries).toHaveLength(1);
+      expect(commanded.h.entries).toHaveLength(1);
+      expect(clicked.h.modelChanges).toEqual([]);
+      expect(clicked.jev.calls).toHaveLength(1);
+    }
+  });
+
+  test("active describes effective settings rather than sessionOn or callability", async () => {
+    const { h, ctx } = setup([], { enabled: false });
+    await h.emit("session_start", {}, ctx);
+    expect(queryFooterActions(h.pi.events)["effort.toggle"]?.active).toBe(false);
+    await h.commands.get("auto-effort").handler("on", ctx);
+    expect(queryFooterActions(h.pi.events)["effort.toggle"]?.active).toBe(false);
+  });
+
+  test.each([["--thinking", "high"], ["--thinking=high"]])("explicit thinking pin %j offers no toggle", async (...flags) => {
+    const argv = [...process.argv];
+    try {
+      process.argv.push(...flags);
+      const { h, ctx } = setup([]);
+      await h.emit("session_start", {}, ctx);
+      expect(queryFooterActions(h.pi.events)).toEqual({});
+      await h.commands.get("auto-effort").handler("on", ctx);
+      expect(queryFooterActions(h.pi.events)).toEqual({});
+    } finally {
+      process.argv.splice(0, process.argv.length, ...argv);
+    }
+  });
+
+  test("no UI offers no action, and losing UI invalidates a captured action", async () => {
+    const { h, ctx } = setup([]);
+    await h.emit("session_start", {}, ctx);
+    const action = queryFooterActions(h.pi.events)["effort.toggle"]!;
+    ctx.hasUI = false;
+    expect(queryFooterActions(h.pi.events)).toEqual({});
+    await action.run();
+    expect(ctx.ui.notes).toEqual([]);
+    expect(h.thinkingChanges).toEqual([]);
+  });
+
+  test.each(["session_start", "session_tree", "session_shutdown", "model_select", "thinking_level_select", "new prompt", "bounds", "toggle", "session id"])(
+    "captured callbacks do nothing after %s",
+    async (change) => {
+      const { h, ctx } = setup([]);
+      await h.emit("session_start", {}, ctx);
+      const action = queryFooterActions(h.pi.events)["effort.toggle"]!;
+      if (change === "new prompt") await h.emit("before_agent_start", { prompt: " " }, ctx);
+      else if (change === "bounds") await h.commands.get("auto-effort").handler("bounds free", ctx);
+      else if (change === "toggle") await action.run();
+      else if (change === "session id") ctx.sessionManager.getSessionId = () => "session-2";
+      else if (change === "thinking_level_select") h.pi.setThinkingLevel("medium");
+      else await h.emit(change, {}, ctx);
+      const before = { changes: [...h.thinkingChanges], notes: [...ctx.ui.notes], status: new Map(ctx.ui.status), entries: [...h.entries] };
+      await action.run();
+      expect(h.thinkingChanges).toEqual(before.changes);
+      expect(ctx.ui.notes).toEqual(before.notes);
+      expect(ctx.ui.status).toEqual(before.status);
+      expect(h.entries).toEqual(before.entries);
+      if (change === "session_shutdown") {
+        // A late settlement cannot make the old runtime's controls available again.
+        await h.emit("agent_settled", {}, ctx);
+        await h.emit("session_tree", {}, ctx);
+        expect(queryFooterActions(h.pi.events)).toEqual({});
+      }
+    },
+  );
+
+  test("off clears quota pressure without assessment or changing the model", async () => {
+    const h = harness();
+    const now = Date.UTC(2026, 0, 1);
+    autoEffort(h.pi, { now: () => now });
+    const jev = fakeJev(() => answers(0));
+    const ctx = h.ctx({ cwd: project(CEILING), model: { provider: "anthropic", id: "managed" }, modelRegistry: jev.registry });
+    await h.emit("session_start", {}, ctx);
+    await h.emit("after_provider_response", { headers: {
+      "anthropic-ratelimit-unified-5h-utilization": "0.9",
+      "anthropic-ratelimit-unified-5h-reset": String((now + 60 * 60_000) / 1_000),
+    } }, ctx);
+    await h.emit("before_agent_start", { prompt: "trivial" }, ctx);
+    expect(h.events.filter((e) => e.channel === "quota:pressure").at(-1)?.data.tier).toBe("critical");
+    await queryFooterActions(h.pi.events)["effort.toggle"]!.run();
+    expect(h.events.filter((e) => e.channel === "quota:pressure").at(-1)?.data).toEqual({ provider: "anthropic", tier: "none", p: 0 });
+    expect(h.thinking).toBe("high");
+    expect(ctx.ui.status.get("auto-effort")).toBeUndefined();
+    expect(h.modelChanges).toEqual([]);
+    expect(jev.calls).toHaveLength(1);
+  });
 });
 
 describe("effort-only operation", () => {

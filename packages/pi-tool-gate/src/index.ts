@@ -12,6 +12,7 @@
 import path from "node:path";
 import { readFileSync, realpathSync } from "node:fs";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { truncateToWidth } from "@earendil-works/pi-tui";
 import {
   alwaysAskBash,
   alwaysAskPath,
@@ -117,6 +118,10 @@ import { agentBeforeLatestUser, approvedPlanOf, callerText, clip, clipTail, rece
 import { offerUserWords, resultText } from "./user-words.ts";
 import { callView } from "./view.ts";
 import { registerWorkflowRenderer, sendWorkflowTransition } from "./workflow-ui.ts";
+import { FLOW_CHANNEL, FLOW_ENTRY, type FlowRequest, type FlowTransitionResult } from "./flow-contract.ts";
+import { FLOW_BUSY, FLOW_RECOVERY, FLOW_TRANSITION, ROLE_MODEL_READY, ProviderFlowController } from "./provider-flows.ts";
+import { FOOTER_ACTIONS_CHANNEL, queryFooterActions, type FooterActionsRequest } from "./footer-actions.ts";
+import { installModelGuard } from "./model-guard.ts";
 
 /** A declined call's result (Block). */
 export const DECLINED = "The user declined this call. Do not retry it; continue without it, or ask the user how to proceed.";
@@ -437,6 +442,20 @@ export default function toolGate(pi: ExtensionAPI) {
   let planProvider = false;
   let planFile: string | undefined;
   let hostCtx: ExtensionContext | undefined;
+  // Install capture before the host constructs/rebinds its runtime; session_start
+  // is too late to capture a restored same-model session without mutating it.
+  const flowLease = installModelGuard(undefined, () => flows.guardPolicy());
+  let guardManager: object | undefined;
+  let roleReady: boolean | undefined;
+  let flowDisplayClaimed = false;
+  let sessionGeneration = 0;
+  let sessionReady = false;
+  let executionCommitting = false;
+  let flowRecordSeen: string | undefined;
+  const branchFlowRecord = (ctx: ExtensionContext) => {
+    const entry = [...ctx.sessionManager.getBranch()].reverse().find(entry => entry.type === "custom" && entry.customType === FLOW_ENTRY);
+    return entry?.type === "custom" ? JSON.stringify(entry.data) : undefined;
+  };
   /** The agent was last told that chat mode is on. */
   let chatTold = false;
   let auto = 0;
@@ -487,6 +506,9 @@ export default function toolGate(pi: ExtensionAPI) {
     try {
       ctx.ui.setStatus(WORKFLOW_STATUS_KEY, workflowStatus(effectiveWorkflow(), shortcut || undefined));
       ctx.ui.setStatus(MODE_STATUS_KEY, modeStatus(approval, duplicateShortcut ? undefined : approvalShortcut || undefined));
+      const flow = flows.snapshot();
+      ctx.ui.setStatus("tool-gate:flow", !flowDisplayClaimed && flow.operatingMode === "linked"
+        ? flow.blocked ? "Linked blocked · /flow" : `Linked ${flow.selectedFlow?.provider ?? "unavailable"}` : undefined);
       // Jev's counts matter where Jev judges: auto mode, and commands while planning.
       ctx.ui.setStatus(
         STATUS_KEY,
@@ -497,6 +519,26 @@ export default function toolGate(pi: ExtensionAPI) {
     }
   };
 
+  const flows = new ProviderFlowController({
+    events: pi.events,
+    workflow: effectiveWorkflow,
+    lease: () => flowLease,
+    roleReady: () => roleReady,
+    setModel: model => pi.setModel(model),
+    getThinking: () => pi.getThinkingLevel(),
+    setThinking: thinking => pi.setThinkingLevel(thinking as Parameters<ExtensionAPI["setThinkingLevel"]>[0]),
+    persist: state => { pi.appendEntry(FLOW_ENTRY, state); flowRecordSeen = hostCtx ? branchFlowRecord(hostCtx) : undefined; },
+    changed: () => status(hostCtx),
+  });
+  const flowResult = async (result: Promise<FlowTransitionResult>, ctx: ExtensionContext) => {
+    const generation = sessionGeneration;
+    const settled = await result;
+    if (generation === sessionGeneration && sessionReady) {
+      if (!settled.ok) ctx.ui.notify(settled.error ?? "Flow transition failed.", "warning");
+      status(ctx);
+    }
+    return settled;
+  };
   const cycle = () => workflowCycle(planProvider);
   const defaults = (config: GateConfig) => {
     const legacy = parseLegacyCombinedMode(config.defaultMode);
@@ -533,19 +575,38 @@ export default function toolGate(pi: ExtensionAPI) {
   const persist = (entry: string, mode: string) => {
     try { pi.appendEntry(entry, { version: 1, mode }); } catch { /* No session yet. */ }
   };
-  const setWorkflow = (next: BaseWorkflowMode, ctx: ExtensionContext | undefined = hostCtx): boolean => {
-    if (execActive) { ctx?.ui.notify(EXEC_GUIDANCE, "warning"); return false; }
-    if (next === "plan" && !planProvider) { ctx?.ui.notify("Plan mode needs pi-plan-mode.", "warning"); return false; }
-    const previous = effectiveWorkflow();
-    if (next === workflow) return true;
-    workflow = next;
+  const changeWorkflow = (next: BaseWorkflowMode, ctx: ExtensionContext | undefined = hostCtx, userInitiated = false): Promise<FlowTransitionResult> => {
+    const result = (error?: string) => Promise.resolve({ ok: !error, snapshot: flows.snapshot(), ...(error ? { error } : {}) });
+    const refused = (error: string) => { ctx?.ui.notify(error, "warning"); return result(error); };
+    if (execActive) return refused(EXEC_GUIDANCE);
+    if (next === "plan" && !planProvider) return refused("Plan mode needs pi-plan-mode.");
+    const flow = flows.snapshot();
+    if (flow.blocked) return refused(flow.blocked);
+    const linked = flow.operatingMode === "linked";
+    // Initial Linked activation is still durably Independent until the setter
+    // succeeds. Its pending state must not take the synchronous Independent path.
+    if (!linked && flow.transitioning) return refused(FLOW_TRANSITION);
+    if (linked && userInitiated && !ctx?.isIdle()) return refused(FLOW_BUSY);
+    if (next === workflow) return result();
+    const commit = () => {
+      const previous = effectiveWorkflow();
+      workflow = next;
+      invalidate();
+      if (linked) pi.appendEntry(WORKFLOW_ENTRY, { version: 1, mode: workflow });
+      else persist(WORKFLOW_ENTRY, workflow);
+      status(ctx);
+      broadcastWorkflow("transition", previous);
+      tellChatNow(ctx);
+    };
+    // Preserve Independent's synchronous mid-run semantics for legacy fire-and-forget callers.
+    if (!linked) { commit(); return result(); }
+    if (!ctx) return result("Workflow coordinator has no active session.");
+    // Invalidate pending judgments before the awaited tool-owned Plan activation begins.
     invalidate();
-    persist(WORKFLOW_ENTRY, workflow);
-    status(ctx);
-    broadcastWorkflow("transition", previous);
-    tellChatNow(ctx);
-    return true;
+    return flowResult(flows.prepareWorkflow(next, ctx, commit), ctx);
   };
+  const setWorkflow = (next: BaseWorkflowMode, ctx: ExtensionContext | undefined = hostCtx, userInitiated = false) =>
+    changeWorkflow(next, ctx, userInitiated).then(result => result.ok);
   const setApproval = (next: ApprovalMode, ctx: ExtensionContext | undefined = hostCtx) => {
     if (approval === next) return;
     const previous = approval;
@@ -573,33 +634,49 @@ export default function toolGate(pi: ExtensionAPI) {
     } catch { return; }
     markChatTold();
   };
-  const cycleWorkflow = (ctx: ExtensionContext | undefined = hostCtx) => {
-    if (execActive) { ctx?.ui.notify(EXEC_GUIDANCE, "warning"); return; }
-    setWorkflow(nextWorkflow(workflow, planProvider) as BaseWorkflowMode, ctx);
+  const cycleWorkflow = (ctx: ExtensionContext | undefined = hostCtx, userInitiated = false): Promise<boolean> => {
+    if (execActive) { ctx?.ui.notify(EXEC_GUIDANCE, "warning"); return Promise.resolve(false); }
+    return setWorkflow(nextWorkflow(workflow, planProvider) as BaseWorkflowMode, ctx, userInitiated);
   };
   pi.events.on(WORKFLOW_SET, (data) => {
-    const next = parseWorkflow((data as { mode?: unknown } | undefined)?.mode);
-    if (next) setWorkflow(next);
+    const request = data as { mode?: unknown; result?: Promise<boolean> } | undefined;
+    const next = parseWorkflow(request?.mode);
+    if (next && request) request.result = setWorkflow(next).catch(error => {
+      hostCtx?.ui.notify(`Workflow transition failed: ${String(error)}`, "warning"); return false;
+    });
   });
-  pi.events.on(WORKFLOW_CYCLE, () => cycleWorkflow());
+  pi.events.on(WORKFLOW_CYCLE, (data) => {
+    const result = cycleWorkflow().catch(error => { hostCtx?.ui.notify(`Workflow transition failed: ${String(error)}`, "warning"); return false; });
+    if (data && typeof data === "object") (data as { result?: Promise<boolean> }).result = result;
+  });
   pi.events.on(MODE_SET, (data) => {
     const next = parseApproval((data as { mode?: unknown } | undefined)?.mode);
     if (next) setApproval(next);
   });
   pi.events.on(MODE_CYCLE, () => setApproval(nextApproval(approval)));
-  pi.events.on(EXEC_CHANGED, (data) => {
-    const event = data as { active?: unknown; source?: unknown } | undefined;
-    // Reconstruction is only a snapshot. Our lifecycle hook owns destination branch restoration.
-    if (event?.source !== "transition") return;
-    const active = event.active;
-    if (typeof active !== "boolean" || active === execActive) return;
+  const commitExecution = (active: boolean) => {
+    if (active === execActive) return;
     const previous = effectiveWorkflow();
     execActive = active;
-    if (!active) { workflow = "work"; persist(WORKFLOW_ENTRY, workflow); }
+    if (!active) {
+      workflow = "work";
+      if (flows.snapshot().operatingMode === "linked") pi.appendEntry(WORKFLOW_ENTRY, { version: 1, mode: workflow });
+      else persist(WORKFLOW_ENTRY, workflow);
+    }
     invalidate();
     status(hostCtx);
     broadcastWorkflow("transition", previous);
     tellChatNow(hostCtx);
+  };
+  pi.events.on(EXEC_CHANGED, (data) => {
+    const event = data as { active?: unknown; source?: unknown } | undefined;
+    // Reconstruction is only a snapshot. Our lifecycle hook owns destination branch restoration.
+    if (event?.source !== "transition") return;
+    if (flows.snapshot().operatingMode === "linked" && !executionCommitting) {
+      hostCtx?.ui.notify("Linked execution requires an awaited approved-plan flow transition.", "warning");
+      return;
+    }
+    if (typeof event.active === "boolean") commitExecution(event.active);
   });
   pi.events.on(PLAN_PROVIDER, (data) => {
     const file = (data as { planFile?: unknown } | undefined)?.planFile;
@@ -613,7 +690,7 @@ export default function toolGate(pi: ExtensionAPI) {
   if (shortcut) {
     pi.registerShortcut(shortcut as never, {
       description: "Cycle workflow (work, chat, plan)",
-      handler: async (ctx) => { cycleWorkflow(ctx); },
+      handler: async (ctx) => { await cycleWorkflow(ctx, true); },
     });
   }
   if (approvalShortcut && !duplicateShortcut) {
@@ -622,6 +699,56 @@ export default function toolGate(pi: ExtensionAPI) {
       handler: async (ctx) => { setApproval(nextApproval(approval), ctx); },
     });
   }
+
+  pi.events.on(ROLE_MODEL_READY, data => {
+    const ready = (data as { ready?: unknown } | undefined)?.ready;
+    if (typeof ready !== "boolean") return;
+    roleReady = ready;
+    // Readiness is only a capability publication. Reconcile at input/startup boundaries,
+    // never from an unawaited event listener while another extension is initializing.
+    status(hostCtx);
+  });
+  pi.events.on(FLOW_CHANNEL, data => {
+    if (!data || typeof data !== "object") return;
+    const request = data as FlowRequest;
+    if (request.kind === "query") {
+      if (!sessionReady) return;
+      request.snapshot = flows.snapshot();
+      if (request.claimDisplay && !flowDisplayClaimed) { flowDisplayClaimed = true; status(hostCtx); }
+      return;
+    }
+    const ctx = hostCtx;
+    if (!ctx || !sessionReady) return;
+    if (request.kind === "resolve") request.result = flows.listFlows(ctx).catch(error => ({ flows: [], failures: [{ provider: "", reason: String(error) }] }));
+    else if (request.kind === "open") request.result = openFlowControl(ctx);
+    else if (request.kind === "workflow" && parseWorkflow(request.workflow)) {
+      request.result = changeWorkflow(request.workflow, ctx).catch(error => {
+        const message = error instanceof Error ? error.message : String(error);
+        ctx.ui.notify(message, "warning");
+        return { ok: false, snapshot: flows.snapshot(), error: message };
+      });
+    } else if (request.kind === "execution") {
+      if (!["begin", "finish", "stop"].includes(request.phase) || typeof request.commit !== "function" || typeof request.planFile !== "string" || !Number.isSafeInteger(request.expectedRevision)) return;
+      invalidate();
+      request.result = flowResult(flows.runExecutionTransition(request, ctx, () => {
+        executionCommitting = true;
+        try {
+          request.commit();
+          // The lifecycle owner owns its durable Exec record; the gate owns its overlay.
+          // Existing owners also publish EXEC_CHANGED synchronously, making this a no-op.
+          commitExecution(request.phase === "begin");
+        } finally { executionCommitting = false; }
+      }), ctx);
+    }
+  });
+  const cancelFlowNavigation = (_event: unknown, ctx: ExtensionContext) => {
+    if (!flows.inFlight) return;
+    ctx.ui.notify("Wait for the linked model transition before switching sessions or branches.", "warning");
+    return { cancel: true };
+  };
+  pi.on("session_before_switch", cancelFlowNavigation);
+  pi.on("session_before_tree", cancelFlowNavigation);
+  pi.on("session_before_fork", cancelFlowNavigation);
 
   const git = (cwd: string) => {
     gitInfo ??= (async () => {
@@ -974,6 +1101,15 @@ export default function toolGate(pi: ExtensionAPI) {
   };
 
   const restore = async (ctx: ExtensionContext, newSession: boolean) => {
+    const generation = ++sessionGeneration;
+    sessionReady = false;
+    flowDisplayClaimed = false;
+    flows.restoreState(ctx.sessionManager.getBranch());
+    flowRecordSeen = branchFlowRecord(ctx);
+    if (guardManager !== ctx.sessionManager) {
+      guardManager = ctx.sessionManager;
+      flowLease.bind(ctx.sessionManager);
+    }
     invalidate();
     pendingUsage.clear();
     hostCtx = ctx;
@@ -991,6 +1127,7 @@ export default function toolGate(pi: ExtensionAPI) {
     dialogs = Promise.resolve();
     if (newSession) { auto = 0; held = 0; pushedBack = 0; warnedPolicy = false; }
     await refreshRules(ctx.cwd);
+    if (generation !== sessionGeneration) return;
     const entries = ctx.sessionManager.getBranch();
     const restored = restoreBranchModes(entries, defaults(config));
     workflow = restored.workflow;
@@ -998,6 +1135,9 @@ export default function toolGate(pi: ExtensionAPI) {
     execActive = restored.execActive;
     const told = [...entries].reverse().find((entry) => entry.type === "custom" && entry.customType === CHAT_ENTRY);
     chatTold = told?.type === "custom" && (told.data as { told?: unknown } | undefined)?.told === true;
+    await flows.reconcile(ctx);
+    if (generation !== sessionGeneration) return;
+    sessionReady = true;
     if (duplicateShortcut) ctx.ui.notify("tool-gate: duplicate workflow and approval shortcut; registering workflow only.", "warning");
     status(ctx);
     broadcastWorkflow("restore");
@@ -1006,20 +1146,80 @@ export default function toolGate(pi: ExtensionAPI) {
   pi.on("session_tree", (_event, ctx) => restore(ctx, false));
   pi.on("session_start", (_event, ctx) => restore(ctx, true));
 
-  pi.on("session_shutdown", () => {
+  pi.on("session_shutdown", async () => {
+    sessionGeneration++;
+    sessionReady = false;
     invalidate();
     pendingUsage.clear();
     hostCtx = undefined;
+    await flows.shutdown();
+    guardManager = undefined;
+  });
+
+  const prepareFlowRun = async (ctx: ExtensionContext): Promise<string | undefined> => {
+    if (flows.inFlight) return FLOW_TRANSITION;
+    // A fresh-implementation bootstrap may seed the destination after our startup hook.
+    // Adopt that branch-local metadata before its first prompt, including the Exec overlay.
+    const record = branchFlowRecord(ctx);
+    if (record !== undefined && record !== flowRecordSeen) {
+      invalidate();
+      const restored = restoreBranchModes(ctx.sessionManager.getBranch(), defaults(config));
+      workflow = restored.workflow;
+      approval = restored.approval;
+      execActive = restored.execActive;
+      flows.restoreState(ctx.sessionManager.getBranch());
+      flowRecordSeen = record;
+      broadcastWorkflow("restore");
+      broadcastApproval();
+    }
+    const flow = flows.snapshot();
+    if (flow.operatingMode === "linked") {
+      const result = await flows.reconcile(ctx);
+      if (!result.ok) return result.error ?? FLOW_RECOVERY;
+    } else if (flow.blocked) return flow.blocked;
+    return undefined;
+  };
+  const pauseFlowRun = (ctx: ExtensionContext, reason: string) => {
+    // The SDK's direct abort signals immediately and leaves accepted custom queues
+    // alone. ctx.abort in native TUI calls clearQueue and loses non-editor messages.
+    // Unsupported hosts still fail closed; they cannot newly activate Linked.
+    if (!flowLease.pause()) {
+      ctx.abort();
+      ctx.ui.notify(`${reason} Queue-preserving pause is unavailable in this runtime; native abort was required.`, "warning");
+    } else ctx.ui.notify(reason, "warning");
+  };
+  pi.on("input", async (_event, ctx) => {
+    if (!sessionReady) return undefined;
+    const reason = await prepareFlowRun(ctx);
+    if (reason) { ctx.ui.notify(reason, "warning"); return { action: "handled" }; }
+    return undefined;
+  });
+  const blockedRunReason = () => flows.inFlight ? FLOW_TRANSITION : flows.snapshot().blocked;
+  pi.on("context", (_event, ctx) => {
+    // Every request, including queued custom results and boundary continuations,
+    // crosses this hook. Input alone cannot guard pi.sendMessage(triggerTurn).
+    const reason = blockedRunReason();
+    if (reason) pauseFlowRun(ctx, reason);
+  });
+  pi.on("session_before_compact", (_event, ctx) => {
+    // Native pre-run compaction happens before before_agent_start, and does not
+    // use the agent's context hook. Cancel it too: a blocked custom trigger must
+    // not make a summary request before its ordinary request can be paused.
+    const reason = blockedRunReason();
+    if (reason) { pauseFlowRun(ctx, reason); return { cancel: true }; }
+    return undefined;
   });
 
   pi.on("before_agent_start", async (_event, ctx) => {
     hostCtx = ctx;
+    const reason = await prepareFlowRun(ctx);
+    if (reason) { pauseFlowRun(ctx, reason); return undefined; }
     await refreshRules(ctx.cwd);
     pushedBackThisTurn.clear();
     classifierFailures.clear();
     gitInfo = undefined;
     // A removed plan provider must not strand a restored session in planning.
-    if (workflow === "plan" && !planProvider && !execActive) setWorkflow("work", ctx);
+    if (workflow === "plan" && !planProvider && !execActive && flows.snapshot().operatingMode === "independent") await setWorkflow("work", ctx);
     if ((effectiveWorkflow() === "chat") === chatTold) return undefined;
     const content = chatNotice();
     markChatTold();
@@ -1071,6 +1271,8 @@ export default function toolGate(pi: ExtensionAPI) {
   };
 
   pi.on("tool_call", async (event, ctx) => {
+    const flow = flows.snapshot();
+    if (flow.blocked || flow.transitioning) return { block: true, reason: `tool-gate blocked this call: ${flow.blocked ?? "a flow transition is in progress."} ${FLOW_RECOVERY}` };
     const epoch = revision;
     const stale = () => epoch !== revision;
     let callUsage: ClassifierUsage | undefined;
@@ -1294,28 +1496,143 @@ export default function toolGate(pi: ExtensionAPI) {
     dialogs = next.catch(() => undefined);
     return next;
   };
+  type ControlChoice = { label: string; run(): Promise<unknown> | void };
+  const pickControl = async (ctx: ExtensionContext, title: string, choices: ControlChoice[]) => {
+    // Retain canonical ids in closures. Never recover ids by parsing shortened UI labels.
+    const labels = choices.map(choice => truncateToWidth(choice.label, 42));
+    for (let i = 0; i < labels.length; i++) {
+      if (labels.filter(label => label === labels[i]).length > 1) {
+        const duplicate = labels[i];
+        labels.forEach((label, index) => { if (label === duplicate) labels[index] = `${truncateToWidth(label, 35)} · ${index + 1}`; });
+      }
+    }
+    const selected = await pick(ctx, title, labels);
+    const choice = choices[labels.indexOf(selected ?? "")];
+    await choice?.run();
+  };
+  const executionStatus = async (ctx: ExtensionContext) => {
+    const action = queryFooterActions(pi.events)["execution.status"];
+    if (action) await action.run();
+    else ctx.ui.notify(EXEC_GUIDANCE, "info");
+  };
+  const selectProvider = async (provider: string, ctx: ExtensionContext) => {
+    if (!ctx.isIdle()) { ctx.ui.notify(FLOW_BUSY, "warning"); return; }
+    if (execActive) { ctx.ui.notify("Provider changes and entering Linked are unavailable during Exec. " + EXEC_GUIDANCE, "warning"); return; }
+    invalidate();
+    await flowResult(flows.selectProvider(provider, ctx), ctx);
+  };
+  const independent = async (ctx: ExtensionContext) => {
+    if (flows.snapshot().operatingMode === "linked" && !ctx.isIdle()) { ctx.ui.notify(FLOW_BUSY, "warning"); return; }
+    invalidate();
+    await flowResult(flows.setIndependent(ctx), ctx);
+  };
+  const showFlowStatus = async (ctx: ExtensionContext) => {
+    const snapshot = flows.snapshot();
+    const availability = await flows.listFlows(ctx).catch(error => ({ flows: [], failures: [{ provider: "catalog", reason: String(error) }] }));
+    ctx.ui.notify([
+      `Operating mode: ${snapshot.operatingMode}. Workflow: ${snapshot.workflow}.`,
+      `Model guard: ${snapshot.guardAvailable ? "available" : "unavailable"}. Selection revision: ${snapshot.revision}.`,
+      ...(snapshot.selectedFlow ? [
+        `Provider: ${snapshot.selectedFlow.provider}. Anchor: ${snapshot.selectedFlow.anchorModel}.`,
+        ...(["work", "chat", "plan", "exec"] as const).map(phase => `${phase}: ${snapshot.selectedFlow!.roles[phase].provider}/${snapshot.selectedFlow!.roles[phase].modelId}`),
+      ] : []),
+      ...(snapshot.blocked ? [`Blocked: ${snapshot.blocked}`] : []),
+      `Available flows: ${availability.flows.map(flow => flow.provider).join(", ") || "none"}.`,
+      ...availability.failures.map(failure => `${failure.provider}: ${failure.reason}`),
+      "Usage: /flow [status|independent|linked [provider]].",
+    ].join("\n"), "info");
+  };
+  const showFlowPicker = async (ctx: ExtensionContext) => {
+    if (!ctx.hasUI) { await showFlowStatus(ctx); return; }
+    const snapshot = flows.snapshot();
+    const blockedQuestion = snapshot.operatingMode === "linked" && snapshot.blocked
+      ? `Linked blocked: ${snapshot.blocked}\nUse /flow independent or select a valid provider.` : undefined;
+    if (execActive) {
+      await pickControl(ctx, blockedQuestion ?? "Operating mode · Exec active", [
+        { label: "Execution status", run: () => executionStatus(ctx) },
+        { label: "Use Independent mode", run: () => independent(ctx) },
+      ]);
+      return;
+    }
+    if (!ctx.isIdle()) { ctx.ui.notify(FLOW_BUSY, "warning"); return; }
+    const generation = sessionGeneration;
+    const availability = await flows.listFlows(ctx).catch(error => ({ flows: [], failures: [{ provider: "catalog", reason: String(error) }] }));
+    if (generation !== sessionGeneration || !sessionReady) return;
+    await pickControl(ctx, blockedQuestion ?? "Operating mode", [
+      { label: "Independent", run: () => independent(ctx) },
+      ...availability.flows.map(flow => ({ label: `Linked · ${flow.provider}`, run: () => selectProvider(flow.provider, ctx) })),
+      ...(availability.flows.length === 0 ? [{ label: "Flow status", run: () => showFlowStatus(ctx) }] : []),
+    ]);
+  };
+  const showModePicker = async (ctx: ExtensionContext) => {
+    const flow = flows.snapshot();
+    const linked = flow.operatingMode === "linked";
+    if (!ctx.hasUI) {
+      if (linked && flow.blocked) await showFlowStatus(ctx);
+      else ctx.ui.notify(`Workflow: ${effectiveWorkflow()}. Usage: /mode [work|chat|plan].`, "info");
+      return;
+    }
+    const blockedQuestion = linked && flow.blocked ? `Linked blocked: ${flow.blocked}\nUse /flow independent or select a valid provider.` : undefined;
+    if (execActive) {
+      if (!linked) { await executionStatus(ctx); return; }
+      await pickControl(ctx, blockedQuestion ?? "Workflow · Exec active", [
+        { label: "Execution status", run: () => executionStatus(ctx) },
+        { label: "Use Independent mode", run: () => independent(ctx) },
+      ]);
+      return;
+    }
+    if (linked && !ctx.isIdle()) { ctx.ui.notify(FLOW_BUSY, "warning"); return; }
+    const choices: ControlChoice[] = cycle().map(mode => ({
+      label: `${mode[0]!.toUpperCase()}${mode.slice(1)}${linked ? ` · ${flow.selectedFlow?.roles[mode].modelId ?? "unavailable"}` : ""}`,
+      run: () => setWorkflow(mode, ctx, true),
+    }));
+    if (linked) choices.push(
+      { label: "Change provider...", run: () => showFlowPicker(ctx) },
+      { label: "Use Independent mode", run: () => independent(ctx) },
+    );
+    else choices.push({ label: "Operating mode...", run: () => showFlowPicker(ctx) });
+    await pickControl(ctx, blockedQuestion ?? (linked ? `Workflow · Linked ${flow.selectedFlow?.provider ?? "blocked"}` : "Workflow"), choices);
+  };
+  const openFlowControl = (ctx: ExtensionContext) => flows.snapshot().operatingMode === "linked" ? showModePicker(ctx) : showFlowPicker(ctx);
+  const showApprovals = async (ctx: ExtensionContext) => {
+    if (!ctx.hasUI) { ctx.ui.notify(`Approvals: ${MODE_NAMES[approval]}. Usage: /approvals [auto|yolo].`, "info"); return; }
+    const selected = await pick(ctx, "Approvals", ["Auto", "Yolo"]);
+    if (selected) setApproval(selected === "Auto" ? "auto" : "bypassPermissions", ctx);
+  };
+  pi.registerCommand("flow", {
+    description: "Operating mode: Independent or a strict provider-linked workflow",
+    getArgumentCompletions: prefix => ["status", "independent", "linked"].filter(name => name.startsWith(prefix)).map(name => ({ value: name, label: name })),
+    handler: async (args, ctx) => {
+      hostCtx = ctx;
+      const [command, provider, ...extra] = args.trim().split(/\s+/u);
+      if (!command) { await showFlowPicker(ctx); return; }
+      if (command === "status" && !provider) { await showFlowStatus(ctx); return; }
+      if (command === "independent" && !provider) { await independent(ctx); return; }
+      if (command === "linked" && !extra.length) {
+        const selected = provider ?? ctx.model?.provider;
+        if (selected) await selectProvider(selected, ctx);
+        else ctx.ui.notify("Choose a provider: /flow linked <provider>.", "warning");
+        return;
+      }
+      ctx.ui.notify("Usage: /flow [status|independent|linked [provider]].", "warning");
+    },
+  });
   pi.registerCommand("mode", {
     description: "Workflow: work, chat or plan (no argument: pick one)",
     getArgumentCompletions: (prefix: string) => cycle().filter((name) => name.startsWith(prefix)).map((name) => ({ value: name, label: name })),
     handler: async (args, ctx) => {
       hostCtx = ctx;
       const arg = args.trim().toLowerCase();
-      if (arg === "exec") { ctx.ui.notify("Approving a distinct-model plan handoff enters exec. " + EXEC_GUIDANCE, "info"); return; }
+      if (arg === "exec") { ctx.ui.notify("Approving a plan handoff enters exec. " + EXEC_GUIDANCE, "info"); return; }
       const legacyApproval = parseApproval(arg);
       if (legacyApproval) { setApproval(legacyApproval, ctx); return; }
       if (arg) {
         const next = parseWorkflow(arg);
-        if (next) setWorkflow(next, ctx);
+        if (next) await setWorkflow(next, ctx, true);
         else ctx.ui.notify("Usage: /mode [work|chat|plan].", "warning");
         return;
       }
-      if (execActive) { ctx.ui.notify(EXEC_GUIDANCE, "info"); return; }
-      if (!ctx.hasUI) { ctx.ui.notify(`Workflow: ${effectiveWorkflow()}. Usage: /mode [work|chat|plan].`, "info"); return; }
-      const choices = cycle();
-      const labels = choices.map((name) => name[0]!.toUpperCase() + name.slice(1));
-      const selected = await pick(ctx, "Workflow", labels);
-      const next = choices[labels.indexOf(selected ?? "")];
-      if (next) setWorkflow(next, ctx);
+      await showModePicker(ctx);
     },
   });
   pi.registerCommand("approvals", {
@@ -1330,10 +1647,23 @@ export default function toolGate(pi: ExtensionAPI) {
         else ctx.ui.notify("Usage: /approvals [auto|yolo].", "warning");
         return;
       }
-      if (!ctx.hasUI) { ctx.ui.notify(`Approvals: ${MODE_NAMES[approval]}. Usage: /approvals [auto|yolo].`, "info"); return; }
-      const selected = await pick(ctx, "Approvals", ["Auto", "Yolo"]);
-      if (selected) setApproval(selected === "Auto" ? "auto" : "bypassPermissions", ctx);
+      await showApprovals(ctx);
     },
+  });
+  pi.events.on(FOOTER_ACTIONS_CHANNEL, data => {
+    const request = data as FooterActionsRequest | undefined;
+    const ctx = hostCtx;
+    if (request?.version !== 1 || !request.actions || !ctx || !sessionReady) return;
+    const generation = sessionGeneration;
+    const session = ctx.sessionManager.getSessionId?.();
+    const guarded = (run: () => Promise<unknown>) => async () => {
+      if (!sessionReady || generation !== sessionGeneration || ctx.sessionManager !== hostCtx?.sessionManager || session !== ctx.sessionManager.getSessionId?.()) return;
+      await run();
+    };
+    request.actions["workflow.cycle"] = { label: execActive ? "Execution status" : "Cycle workflow", ...(shortcut && !execActive ? { key: shortcut } : {}), run: guarded(() => execActive ? executionStatus(ctx) : cycleWorkflow(ctx, true)) };
+    request.actions["workflow.open"] = { label: "Workflow", run: guarded(() => showModePicker(ctx)) };
+    request.actions["flow.open"] = { label: "Operating mode", run: guarded(() => openFlowControl(ctx)) };
+    request.actions["approvals.open"] = { label: "Approvals", ...(!duplicateShortcut && approvalShortcut ? { key: approvalShortcut } : {}), run: guarded(() => showApprovals(ctx)) };
   });
 
   /** The rules in force for a project, and the ways `/gate rules` may change them. */

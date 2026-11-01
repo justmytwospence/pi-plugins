@@ -14,7 +14,7 @@ const tuiPath = path.join(modules, "pi-tui/dist/index.js");
 const { createJiti } = await import(pathToFileURL(path.join(root, "dist/core/extensions/jiti-loader.js")));
 const jiti = createJiti(import.meta.url, { moduleCache: false, alias: { "@earendil-works/pi-tui": tuiPath } });
 const mod = await jiti.import(entry);
-const { visibleWidth } = await import(pathToFileURL(tuiPath));
+const { visibleWidth, sliceByColumn } = await import(pathToFileURL(tuiPath));
 const { getThemeByName } = await import(pathToFileURL(path.join(root, "dist/modes/interactive/theme/theme.js")));
 const now = Date.parse("2026-09-23T12:00:00Z");
 const theme = { fg: (_color, text) => text, bold: (text) => text };
@@ -292,7 +292,7 @@ test("footer lines share separators, concise labels and unparenthesized qualifie
   s.statuses = mod.absorbStatuses(new Map([["tool-gate", "gate: 0 auto · 0 pushed back · 0 asked"]]), { claudeRow: false }).rest;
   s.quotas = [{ source: "Codex acct", updated: now, windows: [{ label: "week", used: 39, reset: now + 86400_000 }] }];
   const rows = mod.renderFooter(s, 160, theme);
-  assert.equal(rows[1], " \u{f06a9}  opus-5.5 · \uee9c reasoning xhigh · auto →");
+  assert.equal(rows[1], " \u{f06a9}  opus-5.5 · \uee9c reasoning auto → xhigh");
   assert.equal(rows[2], " \uf0e4  Context 28% used");
   assert.equal(rows[3], " \uf510  Gate 0 auto · 0 pushed back · 0 asked");
   assert.equal(rows[4], " \uf252  Codex week 39% used · resets in 1d0h");
@@ -308,7 +308,7 @@ test("dashboard hierarchy accents sections and quiets countdowns, not alerts", (
   s.cache = "cold";
   mod.renderFooter(s, 160, paint);
   for (const pair of [["muted", "Context"], ["muted", "Claude"], ["muted", "main"], ["muted", "5h"],
-    ["dim", " used"], ["dim", "resets in 2h14m"], ["error", "95%"], ["warning", "❄"]]) {
+    ["dim", " used"], ["dim", "resets in 2h14m"], ["error", "95%"], ["warning", "cold"]]) {
     assert.ok(calls.some(([color, value]) => color === pair[0] && value === pair[1]), pair.join(": "));
   }
 });
@@ -406,11 +406,20 @@ test("companion extension statuses fold into their rows, and degrade when absent
 
   const s = { ...fixture(), thinking: "medium", statuses: absorbed.rest, autoEffort: true, lean: absorbed.lean, cache: absorbed.cache, extraBilled: 3 };
   const rows = mod.renderFooter(s, 200, theme).map(plain);
-  assert.match(rows[1], /reasoning medium · auto/);
+  assert.match(rows[1], /reasoning auto → medium/);
   assert.match(rows[2], /Lean \u221212k tok/);
   assert.match(rows[2], /Cache 4:12/);
-  for (const text of ["cache cold", "cache cold (model)", "cache cold?", "cache 1h05m"]) {
-    assert.equal(mod.absorbStatuses(new Map([["cache-guard", text]]), { claudeRow: false }).cache, text.slice(6));
+  for (const text of ["cache cold", "cache cold (model)", "cache cold?", "cache 1h05m", "cache ~4:12", "cache ~1h05m"]) {
+    const reading = mod.absorbStatuses(new Map([["cache-guard", text]]), { claudeRow: false });
+    assert.equal(reading.cache, text.slice(6));
+    assert.deepEqual(reading.rest, [], "estimated cache clocks must not escape onto their own notice row");
+    for (const width of [46, 120, 180]) {
+      const rendered = mod.renderFooter({ ...fixture(), cache: reading.cache, statuses: reading.rest }, width, theme).map(plain);
+      const cacheRows = rendered.filter(row => /Cache /.test(row));
+      assert.ok(cacheRows.every(row => /Context /.test(row)), "Cache belongs only on Context");
+      assert.ok(rendered.every(row => !/cache ~/.test(row)), "raw provider status must never become a separate row");
+      if (width >= 120 && text.includes("~")) assert.ok(cacheRows.some(row => row.includes(text.slice(6))), "keep the estimated-clock qualifier");
+    }
   }
   assert.deepEqual(mod.absorbStatuses(new Map([["cache-guard", "cache is weird"]]), { claudeRow: false }).rest, ["cache is weird"]);
   assert.match(rows.at(-1), /3 requests billed to extra usage/);
@@ -420,12 +429,12 @@ test("companion extension statuses fold into their rows, and degrade when absent
   for (let width = 1; width <= 160; width++) assert.ok(mod.renderFooter(s, width, theme).every((row) => visibleWidth(row) <= width));
   assert.match(plain(mod.renderFooter(s, 50, theme).at(-1)), /extra x3/);
 
-  // The trend arrow and limit note follow the same dot separator.
-  for (const [text, shown] of [["effort: low (auto \u2192)", "auto \u2192"], ["effort: medium (auto \u2193, limited: 5h 84%)", "auto \u2193, limited: 5h 84%"]]) {
+  // Automatic reasoning has one direction arrow; quota limits remain a qualifier.
+  for (const [text, shown] of [["effort: low (auto \u2192)", "reasoning auto → low"], ["effort: medium (auto \u2193, limited: 5h 84%)", "reasoning auto → low · limited: 5h 84%"]]) {
     const a = mod.absorbStatuses(new Map([["auto-effort", text]]), { claudeRow: false });
     assert.deepEqual(a.rest, []);
     const row = plain(mod.renderFooter({ ...fixture(), thinking: "low", statuses: a.rest, autoEffort: a.autoEffort, autoEffortDetail: a.autoEffortDetail }, 200, theme)[1]);
-    assert.ok(row.includes(`reasoning low · ${shown}`), row);
+    assert.ok(row.includes(shown), row);
   }
 
   // Companions not installed (no statuses): the plain footer.
@@ -473,11 +482,11 @@ test("optional companions share label style and preserve meaningful qualifiers",
   assert.deepEqual(absorbed.rest, ["Plan A working · B cut off · resume in /plan · /plan", "Gate off"]);
   const s = { ...fixture(), borderGauge: true, ...absorbed, statuses: absorbed.rest, cache: "cold (model)" };
   const rows = mod.renderFooter(s, 200, theme);
-  assert.equal(rows[2], " \uf0e4  Context 28% used · Cache ❄ · model changed");
+  assert.equal(rows[2], " \uf0e4  Context 28% used · Cache cold · model changed");
   assert.equal(rows[3], " \uf02d  Marimo fit.py · disconnected");
   assert.equal(rows[4], " \uf085  Background vite starting kept · lint ✗ · fmt ■");
   assert.match(rows[5], /^ \uf0f3  Plan /);
-  assert.match(mod.renderFooter({ ...s, cache: "cold?" }, 200, theme)[2], /Cache ❄ · unconfirmed/);
+  assert.match(mod.renderFooter({ ...s, cache: "cold?" }, 200, theme)[2], /Cache unknown/);
   assert.deepEqual(mod.absorbStatuses(new Map([["plan", "plan: new format"]]), { claudeRow: false }).rest, ["plan: new format"]);
   assert.deepEqual(mod.absorbStatuses(new Map([["third-party", "widget: Mixed CASE (keep me)"]]), { claudeRow: false }).rest, ["widget: Mixed CASE (keep me)"]);
 });
@@ -734,6 +743,13 @@ function host(entries = [], cwd = os.tmpdir(), mode = "tui", nativeBranch = null
     get editorFactory() { return editorFactory; }, set editorFactory(f) { editorFactory = f; },
     get footer() { return footer; }, get disposed() { return disposed; }, get paints() { return paints; },
   };
+}
+
+// Native status changes request a frame without a public status-change event.
+// The footer coalesces discovery after that frame; the subsequent frame is fresh.
+async function refreshFrame(h) {
+  h.footer.render(120);
+  await new Promise((resolve) => setImmediate(resolve));
 }
 
 test("Git polling exposes staging details and outside Git stays quiet without a native branch fallback", async () => {
@@ -1203,6 +1219,7 @@ test("lifecycle: native fallback, mode persistence, provider isolation, reload a
     for (const variant of ["", "\ufe0e", "\ufe0f"]) {
       const status = `\x1b[36m\u{1f50c}${variant} MCP: 5 connected\x1b[39m`;
       h.statuses.set("mcp", status);
+      await refreshFrame(h);
       const rendered = h.footer.render(120).join("\n");
       assert.match(rendered, /\uf1e6(?:\x1b\[[0-9;]*m)* \x1b\[36mMCP: 5 connected\x1b\[39m/, "the flat plug leads the row; color/text preserved");
       assert.doesNotMatch(rendered, /\u{1f50c}/u);
@@ -1215,9 +1232,11 @@ test("lifecycle: native fallback, mode persistence, provider isolation, reload a
     assert.match(h.footer.render(120)[0], /!/, "unmeasured Git state is not clean");
     assert.doesNotMatch(plain(h.footer.render(120)[1]), /\(auto\)/);
     h.statuses.set("auto-effort", "effort: xhigh (auto)");
-    assert.match(plain(h.footer.render(120)[1]), /reasoning xhigh · auto/);
+    await refreshFrame(h);
+    assert.match(plain(h.footer.render(120)[1]), /reasoning auto → xhigh/);
     assert.doesNotMatch(h.footer.render(120).join("\n"), /effort:/);
     h.statuses.delete("auto-effort");
+    await refreshFrame(h);
     assert.doesNotMatch(plain(h.footer.render(120)[1]), /\(auto\)/);
     await vi.waitFor(() => assert.equal(fetches.length, 1));
     assert.equal(fetches[0].url, "https://chatgpt.com/backend-api/wham/usage");
@@ -1652,9 +1671,11 @@ test("MCP chip: built-in servers on the context row, yielding to a published mcp
     await h.handlers.get("agent_settled")({}, h.ctx);
     await vi.waitFor(() => assert.match(statusRow(), /MCP 2\/3$/), "the trusted project's file adds its servers");
     h.statuses.set("plan", "PLAN mode");
+    await refreshFrame(h);
     assert.match(statusRow(), /Context .* \u00b7 \uf1e6 MCP 2\/3$/, "the chip stays on the context row");
     assert.ok(h.footer.render(120).map(plain).some((row) => /^ \S+  PLAN mode$/.test(row)), "other statuses keep their own row");
     h.statuses.set("mcp", "\u{1f50c} MCP: 5 connected");
+    await refreshFrame(h);
     assert.match(statusRow(), /Context .* \u00b7 \uf1e6 MCP: 5 connected$/, "another extension's mcp status replaces the chip");
     assert.equal(h.footer.render(120).filter((row) => /MCP/.test(row)).length, 1);
     h.statuses.delete("mcp"); h.statuses.delete("plan");
@@ -1710,12 +1731,12 @@ test("the permission mode gets its own row in its color; plan runs point at /pla
   const s = { ...fixture(), mode: absorbed.mode, statuses: absorbed.rest };
   const rows = mod.renderFooter(s, 160, theme).map(plain);
   assert.match(rows[1], /opus-5\.5 · \uee9c reasoning xhigh$/);
-  assert.match(rows[2], /Approvals · accept edits \(legacy\) · shift\+tab/);
+  assert.match(rows[2], /Approvals · accept edits \(legacy\) +shift\+tab$/);
   // The gate's tally follows the mode on its row.
   const gated = { ...s, statuses: ["Gate 2 auto · 0 pushed back · 1 asked"] };
   const auto = { ...gated, mode: mod.parseModeStatus("⏵⏵ auto mode on (shift+tab to cycle)") };
   const autoRows = mod.renderFooter(auto, 160, theme).map(plain);
-  assert.match(autoRows[2], /Approvals · auto · Gate 2 auto · 0 pushed back · 1 asked · shift\+tab/);
+  assert.match(autoRows[2], /Approvals · auto · Gate 2 auto · 0 pushed back · 1 asked +shift\+tab$/);
   assert.equal(autoRows.filter((r) => r.includes("Gate")).length, 1);
   assert.equal(mod.parseModeStatus("⏸ plan mode on").kind, "plan");
   assert.equal(mod.parseModeStatus("⏸ plan mode on").label, "\u{f03e4} plan mode on");
@@ -1738,15 +1759,15 @@ test("pi-plan-mode's exec workflow preserves a separate approvals row", () => {
   assert.deepEqual(absorbed.rest, []);
   const s = { ...fixture(), mode: absorbed.mode, exec: absorbed.exec, statuses: absorbed.rest };
   const rows = mod.renderFooter(s, 160, theme).map(plain);
-  assert.match(rows[2], /\bEXEC\b · Claude Opus 5.5 on call · \/plan-exec/);
+  assert.match(rows[2], /\bEXEC\b · Claude Opus 5.5 on call +\/plan-exec$/);
   assert.doesNotMatch(rows[2], /implementing approved plan/);
-  assert.match(rows[3], /Approvals · auto · shift\+tab/);
+  assert.match(rows[3], /Approvals · auto +shift\+tab$/);
   // Without a mode, or a planner on call, the row is still drawn.
   const standalone = mod.renderFooter({ ...s, mode: undefined }, 160, theme).map(plain);
   assert.match(standalone[2], /\bEXEC\b · Claude Opus 5.5 on call/);
   assert.ok(!standalone.some(row => row.includes("Approvals")));
   assert.equal(mod.absorbStatuses(new Map([["plan-exec", "exec mode on"]]), { claudeRow: false }).exec, "");
-  assert.match(mod.renderFooter({ ...s, exec: "" }, 160, theme).map(plain)[2], /\bEXEC\b · implementing approved plan · \/plan-exec/);
+  assert.match(mod.renderFooter({ ...s, exec: "" }, 160, theme).map(plain)[2], /\bEXEC\b · implementing approved plan +\/plan-exec$/);
   assert.deepEqual(mod.absorbStatuses(new Map([["plan-exec", "something else"]]), { claudeRow: false }).rest, ["something else"]);
 });
 
@@ -1880,13 +1901,13 @@ test("legacy workflow fallback never invents approvals; explicit workflow and ex
   }
   const a = absorb([["permission-mode", "⏵⏵ auto mode on (ctrl+a to cycle)"]]);
   const rows = mod.renderFooter({ ...fixture(), ...a, statuses: a.rest }, 46, theme).map(plain);
-  assert.match(rows[2], /Approvals · auto · ctrl\+a/);
+  assert.match(rows[2], /Approvals · auto +ctrl\+a$/);
   assert.ok(!rows.some(row => /\b(WORK|CHAT|PLAN|EXEC)\b/.test(row)));
   for (const width of [46, 120]) {
     const custom = absorb([["workflow-mode", "workflow: work (alt+w to cycle)"], ["permission-mode", "⏵⏵ auto mode on (ctrl+a to cycle)"]]);
     const rows = mod.renderFooter({ ...fixture(), ...custom, statuses: custom.rest }, width, theme).map(plain);
     assert.match(rows[2], /\bWORK\b.*alt\+w/);
-    assert.match(rows[3], /Approvals · auto · ctrl\+a/);
+    assert.match(rows[3], /Approvals · auto +ctrl\+a$/);
     const disabled = absorb([["workflow-mode", "workflow: work"], ["permission-mode", "⏵⏵ auto mode on"]]);
     const disabledRows = mod.renderFooter({ ...fixture(), ...disabled, statuses: disabled.rest }, width, theme).map(plain);
     assert.match(disabledRows[2], /\bWORK\b · edits and actions$/);
@@ -2007,4 +2028,205 @@ test("Fable quota shows only over trajectory and within 48 hours of reset", () =
   assert.equal(show(68, 3), false);
   assert.equal(show(10, 1), false);
   assert.equal(show(90, 1), true);
+});
+
+const controlState = () => Object.fromEntries([
+  ["model.open", {}], ["reasoning.cycle", {}], ["effort.toggle", { active: true }],
+  ["workflow.cycle", { key: "ctrl+w" }], ["workflow.open", {}], ["flow.open", {}],
+  ["execution.status", {}], ["approvals.open", { key: "ctrl+a" }],
+  ["context.open", {}], ["context.skills", {}], ["cache.status", {}], ["mcp.open", {}],
+]);
+const flowState = (workflow = "work", extra = {}) => ({
+  version: 1, operatingMode: "linked", revision: 7, workflow,
+  ready: true, guardAvailable: true, transitioning: false,
+  selectedFlow: { provider: "anthropic", anchorModel: "claude-opus-5-5", roles: Object.fromEntries(
+    ["work", "chat", "plan", "exec"].map((role) => [role, { provider: "anthropic", modelId: "claude-opus-5-5" }])) },
+  ...extra,
+});
+const controlledFixture = () => ({
+  ...fixture(), quotas: [], actions: controlState(), primaryKeys: { model: "alt+p", workflow: "ctrl+w", approvals: "ctrl+a" },
+  workflow: { kind: "work" }, mode: { kind: "auto", label: "auto" },
+  cache: "cold (model)", skills: 7, mcp: { connected: 2, total: 3 }, borderGauge: true,
+});
+const hitText = (layout, hit) => plain(sliceByColumn(layout.lines[hit.row], hit.startCol, hit.endCol - hit.startCol));
+
+test("final cell metadata selects only explicit values, never labels, icons, separators or key-rail padding", () => {
+  const s = controlledFixture();
+  s.model = "日本語-e\u0301-model";
+  const layout = mod.layoutFooter(s, 180, getThemeByName("dark"));
+  assert.deepEqual(mod.renderFooter(s, 180, getThemeByName("dark")), layout.lines);
+  assert.deepEqual(layout.hits.map((hit) => [hit.action, hitText(layout, hit)]), [
+    ["model.open", "日本語-e\u0301-model"], ["effort.toggle", "auto"], ["reasoning.cycle", "xhigh"], ["model.open", "alt+p"],
+    ["workflow.cycle", "WORK"], ["workflow.cycle", "ctrl+w"], ["approvals.open", "auto"], ["approvals.open", "ctrl+a"],
+    ["context.open", "28%"], ["cache.status", "Cache cold"], ["mcp.open", "MCP 2/3"], ["context.skills", "Skills 7"],
+  ]);
+  for (const hit of layout.hits) {
+    assert.equal(hit.endCol - hit.startCol, visibleWidth(hitText(layout, hit)));
+    assert.ok(!/^\s|\s$/.test(hitText(layout, hit)), hitText(layout, hit));
+    assert.ok(!hitText(layout, hit).includes(" · "));
+  }
+  const rail = layout.hits.filter((hit) => ["alt+p", "ctrl+w", "ctrl+a"].includes(hitText(layout, hit)));
+  assert.deepEqual(rail.map((hit) => hit.endCol), [179, 179, 179]);
+  for (const hit of rail) assert.equal(plain(sliceByColumn(layout.lines[hit.row], hit.startCol - 2, 2)), "  ");
+});
+
+test("control-row hint reservation has the exact 18-cell threshold and never sacrifices state to a dangling key", () => {
+  const s = controlledFixture();
+  s.model = "sol"; s.thinking = undefined; s.actions = { "model.open": {} };
+  for (const width of [27, 28, 59, 60, 120, 180]) {
+    const layout = mod.layoutFooter(s, width, theme);
+    const hinted = width >= 28;
+    assert.equal(layout.lines[1].endsWith("alt+p"), hinted, `width ${width}`);
+    assert.ok(layout.lines[1].includes("sol"));
+    assert.equal(layout.hits.filter((hit) => hit.row === 1).length, hinted ? 2 : 1);
+    if (hinted) assert.equal(visibleWidth(layout.lines[1]), width - (width >= 60 ? 1 : 0));
+  }
+  const tiny = mod.layoutFooter({ ...s, model: "日本語" }, 5, theme);
+  assert.equal(tiny.hits.filter((hit) => hit.row === 1).length, 0, "a clipped model/ellipsis is inert");
+  const narrow = mod.layoutFooter(controlledFixture(), 28, theme);
+  assert.ok(!narrow.hits.some((hit) => hit.action === "effort.toggle" || hit.action === "reasoning.cycle"), "dropped reasoning has no invisible controls");
+});
+
+test("Linked combines model/workflow while reasoning, auto-off and approvals stay independent", () => {
+  for (const workflow of ["work", "chat", "plan", "exec"]) {
+    const independent = { ...controlledFixture(), workflow: { kind: workflow },
+      exec: workflow === "exec" ? "review 2 · 3 consultations · $0.31 consult · $0.42 review" : undefined };
+    for (const width of [46, 120, 180]) {
+      const separate = mod.layoutFooter(independent, width, theme);
+      const joined = mod.layoutFooter({ ...independent, flow: flowState(workflow) }, width, theme);
+      assert.equal(separate.lines.length, 5);
+      assert.equal(joined.lines.length, 4);
+      assert.ok(joined.lines[1].includes(workflow.toUpperCase()));
+      assert.match(joined.lines[2], /Approvals · auto/);
+      assert.ok(!joined.lines.some((line) => line.includes(mod.ICONS.model)));
+      assert.equal(joined.lines.filter((line) => line.includes(workflow.toUpperCase())).length, 1);
+      assert.equal(separate.lines[2].endsWith(workflow === "exec" ? "/plan-exec" : "ctrl+w"), true);
+      assert.equal(joined.lines[1].endsWith("alt+p"), true);
+      if (width >= 120) {
+        assert.match(joined.lines[1], /anthropic · opus-5\.5 · .*reasoning auto → xhigh/);
+        if (workflow === "exec") {
+          assert.match(joined.lines[1], /review 2/);
+          assert.equal(joined.hits.find((hit) => hitText(joined, hit) === "EXEC").action, "execution.status");
+        }
+      }
+      if (width === 180 && workflow === "exec") assert.ok(joined.lines[1].includes(independent.exec));
+    }
+  }
+  const s = { ...controlledFixture(), flow: flowState(), actions: { ...controlState(), "effort.toggle": { active: false } } };
+  const off = mod.layoutFooter(s, 180, theme);
+  assert.match(off.lines[1], /reasoning xhigh · auto off/);
+  assert.equal(hitText(off, off.hits.find((hit) => hit.action === "effort.toggle")), "auto off");
+  delete s.actions["effort.toggle"];
+  const pinned = mod.layoutFooter(s, 180, theme);
+  assert.match(pinned.lines[1], /reasoning xhigh/);
+  assert.doesNotMatch(pinned.lines[1], /auto off/);
+  assert.ok(!pinned.hits.some((hit) => hit.action === "effort.toggle"));
+});
+
+test("context owns cold/unknown/timed cache, telemetry actions and no speculative controls", () => {
+  for (const [cache, expected] of [["cold", "cold"], ["cold (model)", "cold"], ["cold?", "unknown"], ["4:12", "4:12"], [undefined, "unknown"]]) {
+    const s = { ...controlledFixture(), cache };
+    const layout = mod.layoutFooter(s, 180, theme);
+    assert.ok(layout.lines[4].includes(`Cache ${expected}`));
+    assert.doesNotMatch(layout.lines[1], /Cache|4:12/);
+    assert.equal(hitText(layout, layout.hits.find((hit) => hit.action === "cache.status")), `Cache ${expected}`);
+    assert.equal(layout.lines[4].includes("model changed"), cache === "cold (model)");
+    assert.ok(!layout.hits.some((hit) => /compact|warm|yolo/.test(hit.action)));
+    const bare = mod.layoutFooter({ ...s, actions: undefined, primaryKeys: undefined }, 180, theme);
+    assert.deepEqual(bare.hits, []);
+    if (!cache) assert.doesNotMatch(bare.lines[4], /Cache/);
+  }
+  const unknown = mod.layoutFooter({ ...controlledFixture(), context: { percent: null, tokens: null, contextWindow: 200000 } }, 180, theme);
+  assert.equal(hitText(unknown, unknown.hits.find((hit) => hit.action === "context.open")), "unknown");
+  assert.doesNotMatch(unknown.lines[4], /0%/);
+});
+
+test("blocked/unavailable Linked states are explicit; held dialogs remain one row with no primary keys or hits", () => {
+  for (const [extra, label] of [[{ blocked: "Assigned model unavailable" }, "Linked blocked"], [{ ready: false }, "Linked unavailable"], [{ guardAvailable: false }, "Linked unavailable"], [{ transitioning: true }, "Linked changing"]]) {
+    const s = { ...controlledFixture(), flow: flowState("plan", extra) };
+    for (const width of [46, 120, 180]) {
+      const layout = mod.layoutFooter(s, width, theme);
+      assert.ok(layout.lines[1].includes(label), layout.lines[1]);
+      const compact = mod.layoutFooter({ ...s, compact: true, stash: { text: "draft" }, bg: [{ kind: "job", name: "tests", elapsed: "2:14" }] }, width, theme);
+      assert.equal(compact.lines.length, 1);
+      assert.deepEqual(compact.hits, []);
+      assert.doesNotMatch(compact.lines[0], /alt\+p|ctrl\+w|ctrl\+a/);
+      assert.ok(compact.lines[0].includes("PLAN"));
+    }
+  }
+});
+
+test("Independent/Linked/Exec final layouts and hit bounds fit all widths 1..240 in both ANSI themes", () => {
+  for (const name of ["light", "dark"]) for (const kind of ["work", "chat", "plan", "exec"]) for (const linked of [false, true]) {
+    const paint = getThemeByName(name);
+    const s = { ...controlledFixture(), model: "日本語-e\u0301-physical-model", workflow: { kind },
+      flow: linked ? flowState(kind) : undefined, exec: kind === "exec" ? "paused · review unavailable · 3 consultations · $0.42 review" : undefined };
+    for (let width = 1; width <= 240; width++) {
+      const layout = mod.layoutFooter(s, width, paint);
+      assert.equal(layout.lines.length, linked ? 4 : 5);
+      assert.ok(layout.lines.every((line) => visibleWidth(line) <= width && !/[\r\n\t]/.test(plain(line))), `${name} ${kind} ${linked} ${width}`);
+      for (const hit of layout.hits) {
+        assert.ok(hit.startCol >= 0 && hit.endCol > hit.startCol && hit.endCol <= visibleWidth(layout.lines[hit.row]));
+        assert.ok(hitText(layout, hit).length > 0);
+        assert.ok(!hitText(layout, hit).includes("…"), "partial labels are inert");
+        assert.ok(!layout.hits.some((other) => other !== hit && other.row === hit.row && other.startCol < hit.endCol && other.endCol > hit.startCol), "hits never overlap");
+      }
+    }
+  }
+});
+
+test("snapshot and action discovery run outside render, coalesce, and retire old-frame callbacks on shutdown", async () => {
+  const h = host();
+  h.ctx.model = { provider: "test", id: "test", contextWindow: 1000 };
+  let rendering = false, queries = 0;
+  const assertOutside = () => { assert.equal(rendering, false); queries++; };
+  h.pi.events.on("pi-plugins.workflow-flow.v1", (request) => { assertOutside(); request.snapshot = flowState(); });
+  h.pi.events.on("pi-plugins.footer-actions.v1", (request) => { assertOutside(); request.actions["cache.status"] = { label: "Cache", run() {} }; });
+  const getCommands = h.pi.getCommands;
+  h.pi.getCommands = () => { assertOutside(); return getCommands(); };
+  try {
+    await h.handlers.get("session_start")({}, h.ctx);
+    const before = queries;
+    rendering = true;
+    try { for (let i = 0; i < 10; i++) h.footer.render(120); }
+    finally { rendering = false; }
+    assert.equal(queries, before);
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(queries, before + 3, "one deferred flow/actions/commands snapshot for the entire burst");
+    const old = h.footer;
+    old.render(120);
+    await h.handlers.get("session_shutdown")({}, h.ctx);
+    const stopped = queries;
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(queries, stopped);
+    assert.deepEqual(old.render(120), []);
+  } finally { await h.handlers.get("session_shutdown")({}, h.ctx); }
+});
+
+test("child chrome clears main flow, mutable workflow, auto-effort and key metadata", async () => {
+  const h = host();
+  h.ctx.model = { provider: "test", id: "test", contextWindow: 1000 };
+  h.pi.events.on("pi-plugins.workflow-flow.v1", (request) => { request.snapshot = flowState("exec"); });
+  h.pi.events.on("pi-plugins.footer-actions.v1", (request) => {
+    request.actions["effort.toggle"] = { label: "auto", active: true, run() { throw new Error("child must not mutate main"); } };
+    request.actions["workflow.cycle"] = { label: "workflow", key: "ctrl+w", run() {} };
+    request.actions["approvals.open"] = { label: "approvals", key: "ctrl+a", run() {} };
+  });
+  h.statuses.set("workflow-mode", "workflow: exec");
+  h.statuses.set("permission-mode", "⏵⏵ auto mode on (ctrl+a to cycle)");
+  h.statuses.set("plan-exec", "exec mode on · review 2");
+  try {
+    await h.handlers.get("session_start")({}, h.ctx);
+    const request = { version: 1 };
+    h.pi.events.emit("pi-plugins.session-chrome.v1", request);
+    const session = { cwd: h.ctx.cwd, provider: "test", model: "child-model", thinking: "low",
+      context: { tokens: 10, contextWindow: 1000, percent: 1 }, totals: fixture().totals };
+    for (const width of [46, 120, 180]) {
+      const lines = request.service.footer(session, width, theme);
+      assert.equal(lines.length, 3);
+      assert.match(lines[1], /child-model · .*reasoning low/);
+      assert.doesNotMatch(lines.join("\n"), /EXEC|WORK|PLAN|Approvals|auto|ctrl\+w|ctrl\+a|alt\+p|plan-exec/);
+      assert.ok(lines.every((line) => visibleWidth(line) <= width));
+    }
+  } finally { await h.handlers.get("session_shutdown")({}, h.ctx); }
 });

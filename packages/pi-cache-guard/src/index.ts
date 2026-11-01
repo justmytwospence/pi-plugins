@@ -12,6 +12,7 @@ import path from "node:path";
 import { type CacheView, type LastRequest, type ModelInfo, lastRequest, view } from "./clock.ts";
 import { loadSettings, saveUserSettings } from "./config.ts";
 import { type Lean, leanContext, trimStatus } from "./context.ts";
+import { FOOTER_ACTIONS_CHANNEL, type FooterActionsRequest } from "./footer-actions.ts";
 import { HerdrReporter, alertHeld, whileBlocked } from "./herdr.ts";
 import { JEV_LOGINS, type JevState, label, probe } from "./jev.ts";
 import { JEV_KEY_URL, JEV_PITCH } from "./lean.ts";
@@ -217,6 +218,8 @@ export default function cacheGuard(
   // Jev: trimming tool output, and compaction.
   const lean: Lean = leanContext(pi);
   let ctx: ExtensionContext | undefined;
+  let sessionReady = false;
+  let generation = 0;
   let settings: Settings = DEFAULT_SETTINGS;
   // A miss found at message_end, written at turn_end once the message itself is in the session.
   let pendingMiss: Notice | undefined;
@@ -344,6 +347,8 @@ export default function cacheGuard(
   };
 
   const stop = () => {
+    sessionReady = false;
+    generation++;
     if (timer) clearInterval(timer);
     timer = undefined;
     if (ctx && shown !== undefined) ctx.ui.setStatus(STATUS_KEY, undefined);
@@ -369,6 +374,7 @@ export default function cacheGuard(
     settings = loadSettings(context.cwd);
     pendingMiss = undefined;
     seenWarm = new Set(recentWarms(context).map((entry) => entry.id!));
+    sessionReady = true;
     emitState(context, current(context), true);
     if (!context.hasUI) return;
     publish();
@@ -380,7 +386,10 @@ export default function cacheGuard(
   const refresh = (context: ExtensionContext, keepLive: boolean) => {
     if (!ctx) return;
     ctx = context;
-    if (!keepLive) live = undefined;
+    if (!keepLive) {
+      generation++;
+      live = undefined;
+    }
     publish();
   };
   pi.on("model_select", (_event, context) => refresh(context, false));
@@ -645,6 +654,57 @@ export default function cacheGuard(
     runJevCompaction(focus, context);
   };
 
+  /** Read-only status, shared by the command and optional footer action. */
+  const showCacheStatus = async (context: ExtensionContext, isCurrent: () => boolean = () => true) => {
+    settings = loadSettings(context.cwd);
+    const v = current(context);
+    const lines: string[] = [];
+    if (!v) {
+      lines.push("No cached request on this branch yet (or the context was just compacted).");
+    } else {
+      const info = infoFor(context);
+      lines.push(`Last request: ${v.last.provider}/${v.last.model}, ${formatTokens(v.last.tokens)} tokens, ${formatDuration(Date.now() - v.last.realAt)} ago` +
+        (v.last.at > v.last.realAt ? `; refreshed by cache warming ${formatDuration(Date.now() - v.last.at)} ago.` : "."));
+      lines.push(info?.ttlMs === undefined
+        ? `TTL: not published for ${info?.provider}/${info?.id}; warning after ${settings.warn.idleMinutes}m idle.`
+        : info.likely
+          ? `TTL: about ${formatDuration(info.ttlMs)} (${info.source}); warning after that, as a likelihood.`
+          : `TTL: ${formatDuration(info.ttlMs)} minimum (${info.source}).`);
+      if (v.remainingMs !== undefined) lines.push(`Warm: ${v.likely ? "about " : ""}${formatClock(v.remainingMs)} left.`);
+      if (v.cold) {
+        lines.push(describeMiss(v.cold, v.last.tokens, undefined));
+        if (!warningOn()) {
+          const reason = sessionOn && settings.enabled && settings.warn.enabled ? "muted for this session" : "off";
+          lines.push(`The next prompt is sent without asking: the warning is ${reason}.`);
+        } else if (!worthWarning(v.last.tokens, undefined, settings)) {
+          lines.push("Below the warning threshold.");
+        } else {
+          lines.push(context.hasUI ? "The next prompt asks before sending." : "The next prompt is sent without asking: no UI is available.");
+        }
+      }
+    }
+    lines.push(`Warning: ${warningLine()}. Keep-warm: Pi's cacheWarming setting (/session shows its next decision).`);
+    lines.push(jevLine(await lean.jev(context), settings, lean.savedChars()));
+    if (isCurrent()) context.ui.notify(lines.join("\n"), "info");
+  };
+
+  pi.events?.on(FOOTER_ACTIONS_CHANNEL, (data) => {
+    const request = data as Partial<FooterActionsRequest> | undefined;
+    if (request?.version !== 1 || !request.actions || typeof request.actions !== "object" || Array.isArray(request.actions) || !sessionReady || !ctx?.hasUI) return;
+    const ownerGeneration = generation;
+    const manager = ctx.sessionManager;
+    const isCurrent = () => sessionReady && generation === ownerGeneration && ctx?.hasUI === true && ctx.sessionManager === manager;
+    request.actions["cache.status"] = {
+      label: "Cache status",
+      run: () => {
+        const context = ctx;
+        if (!context || !isCurrent()) return;
+        // Jev discovery may await local credential availability; fence its eventual notification too.
+        return showCacheStatus(context, isCurrent);
+      },
+    };
+  });
+
   pi.registerCommand(NAME, {
     description: "Prompt cache and context: status, on, off, fresh, compact [focus], jev",
     getArgumentCompletions: (prefix) => SUBCOMMANDS.filter((v) => v.startsWith(prefix)).map((value) => ({ value, label: value })),
@@ -692,36 +752,7 @@ export default function cacheGuard(
         context.ui.notify(`cache-guard ${command} for this session`, "info");
         return;
       }
-      settings = loadSettings(context.cwd);
-      const v = current(context);
-      const lines: string[] = [];
-      if (!v) {
-        lines.push("No cached request on this branch yet (or the context was just compacted).");
-      } else {
-        const info = infoFor(context);
-        lines.push(`Last request: ${v.last.provider}/${v.last.model}, ${formatTokens(v.last.tokens)} tokens, ${formatDuration(Date.now() - v.last.realAt)} ago` +
-          (v.last.at > v.last.realAt ? `; refreshed by cache warming ${formatDuration(Date.now() - v.last.at)} ago.` : "."));
-        lines.push(info?.ttlMs === undefined
-          ? `TTL: not published for ${info?.provider}/${info?.id}; warning after ${settings.warn.idleMinutes}m idle.`
-          : info.likely
-            ? `TTL: about ${formatDuration(info.ttlMs)} (${info.source}); warning after that, as a likelihood.`
-            : `TTL: ${formatDuration(info.ttlMs)} minimum (${info.source}).`);
-        if (v.remainingMs !== undefined) lines.push(`Warm: ${v.likely ? "about " : ""}${formatClock(v.remainingMs)} left.`);
-        if (v.cold) {
-          lines.push(describeMiss(v.cold, v.last.tokens, undefined));
-          if (!warningOn()) {
-            const reason = sessionOn && settings.enabled && settings.warn.enabled ? "muted for this session" : "off";
-            lines.push(`The next prompt is sent without asking: the warning is ${reason}.`);
-          } else if (!worthWarning(v.last.tokens, undefined, settings)) {
-            lines.push("Below the warning threshold.");
-          } else {
-            lines.push(context.hasUI ? "The next prompt asks before sending." : "The next prompt is sent without asking: no UI is available.");
-          }
-        }
-      }
-      lines.push(`Warning: ${warningLine()}. Keep-warm: Pi's cacheWarming setting (/session shows its next decision).`);
-      lines.push(jevLine(await lean.jev(context), settings, lean.savedChars()));
-      context.ui.notify(lines.join("\n"), "info");
+      return showCacheStatus(context);
     },
   });
 }

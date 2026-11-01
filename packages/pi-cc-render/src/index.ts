@@ -6,6 +6,7 @@ import { installBashHighlight } from "./feature/shell/bash-highlight.ts";
 import { installFlushDockedBash } from "./feature/shell/flush-docked-bash.ts";
 import piStartupHeader, { installEarlyStartupHeader } from "./feature/shell/startup-header.ts";
 import { installStartupResources } from "./feature/shell/startup-resources.ts";
+import installNativeControls from "./feature/shell/native-controls.ts";
 
 // features
 import agentSummary from "./feature/agent-summary/index.ts";
@@ -28,6 +29,7 @@ export default function (pi: ExtensionAPI): void {
 	installFlushDockedBash();
 	installBashHighlight();
 	installEarlyStartupHeader();
+	installNativeControls(pi);
 	installStartupResources(pi);
 	piStartupHeader(pi);
 

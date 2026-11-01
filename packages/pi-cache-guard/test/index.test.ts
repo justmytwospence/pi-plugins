@@ -5,6 +5,8 @@ import path from "node:path";
 
 import cacheGuard, { JEV_TIP, MODEL_OFFERS, type ModelOffers, OFFER_TIMEOUT_MS, OPTION_MAX, choiceMenu, cleanOffers, coldTitle, modelInfo, statusText } from "../src/index.ts";
 import { lastRequest, view } from "../src/clock.ts";
+import * as config from "../src/config.ts";
+import { FOOTER_ACTIONS_CHANNEL, type FooterActionsRequest, queryFooterActions } from "../src/footer-actions.ts";
 import { HerdrReporter, alertHeld, soundFile } from "../src/herdr.ts";
 
 const NOW = Date.parse("2026-10-07T12:00:00Z");
@@ -146,12 +148,12 @@ function harnessWith(entries: unknown[], herdr: HerdrReporter, model: any = opus
     },
   };
   cacheGuard(pi as any, { herdr, alert: (body) => alerts.push(body) });
-  const emit = async (name: string, event: any) => {
+  const emit = async (name: string, event: any, context = ctx) => {
     let result: unknown;
-    for (const handler of handlers.get(name) ?? []) result = (await handler(event, ctx)) ?? result;
+    for (const handler of handlers.get(name) ?? []) result = (await handler(event, context)) ?? result;
     return result;
   };
-  return { emit, ui, ctx, commands, sent, sessions, appended, renderers, blocked, alerts, states, choices, listen };
+  return { emit, ui, ctx, pi, commands, sent, sessions, appended, renderers, blocked, alerts, states, choices, listen };
 }
 
 const input = (text: string, extra: Record<string, unknown> = {}) => ({ type: "input", text, source: "interactive", ...extra });
@@ -667,6 +669,198 @@ describe("model offers", () => {
     expect(title).toContain("Sending re-caches 601k tokens on any model; a summary reads up to 601k, a quick compaction none; a new session starts empty.");
     expect(title).toContain(`Recommended: ${long} (routine change).`);
     expect(coldTitle(v, { ready: false, filtered: false, missing: true })).toContain(JEV_TIP);
+  });
+});
+
+describe("footer actions", () => {
+  const userFile = () => path.join(process.env.PI_CODING_AGENT_DIR!, "cache-guard.json");
+  beforeEach(() => { vi.useFakeTimers(); vi.setSystemTime(NOW); });
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.useRealTimers();
+    rmSync(userFile(), { force: true });
+  });
+  const action = (h: ReturnType<typeof harness>) => queryFooterActions(h.pi.events)["cache.status"];
+
+  test("discovers only cache.status synchronously, preserving other providers' actions", async () => {
+    const h = harness([]);
+    expect(queryFooterActions(h.pi.events)).toEqual({});
+    // Command contexts alone do not make a pre-session provider ready.
+    await h.commands.get("cache-guard").handler("on", h.ctx);
+    expect(queryFooterActions(h.pi.events)).toEqual({});
+    await h.emit("session_start", {});
+    const sibling = { label: "MCP", run: vi.fn() };
+    const request: FooterActionsRequest = { version: 1, actions: { "mcp.open": sibling } };
+    const actions = request.actions;
+    h.pi.events.emit(FOOTER_ACTIONS_CHANNEL, request);
+    expect(request.actions).toBe(actions);
+    expect(request.actions).toEqual({
+      "mcp.open": sibling,
+      "cache.status": { label: "Cache status", run: expect.any(Function) },
+    });
+    expect(request.actions["mcp.open"]).toBe(sibling);
+    expect(sibling.run).not.toHaveBeenCalled();
+    for (const invalid of [undefined, null, {}, { version: 2, actions: {} }, { version: 1 }, { version: 1, actions: [] }]) {
+      const before = structuredClone(invalid);
+      expect(() => h.pi.events.emit(FOOTER_ACTIONS_CHANNEL, invalid)).not.toThrow();
+      expect(invalid).toEqual(before);
+    }
+    await h.emit("session_shutdown", {});
+    expect(queryFooterActions(h.pi.events)).toEqual({});
+    await h.commands.get("cache-guard").handler("on", h.ctx);
+    expect(queryFooterActions(h.pi.events)).toEqual({});
+  });
+
+  test("has no action without UI, including after UI disappears", async () => {
+    const h = harness([]);
+    h.ctx.hasUI = false;
+    await h.emit("session_start", {});
+    expect(queryFooterActions(h.pi.events)).toEqual({});
+    h.ctx.hasUI = true;
+    await h.emit("session_start", {});
+    const ready = action(h)!;
+    h.ctx.hasUI = false;
+    expect(queryFooterActions(h.pi.events)).toEqual({});
+    await ready.run();
+    expect(h.ui.notes).toEqual([]);
+  });
+
+  test("queries do no I/O, status computation, notifications, inference or state mutation", async () => {
+    const h = harness([assistant(NOW - 900_000, 600_000)], opus, jevRegistry());
+    await h.emit("session_start", {});
+    await h.commands.get("cache-guard").handler("status", h.ctx);
+    const before = structuredClone({ status: h.ui.status, notes: h.ui.notes, states: h.states, entries: h.ctx.sessionManager.getBranch() });
+    const spies = [
+      vi.spyOn(config, "loadSettings"), vi.spyOn(config, "saveUserSettings"),
+      vi.spyOn(h.ctx.sessionManager, "getBranch"), vi.spyOn(h.ctx.sessionManager, "getSessionFile"),
+      vi.spyOn(h.ctx.modelRegistry, "getAvailableOfType"), vi.spyOn(h.ctx.modelRegistry, "findOfType"),
+      vi.spyOn(h.ctx.modelRegistry, "classify"), vi.spyOn(h.ctx.modelRegistry, "find"),
+      vi.spyOn(h.ui, "setStatus"), vi.spyOn(h.ui, "notify"), vi.spyOn(h.ui, "select"),
+      vi.spyOn(h.ui, "setEditorText"), vi.spyOn(h.ctx, "compact"), vi.spyOn(h.ctx, "newSession"),
+      vi.spyOn(h.pi, "sendUserMessage"), vi.spyOn(h.pi, "appendEntry"),
+      vi.spyOn(h.pi, "setModel"), vi.spyOn(h.pi, "setThinkingLevel"),
+    ];
+    const bus = vi.spyOn(h.pi.events, "emit");
+    const timers = vi.getTimerCount();
+    for (let i = 0; i < 3; i++) expect(Object.keys(queryFooterActions(h.pi.events))).toEqual(["cache.status"]);
+    await Promise.resolve();
+    for (const spy of spies) expect(spy).not.toHaveBeenCalled();
+    expect(bus.mock.calls.map(([channel]) => channel)).toEqual(Array(3).fill(FOOTER_ACTIONS_CHANNEL));
+    expect(vi.getTimerCount()).toBe(timers);
+    expect({ status: h.ui.status, notes: h.ui.notes, states: h.states, entries: h.ctx.sessionManager.getBranch() }).toEqual(before);
+    expect(h.appended).toEqual([]);
+    expect(h.sessions).toEqual([]);
+    expect(h.sent).toEqual([]);
+    expect(h.ui.menus).toEqual([]);
+  });
+
+  test.each([
+    { name: "empty", entries: [], model: opus },
+    { name: "warm", entries: [assistant(NOW - 60_000, 600_000)], model: opus },
+    { name: "cold", entries: [assistant(NOW - 900_000, 600_000)], model: opus },
+    { name: "model changed", entries: [assistant(NOW - 60_000, 600_000)], model: sonnet },
+    { name: "unknown TTL", entries: [assistant(NOW - 900_000, 600_000, { ...opus, provider: "unknown" })], model: { ...opus, promptCache: undefined, provider: "unknown" } },
+    { name: "warming refresh", entries: [assistant(NOW - 900_000, 600_000), warm(NOW - 60_000, 600_000)], model: opus },
+  ])("matches command status for $name without changing anything", async ({ entries, model }) => {
+    const settings = JSON.stringify({ warn: { enabled: true }, jev: { enabled: true } });
+    writeFileSync(userFile(), settings);
+    const registry = jevRegistry();
+    const h = harness(entries, model, registry);
+    await h.emit("session_start", {});
+    h.ui.editor = "keep this draft";
+    const before = structuredClone({ entries, status: h.ui.status, states: h.states });
+    const notify = vi.spyOn(h.ui, "notify");
+    const save = vi.spyOn(config, "saveUserSettings");
+    for (const args of ["status", ""]) {
+      await h.commands.get("cache-guard").handler(args, h.ctx);
+      const command = notify.mock.calls.at(-1);
+      await action(h)!.run();
+      expect(notify.mock.calls.at(-1)).toEqual(command);
+      expect(notify).toHaveBeenLastCalledWith(expect.any(String), "info");
+    }
+    expect({ entries, status: h.ui.status, states: h.states }).toEqual(before);
+    expect(save).not.toHaveBeenCalled();
+    expect(readFileSync(userFile(), "utf8")).toBe(settings);
+    expect(registry.calls).toEqual([]);
+    expect(h.sent).toEqual([]);
+    expect(h.sessions).toEqual([]);
+    expect(h.appended).toEqual([]);
+    expect(h.blocked).toEqual([]);
+    expect(h.alerts).toEqual([]);
+    expect(h.choices).toEqual([]);
+    expect(h.ui.editor).toBe("keep this draft");
+    expect(h.ui.compactions).toEqual([]);
+    expect(h.ui.menus).toEqual([]);
+    expect(await h.emit("cache_warming_decision", {})).toBeUndefined();
+  });
+
+  test("status preserves a muted or disabled warning and remains available when off", async () => {
+    const h = harness([assistant(NOW - 900_000, 600_000)]);
+    await h.emit("session_start", {});
+    h.ui.answers = ["Send, and stop"];
+    await h.emit("input", input("mute"));
+    for (const mode of ["muted", "off"] as const) {
+      if (mode === "off") await h.commands.get("cache-guard").handler("off", h.ctx);
+      await h.commands.get("cache-guard").handler("status", h.ctx);
+      const command = h.ui.notes.at(-1);
+      await action(h)!.run();
+      expect(h.ui.notes.at(-1)).toBe(command);
+      expect(command).toContain(`Warning: ${mode}`);
+      expect(await h.emit("input", input("still not asking"))).toEqual({ action: "continue" });
+      expect(h.ui.confirms).toHaveLength(1);
+    }
+    writeFileSync(userFile(), JSON.stringify({ enabled: false }));
+    await h.emit("session_start", {});
+    await action(h)!.run();
+    expect(h.ui.notes.at(-1)).toContain('Warning: off ("enabled": false in settings)');
+  });
+
+  const transitions = ["session_start", "session_tree", "session_compact", "model_select", "session_shutdown", "manager change"] as const;
+  const transition = async (h: ReturnType<typeof harness>, name: typeof transitions[number]) => {
+    if (name === "manager change") {
+      await h.emit("agent_settled", {}, { ...h.ctx, sessionManager: { ...h.ctx.sessionManager } });
+    } else {
+      await h.emit(name, name === "session_compact" ? { compactionEntry: {} } : {});
+    }
+  };
+
+  test.each(transitions)("a retained callback is inert after %s, even with the same context object", async (name) => {
+    const h = harness([assistant(NOW - 900_000, 600_000)]);
+    await h.emit("session_start", {});
+    const stale = action(h)!;
+    await transition(h, name);
+    const load = vi.spyOn(config, "loadSettings");
+    const branch = vi.spyOn(h.ctx.sessionManager, "getBranch");
+    await stale.run();
+    expect(load).not.toHaveBeenCalled();
+    expect(branch).not.toHaveBeenCalled();
+    expect(h.ui.notes).toEqual([]);
+    if (name === "session_shutdown") {
+      expect(queryFooterActions(h.pi.events)).toEqual({});
+      await h.emit("session_start", {});
+      await stale.run();
+      expect(h.ui.notes).toEqual([]);
+    }
+    await action(h)!.run();
+    expect(h.ui.notes).toHaveLength(1);
+  });
+
+  test.each([...transitions, "no UI"] as const)("an in-flight status cannot notify after %s", async (name) => {
+    let resolve!: (models: never[]) => void;
+    const available = new Promise<never[]>((done) => { resolve = done; });
+    const h = harness([assistant(NOW - 900_000, 600_000)], opus, { ...jevRegistry(), getAvailableOfType: () => available });
+    await h.emit("session_start", {});
+    const pending = action(h)!.run();
+    expect(h.ui.notes).toEqual([]);
+    if (name === "no UI") h.ctx.hasUI = false;
+    else await transition(h, name);
+    resolve([]);
+    await pending;
+    expect(h.ui.notes).toEqual([]);
+    expect(h.ui.menus).toEqual([]);
+    expect(h.ui.compactions).toEqual([]);
+    expect(h.sent).toEqual([]);
+    expect(h.appended).toEqual([]);
   });
 });
 

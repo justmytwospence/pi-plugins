@@ -3,9 +3,14 @@ import { execFileSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
+import { AgentSession } from "@earendil-works/pi-coding-agent";
 import { downloadsOf } from "../src/downloads.ts";
 import toolGate, { blockedBy, CLASSIFIER_UNAVAILABLE, DECLINED, DECLINED_WITH_MESSAGE, DECLINED_WITH_MESSAGE_END, DEFAULT_CONFIG, judgeStateOf, scriptOfCall } from "../src/index.ts";
-import { APPROVAL_ENTRY, WORKFLOW_ENTRY } from "../src/modes.ts";
+import { APPROVAL_ENTRY, WORKFLOW_ENTRY, WORKFLOW_SET, PLAN_PROVIDER } from "../src/modes.ts";
+import { FLOW_ENTRY, queryFlow, requestExecution, requestWorkflow, type FlowState } from "../src/flow-contract.ts";
+import { queryFooterActions } from "../src/footer-actions.ts";
+import * as modelGuard from "../src/model-guard.ts";
+import { FLOW_TRANSITION } from "../src/provider-flows.ts";
 import { assistantEntry, fakeJev, harness, usage, userEntry } from "./harness.ts";
 
 let configDir: string;
@@ -204,6 +209,365 @@ describe("pending decisions are invalidated by mode and branch changes", () => {
       { type: "custom", customType: APPROVAL_ENTRY, data: { version: 1, mode: "auto" } });
     await h.emit("session_tree", { type: "session_tree" }, ctx);
     expect(await h.emit("tool_result", { type: "tool_result", toolCallId: "t1", toolName: "bash", content: [], isError: false }, ctx)).toBeUndefined();
+  });
+});
+
+describe("awaited Linked gate transitions", () => {
+  function linkedSetup() {
+    const s = setup(safe);
+    // Capture through the maintained binder, without constructing a model runtime.
+    // End-to-end native session/abort/queue behavior is in test-linked-flow.mjs.
+    const abort = vi.fn();
+    const session = { sessionManager: s.ctx.sessionManager, agent: { abort },
+      abortRetry() {}, abortCompaction() {}, abortBranchSummary() {}, async waitForIdle() {} };
+    (AgentSession.prototype as unknown as { _bindExtensionCore: Function })._bindExtensionCore.call(session, { bindCore() {} });
+    const available = ["start", "general", "planner", "worker"].map(id => ({ provider: "test", id, api: "openai-completions" }));
+    let model = available[0]!;
+    let serial = 0;
+    let roleAvailable = true;
+    s.ctx.isIdle = () => true;
+    Object.defineProperty(s.ctx, "model", { configurable: true, get: () => model });
+    s.ctx.sessionManager.getSessionId = () => "flow-session";
+    s.ctx.sessionManager.getLeafId = () => s.branch.at(-1)?.id ?? null;
+    const append = s.h.pi.appendEntry;
+    s.h.pi.appendEntry = (customType: string, data: unknown) => {
+      append(customType, data);
+      s.branch.push({ type: "custom", id: `flow-${++serial}`, customType, data: structuredClone(data) });
+    };
+    const getAvailable = vi.fn(async () => available);
+    s.ctx.modelRegistry = { ...(s.jev.registry as object), getAvailable };
+    const setModel = vi.fn(async (next: typeof model) => {
+      model = next;
+      s.branch.push({ type: "model_change", id: `model-${++serial}`, provider: model.provider, modelId: model.id });
+      // Model-specific SDK defaults do not override effort preserved by the coordinator.
+      s.h.pi.setThinkingLevel("low");
+      return true;
+    });
+    s.h.pi.setModel = setModel;
+    s.h.pi.events.on("subagents:role-model", (request: any) => {
+      if (roleAvailable) request.reply = { model: `test/${request.role}`, thinking: "medium" };
+    });
+    s.h.pi.events.emit(PLAN_PROVIDER, { planFile: "/tmp/approved.md" });
+    return { ...s, session, abort, available, setModel, getAvailable, setRoleAvailable: (ready: boolean) => { roleAvailable = ready; } };
+  }
+  async function linkedStart() {
+    const s = linkedSetup();
+    await s.h.emit("session_start", {}, s.ctx);
+    await s.h.commands.get("flow").handler("linked test", s.ctx);
+    expect(queryFlow(s.h.pi.events)).toMatchObject({ operatingMode: "linked", workflow: "work", guardAvailable: true });
+    return s;
+  }
+  test.each([
+    ["preparation", "success"], ["preparation", "failure"],
+    ["model", "success"], ["model", "failure"],
+  ] as const)("initial selection awaiting %s fences controls and input through %s", async (boundary, outcome) => {
+    const s = linkedSetup();
+    await s.h.emit("session_start", {}, s.ctx);
+    const before = structuredClone(s.branch);
+    const entered = deferred<void>();
+    const release = deferred<void>();
+    const wait = async () => {
+      entered.resolve();
+      await release.promise;
+      if (outcome === "failure") throw new Error("Initial authentication failed");
+    };
+    if (boundary === "preparation") s.getAvailable.mockImplementationOnce(async () => { await wait(); return s.available; });
+    else {
+      const native = s.setModel.getMockImplementation()!;
+      s.setModel.mockImplementationOnce(async model => { await wait(); return native(model); });
+    }
+    const selection = s.h.commands.get("flow").handler("linked test", s.ctx);
+    try {
+      // Even a no-op Work request must refuse before selection's first queued microtask.
+      expect(s.getAvailable).not.toHaveBeenCalled();
+      expect(queryFlow(s.h.pi.events)).toMatchObject({ operatingMode: "independent", transitioning: true });
+      const same = requestWorkflow(s.h.pi.events, "work");
+      expect(await same).toMatchObject({ ok: false, error: FLOW_TRANSITION });
+      await entered.promise;
+      await s.h.commands.get("flow").handler("independent", s.ctx);
+      expect(s.ctx.ui.notes.at(-1)?.message).toBe(FLOW_TRANSITION);
+      await s.h.commands.get("mode").handler("plan", s.ctx);
+      expect(s.ctx.ui.notes.at(-1)?.message).toBe(FLOW_TRANSITION);
+      const workflow: { mode: string; result?: Promise<boolean> } = { mode: "plan" };
+      s.h.pi.events.emit(WORKFLOW_SET, workflow);
+      expect(await workflow.result).toBe(false);
+      expect(await requestWorkflow(s.h.pi.events, "chat")).toMatchObject({ ok: false, error: FLOW_TRANSITION });
+      await queryFooterActions(s.h.pi.events)["workflow.cycle"]!.run();
+      expect(s.ctx.ui.notes.at(-1)?.message).toBe(FLOW_TRANSITION);
+      for (const source of ["interactive", "rpc", "extension"]) expect(await s.h.emit("input", { text: "begin", source }, s.ctx)).toEqual({ action: "handled" });
+      for (const event of ["session_before_tree", "session_before_switch", "session_before_fork"]) expect(await s.h.emit(event, {}, s.ctx)).toEqual({ cancel: true });
+      expect(s.h.entries).toEqual([]);
+      expect(s.branch).toEqual(before);
+      expect(s.h.thinkingChanges).toEqual([]);
+      expect(queryFlow(s.h.pi.events)).toMatchObject({ operatingMode: "independent", workflow: "work", revision: 0, transitioning: true });
+      release.resolve();
+      await selection;
+      if (outcome === "failure") {
+        expect(queryFlow(s.h.pi.events)).toMatchObject({ operatingMode: "independent", workflow: "work", revision: 0, transitioning: false });
+        expect(queryFlow(s.h.pi.events)?.blocked).toBeUndefined();
+        expect(s.ctx.ui.notes.at(-1)?.message).toBe("Initial authentication failed");
+        expect(s.branch).toEqual(before);
+        expect(s.h.entries).toEqual([]);
+        const notes = s.ctx.ui.notes.length;
+        await s.h.commands.get("flow").handler("independent", s.ctx);
+        expect(s.ctx.ui.notes).toHaveLength(notes);
+        await s.h.commands.get("flow").handler("linked test", s.ctx);
+      }
+      expect(queryFlow(s.h.pi.events)).toMatchObject({ operatingMode: "linked", workflow: "work", revision: 1, transitioning: false });
+      expect(s.ctx.model.id).toBe("general");
+      expect(s.h.thinking).toBe("medium");
+      expect(s.h.entries.filter(entry => entry.customType === FLOW_ENTRY)).toHaveLength(1);
+      expect(s.h.entries.filter(entry => entry.customType === WORKFLOW_ENTRY)).toEqual([]);
+      expect(await s.h.emit("session_before_tree", {}, s.ctx)).toBeUndefined();
+      await s.h.commands.get("mode").handler("plan", s.ctx);
+      expect(queryFlow(s.h.pi.events)?.workflow).toBe("plan");
+      expect(s.ctx.model.id).toBe("planner");
+      await s.h.commands.get("flow").handler("independent", s.ctx);
+      expect(queryFlow(s.h.pi.events)).toMatchObject({ operatingMode: "independent", workflow: "plan", revision: 2, transitioning: false });
+      expect(s.jev.calls).toEqual([]);
+    } finally {
+      release.resolve();
+      await selection;
+      await s.h.emit("session_shutdown", {}, s.ctx);
+    }
+  });
+  test("custom-start and continuation hooks pause blocked Linked through the session, not TUI abort", async () => {
+    const s = await linkedStart();
+    s.branch.push({ type: "custom", customType: FLOW_ENTRY, data: { version: 1, operatingMode: "linked", revision: 1 } });
+    const uiAbort = vi.fn();
+    s.ctx.abort = uiAbort;
+    await s.h.emit("before_agent_start", { messageType: "custom", message: { customType: "result", content: "accepted" } }, s.ctx);
+    expect(queryFlow(s.h.pi.events)?.blocked).toMatch(/missing or invalid/u);
+    expect(s.abort).toHaveBeenCalledOnce();
+    await s.h.emit("context", { messages: [] }, s.ctx);
+    expect(s.abort).toHaveBeenCalledTimes(2);
+    expect(await s.h.emit("session_before_compact", {}, s.ctx)).toEqual({ cancel: true });
+    expect(s.abort).toHaveBeenCalledTimes(3);
+    expect(uiAbort).not.toHaveBeenCalled();
+    await s.h.commands.get("flow").handler("independent", s.ctx);
+    await s.h.emit("before_agent_start", { messageType: "custom" }, s.ctx);
+    await s.h.emit("context", { messages: [] }, s.ctx);
+    expect(await s.h.emit("session_before_compact", {}, s.ctx)).toBeUndefined();
+    expect(s.abort).toHaveBeenCalledTimes(3);
+    await s.h.emit("session_shutdown", {}, s.ctx);
+  });
+  test("ordinary Independent controls retain synchronous mid-run workflow changes without model discovery", async () => {
+    const s = linkedSetup();
+    await s.h.emit("session_start", {}, s.ctx);
+    s.ctx.isIdle = () => false;
+    try {
+      const workflow: { mode: string; result?: Promise<boolean> } = { mode: "plan" };
+      s.h.pi.events.emit(WORKFLOW_SET, workflow);
+      expect(queryFlow(s.h.pi.events)).toMatchObject({ operatingMode: "independent", workflow: "plan", transitioning: false });
+      expect(s.h.entries).toEqual([{ customType: WORKFLOW_ENTRY, data: { version: 1, mode: "plan" } }]);
+      expect(await workflow.result).toBe(true);
+      const chat = requestWorkflow(s.h.pi.events, "chat");
+      expect(queryFlow(s.h.pi.events)?.workflow).toBe("chat");
+      expect(await chat).toMatchObject({ ok: true });
+      await s.h.commands.get("mode").handler("work", s.ctx);
+      await s.h.commands.get("flow").handler("independent", s.ctx);
+      expect(queryFlow(s.h.pi.events)).toMatchObject({ operatingMode: "independent", workflow: "work", revision: 0 });
+      expect(s.h.entries.filter(entry => entry.customType === WORKFLOW_ENTRY).map(entry => entry.data)).toEqual([
+        { version: 1, mode: "plan" }, { version: 1, mode: "chat" }, { version: 1, mode: "work" },
+      ]);
+      expect(s.h.entries.filter(entry => entry.customType === FLOW_ENTRY)).toEqual([]);
+      expect(s.getAvailable).not.toHaveBeenCalled();
+      expect(s.setModel).not.toHaveBeenCalled();
+      expect(s.h.thinkingChanges).toEqual([]);
+    } finally { await s.h.emit("session_shutdown", {}, s.ctx); }
+  });
+  test.each([
+    ["selection", "preparation"], ["selection", "model"],
+    ["workflow", "preparation"], ["workflow", "model"],
+  ] as const)("session_shutdown awaits %s at %s while synchronously invalidating other state", async (operation, boundary) => {
+    // Observe the gate's lease, without replacing the guard or suppressing native writes.
+    const guard = vi.spyOn(modelGuard, "installModelGuard");
+    const s = linkedSetup();
+    const release = deferred<void>();
+    let pending: Promise<unknown> | undefined;
+    let queued: Promise<unknown> | undefined;
+    try {
+      await s.h.emit("session_start", {}, s.ctx);
+      if (operation === "workflow") await s.h.commands.get("flow").handler("linked test", s.ctx);
+      const lease = guard.mock.results.at(-1)!.value!;
+      const dispose = vi.spyOn(lease, "dispose");
+      expect(await s.h.emit("tool_call", call("bash", { command: "npm test" }, "authorized"), s.ctx)).toBeUndefined();
+      expect(s.jev.calls).toHaveLength(1);
+      const before = structuredClone(s.h.entries);
+      const branch = structuredClone(s.branch);
+      const thinking = [...s.h.thinkingChanges];
+      const actions = queryFooterActions(s.h.pi.events);
+      const entered = deferred<void>();
+      const settled = vi.fn();
+      if (boundary === "preparation") s.getAvailable.mockImplementationOnce(async () => { entered.resolve(); await release.promise; return s.available; });
+      else {
+        const native = s.setModel.getMockImplementation()!;
+        s.setModel.mockImplementationOnce(async model => {
+          entered.resolve();
+          await release.promise;
+          const result = await native(model);
+          expect(lease.available).toBe(true);
+          expect(dispose).not.toHaveBeenCalled();
+          expect(settled).not.toHaveBeenCalled();
+          return result;
+        });
+      }
+      pending = operation === "selection" ? s.h.commands.get("flow").handler("linked test", s.ctx) : requestWorkflow(s.h.pi.events, "plan");
+      await entered.promise;
+      queued = s.h.commands.get("flow").handler("linked test", s.ctx);
+      const modelCalls = s.setModel.mock.calls.length;
+      const availabilityCalls = s.getAvailable.mock.calls.length;
+      const notes = [...s.ctx.ui.notes];
+      const shutdown = s.h.emit("session_shutdown", {}, s.ctx);
+      const completion = shutdown.then(settled);
+      expect(queryFlow(s.h.pi.events)).toBeUndefined();
+      expect(queryFooterActions(s.h.pi.events)).toEqual({});
+      expect(lease.available).toBe(true);
+      expect(dispose).not.toHaveBeenCalled();
+      await actions["workflow.cycle"]!.run();
+      expect(await s.h.emit("tool_result", { type: "tool_result", toolCallId: "authorized", toolName: "bash", content: [], isError: false }, s.ctx)).toBeUndefined();
+      expect(settled).not.toHaveBeenCalled();
+      expect(s.h.entries).toEqual(before);
+      expect(s.branch).toEqual(branch);
+      release.resolve();
+      const [result] = await Promise.all([pending, queued, completion]);
+      if (operation === "workflow") expect(result).toMatchObject({ ok: false, error: expect.stringMatching(/cancelled/u) });
+      expect(settled).toHaveBeenCalledOnce();
+      expect(dispose).toHaveBeenCalledOnce();
+      expect(lease.available).toBe(false);
+      expect(s.setModel).toHaveBeenCalledTimes(modelCalls);
+      expect(s.getAvailable).toHaveBeenCalledTimes(availabilityCalls);
+      expect(s.h.entries).toEqual(before);
+      expect(s.ctx.ui.notes).toEqual(notes);
+      expect(queryFlow(s.h.pi.events)).toBeUndefined();
+      if (boundary === "model") {
+        const id = operation === "selection" ? "general" : "planner";
+        expect(s.ctx.model.id).toBe(id);
+        expect(s.branch.slice(branch.length)).toEqual([{ type: "model_change", id: expect.any(String), provider: "test", modelId: id }]);
+        // Only the native default was written, never stale coordinator effort restoration.
+        expect(s.h.thinkingChanges).toEqual([...thinking, "low"]);
+      } else {
+        expect(s.branch).toEqual(branch);
+        expect(s.h.thinkingChanges).toEqual(thinking);
+      }
+    } finally {
+      release.resolve();
+      await Promise.all([pending, queued]);
+      await s.h.emit("session_shutdown", {}, s.ctx);
+      guard.mockRestore();
+    }
+  });
+  test("tool-owned Plan entry is awaited mid-run, preserving approvals and effort; user controls require idle", async () => {
+    const s = await linkedStart();
+    await s.h.commands.get("approvals").handler("yolo", s.ctx);
+    s.h.pi.setThinkingLevel("high");
+    s.ctx.isIdle = () => false;
+    await s.h.commands.get("mode").handler("plan", s.ctx);
+    expect(queryFlow(s.h.pi.events)?.workflow).toBe("work");
+    expect(s.ctx.ui.notes.at(-1)?.message).toMatch(/Wait for the current turn/u);
+    const entered = deferred<void>();
+    const release = deferred<void>();
+    const native = s.setModel.getMockImplementation()!;
+    s.setModel.mockImplementationOnce(async model => { entered.resolve(); await release.promise; return native(model); });
+    const request: { mode: string; result?: Promise<boolean> } = { mode: "plan" };
+    s.h.pi.events.emit(WORKFLOW_SET, request);
+    expect(request.result).toBeInstanceOf(Promise);
+    await entered.promise;
+    expect(queryFlow(s.h.pi.events)?.workflow).toBe("work");
+    expect(s.h.entries.filter(entry => entry.customType === WORKFLOW_ENTRY)).toHaveLength(0);
+    release.resolve();
+    expect(await request.result).toBe(true);
+    expect(queryFlow(s.h.pi.events)?.workflow).toBe("plan");
+    expect(s.ctx.model.id).toBe("planner");
+    expect(s.h.thinking).toBe("high");
+    expect(s.h.entries.filter(entry => entry.customType === APPROVAL_ENTRY)).toEqual([{ customType: APPROVAL_ENTRY, data: { version: 1, mode: "bypassPermissions" } }]);
+    await s.h.emit("session_shutdown", {}, s.ctx);
+  });
+  test("failed authorized activation preserves workflow/selection and returns failure on the synchronous request promise", async () => {
+    const s = await linkedStart();
+    const before = queryFlow(s.h.pi.events);
+    const request: { mode: string; result?: Promise<boolean> } = { mode: "plan" };
+    s.setModel.mockRejectedValueOnce(new Error("Authentication expired"));
+    s.h.pi.events.emit(WORKFLOW_SET, request);
+    expect(await request.result).toBe(false);
+    expect(queryFlow(s.h.pi.events)).toEqual(before);
+    expect(s.h.entries.filter(entry => entry.customType === WORKFLOW_ENTRY)).toEqual([]);
+    expect(s.ctx.ui.notes.at(-1)?.message).toContain("Authentication expired");
+    await s.h.emit("session_shutdown", {}, s.ctx);
+  });
+  test("same-model approved begin still commits Exec; completion commits only after Work activation, including after tree restore", async () => {
+    const s = await linkedStart();
+    await s.h.commands.get("mode").handler("plan", s.ctx);
+    // Restore a provider whose planner/worker intentionally share the same physical model.
+    const saved = structuredClone(queryFlow(s.h.pi.events)!) as FlowState;
+    saved.selectedFlow!.roles.exec = { ...saved.selectedFlow!.roles.plan };
+    s.h.pi.appendEntry(FLOW_ENTRY, saved);
+    await s.h.emit("session_tree", {}, s.ctx);
+    const revision = queryFlow(s.h.pi.events)!.revision;
+    const calls = s.setModel.mock.calls.length;
+    const begin = vi.fn(() => s.h.pi.appendEntry("plan-mode:exec", { active: true, planFile: "/tmp/approved.md" }));
+    expect(await requestExecution(s.h.pi.events, { phase: "begin", expectedRevision: revision, planFile: "/tmp/approved.md", commit: begin })).toMatchObject({ ok: true, snapshot: { workflow: "exec" } });
+    expect(begin).toHaveBeenCalledOnce();
+    expect(s.setModel).toHaveBeenCalledTimes(calls);
+    await s.h.emit("session_tree", {}, s.ctx);
+    expect(queryFlow(s.h.pi.events)?.revision).toBe(revision);
+    const ended = vi.fn(() => {
+      expect(s.ctx.model.id).toBe("general");
+      s.h.pi.appendEntry("plan-mode:exec", { active: false, planFile: "/tmp/approved.md" });
+    });
+    s.setModel.mockRejectedValueOnce(new Error("Work unavailable"));
+    const finish = () => requestExecution(s.h.pi.events, { phase: "finish", expectedRevision: revision, planFile: "/tmp/approved.md", commit: ended });
+    expect(await finish()).toMatchObject({ ok: false, snapshot: { workflow: "exec" } });
+    expect(ended).not.toHaveBeenCalled();
+    expect(await finish()).toMatchObject({ ok: true, snapshot: { workflow: "work" } });
+    expect(ended).toHaveBeenCalledOnce();
+    await s.h.emit("session_shutdown", {}, s.ctx);
+  });
+  test("restored blocked flow handles load-order readiness and late fresh Exec bootstrap before input", async () => {
+    const s = await linkedStart();
+    const saved = structuredClone(queryFlow(s.h.pi.events)!) as FlowState;
+    s.h.pi.events.emit("subagents:role-model-ready", { ready: false });
+    await s.h.emit("session_tree", {}, s.ctx);
+    expect(queryFlow(s.h.pi.events)?.blocked).toMatch(/not ready/u);
+    s.h.pi.events.emit("subagents:role-model-ready", { ready: true });
+    expect(await s.h.emit("input", { source: "extension", text: "resume" }, s.ctx)).toBeUndefined();
+    expect(queryFlow(s.h.pi.events)?.blocked).toBeUndefined();
+    s.branch.splice(0, s.branch.length, userEntry("fresh child"));
+    await s.h.emit("session_start", {}, s.ctx);
+    expect(queryFlow(s.h.pi.events)?.operatingMode).toBe("independent");
+    s.h.pi.appendEntry(FLOW_ENTRY, saved);
+    s.h.pi.appendEntry("plan-mode:exec", { active: true, planFile: "/tmp/approved.md" });
+    expect(await s.h.emit("input", { source: "extension", text: "implement" }, s.ctx)).toBeUndefined();
+    expect(queryFlow(s.h.pi.events)).toMatchObject({ operatingMode: "linked", workflow: "exec", revision: saved.revision });
+    expect(s.ctx.model.id).toBe("worker");
+    await s.h.emit("session_shutdown", {}, s.ctx);
+  });
+  test("unavailable flows offer an observational status choice and blocked pickers name recovery", async () => {
+    const s = await linkedStart();
+    s.h.pi.events.emit("subagents:role-model-ready", { ready: false });
+    await s.h.emit("session_tree", {}, s.ctx);
+    const before = structuredClone(s.h.entries);
+    const modelCalls = s.setModel.mock.calls.length;
+    const snapshot = queryFlow(s.h.pi.events);
+    s.ctx.ui.selectAnswers.push("Flow status");
+    await s.h.commands.get("flow").handler("", s.ctx);
+    expect(s.ctx.ui.selects.at(-1)?.options).toEqual(["Independent", "Flow status"]);
+    expect(s.ctx.ui.notes.at(-1)?.message).toContain("Blocked:");
+    expect(s.ctx.ui.notes.at(-1)?.message).toContain("not ready");
+    expect(s.h.entries).toEqual(before);
+    expect(s.setModel).toHaveBeenCalledTimes(modelCalls);
+    expect(queryFlow(s.h.pi.events)).toEqual(snapshot);
+    await s.h.emit("session_shutdown", {}, s.ctx);
+  });
+  test("Linked model control opens combined choices and approvals still open an explicit picker", async () => {
+    const s = await linkedStart();
+    const actions = queryFooterActions(s.h.pi.events);
+    await actions["flow.open"]!.run();
+    expect(s.ctx.ui.selects.at(-1)?.options).toEqual(["Work · general", "Chat · general", "Plan · planner", "Change provider...", "Use Independent mode"]);
+    await actions["approvals.open"]!.run();
+    expect(s.ctx.ui.selects.at(-1)?.options).toEqual(["Auto", "Yolo"]);
+    expect(s.h.entries.some(entry => entry.customType === APPROVAL_ENTRY)).toBe(false);
+    await s.h.emit("session_shutdown", {}, s.ctx);
   });
 });
 

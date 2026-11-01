@@ -29,6 +29,8 @@ import {
 } from "./exec-cards.js";
 import { ExecReplyTracker, pausePresentation, recoveryChoices } from "./exec-interaction.js";
 import { discoverFamily } from "./family-contract.js";
+import { type FlowState, queryFlow } from "./flow-contract.js";
+import { FOOTER_ACTIONS_CHANNEL, type FooterActionsRequest } from "./footer-actions.js";
 import { holdBlocked } from "./herdr-blocked.js";
 import { type ModelSpec, parseModelSpec } from "./implementation-models.js";
 import {
@@ -53,6 +55,8 @@ import { type PlannerSessionFactory, plannerSessionDir } from "./planner/session
 import { formatCost } from "./planners.js";
 import { reviewCard, reviewTitle } from "./review-card.js";
 import { emptyUsage, type Usage } from "./scout-process.js";
+
+export type { FinishDetails } from "./exec-cards.js";
 
 export const EXEC_ENTRY = "plan-mode:exec";
 export const EXEC_STATUS_KEY = "plan-exec";
@@ -83,6 +87,10 @@ export interface ExecState {
   asks: number;
   costUsd: number;
   negotiation?: NegotiationState;
+  /** Detached provider assignments and selection revision captured at approval. Absent on legacy executions. */
+  linkedFlow?: FlowState;
+  /** Authorized completion retained until the Linked Work-model transition commits. */
+  pendingCompletion?: FinishDetails;
   touched?: string[];
   pendingReturn?: { leaf: string; details: FinishDetails };
   completion?: FinishDetails;
@@ -93,16 +101,20 @@ export interface ExecHost {
   consultantAccess(ctx: ExtensionContext, planFile: string, spec: ModelSpec): PlannerAccessConfig;
   createSession?: PlannerSessionFactory;
   restoreModel(ctx: ExtensionContext, spec: ModelSpec): Promise<unknown>;
+  /** Call commitEnd synchronously only after Work activation and coordinator fencing succeed. */
+  finishLinked?(ctx: ExtensionContext, completion: FinishDetails, commitEnd: () => void): Promise<boolean>;
   completionReview(): boolean;
   completionMaxRevisions(): number;
 }
 
 export interface ExecController {
   readonly active: boolean;
+  readonly state: ExecState | undefined;
   begin(ctx: ExtensionContext, state: ExecState, options: { record: boolean }): void;
 }
 
 const NOT_ACTIVE = "No approved plan is being implemented.";
+const WORK_MODEL_UNAVAILABLE = "Work model unavailable. Retry completion or use /flow independent.";
 
 export function registerExec(pi: ExtensionAPI, host: ExecHost): ExecController {
   let state: ExecState | undefined;
@@ -136,6 +148,7 @@ export function registerExec(pi: ExtensionAPI, host: ExecHost): ExecController {
   /** Files the agent edited or wrote with its tools while this mode was on. */
   const touched = new Set<string>();
   let hostCtx: ExtensionContext | undefined;
+  let finalizing: { current: ExecState; token: number } | undefined;
 
   const safely = (fn: () => void) => {
     try {
@@ -151,8 +164,9 @@ export function registerExec(pi: ExtensionAPI, host: ExecHost): ExecController {
     let text: string | undefined;
     if (state?.active) {
       const n = state.negotiation;
-      const phase =
-        n?.phase === "reviewing"
+      const phase = state.pendingCompletion
+        ? "completion pending"
+        : n?.phase === "reviewing"
           ? `review ${n.attempts}`
           : n?.phase === "revising" && busy
             ? `revising · ${outstanding(n).length} findings`
@@ -195,6 +209,8 @@ export function registerExec(pi: ExtensionAPI, host: ExecHost): ExecController {
   };
 
   const begin = (ctx: ExtensionContext, next: ExecState, options: { record: boolean }) => {
+    const linkedFlow = next.linkedFlow === undefined ? undefined : parseLinkedFlow(next.linkedFlow);
+    if (next.linkedFlow !== undefined && !linkedFlow) throw new Error("Invalid linked execution flow.");
     epoch++;
     replies.invalidate();
     cancelDialogs();
@@ -212,6 +228,7 @@ export function registerExec(pi: ExtensionAPI, host: ExecHost): ExecController {
     next.negotiation = createNegotiation(randomUUID(), host.completionMaxRevisions?.() ?? 2);
     next.touched = [...touched];
     state = structuredClone(next);
+    if (linkedFlow) state.linkedFlow = linkedFlow;
     if (options.record) persist();
     setTools();
     updateStatus(ctx);
@@ -237,14 +254,85 @@ export function registerExec(pi: ExtensionAPI, host: ExecHost): ExecController {
     details: FinishDetails,
     ctx: ExtensionContext,
     usage?: Usage,
+    signal?: AbortSignal,
   ) => {
-    if (!live(current, token)) return text("Execution changed; finalization discarded.");
-    current.returnTo = undefined;
-    current.pendingReturn = undefined;
-    pendingReturn = undefined;
-    current.completion = structuredClone(details);
-    end(ctx);
-    if (details.completion !== "stopped") {
+    const manager = ctx.sessionManager;
+    const sessionId = manager.getSessionId?.();
+    const currentSession = () =>
+      live(current, token) && hostCtx?.sessionManager === manager && manager.getSessionId?.() === sessionId;
+    if (!currentSession() || !current.active) return text("Execution changed; finalization discarded.");
+    if (finalizing?.current === current && finalizing.token === token)
+      return pausedResult("Completion transition is already in progress.");
+    const operation = { current, token };
+    finalizing = operation;
+    // Missing coordinator is not permission to restore the planning model. Only an explicit
+    // current Independent snapshot releases the historical Linked completion policy.
+    let linked = Boolean(current.linkedFlow);
+    let coordinatorPresent = false;
+    if (linked) {
+      try {
+        const flow = queryFlow(pi.events);
+        coordinatorPresent = flow?.operatingMode === "linked";
+        if (flow?.operatingMode === "independent") linked = false;
+      } catch {
+        // Preserve the Linked lock if optional discovery fails.
+      }
+    }
+    let committed = false;
+    let commitOpen = true;
+    const commitEnd = () => {
+      if (!commitOpen || committed || !currentSession() || !current.active) return;
+      if (linked && (signal?.aborted || ctx.signal?.aborted)) return;
+      committed = true;
+      current.returnTo = undefined;
+      current.pendingReturn = undefined;
+      current.pendingCompletion = undefined;
+      pendingReturn = undefined;
+      // Restore the pre-handoff negotiation, not the temporary Work-model failure pause.
+      current.negotiation = restoreNegotiation(details.negotiation) ?? current.negotiation;
+      current.completion = structuredClone(details);
+      end(ctx);
+    };
+    try {
+      if (linked) {
+        current.pendingCompletion = structuredClone(details);
+        if (current.negotiation) {
+          current.negotiation.phase = "paused";
+          current.negotiation.pause = { reason: "failure", action: WORK_MODEL_UNAVAILABLE };
+        }
+        cancelDialogs();
+        persist();
+        updateStatus(ctx);
+        try {
+          if (coordinatorPresent && host.finishLinked && !signal?.aborted && !ctx.signal?.aborted)
+            await host.finishLinked(ctx, structuredClone(details), commitEnd);
+        } catch {
+          // No callback means no committed exit, even if the hook claims success or throws.
+        } finally {
+          commitOpen = false;
+        }
+        if (!currentSession()) return text("Execution changed; finalization discarded.");
+        if (!committed) {
+          pauseShownThisRun = true;
+          disposeAgent();
+          return {
+            content: [{ type: "text", text: WORK_MODEL_UNAVAILABLE }],
+            details: {
+              ...structuredClone(details),
+              completion: undefined,
+              negotiation: structuredClone(current.negotiation),
+              action: WORK_MODEL_UNAVAILABLE,
+            },
+            ...(usage ? { usage } : {}),
+            terminate: true,
+          } as never;
+        }
+      } else commitEnd();
+    } finally {
+      commitOpen = false;
+      if (finalizing === operation) finalizing = undefined;
+    }
+    if (!linked && details.completion !== "stopped") {
       const spec = parseModelSpec(current.restore);
       const now = ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : "";
       if (spec && now === current.implementerModel) {
@@ -254,7 +342,7 @@ export function registerExec(pi: ExtensionAPI, host: ExecHost): ExecController {
         } catch {
           /* The final report remains durable even when restoration fails. */
         }
-        if (!live(current, token)) return text("Execution changed during model restoration.");
+        if (!currentSession()) return text("Execution changed during model restoration.");
         if (restored) {
           const plannerSpec = parseModelSpec(current.planner?.spec);
           details.returnedTo =
@@ -269,7 +357,7 @@ export function registerExec(pi: ExtensionAPI, host: ExecHost): ExecController {
         if (!restored) details.action = "Planning model restoration failed; select the model manually.";
       }
     }
-    if (live(current, token)) {
+    if (currentSession()) {
       current.completion = structuredClone(details);
       persist();
     }
@@ -305,17 +393,42 @@ export function registerExec(pi: ExtensionAPI, host: ExecHost): ExecController {
       .reverse()
       .find((entry) => entry.type === "custom" && entry.customType === EXEC_ENTRY)?.data;
     state = validState(latest);
+    const bootstrap = [...entries]
+      .reverse()
+      .find((entry) => entry.type === "custom" && entry.customType === "plan-implementation-runtime")?.data as
+      | { exec?: unknown }
+      | undefined;
+    const seed = validState(bootstrap?.exec);
+    const pendingBootstrap = Boolean(
+      state?.active &&
+        state.linkedFlow &&
+        !state.negotiation &&
+        seed?.active &&
+        seed.planFile === state.planFile &&
+        seed.implementerModel === state.implementerModel &&
+        JSON.stringify(seed.linkedFlow) === JSON.stringify(state.linkedFlow) &&
+        !entries.some(
+          (entry) => entry.type === "custom" && entry.customType === "plan-implementation-runtime-consumed",
+        ),
+    );
     pendingReturn = state?.pendingReturn;
     if (state) {
       for (const file of state.touched ?? []) touched.add(file);
       state.negotiation ??= createNegotiation(randomUUID(), host.completionMaxRevisions?.() ?? 2);
       const n = state.negotiation;
-      if (n.phase === "reviewing" || n.phase === "consulting") {
+      if (state.pendingCompletion) {
+        n.phase = "paused";
+        n.pause = { reason: "failure", action: WORK_MODEL_UNAVAILABLE };
+      } else if (n.phase === "reviewing" || n.phase === "consulting") {
         if (n.phase === "reviewing") n.history.at(-1)!.error = "Review interrupted by reload.";
         n.phase = "paused";
         n.pause = { reason: "interrupted", action: "Exchange interrupted by reload; no paid request was retried." };
       }
-      persist();
+      // A fresh seed is an overlay for startup reconciliation, not a committed
+      // begin. Keep its durable identity uninitialized until the post-start
+      // bootstrap activates the worker and calls begin; otherwise the gate must
+      // reject that begin as a duplicate. Local recovery still has a negotiation.
+      if (!pendingBootstrap) persist();
     }
     if (!state?.active) cards.end();
     setTools();
@@ -452,6 +565,19 @@ export function registerExec(pi: ExtensionAPI, host: ExecHost): ExecController {
     const n = current.negotiation!;
     if (!live(current, token) || !current.active || signal?.aborted || ctx.signal?.aborted)
       return pausedResult("Execution changed or was interrupted; no action taken.");
+    if (current.pendingCompletion && action !== "stop") {
+      if (action !== "retry") return pausedResult(WORK_MODEL_UNAVAILABLE);
+      const result = await finalize(current, token, structuredClone(current.pendingCompletion), ctx, undefined, signal);
+      if (origin === "command" && live(current, token) && !current.active && current.completion) {
+        pi.sendMessage({
+          customType: FINISH_MESSAGE_TYPE,
+          content: finishMessageText(current.completion),
+          details: structuredClone(current.completion),
+          display: true,
+        });
+      }
+      return result;
+    }
     if (action === "stop" || action === "accept") {
       if (action === "accept" && n.phase !== "paused") return text("Only a paused execution can be overridden.");
       if (action === "accept" || origin === "tool") {
@@ -475,7 +601,8 @@ export function registerExec(pi: ExtensionAPI, host: ExecHost): ExecController {
           );
       }
       const details: FinishDetails = {
-        ...(n.latestReport ??
+        ...(current.pendingCompletion ??
+          n.latestReport ??
           (action === "stop"
             ? {
                 report: "Implementation stopped.",
@@ -484,8 +611,8 @@ export function registerExec(pi: ExtensionAPI, host: ExecHost): ExecController {
               }
             : { report: "No report submitted.", verification: "Unknown.", concerns: "Unreviewed." })),
         planFile: current.planFile,
-        negotiation: structuredClone(n),
-        decision: n.history.at(-1)?.decision,
+        negotiation: structuredClone(current.pendingCompletion?.negotiation ?? n),
+        decision: current.pendingCompletion?.decision ?? n.history.at(-1)?.decision,
         completion: action === "stop" ? "stopped" : "user_override",
         executionId: n.executionId,
         asks: current.asks,
@@ -495,8 +622,8 @@ export function registerExec(pi: ExtensionAPI, host: ExecHost): ExecController {
         current.pendingReturn = undefined;
         pendingReturn = undefined;
       }
-      const result = await finalize(current, token, details, ctx);
-      if (origin === "command" && live(current, token)) {
+      const result = await finalize(current, token, details, ctx, undefined, signal);
+      if (origin === "command" && live(current, token) && !current.active) {
         pi.sendMessage({
           customType: FINISH_MESSAGE_TYPE,
           content: finishMessageText(details),
@@ -538,6 +665,7 @@ export function registerExec(pi: ExtensionAPI, host: ExecHost): ExecController {
     signal?: AbortSignal,
   ): Promise<ActionResult> => {
     const n = current.negotiation!;
+    if (current.pendingCompletion) return pausedResult(`${WORK_MODEL_UNAVAILABLE}\nUse /plan-exec retry.`);
     if (n.phase !== "paused") return text("Implementation remains active; completion has not been confirmed.");
     const choices = recoveryChoices(n);
     const selected = await select(
@@ -581,6 +709,10 @@ export function registerExec(pi: ExtensionAPI, host: ExecHost): ExecController {
       const token = epoch;
       const n = current.negotiation!;
       const { action, replyId } = (params ?? {}) as { action?: string; replyId?: unknown };
+      if (current.pendingCompletion && action !== "stop")
+        return action === "retry"
+          ? applyAction(current, token, "retry", ctx, "tool", undefined, signal)
+          : pausedResult(WORK_MODEL_UNAVAILABLE);
       if (action === "answer") {
         if (n.phase !== "paused" || n.pause?.reason !== "user_needed" || typeof replyId !== "string")
           return text("A fresh delivered user answer and its current replyId are required; no change made.");
@@ -618,9 +750,11 @@ export function registerExec(pi: ExtensionAPI, host: ExecHost): ExecController {
     const reply = replies.eligible(n);
     const guidance = [
       "An approved plan is being implemented. Human questions do not cancel the task; answer them normally. Follow explicit requests to pause. Keep human-facing explanations concise; do not dump review history or advertise recovery commands.",
-      n.phase === "paused"
-        ? `${pauseText(n)}\nDo not implement while awaiting this decision. Answer clarification normally. Call continue_plan(action=answer, replyId) only when an eligible reply resolves the pending reviewer question; clarification alone is not recovery. Never interpret conversational text as retry, extension or unreviewed-completion authorization; those require a native selection.`
-        : "Continue the approved implementation unless the user changes direction. Completion requires finish_plan and the existing review safeguards.",
+      state.pendingCompletion
+        ? `${WORK_MODEL_UNAVAILABLE}\nCompletion is already authorized and saved. Do not implement or rerun review. finish_plan or continue_plan(action=retry) retries only the saved completion handoff.`
+        : n.phase === "paused"
+          ? `${pauseText(n)}\nDo not implement while awaiting this decision. Answer clarification normally. Call continue_plan(action=answer, replyId) only when an eligible reply resolves the pending reviewer question; clarification alone is not recovery. Never interpret conversational text as retry, extension or unreviewed-completion authorization; those require a native selection.`
+          : "Continue the approved implementation unless the user changes direction. Completion requires finish_plan and the existing review safeguards.",
       reply
         ? `Eligible delivered human reply: ${JSON.stringify(reply.text)}\nreplyId: ${reply.id}`
         : "No eligible delivered textual reply is available. If attribution failed or several inputs were queued, ask: Please send your answer once more now that the conversation has stopped. No slash command is needed.",
@@ -854,6 +988,10 @@ export function registerExec(pi: ExtensionAPI, host: ExecHost): ExecController {
       if (!current?.active) return text(NOT_ACTIVE);
       const token = epoch;
       let n = current.negotiation!;
+      if (current.pendingCompletion) {
+        if (signal?.aborted || ctx.signal?.aborted) return pausedResult(WORK_MODEL_UNAVAILABLE);
+        return finalize(current, token, structuredClone(current.pendingCompletion), ctx, undefined, signal);
+      }
       if (n.phase === "paused") {
         pauseShownThisRun = true;
         const previous = n.history.at(-1);
@@ -919,7 +1057,7 @@ export function registerExec(pi: ExtensionAPI, host: ExecHost): ExecController {
         details.assessment = { state: "disabled" };
         details.completion = "no_review";
         details.negotiation = structuredClone(n);
-        return await finalize(current, token, details, ctx);
+        return await finalize(current, token, details, ctx, undefined, signal);
       }
       try {
         n = startReview(n, submission, responses);
@@ -1079,7 +1217,7 @@ export function registerExec(pi: ExtensionAPI, host: ExecHost): ExecController {
       updateStatus(ctx);
       if (decision?.outcome === "accepted") {
         details.completion = "accepted";
-        return await finalize(current, token, details, ctx, usage);
+        return await finalize(current, token, details, ctx, usage, signal);
       }
       if (n.phase === "paused") {
         pauseShownThisRun = true;
@@ -1119,27 +1257,55 @@ export function registerExec(pi: ExtensionAPI, host: ExecHost): ExecController {
     },
   });
 
+  const showStatus = (ctx: ExtensionContext) => {
+    if (!state?.active) {
+      ctx.ui.notify(NOT_ACTIVE, "info");
+      return;
+    }
+    const n = state.negotiation!;
+    const message = state.pendingCompletion
+      ? `${WORK_MODEL_UNAVAILABLE}\nUse /plan-exec retry to finish the saved handoff without another review.`
+      : n.phase === "paused"
+        ? `${pauseText(n)}\nRecovery: /plan-exec for choices, /plan-exec accept or /plan-exec stop.`
+        : `${busy ? `Implementation active · ${n.phase}. Completion has not been confirmed.` : "Implementation is idle; completion has not been confirmed. Reply to continue or change direction."}\nUse /plan-exec stop to abandon implementation.`;
+    ctx.ui.notify(message, "info");
+  };
+
+  pi.events.on(FOOTER_ACTIONS_CHANNEL, (data: unknown) => {
+    const request = data as FooterActionsRequest | undefined;
+    const ctx = hostCtx;
+    const current = state;
+    if (request?.version !== 1 || !request.actions || !ctx?.hasUI || !current?.active) return;
+    const token = epoch;
+    const manager = ctx.sessionManager;
+    const sessionId = manager.getSessionId?.();
+    request.actions["execution.status"] = {
+      label: "Execution status",
+      run: () => {
+        if (
+          live(current, token) &&
+          current.active &&
+          hostCtx?.sessionManager === manager &&
+          manager.getSessionId?.() === sessionId
+        )
+          showStatus(hostCtx);
+      },
+    };
+  });
+
   pi.registerCommand("plan-exec", {
-    description:
-      "Show implementation status or paused recovery choices; compatibility: retry, resume <answer>, accept, stop",
+    description: "Show implementation status or paused recovery choices; status, retry, resume <answer>, accept, stop",
     handler: async (args, ctx) => {
       const current = state;
-      if (!current?.active) {
-        ctx.ui.notify(NOT_ACTIVE, "info");
+      const [action, ...words] = args.trim().split(/\s+/u);
+      if (!current?.active || (action === "status" && words.length === 0)) {
+        showStatus(ctx);
         return;
       }
       const token = epoch;
       const n = current.negotiation!;
-      const [action, ...words] = args.trim().split(/\s+/u);
-      if (!action && (n.phase !== "paused" || !ctx.isIdle())) {
-        ctx.ui.notify(
-          n.phase === "paused"
-            ? pauseText(n)
-            : busy
-              ? `Implementation active · ${n.phase}. Completion has not been confirmed.`
-              : "Implementation is idle; completion has not been confirmed. Reply to continue or change direction.",
-          "info",
-        );
+      if (!action && (current.pendingCompletion || n.phase !== "paused" || !ctx.isIdle())) {
+        showStatus(ctx);
         return;
       }
       if (!ctx.isIdle()) {
@@ -1152,7 +1318,7 @@ export function registerExec(pi: ExtensionAPI, host: ExecHost): ExecController {
           (action !== "resume" && words.length > 0) ||
           (action === "resume" && !words.join(" ").trim()))
       ) {
-        ctx.ui.notify("Usage: /plan-exec [retry | resume <answer> | accept | stop]", "warning");
+        ctx.ui.notify("Usage: /plan-exec [status | retry | resume <answer> | accept | stop]", "warning");
         return;
       }
       const result = action
@@ -1170,7 +1336,7 @@ export function registerExec(pi: ExtensionAPI, host: ExecHost): ExecController {
       const refused =
         ((action === "retry" || action === "resume") && current.negotiation === n) ||
         (action === "accept" && (!ctx.hasUI || n.phase !== "paused"));
-      if (live(current, token) && current.active && (!action || refused))
+      if (live(current, token) && current.active && (!action || refused || current.pendingCompletion))
         ctx.ui.notify(result.content.map((part) => part.text).join("\n"), refused ? "warning" : "info");
     },
   });
@@ -1325,6 +1491,9 @@ export function registerExec(pi: ExtensionAPI, host: ExecHost): ExecController {
     get active() {
       return state?.active === true;
     },
+    get state() {
+      return state ? structuredClone(state) : undefined;
+    },
     begin,
   };
 }
@@ -1336,6 +1505,18 @@ function validState(data: unknown): ExecState | undefined {
   if (!entry.active && !entry.pendingReturn) return undefined;
   const negotiation = entry.negotiation === undefined ? undefined : restoreNegotiation(entry.negotiation);
   if (entry.negotiation !== undefined && !negotiation) return undefined;
+  const linkedFlow = entry.linkedFlow === undefined ? undefined : parseLinkedFlow(entry.linkedFlow);
+  if (entry.linkedFlow !== undefined && !linkedFlow) return undefined;
+  const pendingCompletion = entry.pendingCompletion;
+  if (
+    pendingCompletion &&
+    (!linkedFlow ||
+      !pendingCompletion.report ||
+      pendingCompletion.planFile !== entry.planFile ||
+      !["accepted", "no_review", "user_override", "stopped"].includes(pendingCompletion.completion ?? "") ||
+      !restoreNegotiation(pendingCompletion.negotiation))
+  )
+    return undefined;
   const planner = entry.planner;
   const valid =
     planner &&
@@ -1346,6 +1527,8 @@ function validState(data: unknown): ExecState | undefined {
     active: entry.active,
     planFile: entry.planFile,
     ...(negotiation ? { negotiation } : {}),
+    ...(linkedFlow ? { linkedFlow } : {}),
+    ...(pendingCompletion ? { pendingCompletion: structuredClone(pendingCompletion) } : {}),
     ...(entry.completion && typeof entry.completion.report === "string"
       ? { completion: structuredClone(entry.completion) }
       : {}),
@@ -1368,6 +1551,40 @@ function validState(data: unknown): ExecState | undefined {
     costUsd:
       typeof entry.costUsd === "number" && Number.isFinite(entry.costUsd) && entry.costUsd >= 0 ? entry.costUsd : 0,
   };
+}
+
+function parseLinkedFlow(value: unknown): FlowState | undefined {
+  if (!value || typeof value !== "object") return undefined;
+  const flow = value as Partial<FlowState>;
+  if (
+    flow.version !== 1 ||
+    flow.operatingMode !== "linked" ||
+    typeof flow.revision !== "number" ||
+    !Number.isSafeInteger(flow.revision) ||
+    flow.revision < 0
+  )
+    return undefined;
+  const selected = flow.selectedFlow;
+  if (
+    !selected ||
+    typeof selected.provider !== "string" ||
+    !selected.provider.trim() ||
+    typeof selected.anchorModel !== "string" ||
+    !selected.anchorModel.trim()
+  )
+    return undefined;
+  for (const role of ["work", "chat", "plan", "exec"] as const) {
+    const assignment = selected.roles?.[role];
+    if (
+      !assignment ||
+      assignment.provider !== selected.provider ||
+      typeof assignment.modelId !== "string" ||
+      !assignment.modelId.trim() ||
+      (assignment.suggestedThinking !== undefined && typeof assignment.suggestedThinking !== "string")
+    )
+      return undefined;
+  }
+  return { version: 1, operatingMode: "linked", revision: flow.revision, selectedFlow: structuredClone(selected) };
 }
 
 function gitShortstat(cwd: string): Promise<string | undefined> {
@@ -1463,6 +1680,7 @@ function finishMessageText(details: FinishDetails): string {
 
 function pauseText(n: NegotiationState): string {
   if (n.phase !== "paused") return `Implementation active · ${n.phase}. Completion has not been confirmed.`;
+  if (n.pause?.action === WORK_MODEL_UNAVAILABLE) return WORK_MODEL_UNAVAILABLE;
   const presentation = pausePresentation(n);
   return [presentation.title, presentation.question, presentation.reason, presentation.next].filter(Boolean).join("\n");
 }

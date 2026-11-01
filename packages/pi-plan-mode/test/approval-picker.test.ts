@@ -15,6 +15,8 @@ import {
   HERE,
   handoffLabel,
   KEEP,
+  LINKED_COMPACT,
+  LINKED_EXECUTE,
   OPTION_MAX,
   pickApproval,
   SAVE,
@@ -90,6 +92,205 @@ function tuiContext(run: (component: ApprovalPicker) => void, overrides: Partial
   }) as ExtensionContext["ui"]["custom"];
   return ctx;
 }
+
+function linkedInput(worker: ModelSpec = target): ApprovalInput {
+  const assignment = { provider: worker.provider, modelId: worker.modelId };
+  return {
+    ...input,
+    intent: "linked-execution",
+    flow: {
+      version: 1,
+      operatingMode: "linked",
+      revision: 3,
+      selectedFlow: {
+        provider: worker.provider,
+        anchorModel: planner.modelId,
+        roles: { work: { ...assignment }, chat: { ...assignment }, plan: { ...planner }, exec: { ...assignment } },
+      },
+    },
+    targets: [
+      { target: worker, targetName: "Worker" },
+      { target: planner, targetName: "Planning model" },
+      { target: { provider: "other", modelId: "free-choice" }, targetName: "Free choice" },
+    ],
+  };
+}
+
+test("linked approval defaults to the first worker with keep context, including the physical planning model", () => {
+  for (const worker of [target, planner]) {
+    const input = linkedInput(worker);
+    const { component, done } = fixture({ input });
+    component.handleInput("\r");
+    assert.deepEqual(done.mock.calls, [
+      [
+        {
+          choice: {
+            kind: "handoff",
+            target: worker,
+            targetName: "Worker",
+            intent: "linked-execution",
+            flow: input.flow,
+            context: "keep",
+          },
+          thinkingLevel: worker.thinkingLevel ?? "medium",
+        },
+      ],
+    ]);
+    const choice = done.mock.calls[0]?.[0]?.choice;
+    assert.ok(choice?.kind === "handoff");
+    assert.notEqual(choice.flow, input.flow);
+    assert.notEqual(choice.flow?.selectedFlow?.roles.exec, input.flow?.selectedFlow?.roles.exec);
+  }
+});
+
+test("linked picker shows only keep/compact worker contexts and edit/save/planning, with model details off the labels", () => {
+  const labels = [LINKED_EXECUTE, LINKED_COMPACT, EDIT, SAVE, KEEP];
+  for (const width of [46, 120, 180]) {
+    const { component } = fixture({ input: linkedInput() });
+    const rendered = component.render(width).map(stripVTControlCharacters);
+    assert.ok(rendered.every((line) => visibleWidth(line) === width));
+    const lines = rendered.map((line) => line.trimEnd());
+    assert.deepEqual(
+      lines.filter((line) => /^ [→ ] /u.test(line)).map((line) => line.slice(3)),
+      labels,
+    );
+    assert.ok(labels.every((label) => visibleWidth(label) <= OPTION_MAX));
+    assert.ok(lines.includes(` → ${LINKED_EXECUTE}`));
+    const text = lines.map((line) => line.trim()).join(" ");
+    assert.ok(text.includes("Linked worker: test/worker."));
+    assert.ok(text.includes("←/→ effort: medium"));
+    assert.ok(!text.includes(HERE));
+    assert.ok(!text.includes(COMPACT_HERE));
+    assert.ok(!text.includes("Planning model"));
+    assert.ok(!text.includes("Free choice"));
+    assert.ok(!text.includes("clear"));
+    assert.ok(text.includes(APPROVAL_HINT));
+    component.dispose();
+  }
+});
+
+test("linked context controls share effort and retain selection across reopening and Edit", () => {
+  const input = linkedInput();
+  const state = createApprovalState();
+  const first = fixture({ input, state });
+  first.component.handleInput(right); // worker medium -> high
+  first.component.handleInput(down); // compact context
+  assert.ok(first.component.render(120).join("\n").includes("←/→ effort: high"));
+  first.component.dispose();
+  const second = fixture({ input, state });
+  assert.ok(second.component.render(120).join("\n").includes(`→ ${LINKED_COMPACT}`));
+  second.component.handleInput(down); // edit
+  second.component.handleInput("\r");
+  assert.deepEqual(second.done.mock.calls, [[{ choice: { kind: "edit" } }]]);
+  const third = fixture({ input, state });
+  assert.equal(state.selectedId, "edit");
+  third.component.handleInput(up); // compact context
+  third.component.handleInput(left); // worker high -> medium
+  third.component.handleInput(up); // keep context
+  assert.ok(third.component.render(120).join("\n").includes("←/→ effort: medium"));
+  third.component.handleInput(down);
+  third.component.handleInput("\r");
+  assert.deepEqual(third.done.mock.calls, [
+    [
+      {
+        choice: {
+          kind: "handoff",
+          target,
+          targetName: "Worker",
+          intent: "linked-execution",
+          flow: input.flow,
+          context: "compact",
+        },
+        thinkingLevel: "medium",
+      },
+    ],
+  ]);
+});
+
+test("linked RPC has the same keep/compact policy, defaults to keep and retains supported effort controls", async () => {
+  for (const context of ["keep", "compact"] as const) {
+    const input = linkedInput();
+    const select = vi
+      .fn<ExtensionContext["ui"]["select"]>()
+      .mockImplementationOnce(async (question, options) => {
+        assert.ok(question.includes("Linked worker: test/worker."));
+        assert.deepEqual(options, [LINKED_EXECUTE, LINKED_COMPACT, EDIT, SAVE, KEEP]);
+        assert.ok(options.every((label) => visibleWidth(label) <= OPTION_MAX));
+        return options[context === "keep" ? 0 : 1];
+      })
+      .mockImplementationOnce(async (question, options) => {
+        assert.equal(question, "Implementation effort");
+        assert.equal(options[0], "medium");
+        assert.ok(options.includes("high"));
+        return "high";
+      });
+    assert.deepEqual(await pickApproval(rpcContext(select), input, createApprovalState()), {
+      choice: { kind: "handoff", target, targetName: "Worker", intent: "linked-execution", flow: input.flow, context },
+      thinkingLevel: "high",
+    });
+    assert.equal(select.mock.calls.length, 2);
+  }
+});
+
+test("linked RPC effort cancellation retains compact context without adding model overrides", async () => {
+  const input = linkedInput();
+  const select = vi
+    .fn<ExtensionContext["ui"]["select"]>()
+    .mockResolvedValueOnce(LINKED_COMPACT)
+    .mockResolvedValueOnce(undefined)
+    .mockImplementationOnce(async (_question, options) => {
+      assert.deepEqual(options, [LINKED_COMPACT, LINKED_EXECUTE, EDIT, SAVE, KEEP]);
+      return options[0];
+    })
+    .mockResolvedValueOnce("low");
+  assert.deepEqual(await pickApproval(rpcContext(select), input, createApprovalState()), {
+    choice: {
+      kind: "handoff",
+      target,
+      targetName: "Worker",
+      intent: "linked-execution",
+      flow: input.flow,
+      context: "compact",
+    },
+    thinkingLevel: "low",
+  });
+});
+
+test("linked nonexecution choices never request effort and a missing worker never offers planning/free execution", async () => {
+  for (const [label, kind] of [
+    [EDIT, "edit"],
+    [SAVE, "save"],
+    [KEEP, "keep"],
+  ] as const) {
+    const select = vi.fn<ExtensionContext["ui"]["select"]>().mockResolvedValueOnce(label);
+    assert.deepEqual(await pickApproval(rpcContext(select), linkedInput(), createApprovalState()), {
+      choice: { kind },
+    });
+    assert.equal(select.mock.calls.length, 1);
+  }
+  const unavailable = { ...linkedInput(), targets: [] };
+  const { component, done } = fixture({ input: unavailable });
+  assert.ok(component.render(120).join("\n").includes("Linked worker unavailable."));
+  component.handleInput("\r");
+  assert.deepEqual(done.mock.calls, [[{ choice: { kind: "edit" } }]]);
+  const select = vi.fn<ExtensionContext["ui"]["select"]>().mockImplementationOnce(async (_question, options) => {
+    assert.deepEqual(options, [EDIT, SAVE, KEEP]);
+    return KEEP;
+  });
+  assert.deepEqual(await pickApproval(rpcContext(select), unavailable, createApprovalState()), {
+    choice: { kind: "keep" },
+  });
+});
+
+test("explicit independent approval preserves existing result objects and options", () => {
+  const { component, done } = fixture({ input: { ...input, intent: "independent" } });
+  component.handleInput(down);
+  component.handleInput(down);
+  component.handleInput("\r");
+  assert.deepEqual(done.mock.calls, [
+    [{ choice: { kind: "handoff", target, targetName: "Worker" }, thinkingLevel: "medium" }],
+  ]);
+});
 
 test("direct implementation is first/default and selection uses the Pi bindings", () => {
   const first = fixture();
