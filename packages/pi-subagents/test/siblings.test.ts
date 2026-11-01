@@ -45,12 +45,12 @@ test.each(["ex", "pending", "visual", "insert"])("actual MainEditor releases a s
   for (const key of ["j", "k", "x", "h", "\x15", "\x04"]) expect(ui.press(key)).toBe(false);
   if (state === "insert") {
     editor.handleInput("\x15");
-    expect(editor.getText().length).toBeLessThan(5);
+    expect(editor.getText()).toBe("draft"); // pi-vim owns Insert-mode transcript navigation.
   }
   fleet.dispose(); editor.dispose();
 });
 
-test("actual MainEditor EOL and insert-selected native edit keys are not stolen", async () => {
+test("actual MainEditor EOL and insert-mode transcript navigation keys are not stolen by Fleet", async () => {
   const { MainEditor } = await import(sibling("pi-vim"));
   const ui = fakeUI();
   const editor = new MainEditor(ui.tui, editorTheme, keys);
@@ -64,7 +64,7 @@ test("actual MainEditor EOL and insert-selected native edit keys are not stolen"
   expect(ui.press(KEY.down)).toBe(true);
   expect(ui.press("\x15")).toBe(false);
   editor.handleInput("\x15");
-  expect(editor.getText()).toBe("");
+  expect(editor.getText()).toBe("draft");
   editor.setText("abc");
   expect(ui.press(KEY.down)).toBe(true);
   expect(ui.press("\x04")).toBe(false);
