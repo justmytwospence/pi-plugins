@@ -2393,15 +2393,82 @@ test("pi-recap's automatic session name stays off the footer; a name you set sho
   assert.equal(mod.ownName(undefined, undefined), undefined);
 });
 
-test("Fable quota shows only over trajectory and within 48 hours of reset", () => {
-  const show = (used, days) => {
-    const s = fixture();
-    s.quotas[0].windows[2] = { label: "Fable", used, reset: now + days * 86400_000 };
-    return /Fable/.test(mod.renderFooter(s, 200, theme).join("\n"));
-  };
-  assert.equal(show(68, 3), false);
-  assert.equal(show(10, 1), false);
-  assert.equal(show(90, 1), true);
+const quotaRenderFixture = (path, windows, observedAt = now) => {
+  const s = fixture();
+  s.quotas = path === "quotas" ? [{ source: "Claude acct", updated: observedAt, windows }] : [];
+  if (path === "providerUsage") s.providerUsage = [{ provider: "anthropic", source: "Claude account", state: "ready", observedAt, windows }];
+  return s;
+};
+
+test("Fable visibility uses high usage or the existing near-reset trajectory on both quota paths", () => {
+  const hour = 3600_000, day = 24 * hour;
+  const cases = [
+    [68, 3 * day, false], [10, day, false], [90, day, true], [70, 3 * day, false],
+    ...[70.1, 71, 100].flatMap((used) => [3, 7].map((days) => [used, days * day, true])),
+    [70, 47 * hour, false], [70, 48 * hour, false], [90, 48 * hour, true],
+  ];
+  for (const path of ["quotas", "providerUsage"]) for (const [used, left, shown] of cases) {
+    const s = quotaRenderFixture(path, [{ label: "Fable", used, reset: now + left }]);
+    const text = plain(mod.renderFooter(s, 200, theme).join("\n"));
+    assert.equal(text.includes("Fable"), shown, `${path}: ${used}% / ${left / hour}h: ${text}`);
+    if (shown && left === 3 * day && (used === 71 || used === 100)) {
+      assert.ok(text.includes(`Fable ${used}% used · resets in 3d0h`), text);
+    }
+  }
+  for (const path of ["quotas", "providerUsage"]) {
+    const text = mod.renderFooter(quotaRenderFixture(path, [{ label: "fAbLe", used: 71, reset: now + 3 * day }]), 200, theme).join("\n");
+    assert.match(text, /fAbLe 71% used · resets in 3d0h/);
+  }
+});
+
+test("Fable hides unknown and expired windows without losing stale reset-due alerts", () => {
+  const cases = [
+    [{ label: "Fable", used: 100 }, false],
+    [{ label: "Fable", used: 100, reset: now }, true],
+    [{ label: "Fable", used: 100, reset: now - 1 }, true],
+    [{ label: "Fable", reset: now + 3 * 86400_000 }, false],
+    ...[NaN, Infinity, -Infinity].flatMap((value) => [
+      [{ label: "Fable", used: 100, reset: value }, value === -Infinity],
+      [{ label: "Fable", used: value, reset: now + 3 * 86400_000 }, false],
+    ]),
+  ];
+  for (const path of ["quotas", "providerUsage"]) for (const [window, expired] of cases) {
+    const text = plain(mod.renderFooter(quotaRenderFixture(path, [window]), 200, theme).join("\n"));
+    assert.doesNotMatch(text, /Fable|resets in/);
+    if (expired) assert.match(text, /stale .*· reset due/);
+    else assert.doesNotMatch(text, /reset due/);
+  }
+});
+
+test("high-usage Fable keeps its percentage and row budget at client widths", () => {
+  for (const path of ["quotas", "providerUsage"]) for (const used of [71, 100]) {
+    const windows = [
+      { label: "5h", used: 10, reset: now + 5 * 3600_000 },
+      { label: "week", used: 20, reset: now + 7 * 86400_000 },
+      { label: "Fable", used, reset: now + 3 * 86400_000 },
+    ];
+    const s = quotaRenderFixture(path, windows);
+    const count = mod.renderFooter(quotaRenderFixture(path, windows.slice(0, 2)), 180, theme).length;
+    for (const width of [46, 120, 180]) {
+      const rows = mod.renderFooter(s, width, theme).map(plain);
+      assert.equal(rows.length, count, `${path} ${used}% width ${width}`);
+      assert.ok(rows.every((row) => visibleWidth(row) <= width));
+      assert.ok(rows.at(-1).includes(`Fable ${used}%`), rows.at(-1));
+      if (width >= 120) assert.ok(rows.at(-1).includes(`Fable ${used}% used · resets in 3d0h`), rows.at(-1));
+    }
+  }
+});
+
+test("ordinary low-usage session and weekly windows retain routine reset countdowns", () => {
+  for (const path of ["quotas", "providerUsage"]) {
+    const windows = [
+      { label: "5h", used: 10, reset: now + 3 * 3600_000 },
+      { label: "week", used: 20, reset: now + 7 * 86400_000 },
+    ];
+    const row = plain(mod.renderFooter(quotaRenderFixture(path, windows), 180, theme).at(-1));
+    assert.match(row, /5h 10% used · resets in 3h0m/);
+    assert.match(row, /week 20% used · resets in 7d0h/);
+  }
 });
 
 const controlState = () => Object.fromEntries([

@@ -234,6 +234,8 @@ labeled.
 - **extra:** shared Claude account extra usage enabled/disabled state. An old spent
   pool is not an active warning when extra usage is off.
 
+Ordinary quota windows retain their routine countdowns when a future reset is known. Percentages are **used**, not remaining. The selectively displayed Fable window appears above 70% used, including exhaustion, regardless of days remaining; otherwise it appears only when over its seven-day usage trajectory and less than 48 hours from reset. Fable requires a known percentage and future reset. Unknown or past-reset data does not imply replenishment.
+
 Other providers get the common session rows, without invented quota information.
 
 ## Settings-cycle preview

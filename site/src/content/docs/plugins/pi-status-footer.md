@@ -151,6 +151,8 @@ Estimated session cost uses recorded token-price usage, including tool, summary 
 
 Quota data becomes stale after ten minutes or when its reset time passes. Failed refreshes preserve the last reading and do not invent a reset to zero. Missing percentages remain unknown; subscription allowances, API throttles, balances and session cost are different measurements.
 
+Percentages show **used**, not remaining. Ordinary windows retain routine countdowns when a future reset is known. The selectively displayed Fable window appears above 70% used, including exhaustion, regardless of days remaining; otherwise it appears only when over its seven-day usage trajectory and less than 48 hours from reset. Fable requires a known percentage and future reset. Unknown or past-reset data does not imply replenishment.
+
 ## Account data and configuration
 
 Claude account readings come from `https://api.anthropic.com/api/oauth/usage` using Pi's own Anthropic subscription login (through Pi's model registry, which handles refresh), so they describe the account Pi bills. They are cached for five minutes in `${CLAUDE_STATUSLINE_CACHE_DIR:-${XDG_CACHE_HOME:-~/.cache}/claude-statusline}/pi-oauth-usage.json`, coordinated through a `.pi-fetch.lock` directory, and the `anthropic-ratelimit-unified-*` headers on each Anthropic response update the 5h and week windows in between. When Pi has no Anthropic subscription login, readings come from Claude Code's shared `oauth-usage.json` in the same directory instead. That is the Claude Code account, which may differ from Pi's account; when refreshing it, the extension reads Claude Code's OAuth token from macOS Keychain or its credentials file, sends it only to the same endpoint, and coordinates through a `.fetch.lock` directory.

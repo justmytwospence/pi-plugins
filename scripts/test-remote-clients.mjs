@@ -658,6 +658,9 @@ for (const width of [46, 120, 180]) {
 const editor = new CustomEditor({ ...tui, terminal: { rows: HEIGHT, columns: 180 } }, themeModule.getEditorTheme(), kb, { paddingX: 0 });
 editor.setText('next step');
 const usageReady = { provider: 'google', source: 'Google Antigravity subscription', state: 'ready', observedAt: NOW, windows: [{ label: '5h', used: 25, reset: NOW + 3_600_000 }] };
+const usageFable = used => ({ provider: 'anthropic', source: 'Anthropic subscription', state: 'ready', observedAt: NOW, windows: [{ label: 'Fable', used, reset: NOW + 3 * 86400_000 }] });
+const fable71 = usageFable(71);
+const fable100 = usageFable(100);
 const usageUnavailable = { provider: 'openai', source: 'OpenAI subscription', state: 'unavailable', windows: [], reason: 'Subscription limits are unavailable.' };
 const usageLocal = { provider: 'ollama', source: 'Local inference', state: 'not-applicable', windows: [], reason: 'Local inference has no account quota.' };
 // Account data must not expand the dialog's one-row, noninteractive footer.
@@ -665,6 +668,10 @@ for (const width of [46, 120, 180]) {
   const blocked = statusFooter(width, modeStatuses('plan', 'auto'), { compact: true, providerUsage: [usageReady, usageUnavailable], providerUsageMore: 3 });
   assert.equal(blocked.length, 1);
   assert.doesNotMatch(stripVTControlCharacters(blocked[0]), /Google|OpenAI|\+3 more/u);
+  for (const usage of [fable71, fable100]) {
+    const fableBlocked = statusFooter(width, modeStatuses('plan', 'auto'), { compact: true, providerUsage: [usage] });
+    assert.equal(fableBlocked.length, 1, 'Fable usage must not add a blocked footer row');
+  }
 }
 // Match the real helper's JSON-only snapshot contract. Rendering is delegated to its
 // registered public entry renderer, not a lookalike Text or a second settings formatter.
@@ -735,6 +742,8 @@ const FOOTERS = [
   // (including any activity pill/separator), rather than comparing unreadable baselines.
   { name: 'high status count', statuses: modeStatuses('plan', 'yolo'), highStatus: true },
   { name: 'provider ready', statuses: modeStatuses('plan', 'auto'), providerUsage: [usageReady] },
+  { name: 'Fable 71%', statuses: modeStatuses('plan', 'auto'), providerUsage: [fable71] },
+  { name: 'Fable 100% high status', statuses: modeStatuses('plan', 'yolo'), providerUsage: [fable100], highStatus: true },
   { name: 'provider unavailable', statuses: modeStatuses('plan', 'auto'), providerUsage: [usageUnavailable] },
   { name: 'provider local', statuses: modeStatuses('plan', 'auto'), providerUsage: [usageLocal] },
   { name: 'status all providers', statuses: modeStatuses('plan', 'auto'), providerUsage: [usageReady, usageUnavailable], providerUsageMore: 3 },
@@ -786,7 +795,14 @@ const IDLE = [
 for (const width of [46, 120, 180]) {
   for (const fixture of FOOTERS) {
     for (const withActivity of [false, true]) {
-      const rendered = idleFooter(width, fixture, withActivity ? 2 : 0).map(stripVTControlCharacters).join('\n');
+      const footerLines = idleFooter(width, fixture, withActivity ? 2 : 0);
+      const rendered = footerLines.map(stripVTControlCharacters).join('\n');
+      if (fixture.providerUsage?.includes(fable71) || fixture.providerUsage?.includes(fable100)) {
+        const used = fixture.providerUsage[0].windows[0].used;
+        assert.equal(footerLines.length + (withActivity ? 2 : 0), fixture.highStatus ? 13 : 6 + (withActivity ? 2 : 0), 'Fable keeps the existing row budget');
+        assert.match(rendered, new RegExp(`Fable.*${used}%`, 'u'), 'Fable retains its percentage at every width');
+        if (width >= 120) assert.match(rendered, /resets in 3d0h/u, 'wide Fable row retains its multi-day countdown');
+      }
       if (fixture.providerUsage?.length) {
         assert.ok(fixture.providerUsage.length <= 2, 'at most two account rows');
         if (fixture.providerUsage.includes(usageReady)) assert.match(rendered, /Google.*5h.*25%/u, 'ready usage keeps its measured percentage');

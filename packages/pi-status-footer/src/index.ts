@@ -370,6 +370,13 @@ export const duration = (ms: number): string => {
   if (mins >= 60) return `${Math.floor(mins / 60)}h${mins % 60}m`;
   return `${mins}m`;
 };
+// Fable is selective: show high usage, or an over-trajectory pool near reset.
+function showQuotaWindow(window: { label: string; used?: number; reset?: number }, now: number): boolean {
+  if (!/^fable$/i.test(window.label)) return true;
+  if (window.used === undefined || !Number.isFinite(window.used) || window.reset === undefined || !Number.isFinite(window.reset) || window.reset <= now) return false;
+  const left = window.reset - now;
+  return window.used > 70 || (left < 48 * 3600_000 && window.used > (1 - left / (7 * 86400_000)) * 100);
+}
 const money = (n: number): string => `$${n.toFixed(n > 0 && n < 0.01 ? 3 : 2)}`;
 // Pi's system theme puts accent at the same contrast as muted gray, so the
 // footer's accents (project, model, gauges) read no stronger than its secondary
@@ -1172,12 +1179,7 @@ export function layoutFooter(snapshot: Snapshot, width: number, theme: Paint): F
       const age = Math.max(0, s.now - (usage.observedAt ?? s.now));
       const expired = usage.windows.some((window) => window.reset !== undefined && window.reset <= s.now);
       const stale = isUsageStale(usage, s.now);
-      const shown = usage.windows.filter((window) => {
-        if (!/^fable$/i.test(window.label)) return true;
-        if (window.reset === undefined || window.reset <= s.now || window.used === undefined) return false;
-        const left = window.reset - s.now;
-        return left < 48 * 3600_000 && window.used > (1 - left / (7 * 86400_000)) * 100;
-      });
+      const shown = usage.windows.filter((window) => showQuotaWindow(window, s.now));
       const windows = shown.map((window): Segment => {
         const value = window.used;
         const color = stale || value === undefined || value < 70 ? "muted" : heat(value);
@@ -1208,14 +1210,7 @@ export function layoutFooter(snapshot: Snapshot, width: number, theme: Paint): F
     const age = Math.max(0, s.now - quota.updated);
     const expired = quota.windows.some((w) => w.reset !== undefined && w.reset <= s.now);
     const stale = age >= QUOTA_STALE_MS || expired;
-    // Fable's weekly pool shows only when over trajectory (used above the elapsed share
-    // of its 7 days) and under 48 hours from reset.
-    const shown = quota.windows.filter((w) => {
-      if (!/^fable$/i.test(w.label)) return true;
-      if (w.reset === undefined || w.reset <= s.now) return false;
-      const left = w.reset - s.now;
-      return left < 48 * 3600_000 && w.used > (1 - left / (7 * 86400_000)) * 100;
-    });
+    const shown = quota.windows.filter((window) => showQuotaWindow(window, s.now));
     const windows = shown.map((w): Segment => {
       let reset = "";
       // Expired windows share the row's reset-due alert; do not repeat it.
