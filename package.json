@@ -57,6 +57,16 @@
       "./packages/pi-cc-render/themes/cc-light.json"
     ]
   },
+  "switchyard": {
+    "adapter": [
+      "./packages/pi-ask-user-question/src/switchyard",
+      "./packages/pi-tool-gate/src/switchyard",
+      "./packages/pi-plan-mode/src/switchyard",
+      "./packages/pi-subagents/src/switchyard",
+      "./packages/pi-todo/src/switchyard",
+      "./packages/pi-bg/src/switchyard"
+    ]
+  },
   "peerDependencies": {
     "@earendil-works/pi-ai": "*",
     "@earendil-works/pi-agent-core": "*",

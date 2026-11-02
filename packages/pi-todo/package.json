@@ -35,6 +35,7 @@
 		"index.ts",
 		"UPSTREAM.json",
 		"locales/",
+		"src/switchyard/",
 		"todo.ts",
 		"todo-overlay.ts",
 		"LICENSE",

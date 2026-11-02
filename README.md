@@ -70,6 +70,10 @@ Notebooks: [pi-marimo](https://github.com/justmytwospence/pi-marimo) is a separa
 
 Some features make paid classifier requests or patch private TUI hooks. **Ctrl+L and Shift+Tab need explicit stock-key remaps** before the suite shortcuts work; see the [keymap](https://pi-plugins.vercel.app/guides/keyboard/#resolve-the-two-stock-conflicts). Read [requirements](https://pi-plugins.vercel.app/guides/requirements/) before enabling everything.
 
+## Switchyard
+
+The ask-user-question, tool-gate, plan-mode, subagents, todo and bg packages also ship [Switchyard](https://github.com/justmytwospence/switchyard) adapters (`src/switchyard/adapter.ts` with its `switchyard-adapter.json`). They render those plugins' dialogs, panels and subagent links in Switchyard clients, and Switchyard discovers them from the root `package.json` `switchyard.adapter` field. They are plain TypeScript with no imports, so Pi itself never loads them.
+
 ## Install
 
 ```sh
