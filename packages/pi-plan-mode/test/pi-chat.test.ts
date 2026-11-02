@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { stripVTControlCharacters } from "node:util";
 import { initTheme, SessionManager } from "@earendil-works/pi-coding-agent";
+import { Text } from "@earendil-works/pi-tui";
 import { test } from "vitest";
 import { PiChat, piChatTheme } from "../src/app/pi-chat.js";
 import { PlannerAgent } from "../src/planner/agent.js";
@@ -47,6 +48,39 @@ test("a chat draws a session's events with Pi's own components", () => {
   assert.match(shown, /main agent ›/u);
   assert.match(shown, /why unbounded\?/u);
   assert.match(shown, /• Plan A submitted\./u);
+});
+
+test("originating definitions win while unknown planner tools get immutable readable fallbacks", () => {
+  const resultText = '{"kept":"literal JSON"}';
+  const args = Object.freeze({ request: Object.freeze({ prose: "first\nsecond" }), query: "cache" });
+  const result = Object.freeze({ content: Object.freeze([{ type: "text", text: resultText }]) });
+  const chat = new PiChat(piChatTheme, {
+    cwd: "/repo",
+    toolDefinition: (name) =>
+      name === "planner_owned"
+        ? {
+            renderCall: () => new Text("Planner's own call", 0, 0),
+            renderResult: () => new Text("Planner's own result", 0, 0),
+          }
+        : undefined,
+  });
+  chat.seed(
+    [
+      { role: "assistant", content: [{ type: "toolCall", id: "own-id", name: "planner_owned", arguments: {} }] },
+      { role: "toolResult", toolCallId: "own-id", content: [{ type: "text", text: "hidden machine result" }] },
+    ],
+    () => undefined,
+  );
+  chat.apply({ type: "tool_execution_start", toolCallId: "unknown-id", toolName: "remote_catalog", args });
+  chat.apply({ type: "tool_execution_end", toolCallId: "unknown-id", result, isError: false });
+  assert.match(text(chat), /Planner's own call[\s\S]*Planner's own result/u);
+  assert.doesNotMatch(text(chat), /hidden machine result|unknown-id/u);
+  assert.match(text(chat), /Remote catalog/u);
+  assert.match(text(chat), /\{"kept":"literal JSON"\}/u);
+  chat.setExpanded(true);
+  assert.match(text(chat), /Prose:\s*\n\s*first\s*\n\s*second/u);
+  assert.equal(args.request.prose, "first\nsecond");
+  assert.equal(result.content[0]?.text, resultText);
 });
 
 test("thinking shows until it is hidden, for earlier and later messages alike", () => {

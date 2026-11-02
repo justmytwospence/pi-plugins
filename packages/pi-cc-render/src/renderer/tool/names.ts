@@ -3,6 +3,7 @@ import type { ThemeColor } from "@earendil-works/pi-coding-agent";
 import { visibleWidth } from "@earendil-works/pi-tui";
 import { config } from "../../config/config.ts";
 import { oneLine } from "../../utils/format.ts";
+import { sanitizeToolResultText } from "../../utils/tool-result-sanitize.ts";
 import { bashLabel } from "./bash-label.ts";
 import { headTruncateToWidth } from "./result.ts";
 
@@ -38,13 +39,6 @@ export function humanizeToolLabel(label: string): string {
 		.replace(/[_-]+/g, " ")
 		.replace(/\b\w/g, (char) => char.toUpperCase());
 }
-
-const AGENT_FAMILY_TOOL_NAMES = new Set([
-	"Agent",
-	"Agents",
-	"get_subagent_result",
-	"steer_subagent",
-]);
 
 /** default-mode (single tool card) and grouping (group card) differ in agent/bash/grep/find/read/fallback wording. */
 export type ToolCallSummaryVariant = "default" | "grouping";
@@ -294,27 +288,17 @@ export function toolCallSummary(
 		return `${title} ${clip(found || fallback)}`;
 	};
 
-	if (variant === "default" && AGENT_FAMILY_TOOL_NAMES.has(toolName) && args.agent_id) {
-		return { main: `${title} ${clip(args.agent_id)}`, detail: "" };
+	if (name === "agent" || name === "agents") {
+		return { main: value(name === "agent" ? "launch agent" : "launch agents", "label", "description", "task", "subagent_type", "agent_type", "agent", "prompt"), detail: "" };
 	}
-	if (variant === "grouping" && (name === "agent" || name === "agents")) {
-		const displayName = args.subagent_type ?? args.agent_type ?? args.agent;
-		if (typeof displayName === "string" && displayName) {
-			return { main: `${title} ${displayName}`, detail: "" };
-		}
-		return {
-			main: value(name === "agent" ? "launch agent" : "launch agents", "description", "prompt"),
-			detail: "",
-		};
+	if (name === "subagent") {
+		const action = typeof args.action === "string" && args.action.trim() ? clip(args.action) : "run";
+		const label = [args.label, args.description, args.task, args.agent].find((item) => typeof item === "string" && item.trim());
+		const role = typeof args.agent === "string" && args.agent.trim() && args.agent !== label ? ` · ${clip(args.agent)}` : "";
+		return { main: `${title} ${action}${label ? ` · ${clip(label)}` : " · agent"}${role}`, detail: "" };
 	}
-	if (variant === "grouping" && (name === "get_subagent_result" || name === "steer_subagent")) {
-		return {
-			main: value(name === "get_subagent_result" ? "agent result" : "steer agent", "agent_id"),
-			detail: "",
-		};
-	}
-	if (variant === "default" && name === "agents") {
-		return { main: value("launch agents", "description", "prompt"), detail: "" };
+	if (name === "get_subagent_result" || name === "steer_subagent") {
+		return { main: value(name === "get_subagent_result" ? "agent result" : "steer agent", "label", "description", "task", "agent"), detail: "" };
 	}
 	const background = backgroundTaskSummary(name, args);
 	if (background) return background;
@@ -385,9 +369,8 @@ export function toolCallSummary(
 		return pathSummary(title, preferredPath, opts.cwd);
 	}
 
-	// Args the field chain can't recognize (namespace proxy tool+args, third-party custom keys…) expand to the full input JSON
-	// instead of leaving just a title; gateway and script specific shapes are handled above
-	const payload = jsonArgs(args);
+	// Unknown arguments get a compact labeled preview, not a serialized object.
+	const payload = fieldPreview(args);
 	return payload ? { main: title, detail: "", payload } : { main: title, detail: "" };
 }
 
@@ -436,17 +419,17 @@ function mcpGatewaySummary(title: string, args: any): ToolCallSummary | undefine
 function innerArgsPayload(value: unknown): string {
 	if (typeof value === "string") return value ? clip(value) : "";
 	if (!value || typeof value !== "object") return "";
-	return jsonArgs(value);
+	return fieldPreview(value);
 }
 
-/** Serialize args to single-line JSON; returns "" for empty or unserializable objects. */
-function jsonArgs(args: any): string {
-	try {
-		const json = JSON.stringify(args);
-		return json && json !== "{}" ? clip(json) : "";
-	} catch {
-		return "";
-	}
+/** Compact field labels avoid display-created JSON while keeping literal scalar values. */
+function fieldPreview(args: object): string {
+	const entries = Object.entries(args).slice(0, 3).map(([key, value]) => {
+		const display = value === null ? "null" : Array.isArray(value) ? `${value.length} items` :
+			typeof value === "object" ? "fields" : value === "" ? '""' : String(value);
+		return `${sanitizeToolResultText(key)}: ${sanitizeToolResultText(display)}`;
+	});
+	return entries.length ? clip(entries.join(" · ")) : "";
 }
 
 /**

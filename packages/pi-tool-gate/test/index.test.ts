@@ -1143,6 +1143,7 @@ test("a held call is pushed back with Jev's reasons and suggestion; the agent's 
   branch.push(assistantEntry("Publishing is the whole point of the release you asked for.", [{ type: "toolCall", id: "t2", name: "bash", arguments: {} }]));
   ctx.ui.selectAnswers.push("Allow rule for this session");
   expect(await h.emit("tool_call", call("bash", { command: "npm publish" }, "t2"), ctx)).toBeUndefined();
+  expect(ctx.ui.selects[0]?.title).toContain("Action: bash\nTarget: npm publish");
   expect(ctx.ui.selects[0]?.title).toMatch(/Held: it changes something other people see/u);
   expect(ctx.ui.selects[0]?.title).toMatch(/Agent: Publishing is the whole point/u);
   expect(ctx.ui.selects[0]?.options).toEqual([
@@ -1411,7 +1412,8 @@ describe("herdr", () => {
         const result: any = await h.emit("tool_call", call("bash", { command: "npm publish" }), ctx);
         expect(result?.block).toBe(answer === "Block" ? true : undefined);
         expect(h.events.map((e) => e.channel)).toEqual(["herdr:blocked", "ui.select", "herdr:blocked"]);
-        expect(h.events[0]?.data).toEqual({ active: true, label: "Allow? bash: npm publish" });
+        expect(h.events[0]?.data).toEqual({ active: true, label: "Allow? bash — npm publish" });
+        expect(h.events[1]?.data).toContain("Action: bash\nTarget: npm publish");
         expect(h.events[2]?.data).toEqual({ active: false });
       }
     } finally {
@@ -1453,7 +1455,7 @@ describe("herdr", () => {
       await long.h.emit("tool_call", call("bash", { command: `npm publish ${"--tag next ".repeat(20)}` }), long.ctx);
       const label: string = long.h.events[0]?.data.label;
       expect(label).toHaveLength(60);
-      expect(label).toMatch(/^Allow\? bash: npm publish --tag next .*…$/u);
+      expect(label).toMatch(/^Allow\? bash — npm publish --tag next .*…$/u);
     } finally {
       DEFAULT_CONFIG.pushBack = true;
     }

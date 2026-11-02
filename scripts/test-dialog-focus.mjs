@@ -8,7 +8,7 @@ import { createDialogFixture, bounded, waitFor, observeInput, plain, KEY,
 
 const { enter: ENTER, escape: ESCAPE } = KEY;
 const marker = { select: 'Native select focus?', confirm: 'Native confirm focus?', input: 'Native input focus?',
-  editor: 'Native editor focus?', question: QUESTION.question, approval: 'Allow bash printf focus?' };
+  editor: 'Native editor focus?', question: QUESTION.question, approval: 'Action: bash' };
 function answer(kind, result) {
   if (kind === 'select') assert.equal(result, CHOICE);
   else if (kind === 'confirm') assert.equal(result, true);
@@ -21,7 +21,12 @@ async function visibleDialog(f, kind, starts = 1) {
   await waitFor('real prompt-start dispatch and dialog installation', () => f.state.starts === starts && f.dialogs.length > 0);
   const dialog = f.dialogs.at(-1).component;
   assert.equal(f.tui.getFocusedComponent(), dialog, 'the visible dialog must actually own input');
-  assert.ok(plain(f.snapshot()).includes(marker[kind]), `visible ${kind} dialog, not a covering viewer`);
+  const screen = plain(f.snapshot());
+  assert.ok(screen.includes(marker[kind]), `visible ${kind} dialog, not a covering viewer`);
+  if (kind === 'approval') {
+    assert.ok(screen.includes('Action: bash'), 'approval retains its action');
+    assert.ok(screen.includes('Target: printf focus'), 'approval retains its target');
+  }
   assert.equal(f.state.footerBlocked, true);
   assert.equal(f.host.suspended, true);
   assert.equal(f.layout.mounted, false);

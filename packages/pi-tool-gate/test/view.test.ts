@@ -5,7 +5,7 @@ import { initTheme } from "@earendil-works/pi-coding-agent";
 import { stripTerminalSequences } from "@earendil-works/pi-tui";
 import { describe, expect, test } from "vitest";
 import { askApproval, BLOCK_WITH_MESSAGE } from "../src/prompt.ts";
-import { callView, formatBash } from "../src/view.ts";
+import { callView, describeCallPresentation, formatBash } from "../src/view.ts";
 
 describe("formatBash", () => {
   test("short commands are left alone", () => {
@@ -62,9 +62,46 @@ describe("callView", () => {
     expect(over.body.kind).toBe("diff");
   });
 
-  test("other tools show their input as JSON", async () => {
-    const v = await callView("deploy", { env: "prod", force: true }, dir);
-    expect(v.body).toEqual({ kind: "code", lang: "json", text: '{\n  "env": "prod",\n  "force": true\n}' });
+  test("generic inputs show nested fields and literal multiline values without changing the input", async () => {
+    const input = Object.freeze({ action: "restart", target: "api", nested: Object.freeze({ message: "first\nsecond", enabled: false, count: 0, missing: null, empty: "", items: Object.freeze(["one", "two"]) }) });
+    const before = structuredClone(input);
+    const v = await callView("deploy", input, dir);
+    expect(input).toEqual(before);
+    expect(v.body.text).toMatch(/nested:/u);
+    expect(v.body.text).toMatch(/first\n\s*second/u);
+    for (const value of ["false", "0", "null", "one", "two"]) expect(v.body.text).toContain(value);
+    expect(v.body.text).toMatch(/empty:/u);
+    expect(v.body.text).not.toContain('"nested"');
+    expect(v.action).toMatch(/restart/u);
+    expect(v.target).toBe("api");
+  });
+
+  test("generic display is bounded and sanitizes controls while preserving Unicode", async () => {
+    const v = await callView("deploy", { message: `café 界\u001b[31m${"x".repeat(100_000)}` }, dir);
+    expect(v.body.text).toContain("café 界");
+    expect(v.body.text).not.toContain("\u001b");
+    expect(v.body.text.length).toBeLessThan(100_000);
+    const many = await callView("deploy", { message: Array.from({ length: 2_100 }, (_, i) => `line ${i}`).join("\n") }, dir);
+    expect(many.body.text.split("\n").length).toBeLessThanOrEqual(2_001);
+  });
+});
+
+describe("describeCallPresentation", () => {
+  test("uses operation and target priority without mutating frozen input", () => {
+    const input = Object.freeze({ action: "restart", method: "ignored", path: "service.yml", url: "https://example.com", target: "api" });
+    const before = structuredClone(input);
+    const result = describeCallPresentation("deploy", input);
+    expect(result.action).toMatch(/restart/u);
+    expect(result.action).toMatch(/deploy/iu);
+    expect(result.target).toBe("service.yml");
+    expect(result.description).toContain("restart");
+    expect(result.description).toContain("service.yml");
+    expect(input).toEqual(before);
+  });
+
+  test("missing targets are explicit and shell commands remain targets", () => {
+    expect(describeCallPresentation("deploy", {}).target).toBe("Not specified");
+    expect(describeCallPresentation("bash", { command: "echo café" }).target).toContain("echo café");
   });
 });
 
@@ -133,7 +170,7 @@ describe("askApproval in the terminal UI", () => {
   test("n opens a message field; Enter blocks with the message", async () => {
     const { choice, message, frames } = await show({ view, options: ["Allow once", "Block"] }, ["n", ..."use a branch", "\r"]);
     // Laid out as Pi's own dialogs, which herdr-web-ui reads: question, blank, rows, blank, hint.
-    expect(frames[0]!.join("\n")).toMatch(/Allow bash .*\?\s*\n\s*\n\s*→ Allow once[\s\S]*Block with a message\s*\n\s*\n\s*n message {2}↑↓ navigate {2}enter select {2}escape\/ctrl\+c cancel/u);
+    expect(frames[0]!.join("\n")).toMatch(/Action:.*bash[\s\S]*Target:.*git push --force origin main\s*\n\s*\n\s*→ Allow once[\s\S]*Block with a message\s*\n\s*\n\s*n message {2}↑↓ navigate {2}enter select {2}escape\/ctrl\+c cancel/u);
     expect(frames[1]!.join("\n")).toMatch(/Message for the agent\s*\n\s*\n\s*› \s*\n\s*\n\s*enter submit {2}escape\/ctrl\+c cancel/u);
     expect(frames.at(-2)!.join("\n")).toMatch(/› use a branch/u);
     expect(choice).toBe("Block");

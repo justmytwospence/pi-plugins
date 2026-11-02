@@ -250,6 +250,7 @@ const RULES = {
   held: 'it changes something other people see',
 };
 const FOLDER = { kind: 'dirs', grant: ['Folder: reads in ~/Projects/other'], tool: 'read', command: '', held: "reads ~/Projects/other/a.ts, outside this project's directories" };
+const GENERIC = { tool: 'deploy', action: 'deploy restart', target: 'production-api', command: 'preview only', held: 'restarts a service' };
 
 async function approvalLines(width, spec = {}) {
   let lines;
@@ -262,7 +263,7 @@ async function approvalLines(width, spec = {}) {
   };
   const options = approvalOptions(spec.kind, spec.plural);
   void askApproval(ctx, {
-    view: { tool: spec.tool ?? 'bash', subject: spec.tool === 'read' ? '~/Projects/other/a.ts' : '', body: { kind: 'code', lang: 'bash', text: spec.command ?? 'git push --force origin main' } },
+    view: { tool: spec.tool ?? 'bash', subject: spec.tool === 'read' ? '~/Projects/other/a.ts' : '', ...(spec.action ? { action: spec.action, target: spec.target } : {}), body: { kind: 'code', lang: 'bash', text: spec.command ?? 'git push --force origin main' } },
     held: spec.held ?? 'force-pushes main/master',
     agentCase: 'The rebase rewrote the branch.',
     options,
@@ -544,13 +545,19 @@ const DIALOGS = [
   { name: 'ask single', lines: (w) => questionLines([question(false)], w), herdr: { options: 4, multi: false }, collie: { kind: 'prompt-select', options: 4 }, },
   { name: 'ask multi', lines: (w) => questionLines([question(true)], w), herdr: { multi: true }, collie: { kind: 'multi-select' }, },
   { name: 'tool-gate approval', lines: approvalLines, herdr: { options: 3, multi: false }, collie: { kind: 'prompt-select' }, },
+  { name: 'tool-gate approval (generic action and target)', lines: w => approvalLines(w, GENERIC), questionIncludes: ['Action: deploy restart', 'Target: production-api'], herdr: { options: 3, multi: false }, collie: { kind: 'prompt-select' } },
   ...[
     ['tool-gate approval (rule)', RULE],
     ['tool-gate approval (two rules)', RULES],
     ['tool-gate approval (folder)', FOLDER],
   ].map(([name, spec]) => {
     const rows = [...approvalOptions(spec.kind, spec.plural), 'Block with a message'];
-    return { name, lines: (w) => approvalLines(w, spec), herdr: { options: rows.length, multi: false, labels: rows }, collie: { kind: 'prompt-select', wraps: rows } };
+    return {
+      name, lines: (w) => approvalLines(w, spec),
+      // Compare all target/rule characters below, ignoring whitespace inserted by screen wrapping.
+      questionIncludes: [`Action: ${spec.tool ?? 'bash'}`, `Target: ${spec.tool === 'read' ? '~/Projects/other/a.ts' : spec.command}`, ...spec.grant],
+      herdr: { options: rows.length, multi: false, labels: rows }, collie: { kind: 'prompt-select', wraps: rows },
+    };
   }),
   ...[0, 1, 2].flatMap(count => [false, true].map(changed => ({
     name: `plan approval (${count} targets${changed ? ', effort changed' : ''})`,
@@ -1232,6 +1239,7 @@ screens.forEach((screen, i) => {
     if (h === null) problems.push('Ovis: no card');
     else {
       if (dialog.question && h.question.replace(/\s+/g, ' ').trim() !== dialog.question) problems.push(`Ovis: question ${JSON.stringify(h.question)}`);
+      for (const part of dialog.questionIncludes ?? []) if (!h.question.replace(/\s+/g, '').includes(part.replace(/\s+/g, ''))) problems.push(`Ovis: question missing ${JSON.stringify(part)}: ${JSON.stringify(h.question)}`);
       if (dialog.herdr.multi !== undefined && h.multi !== dialog.herdr.multi) problems.push(`Ovis: multi_select ${h.multi}`);
       if (dialog.herdr.options !== undefined && h.options.length !== dialog.herdr.options) problems.push(`Ovis: options ${JSON.stringify(h.options)}`);
       else if (dialog.herdr.labels !== undefined && JSON.stringify(h.options) !== JSON.stringify(dialog.herdr.labels)) problems.push(`Ovis: labels ${JSON.stringify(h.options)}`);
@@ -1257,6 +1265,7 @@ screens.forEach((screen, i) => {
     if (card?.kind !== wanted) read.push(`Collie: ${card?.kind ?? 'no card'}, wanted ${wanted}`);
     else if (wanted === dialog.collie.kind && dialog.collie.options !== undefined && card.options.length !== dialog.collie.options) read.push(`Collie: options ${JSON.stringify(card.options)}`);
     if (card?.kind === wanted && wanted !== 'unread-dialog' && dialog.question && card.question.replace(/\s+/g, ' ').trim() !== dialog.question) read.push(`Collie: question ${JSON.stringify(card.question)}`);
+    if (card?.kind === wanted && wanted !== 'unread-dialog') for (const part of dialog.questionIncludes ?? []) if (!card.question.replace(/\s+/g, '').includes(part.replace(/\s+/g, ''))) read.push(`Collie: question missing ${JSON.stringify(part)}: ${JSON.stringify(card.question)}`);
     if (card?.kind === wanted && dialog.collie.labels && JSON.stringify(card.options.slice(0, dialog.collie.labels.length)) !== JSON.stringify(dialog.collie.labels)) read.push(`Collie: labels ${JSON.stringify(card.options)}`);
     if (dialog.collie.wraps && wrapsRow(dialog.collie.wraps, screen.width)) read.push(`an option is wider than ${screen.width - 4} columns, and Pi's own select wraps it with no gutter`);
     problems.push(...read);

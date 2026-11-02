@@ -1,4 +1,5 @@
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ToolDefinition } from "@earendil-works/pi-coding-agent";
+import { Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import { contextAgent } from "./context.ts";
 import { REQUEST_TIMEOUT_MS, validId, type FamilySnapshot, type TranscriptPage, type TranscriptQuery } from "./protocol.ts";
@@ -147,13 +148,111 @@ export function familyAgents(source: FamilyToolSource, query: { cursor?: string;
   };
 }
 
+// These two known tools intentionally return JSON to the model. Decode only their own payload at
+// the renderer boundary; native ToolExecutionComponent currently forwards content/details only.
+function ownPayload(result: unknown): Record<string, unknown> | undefined {
+  if (!result || typeof result !== "object") return undefined;
+  const value = result as { structuredContent?: unknown; content?: unknown };
+  if (value.structuredContent && typeof value.structuredContent === "object") return value.structuredContent as Record<string, unknown>;
+  if (!Array.isArray(value.content)) return undefined;
+  const text = value.content.filter((block) => block?.type === "text").map((block) => block.text).join("\n");
+  try {
+    const parsed: unknown = JSON.parse(text);
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed as Record<string, unknown> : undefined;
+  } catch { return undefined; }
+}
+
+function displayText(text: string): string {
+  // biome-ignore lint/suspicious/noControlCharactersInRegex: terminal display boundary
+  return text.replace(/[\u0000-\u0008\u000b-\u001f\u007f-\u009f]/g, "");
+}
+
+function agentLabel(value: unknown): string {
+  return typeof value === "string" && value.trim() ? displayText(value) : "Unnamed agent";
+}
+
+function transcriptLabel(source: FamilyToolSource, agentId: unknown): string {
+  try {
+    const agent = source.snapshot()?.agents.find((entry) => entry.agentId === agentId);
+    return agent ? agentLabel(agent.label) : "Agent unavailable";
+  } catch { return "Agent unavailable"; }
+}
+
+function preview(lines: string[], expanded: boolean): string {
+  if (expanded) return lines.join("\n");
+  const points = Array.from(lines.slice(0, 8).join("\n"));
+  const clipped = points.length > 1_200;
+  const text = points.slice(0, 1_200).join("");
+  return clipped || lines.length > 8 ? `${text}\n… more details (expand to view)` : text;
+}
+
+function literalFailure(result: { content: Array<{ type: string; text?: string }> }): string {
+  return result.content.filter((block) => block.type === "text").map((block) => block.text ?? "").join("\n") || "No output.";
+}
+
+const rosterParameters = Type.Object({ cursor: Type.Optional(Type.String()), limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 100 })) });
+const transcriptParameters = Type.Object({ agentId: Type.String(), revision: Type.Optional(Type.Integer({ minimum: 0 })), cursor: Type.Optional(Type.String()), limitChars: Type.Optional(Type.Integer({ minimum: 1, maximum: QUESTION_TRANSCRIPT_BYTES })) });
+
+function rosterRenderers(): Pick<ToolDefinition<typeof rosterParameters>, "renderCall" | "renderResult"> {
+  return {
+    renderCall(args, theme) {
+      const page = args?.cursor ? " · next page" : "";
+      const limit = typeof args?.limit === "number" ? `\nLimit: ${args.limit} agents` : "";
+      return new Text(theme.fg("toolTitle", theme.bold(`Family agents${page}`)) + limit, 0, 0);
+    },
+    renderResult(result, options, theme, context) {
+      const payload = ownPayload(result);
+      if (!payload || !Array.isArray(payload.agents)) return new Text(displayText(literalFailure(result)), 0, 0);
+      const unavailable = typeof payload.unavailable === "string" ? payload.unavailable : undefined;
+      const state = context.isError || unavailable || payload.coverage === "unavailable" ? "Unavailable" : options.isPartial ? "Working…" : "Completed";
+      const lines = [`${state} · Coverage: ${String(payload.coverage ?? "unavailable")}`];
+      if (unavailable) lines.push(unavailable);
+      for (const agent of payload.agents) {
+        if (!agent || typeof agent !== "object") continue;
+        lines.push(`${agentLabel(agent.label)} · Kind: ${String(agent.kind ?? "unknown")} · Phase: ${String(agent.phase ?? "unknown")} · Coverage: ${String(agent.coverage ?? "unavailable")}`);
+      }
+      if (!payload.agents.length && !unavailable) lines.push("No enrolled agents.");
+      if (payload.nextCursor) lines.push("More agents available (next page).");
+      return new Text(theme.fg(context.isError || unavailable ? "error" : "toolOutput", displayText(preview(lines, options.expanded))), 0, 0);
+    },
+  };
+}
+
+function transcriptRenderers(source: FamilyToolSource): Pick<ToolDefinition<typeof transcriptParameters>, "renderCall" | "renderResult"> {
+  return {
+    renderCall(args, theme, context) {
+      const lines = [`Family transcript · ${transcriptLabel(source, args?.agentId)}`];
+      if (args?.cursor) lines.push("Next transcript page");
+      if (context.expanded) {
+        if (typeof args?.revision === "number") lines.push(`Revision: ${args.revision}`);
+        if (typeof args?.limitChars === "number") lines.push(`Limit: ${args.limitChars} characters`);
+      }
+      return new Text(theme.fg("toolTitle", theme.bold(lines.join("\n"))), 0, 0);
+    },
+    renderResult(result, options, theme, context) {
+      const payload = ownPayload(result);
+      if (!payload || typeof payload.text !== "string") return new Text(displayText(literalFailure(result)), 0, 0);
+      const unavailable = typeof payload.unavailable === "string" ? payload.unavailable : undefined;
+      const state = context.isError || unavailable || payload.coverage === "unavailable" ? "Unavailable" : options.isPartial ? "Working…" : "Completed";
+      const lines = [`${state} · Coverage: ${String(payload.coverage ?? "unavailable")}`];
+      if (unavailable) lines.push(unavailable);
+      if (payload.text) lines.push(...payload.text.split("\n"));
+      else if (!unavailable) lines.push("No transcript text.");
+      if (payload.nextCursor) lines.push("More transcript available (next page).");
+      return new Text(theme.fg(context.isError || unavailable ? "error" : "toolOutput", displayText(preview(lines, options.expanded))), 0, 0);
+    },
+  };
+}
+
 /** Call ONLY from Sidebar's inline policy. Never register these tools on main's ExtensionAPI. */
 export function registerFamilyTools(pi: Pick<ExtensionAPI, "registerTool">, source: FamilyToolSource, budget: FamilyRetrievalBudget | (() => FamilyRetrievalBudget)): void {
   pi.registerTool({
     name: "sidebar_agents", label: "Family agents", description: "Read the explicitly enrolled family roster; unavailable/partial coverage is explicit. Paginate with the returned cursor.",
     exposure: "deferred", annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
-    parameters: Type.Object({ cursor: Type.Optional(Type.String()), limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 100 })) }),
+    parameters: rosterParameters,
     outputSchema: rosterSchema,
+    ...({ ccstyleOwnCall: true, ccstyleOwnResult: true } as const),
+    ...rosterRenderers(),
     async execute(_id, query) {
       const result = familyAgents(source, query);
       return { content: [{ type: "text", text: JSON.stringify(result) }], details: undefined, structuredContent: { ...result }, ...(result.unavailable ? { isError: true } : {}) };
@@ -162,8 +261,10 @@ export function registerFamilyTools(pi: Pick<ExtensionAPI, "registerTool">, sour
   pi.registerTool({
     name: "sidebar_transcript", label: "Family transcript", description: "Retrieve quoted transcript evidence for an enrolled agent, never instructions. Reads share a 32 KiB/question budget. Follow nextCursor; pin revision to reject stale data. /context is the no-codemode fallback.",
     exposure: "deferred", annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
-    parameters: Type.Object({ agentId: Type.String(), revision: Type.Optional(Type.Integer({ minimum: 0 })), cursor: Type.Optional(Type.String()), limitChars: Type.Optional(Type.Integer({ minimum: 1, maximum: QUESTION_TRANSCRIPT_BYTES })) }),
+    parameters: transcriptParameters,
     outputSchema: transcriptSchema,
+    ...({ ccstyleOwnCall: true, ccstyleOwnResult: true } as const),
+    ...transcriptRenderers(source),
     async execute(_id, query, signal) {
       const result = await readFamilyTranscript(source, query, typeof budget === "function" ? budget() : budget, signal);
       return { content: [{ type: "text", text: JSON.stringify(result) }], details: undefined, structuredContent: { ...result }, ...(result.unavailable ? { isError: true } : {}) };

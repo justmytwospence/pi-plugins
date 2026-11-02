@@ -43,6 +43,23 @@ function setup(opts: { request?: boolean; sentAt?: number; now?: number; api?: s
   return { pi, state, agent, cpi, cctx, events, aborted: () => aborted };
 }
 
+describe("Sidebar's renderer definitions", () => {
+  it("uses only the current private session and returns undefined when absent", () => {
+    const { agent, pi } = setup();
+    const mainDefinition = { renderCall: () => "main" };
+    (pi as any).getToolDefinition = () => mainDefinition;
+    expect(agent.toolDefinition("lookup")).toBeUndefined();
+    const ownDefinition = Object.freeze({ renderCall: () => "Sidebar" });
+    const calls: string[] = [];
+    (agent as any).session = { getToolDefinition: (name: string) => { calls.push(name); return name === "lookup" ? ownDefinition : undefined; } };
+    expect(agent.toolDefinition("lookup")).toBe(ownDefinition);
+    expect(agent.toolDefinition("missing")).toBeUndefined();
+    expect(calls).toEqual(["lookup", "missing"]);
+    (agent as any).session = undefined;
+    expect(agent.toolDefinition("lookup")).toBeUndefined();
+  });
+});
+
 describe("Sidebar's requests", () => {
   it("adds main's newer entries, the role and the live status around Sidebar's question", async () => {
     const { cpi, cctx } = setup();

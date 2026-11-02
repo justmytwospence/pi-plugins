@@ -544,6 +544,11 @@ export default async function plan(pi: ExtensionAPI, dependencies: PlanDependenc
 
   // --- Events ------------------------------------------------------------------------------------
 
+  // Main owns these definitions; retain their renderers for its embedded mirror.
+  const mainToolDefinition = registerMainChat(pi, {
+    planners: () => run?.agents,
+    submitMerged,
+  });
   // M: your main agent, as the pane below the lanes shows it.
   const mainAgent = new MainAgentView({
     model: () => {
@@ -559,6 +564,7 @@ export default async function plan(pi: ExtensionAPI, dependencies: PlanDependenc
     merged: () => run?.merged,
     onChange: () => app?.render(),
     cwd: () => hostCtx?.cwd ?? process.cwd(),
+    toolDefinition: mainToolDefinition,
   });
   for (const event of [
     "agent_start",
@@ -574,12 +580,6 @@ export default async function plan(pi: ExtensionAPI, dependencies: PlanDependenc
       mainAgent.apply(payload as unknown as Record<string, unknown>);
     });
   }
-
-  // Your main agent's side of a run: plans delivered to it, and its two tools.
-  registerMainChat(pi, {
-    planners: () => run?.agents,
-    submitMerged,
-  });
 
   // The planners and their scouts as a source for the suite's activity views (pi-bg's /tasks,
   // pi-subagents' list under the prompt).
