@@ -3,6 +3,7 @@
 // Select another host with PI_TEST_SDK_ROOT=/absolute/path/to/pi-coding-agent.
 import assert from 'node:assert/strict';
 import childProcess from 'node:child_process';
+import { EventEmitter } from 'node:events';
 import { mkdtempSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import http from 'node:http';
 import https from 'node:https';
@@ -104,7 +105,11 @@ const cycleFixture = join(temp, 'settings-cycle-fixture.ts');
 writeFileSync(cycleFixture, `
 import { settingsCycles } from ${JSON.stringify(resolve(root, 'packages/pi-status-footer/src/settings-cycle.ts'))};
 export default function (pi) {
-  const cycles = settingsCycles(pi);
+  // This extension is first in the real loader, so every sibling discovers this
+  // coordinator and the same injected immediate-terminal transport.
+  const transport = {};
+  pi.events.emit('test:cycle-transport', transport);
+  const cycles = settingsCycles(pi, { inputPorts: transport.inputPorts });
   const owner = {};
   const values = { workflow: 'work', 'auto-effort': false, approvals: 'auto' };
   const applied = [];
@@ -140,11 +145,30 @@ const previousKeys = getKeybindings();
 initTheme('dark', false);
 
 class MemoryTerminal {
-  constructor(columns) { this.columns = columns; this.rows = 44; this.kittyProtocolActive = false; this.writes = []; }
+  constructor(columns, raw, transport = 'legacy') {
+    this.columns = columns; this.rows = 44; this.raw = raw; this.transport = transport;
+    this.kittyProtocolActive = transport !== 'legacy'; this.writes = [];
+    this.flags = 7; this.frames = []; this.queries = 0; this.pushes = 0; this.pops = 0;
+  }
   start(input) { this.input = input; }
   stop() { this.input = undefined; }
   async drainInput() {}
-  write(data) { this.writes.push(data); }
+  write(data) {
+    this.writes.push(data);
+    for (const match of data.matchAll(/\x1b\[(?:\?u|>(\d+)u|<u)/gu)) {
+      if (match[1]) { this.frames.push(this.flags); this.flags = Number(match[1]); this.pushes++; }
+      else if (match[0] === '\x1b[<u') {
+        assert.ok(this.frames.length, 'a matching extension frame must exist before pop');
+        this.flags = this.frames.pop(); this.pops++;
+      } else {
+        const query = ++this.queries;
+        if (['unknown', 'legacy'].includes(this.transport) || (this.transport === 'dropped' && query % 2 === 0)) continue;
+        const flags = this.transport === 'unsupported' ? 0 : this.transport === 'partial' && this.frames.length ? 3 : this.flags;
+        queueMicrotask(() => this.reply(`\x1b[?${flags}u`));
+      }
+    }
+  }
+  reply(data) { this.raw.emit('data', Buffer.from(data)); }
   hideCursor() {}
   showCursor() {}
   clearLine() {}
@@ -154,9 +178,14 @@ class MemoryTerminal {
   setTitle() {}
   setProgress() {}
   setProgramStatus() {}
-  send(packet) {
+  send(...packets) {
     assert.equal(typeof this.input, 'function', 'Terminal.start must own input');
-    this.input(packet);
+    // The passive stdin observer sees exactly the bytes on this immediate link;
+    // capability replies are consumed by the host before its public input hooks.
+    for (const packet of packets) {
+      this.raw.emit('data', Buffer.from(packet));
+      this.input(packet);
+    }
   }
 }
 const tick = () => new Promise(resolve => setImmediate(resolve));
@@ -176,9 +205,15 @@ const settings = f => { const request = { type: 'query' }; f.bus.emit('test:sett
 const stage = (f, key) => { const request = { type: 'stage', key }; f.bus.emit('test:settings-cycle', request); return request.result; };
 const plain = value => stripVTControlCharacters(value).replace(/\x1b_pi:[^\x07]*\x07/gu, '');
 
-async function fixture(width, flow, sidebar) {
+async function fixture(width, flow, sidebar, { transport = 'legacy', mainScreen = false, vim = true } = {}) {
   const cwd = mkdtempSync(join(temp, `project-${width}-${flow}-${sidebar}-`));
   const bus = createEventBus();
+  const raw = new EventEmitter(), exitSource = new EventEmitter();
+  const terminal = new MemoryTerminal(width, raw, transport);
+  bus.on('test:cycle-transport', request => {
+    request.inputPorts = { stdin: raw, exitSource, isInputTTY: () => true, isOutputTTY: () => true,
+      writeSync: data => terminal.write(data), queueMicrotask };
+  });
   const calls = [];
   let generation = 0;
   const flowState = () => flow === 'linked' ? {
@@ -201,7 +236,7 @@ async function fixture(width, flow, sidebar) {
     theme: 'dark', quietStartup: true, showHardwareCursor: false,
     doubleEscapeAction: 'none', terminal: { showTerminalProgress: false },
   });
-  const extensionPaths = [...paths.slice(0, sidebar === 'absent' ? 4 : 5), cycleFixture];
+  const extensionPaths = [cycleFixture, ...paths.slice(vim ? 0 : 1, sidebar === 'absent' ? 4 : 5)];
   const services = await createAgentSessionServices({
     cwd, agentDir: process.env.PI_CODING_AGENT_DIR, modelRuntime, settingsManager,
     resourceLoaderOptions: { eventBus: bus, noExtensions: true, noSkills: true,
@@ -218,9 +253,8 @@ async function fixture(width, flow, sidebar) {
   const runtime = new AgentSessionRuntime(result.session, services, async () => {
     throw new Error('Session replacement is not part of this fixture');
   });
-  const terminal = new MemoryTerminal(width);
   if (sidebar === 'open') terminal.rows = 110;
-  const mode = new InteractiveMode(runtime, { terminal, tuiMode: 'fullscreen', initialThemeSetting: 'dark' });
+  const mode = new InteractiveMode(runtime, { terminal, tuiMode: mainScreen ? 'regular' : 'fullscreen', initialThemeSetting: 'dark' });
   mode.shutdown = async () => {};
   mode.onInputCallback = () => assert.fail('A click must not submit a model request');
   mode.setupKeyHandlers();
@@ -237,8 +271,8 @@ async function fixture(width, flow, sidebar) {
   for (const child of [mode.documentContainer, mode.pendingMessagesContainer,
     mode.statusContainer, mode.widgetContainerAbove, mode.editorContainer,
     mode.widgetContainerBelow, mode.footerContainer]) mode.renderer.addChild(child);
-  assert.ok(mode.renderer instanceof TuiAltScreen);
-  mode.renderer.setLayoutRoot(viewport.root);
+  assert.equal(mode.renderer instanceof TuiAltScreen, !mainScreen);
+  if (!mainScreen) mode.renderer.setLayoutRoot(viewport.root);
   mode.ui.setFocus(mode.defaultEditor);
   mode.ui.start();
   const errors = [];
@@ -273,7 +307,7 @@ async function fixture(width, flow, sidebar) {
       mode.ui.setFocus(mode.editor);
       assert.equal(mode.ui.getFocusedComponent(), mode.editor, 'main regains focus while Sidebar stays open');
       assert.notEqual(mode.renderer.layoutRoot, viewport.root, 'Sidebar mounts a real split');
-    } else assert.equal(mode.renderer.layoutRoot, viewport.root, 'closed Sidebar does not mount a split');
+    } else if (!mainScreen) assert.equal(mode.renderer.layoutRoot, viewport.root, 'closed Sidebar does not mount a split');
     mode.createExtensionUIContext().setStatus('workflow-mode', flow === 'exec' ? 'workflow: exec' : 'workflow: work');
     mode.createExtensionUIContext().setStatus('permission-mode', '⏵⏵ auto mode on (alt+a to cycle)');
     mode.createExtensionUIContext().setStatus('cache-guard', 'cache cold?');
@@ -282,7 +316,7 @@ async function fixture(width, flow, sidebar) {
     mode.renderer.renderNow();
     await tick();
     mode.renderer.renderNow();
-    return { mode, runtime, terminal, calls, mouseEvents, bus, modelRuntime, errors, get generation() { return generation; },
+    return { mode, runtime, terminal, raw, exitSource, calls, mouseEvents, bus, modelRuntime, errors, get generation() { return generation; },
       nextGeneration() { generation++; }, frame: () => mode.renderer.renderNow(),
       async close() {
         // Drain existing next-timer session_start registrations (cc-render's write
@@ -290,6 +324,9 @@ async function fixture(width, flow, sidebar) {
         await pause(5);
         try { await runtime.dispose(); }
         finally { try { mode.stop(); } finally { mode.renderer.stop(); } }
+        assert.equal(terminal.frames.length, 0, 'shutdown leaves no keyboard frame');
+        assert.equal(raw.listenerCount('data'), 0, 'shutdown removes the passive reply observer');
+        assert.equal(exitSource.listenerCount('exit'), 0, 'shutdown removes its emergency restoration listener');
       } };
   } catch (error) {
     try { await runtime.dispose(); } catch { /* Preserve the original setup failure. */ }
@@ -349,6 +386,166 @@ function requireOne(f, point, action, release = 0) {
   assert.equal(f.calls.at(-1).action, action);
 }
 
+const cycleAnchors = f => journalEntries(f).filter(entry => entry.customType === 'settings:cycle');
+const nativeAnchor = f => f.mode.chatContainer.children.find(child => child.render(120).some(line => plain(line).includes('Settings')));
+const reasoningRecords = f => f.runtime.session.sessionManager.getEntries().filter(entry => entry.type === 'thinking_level_change');
+
+async function terminalCycles() {
+  for (const mainScreen of [false, true]) {
+    const f = await fixture(120, 'independent', 'absent', { transport: 'supported', mainScreen, vim: false });
+    try {
+      const api = settings(f);
+      const original = snapshot(f);
+      const context = structuredClone(f.runtime.session.sessionManager.buildSessionContext().messages);
+      const before = reasoningRecords(f).length;
+      f.terminal.send('\x1b[116;5u'); // original configured ctrl+t through the real native editor action
+      assert.equal(api.cycles.snapshot()?.phase, 'pending');
+      const anchor = nativeAnchor(f);
+      const savedAnchor = structuredClone(cycleAnchors(f)[0]);
+      assert.ok(anchor, 'the actual native history component exists before negotiation finishes');
+      assert.equal(api.cycles.inputStatus().mode, 'negotiating', `real editor transport capture: ${JSON.stringify({ status: api.cycles.inputStatus(), queries: f.terminal.queries, pushes: f.terminal.pushes, listeners: f.raw.listenerCount('data') })}`);
+      await until(() => f.terminal.queries === 2, 'baseline, push and capability query');
+      await tick();
+      assert.equal(api.cycles.inputStatus().mode, 'negotiating', 'acknowledgement alone is not current held-state evidence');
+      assert.equal(api.cycles.inputStatus().reason, 'unconfirmed');
+      // Releasing the ordinary key still reports Ctrl held and proves the enhanced
+      // frame is actually working after the push; it must not activate ctrl+t twice.
+      f.terminal.send('\x1b[116;5:3;116u');
+      assert.equal(api.cycles.inputStatus().mode, 'modifier-release');
+      assert.deepEqual(api.cycles.inputStatus().modifiers, ['ctrl']);
+      await pause(3100);
+      assert.equal(api.cycles.snapshot()?.phase, 'pending', 'a negotiated multi-second hold has no watchdog');
+      assert.equal(f.runtime.session.thinkingLevel, original.thinking);
+      assert.equal(reasoningRecords(f).length, before, 'ordinary-key release and long hold invoke no setter');
+      assert.equal(cycleAnchors(f).length, 1);
+      f.terminal.send('\x1b[57442;1:3u');
+      await until(() => api.cycles.snapshot()?.phase === 'applied', 'final Ctrl release applies immediately');
+      assert.equal(reasoningRecords(f).length, before + 1, 'final participating release applies exactly once');
+      assert.equal(f.terminal.frames.length, 0);
+      assert.equal(f.terminal.pops, 1, 'the temporary frame is restored before effective application');
+      assert.equal(f.terminal.flags, 7, 'the original native keyboard frame is preserved');
+      assert.equal(api.cycles.inputStatus().mode, 'idle');
+      assert.ok(f.mode.chatContainer.children.includes(anchor));
+      assert.match(anchor.render(120).map(plain).join('\n'), /Settings · Effort/u);
+
+      // New transactions settled by the timer still reuse the original component,
+      // not merely the same persisted ID appended as a second native anchor.
+      for (const key of ['workflow', 'auto-effort', 'workflow']) {
+        const result = stage(f, key);
+        assert.equal(api.cycles.inputStatus().mode, 'timer');
+        assert.equal(await result, true);
+        assert.equal(cycleAnchors(f).length, 1);
+        assert.deepEqual(cycleAnchors(f)[0], savedAnchor, 'the first native anchor record stays immutable');
+        assert.ok(f.mode.chatContainer.children.includes(anchor), 'completed batches retain the very same native component');
+        assert.equal(historyLines(f).length, 1);
+        assert.match(anchor.render(120).map(plain).join('\n'), /Settings ·/u);
+      }
+      if (!mainScreen) {
+        f.terminal.send('\x1b[116;5u');
+        await until(() => f.terminal.pushes === 2, 'second negotiated keyboard batch');
+        await tick();
+        f.terminal.send('\x1b[57442;5u');
+        assert.equal(api.cycles.inputStatus().mode, 'modifier-release');
+        await tick(); f.frame();
+        const level = api.cycles.snapshot().settings.find(item => item.key === 'reasoning').target;
+        const pointer = target(f, level);
+        pointer.x -= 2;
+        click(f, pointer);
+        assert.equal(api.cycles.inputStatus().mode, 'timer', 'an actual footer click does not inherit the keyboard hold');
+        assert.equal(api.cycles.inputStatus().reason, 'pointer');
+        assert.equal(f.terminal.frames.length, 0, 'pointer activation closes the keyboard lease immediately');
+        await until(() => api.cycles.snapshot()?.phase === 'applied', 'pointer fallback after held keyboard cycle');
+        assert.equal(cycleAnchors(f).length, 1);
+        assert.ok(f.mode.chatContainer.children.includes(anchor));
+      }
+      assert.deepEqual(f.runtime.session.sessionManager.buildSessionContext().messages, context, 'transport cycles never enter model context');
+      assert.equal(f.mode.editor.getExpandedText(), original.draft, 'modifier normalization inserts no PUA glyph or release text');
+      assert.equal(f.mode.ui.getFocusedComponent(), original.focus);
+
+      const recovering = f.terminal.pushes + 1;
+      const beforeRecovery = reasoningRecords(f).length;
+      f.terminal.send('\x1b[116;5u');
+      await until(() => f.terminal.pushes === recovering, 'lost-release recovery handshake');
+      await tick();
+      f.terminal.send('\x1b[57442;5u');
+      assert.equal(api.cycles.inputStatus().mode, 'modifier-release');
+      f.terminal.send('\x1b[120;1:3u'); // no modifier-release packet; later trustworthy mask says Ctrl is up
+      await until(() => api.cycles.snapshot()?.phase === 'applied', 'later event mask recovers a dropped modifier release');
+      assert.equal(reasoningRecords(f).length, beforeRecovery + 1);
+      assert.equal(cycleAnchors(f).length, 1);
+      assert.equal(f.mode.editor.getExpandedText(), original.draft);
+
+      const focusLease = f.terminal.pushes + 1;
+      const beforeFocus = reasoningRecords(f).length;
+      f.terminal.send('\x1b[116;5u');
+      await until(() => f.terminal.pushes === focusLease, 'focus-loss handshake');
+      await tick();
+      f.terminal.send('\x1b[57442;5u');
+      assert.equal(api.cycles.inputStatus().mode, 'modifier-release');
+      f.mode.ui.setFocus(new Container());
+      f.terminal.send('\x1b[57442;1:3u');
+      assert.equal(api.cycles.snapshot()?.phase, 'cancelled', 'a hidden main editor cannot commit a held shortcut');
+      assert.equal(reasoningRecords(f).length, beforeFocus);
+      assert.equal(f.terminal.frames.length, 0, 'focus loss restores the frame before cancellation');
+      f.mode.ui.setFocus(f.mode.editor);
+
+      // Associated Unicode/IME text must use the actual editor input path once,
+      // including raw private-use text and bracketed paste, never draft replacement.
+      f.mode.editor.setText('');
+      f.terminal.send('\x1b[97;1;233:769u');
+      f.terminal.send('\x1b[0;1;30028:128578u');
+      f.terminal.send('\ue123');
+      f.terminal.send('\x1b[200~pasted 界\x1b[201~');
+      assert.equal(f.mode.editor.getExpandedText(), 'é́界🙂\ue123pasted 界');
+      f.terminal.send('\x1b[57442;5u', '\x1b[57442;1:3u');
+      assert.equal(f.mode.editor.getExpandedText(), 'é́界🙂\ue123pasted 界');
+      assert.deepEqual(f.errors, []);
+      console.log(`PASS real ${mainScreen ? 'main-screen' : 'fullscreen'} negotiated hold/release, native anchor reuse and enhanced text (${sdkRoot})`);
+    } finally { await f.close(); }
+  }
+
+  for (const transport of ['legacy', 'unsupported', 'partial', 'unknown', 'dropped', 'supported']) {
+    const f = await fixture(120, 'independent', 'absent', { transport, vim: false });
+    try {
+      const api = settings(f), before = reasoningRecords(f).length;
+      const started = Date.now();
+      f.terminal.send(transport === 'legacy' ? '\x14' : '\x1b[116;5u');
+      await tick();
+      assert.ok(['timer', 'negotiating'].includes(api.cycles.inputStatus().mode));
+      await pause(700);
+      assert.equal(api.cycles.snapshot()?.phase, 'pending', `${transport} does not retain the old 400 ms deadline`);
+      // Unrelated input and a late capability reply must not restart the deadline.
+      f.terminal.send(packet(35, { x: 0, y: 0 }, 'M'));
+      await until(() => api.cycles.snapshot()?.phase === 'applied', `${transport} 1000 ms fallback`);
+      assert.ok(Date.now() - started >= 990, `${transport} waits for the cycle fallback`);
+      assert.ok(Date.now() - started < 1600, `${transport} noise does not extend the cycle fallback`);
+      assert.equal(reasoningRecords(f).length, before + 1);
+      assert.equal(f.terminal.frames.length, 0, `${transport} leaves no keyboard lease`);
+      if (['legacy', 'unsupported', 'unknown'].includes(transport)) assert.equal(f.terminal.pushes, 0);
+      else assert.equal(f.terminal.pushes, f.terminal.pops, `${transport} restores its exact pushed frame`);
+      f.terminal.reply('\x1b[?31u');
+      await tick();
+      assert.equal(reasoningRecords(f).length, before + 1, 'orphan replies cannot revive a settled transaction');
+      assert.equal(f.terminal.frames.length, 0);
+      assert.deepEqual(f.errors, []);
+      console.log(`PASS real terminal ${transport} fallback and lease cleanup (${sdkRoot})`);
+    } finally { await f.close(); }
+  }
+
+  const f = await fixture(120, 'independent', 'absent', { transport: 'unknown', vim: false });
+  try {
+    const api = settings(f), before = reasoningRecords(f).length;
+    f.terminal.send('\x1b[116;5u');
+    f.terminal.send('\x1b[57442;1:3u'); // release before even the initial baseline reply
+    await until(() => api.cycles.snapshot()?.phase === 'applied', 'release before initial handshake');
+    f.terminal.reply('\x1b[?7u\x1b[?31u');
+    await pause(1050);
+    assert.equal(reasoningRecords(f).length, before + 1, 'late full acknowledgement cannot strand or relaunch an already released batch');
+    assert.equal(f.terminal.frames.length, 0);
+    assert.equal(f.terminal.pushes, 0, 'late replies cannot open an orphan lease');
+  } finally { await f.close(); }
+}
+
 async function shortcutModelCancellation() {
   const f = await fixture(120, 'independent', 'absent');
   try {
@@ -368,7 +565,7 @@ async function shortcutModelCancellation() {
     assert.deepEqual(settings(f).applied, []);
     assert.equal(settings(f).cycles.snapshot().phase, 'cancelled');
     assert.equal(settings(f).cycles.snapshot().reason, 'model changed');
-    await pause(425);
+    await pause(1025);
     assert.deepEqual(settings(f).applied, [], 'no late permission relaxation after the old deadline');
     assert.deepEqual(f.errors, []);
   } finally { await f.close(); }
@@ -403,14 +600,45 @@ async function journalCheckpoint() {
     assert.match(anchor.render(120).map(plain).join('\n'), /Workflow plan · Auto on/u,
       'an already-created native component renders the latest hidden snapshot');
     await pause(250);
-    assert.deepEqual(api.applied, [], 'no effective changes before the 400 ms quiet period');
+    assert.deepEqual(api.applied, [], 'no effective changes before the 1000 ms quiet period');
     assert.equal(await first, true);
-    assert.ok(Date.now() - lastStaged >= 390, 'settlement waits for the quiet period after the latest mixed-control input');
+    assert.ok(Date.now() - lastStaged >= 990, 'settlement waits for the quiet period after the latest mixed-control input');
     assert.deepEqual(api.applied, [{ key: 'workflow', value: 'plan' }, { key: 'auto-effort', value: true }]);
     assert.equal(historyLines(f).length, 1);
     assert.match(historyLines(f)[0], /Settings · Workflow plan · Auto on/u);
     assert.deepEqual(f.runtime.session.sessionManager.buildSessionContext().messages, beforeContext,
       'neither the anchor nor any hidden snapshot enters model context');
+    const originalRow = api.cycles.snapshot().id;
+    const originalRecord = structuredClone(cycleAnchors(f)[0]);
+    for (let batch = 0; batch < 2; batch++) {
+      const unchanged = stage(f, 'workflow');
+      assert.notEqual(unchanged, first, 'a completed row gets a fresh per-batch transaction promise');
+      assert.equal(stage(f, 'workflow'), unchanged);
+      assert.equal(stage(f, 'workflow'), unchanged);
+      assert.equal(await unchanged, true);
+      assert.equal(api.cycles.snapshot().phase, 'unchanged');
+      assert.equal(api.cycles.snapshot().id, originalRow);
+      assert.equal(api.cycles.snapshot().settings.length, 1, 'latest no-op batch does not claim older committed auto-effort changes');
+      assert.equal(api.cycles.snapshot().settings[0].baseline, 'plan', 'new batch validates against fresh effective baseline');
+      assert.equal(cycleAnchors(f).length, 1);
+      assert.deepEqual(cycleAnchors(f)[0], originalRecord);
+      assert.ok(f.mode.chatContainer.children.includes(anchor));
+      assert.match(anchor.render(120).map(plain).join('\n'), /Settings unchanged/u);
+      assert.deepEqual(api.applied, [{ key: 'workflow', value: 'plan' }, { key: 'auto-effort', value: true }], 'unchanged batches invoke no setter');
+    }
+    api.cycles.cancel('explicit fixture selection'); // boundary even with no pending transaction
+    const selected = stage(f, 'workflow');
+    assert.equal(await selected, true);
+    assert.equal(cycleAnchors(f).length, 2, 'explicit selection seals reuse even after settlement');
+    assert.notEqual(api.cycles.snapshot().id, originalRow);
+    assert.match(anchor.render(120).map(plain).join('\n'), /Settings unchanged/u, 'a sealed old native component never changes again');
+    const selectedRow = api.cycles.snapshot().id;
+    api.pi.appendEntry('fixture:unrelated-output', { visible: false });
+    const separated = stage(f, 'workflow');
+    assert.equal(await separated, true);
+    assert.equal(cycleAnchors(f).length, 3, 'an unknown branch record is a conservative row boundary');
+    assert.notEqual(api.cycles.snapshot().id, selectedRow);
+    assert.deepEqual(f.runtime.session.sessionManager.buildSessionContext().messages, beforeContext);
 
     // A genuine local AgentSession stream drives InteractiveMode's streaming component.
     // This explicitly scripted transport is the only inference-shaped call allowed here.
@@ -464,6 +692,7 @@ async function journalCheckpoint() {
     // Native /reload rebuilds chat before session_start and then reconciles the journal.
     // An abandoned pending record becomes cancelled; no timer or draft is restored.
     const pending = stage(f, 'workflow');
+    const retiredRowId = api.cycles.snapshot().id;
     const savedEntries = structuredClone(journalEntries(f));
     const appliedBeforeReload = api.applied.length;
     const draft = f.mode.editor.getExpandedText();
@@ -472,15 +701,18 @@ async function journalCheckpoint() {
     await tick(); f.frame();
     assert.match(historyLines(f).at(-1), /Settings cancelled · interrupted/u);
     assert.deepEqual(journalEntries(f), savedEntries, 'reload does not rewrite append-only journal data');
-    await pause(450);
+    await pause(1050);
     assert.equal(api.applied.length, appliedBeforeReload, 'retired timer cannot apply after reload');
     assert.deepEqual(settings(f).applied, [], 'replacement coordinator does not replay the old preview');
     assert.equal(f.mode.editor.getExpandedText(), draft);
     assert.equal(f.mode.ui.getFocusedComponent(), f.mode.editor);
 
     // Persist an interrupted applying snapshot using the helper's actual versioned data.
+    const anchorsBeforeRestage = cycleAnchors(f).length;
     const staged = stage(f, 'workflow');
     const current = settings(f);
+    assert.notEqual(current.cycles.snapshot().id, retiredRowId, 'reload never reopens a restored row for live editing');
+    assert.equal(cycleAnchors(f).length, anchorsBeforeRestage + 1, 'the replacement coordinator appends a fresh native anchor');
     const snapshot = current.cycles.snapshot();
     current.pi.appendEntry('settings:cycle-state', { version: 1, ...snapshot, phase: 'applying' });
     const applyingEntries = structuredClone(journalEntries(f));
@@ -563,6 +795,7 @@ async function journalCheckpoint() {
 
 let failure;
 try {
+  await terminalCycles();
   await shortcutModelCancellation();
   await journalCheckpoint();
   for (const width of [46, 120, 180]) for (const flow of ['independent', 'linked', 'exec']) {

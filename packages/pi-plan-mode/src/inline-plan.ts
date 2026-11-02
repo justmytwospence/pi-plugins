@@ -52,7 +52,7 @@ import { expandHome } from "./plan-hook.js";
 import { promptPlanName } from "./plan-name-input.js";
 import { PlanReviewViewport } from "./plan-review-viewport.js";
 import { type ReviewStatus, reviewBody, reviewTitle } from "./review-card.js";
-import { settingsCycles } from "./settings-cycle.js";
+import { type SettingCycleTrigger, settingsCycles } from "./settings-cycle.js";
 import { findBlockedCommandSegment, readCommand, type SafeSubcommands } from "./tool-policy.js";
 import { transcriptCheckpoint } from "./transcript-contract.js";
 import { registerWorkflowRenderer, sendWorkflowTransition, type WorkflowKind } from "./workflow-ui.js";
@@ -150,7 +150,7 @@ export interface InlinePlanMode {
   /** A token invalidated by workflow/branch changes, for pending handoffs. */
   readonly revision: number;
   /** Toggle (alone) or cycle (with the gate): what the shortcut does. */
-  toggle(ctx: ExtensionContext): Promise<boolean>;
+  toggle(ctx: ExtensionContext, trigger?: SettingCycleTrigger): Promise<boolean>;
 }
 
 export function enterPlanText(planFile: string, existing: boolean, gate: boolean) {
@@ -896,16 +896,18 @@ export function registerInlinePlanMode(pi: ExtensionAPI, host: InlineHost): Inli
     get revision() {
       return revision;
     },
-    async toggle(ctx) {
+    async toggle(ctx, trigger) {
       hostCtx = ctx;
       if (host.executing() || gate?.mode === "exec") {
         ctx.ui.notify(EXEC_GUIDANCE, "warning");
         return false;
       }
       if (gate) {
-        const request: { userInitiated: true; result?: Promise<{ ok: boolean } | boolean | undefined> } = {
-          userInitiated: true,
-        };
+        const request: {
+          userInitiated: true;
+          cycleTrigger?: SettingCycleTrigger;
+          result?: Promise<{ ok: boolean } | boolean | undefined>;
+        } = { userInitiated: true, cycleTrigger: trigger };
         try {
           pi.events.emit(MODE_CYCLE, request);
           const result = await request.result;
@@ -918,25 +920,29 @@ export function registerInlinePlanMode(pi: ExtensionAPI, host: InlineHost): Inli
       const ownerGeneration = generation;
       const session = ctx.sessionManager.getSessionId();
       const anchor = ctx.sessionManager.getLeafId?.();
-      return settings.stage(ctx, {
-        key: "workflow",
-        owner: workflowOwner,
-        read: () => (state.active ? "plan" : "work"),
-        next: (value) => (value === "plan" ? "work" : "plan"),
-        format: (value) => value,
-        validate: () => (host.executing() || gate?.mode === "exec" ? EXEC_GUIDANCE : undefined),
-        apply: (value) => {
-          if (value === "plan") enterLocal(ctx);
-          else exitLocal(ctx);
-          return true;
+      return settings.stage(
+        ctx,
+        {
+          key: "workflow",
+          owner: workflowOwner,
+          read: () => (state.active ? "plan" : "work"),
+          next: (value) => (value === "plan" ? "work" : "plan"),
+          format: (value) => value,
+          validate: () => (host.executing() || gate?.mode === "exec" ? EXEC_GUIDANCE : undefined),
+          apply: (value) => {
+            if (value === "plan") enterLocal(ctx);
+            else exitLocal(ctx);
+            return true;
+          },
+          current: () =>
+            restored &&
+            generation === ownerGeneration &&
+            ctx.sessionManager === hostCtx?.sessionManager &&
+            session === ctx.sessionManager.getSessionId() &&
+            (!anchor || ctx.sessionManager.getBranch().some((entry) => entry.id === anchor)),
         },
-        current: () =>
-          restored &&
-          generation === ownerGeneration &&
-          ctx.sessionManager === hostCtx?.sessionManager &&
-          session === ctx.sessionManager.getSessionId() &&
-          (!anchor || ctx.sessionManager.getBranch().some((entry) => entry.id === anchor)),
-      });
+        trigger,
+      );
     },
   };
 }

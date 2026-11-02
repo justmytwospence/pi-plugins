@@ -362,7 +362,7 @@ describe("settings cycle previews", () => {
     await vi.advanceTimersByTimeAsync(300);
     await h.shortcuts.get("shift+tab").handler(ctx);
     await h.shortcuts.get("alt+a").handler(ctx);
-    await vi.advanceTimersByTimeAsync(399);
+    await vi.advanceTimersByTimeAsync(999);
     expect(queryFlow(h.pi.events)?.workflow).toBe("work");
     expect(ctx.ui.status.get(MODE_STATUS_KEY)).toContain("auto");
     expect(h.entries.filter(e => [WORKFLOW_ENTRY, APPROVAL_ENTRY].includes(e.customType))).toEqual([]);
@@ -393,7 +393,7 @@ describe("settings cycle previews", () => {
     for (const request of approvals) h.pi.events.emit(MODE_CYCLE, request);
     expect(first.result).toBeInstanceOf(Promise);
     expect(approvals[0].result).toBeInstanceOf(Promise);
-    await vi.advanceTimersByTimeAsync(399);
+    await vi.advanceTimersByTimeAsync(999);
     expect(settled).toBe(false);
     expect(queryFlow(h.pi.events)?.workflow).toBe("work");
     await vi.advanceTimersByTimeAsync(1);
@@ -410,7 +410,7 @@ describe("settings cycle previews", () => {
     await action.run();
     expect(settingsCycles(h.pi).snapshot()?.phase).toBe("pending");
     await action.run();
-    await vi.advanceTimersByTimeAsync(400);
+    await vi.advanceTimersByTimeAsync(1000);
     expect(settingsCycles(h.pi).snapshot()?.phase).toBe("unchanged");
     expect(queryFlow(h.pi.events)?.workflow).toBe("work");
   });
@@ -420,7 +420,7 @@ describe("settings cycle previews", () => {
     ctx.isIdle = () => false;
     await h.shortcuts.get("shift+tab").handler(ctx);
     expect(h.messages).toEqual([]);
-    await vi.advanceTimersByTimeAsync(400);
+    await vi.advanceTimersByTimeAsync(1000);
     expect(h.messages).toHaveLength(1);
     expect(h.messages[0]).toMatchObject({ message: { customType: "tool-gate:chat-notice", display: false }, opts: { deliverAs: "steer" } });
   });
@@ -434,7 +434,7 @@ describe("settings cycle previews", () => {
     else h.pi.events.emit(EXEC_CHANGED, { active: true, source: "transition" });
     expect(await request.result).toBe(false);
     expect(queryFlow(h.pi.events)?.workflow).toBe(action === "setter" ? "chat" : action === "exec" ? "exec" : "work");
-    await vi.advanceTimersByTimeAsync(400);
+    await vi.advanceTimersByTimeAsync(1000);
     expect(settingsCycles(h.pi).snapshot()?.phase).toBe("cancelled");
   });
 
@@ -453,7 +453,7 @@ describe("settings cycle previews", () => {
     try {
       const pending: WorkflowCycleRequest = {};
       h.pi.events.emit(WORKFLOW_CYCLE, pending);
-      await vi.advanceTimersByTimeAsync(400);
+      await vi.advanceTimersByTimeAsync(1000);
       expect(settingsCycles(h.pi).snapshot()?.phase).toBe("applying");
       for (const channel of [WORKFLOW_CYCLE, MODE_CYCLE]) {
         const refused: { result?: Promise<boolean> } = {};
@@ -479,7 +479,7 @@ describe("settings cycle previews", () => {
     const request: WorkflowCycleRequest = {};
     h.pi.events.emit(WORKFLOW_CYCLE, request);
     expect(ctx.sessionManager.getLeafId()).toMatch(/^journal-/u);
-    await vi.advanceTimersByTimeAsync(400);
+    await vi.advanceTimersByTimeAsync(1000);
     expect(await request.result).toBe(true);
     expect(queryFlow(h.pi.events)?.workflow).toBe("chat");
   });
@@ -512,7 +512,7 @@ describe("settings cycle previews", () => {
       const pending: WorkflowCycleRequest & { userInitiated: boolean } = { userInitiated: true };
       h.pi.events.emit(WORKFLOW_CYCLE, pending);
       ctx.isIdle = () => false;
-      await vi.advanceTimersByTimeAsync(400);
+      await vi.advanceTimersByTimeAsync(1000);
       expect(await pending.result).toBe(false);
       expect(settingsCycles(h.pi).snapshot()?.phase).toBe("failed");
       expect(h.entries.filter(e => e.customType === WORKFLOW_ENTRY)).toEqual([]);

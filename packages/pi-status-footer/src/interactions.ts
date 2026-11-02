@@ -1,5 +1,6 @@
 import type { Component, TuiMouseEvent, TuiMouseEventResult } from "@earendil-works/pi-tui";
 import type { FooterActionId, FooterActionsRequest } from "./footer-actions.ts";
+import type { SettingCycleTrigger } from "./settings-cycle.ts";
 
 /** Zero-based, half-open terminal-cell bounds produced with the final rendered text. */
 export interface FooterHit { row: number; startCol: number; endCol: number; action: string }
@@ -102,6 +103,8 @@ export interface FooterActionControllerOptions {
   isIdle(): boolean;
   isLinked(): boolean;
   cycleReasoning(): void;
+  captureCycleTrigger?(): SettingCycleTrigger | undefined;
+  withCycleTrigger?<T>(trigger: SettingCycleTrigger, run: () => T): T;
   cancelSettings(reason: string): void;
   /** Read an already-discovered snapshot. Never emit a capability query from render. */
   getActions(): FooterActionsRequest["actions"];
@@ -109,7 +112,7 @@ export interface FooterActionControllerOptions {
   refresh(): void;
 }
 export interface FooterActionController {
-  activate(action: string): Promise<void>;
+  activate(action: string, origin?: "pointer" | "keyboard"): Promise<void>;
   available(action: string): boolean;
   describe(): { bound: boolean; current: boolean; mainFocus: boolean; overlay: boolean | null; promptDepth: number; blockedHolds: number; idle: boolean; opening: boolean; actions: string[] };
   /** Capture actual main editor/TUI identities. Returns an ownership-safe release. */
@@ -172,7 +175,7 @@ export function createFooterActionController(options: FooterActionControllerOpti
       promptDepth: options.getPromptDepth(), blockedHolds: options.getBlocked(), idle: options.isIdle(),
       opening: !!opening, actions: owner && current(owner) ? Object.keys(commands).filter((action) => !!resolve(action, owner)) : [] };
   };
-  const activate = async (action: string): Promise<void> => {
+  const activate = async (action: string, origin: "pointer" | "keyboard" = "pointer"): Promise<void> => {
     const owner = binding;
     if (!current(owner) || opening) return;
     if (!hasFocusApi(owner)) { unavailable(action); return; }
@@ -187,7 +190,10 @@ export function createFooterActionController(options: FooterActionControllerOpti
     opening = token;
     try {
       if (["model.open", "workflow.open", "flow.open", "approvals.open"].includes(action)) options.cancelSettings("opened settings picker");
-      const result = run();
+      const trigger: SettingCycleTrigger = origin === "keyboard"
+        ? options.captureCycleTrigger?.() ?? { kind: "programmatic" }
+        : { kind: "pointer" };
+      const result = options.withCycleTrigger ? options.withCycleTrigger(trigger, run) : run();
       if (result) await result;
     } catch (error) {
       if (current(owner)) options.notify(`Footer action failed: ${error instanceof Error ? error.message : String(error)}`, "error");
@@ -221,7 +227,7 @@ export function createFooterActionController(options: FooterActionControllerOpti
         if (options.isLinked()) void activate("model.open");
         else model?.();
       };
-      const cycle = () => { void activate("reasoning.cycle"); };
+      const cycle = () => { void activate("reasoning.cycle", "keyboard"); };
       routing = true;
       if (model) handlers.set("app.model.select", select);
       if (thinking) handlers.set("app.thinking.cycle", cycle);

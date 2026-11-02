@@ -271,7 +271,7 @@ describe.each(["prompt", "run"])("stale %s assessment", (phase) => {
     } else if (change === "footer off/on") {
       vi.useFakeTimers();
       await queryFooterActions(h.pi.events)["effort.toggle"]!.run();
-      await vi.advanceTimersByTimeAsync(400);
+      await vi.advanceTimersByTimeAsync(1000);
       await h.commands.get("auto-effort").handler("on", ctx);
       vi.useRealTimers();
     } else if (change === "new prompt") {
@@ -499,7 +499,7 @@ describe("optional footer action", () => {
     for (const enabled of [false, true]) {
       await queryFooterActions(clicked.h.pi.events)["effort.toggle"]!.run();
       expect(queryFooterActions(clicked.h.pi.events)["effort.toggle"]?.active).toBe(!enabled);
-      await vi.advanceTimersByTimeAsync(400);
+      await vi.advanceTimersByTimeAsync(1000);
       await commanded.h.commands.get("auto-effort").handler(enabled ? "on" : "off", commanded.ctx);
       expect(queryFooterActions(clicked.h.pi.events)["effort.toggle"]?.active).toBe(enabled);
       expect(clicked.h.thinking).toBe("high");
@@ -528,12 +528,12 @@ describe("optional footer action", () => {
     await toggle.run();
     expect(renderer.render(120)[0]).toContain("Auto on");
     expect(queryFooterActions(h.pi.events)["effort.toggle"]?.active).toBe(true);
-    await vi.advanceTimersByTimeAsync(400);
+    await vi.advanceTimersByTimeAsync(1000);
     expect(queryFooterActions(h.pi.events)["effort.toggle"]?.active).toBe(true);
     expect(h.thinkingChanges).toEqual([]);
     await toggle.run();
     await h.commands.get("auto-effort").handler("on", ctx);
-    await vi.advanceTimersByTimeAsync(400);
+    await vi.advanceTimersByTimeAsync(1000);
     expect(queryFooterActions(h.pi.events)["effort.toggle"]?.active).toBe(true);
     expect(ctx.ui.notes.at(-1)?.message).toContain("auto-effort on");
   });
@@ -544,7 +544,7 @@ describe("optional footer action", () => {
     await h.emit("session_start", {}, ctx);
     await queryFooterActions(h.pi.events)["effort.toggle"]!.run();
     await h.emit("model_select", {}, ctx);
-    await vi.advanceTimersByTimeAsync(400);
+    await vi.advanceTimersByTimeAsync(1000);
     expect(queryFooterActions(h.pi.events)["effort.toggle"]?.active).toBe(false);
   });
 
@@ -561,7 +561,7 @@ describe("optional footer action", () => {
       current: () => true,
       apply: (level) => { h.pi.setThinkingLevel(level); h.pi.events.emit(SETTINGS_REASONING_COMMITTED, { level: h.thinking }); return true; },
     });
-    await vi.advanceTimersByTimeAsync(400);
+    await vi.advanceTimersByTimeAsync(1000);
     expect(h.thinkingChanges).toEqual(["low", "medium"]);
     expect(queryFooterActions(h.pi.events)["effort.toggle"]?.active).toBe(false);
     await h.commands.get("auto-effort").handler("status", ctx);
@@ -580,7 +580,7 @@ describe("optional footer action", () => {
     });
     await h.emit("turn_end", { turnIndex: 0, message: { stopReason: "toolUse" }, toolResults: [{ isError: true }] }, ctx);
     expect(await result).toBe(false);
-    await vi.advanceTimersByTimeAsync(400);
+    await vi.advanceTimersByTimeAsync(1000);
     expect(h.thinking).toBe("low");
     expect(h.thinkingChanges).toEqual(["low"]);
   });
@@ -612,7 +612,7 @@ describe("optional footer action", () => {
       next: () => "xhigh", format: (value) => value, validate: () => undefined, current: () => true,
       apply: (value) => { h.pi.setThinkingLevel(value); h.pi.events.emit(SETTINGS_REASONING_COMMITTED, { level: h.thinking }); return true; },
     });
-    await vi.advanceTimersByTimeAsync(400);
+    await vi.advanceTimersByTimeAsync(1000);
     expect(await workflowCommit).toBe(true);
     expect(await reasoningCommit).toBe(true);
     h.pi.events.emit(SETTINGS_REASONING_COMMITTED, { level: "high" }); // Duplicate is not another manual change.
@@ -710,7 +710,7 @@ describe("optional footer action", () => {
         next: () => "xhigh", format: value => value, validate: () => undefined, current: () => true,
         apply: () => { h.pi.events.emit(SETTINGS_REASONING_COMMITTED, { level: h.thinking }); return true; },
       });
-      await vi.advanceTimersByTimeAsync(400);
+      await vi.advanceTimersByTimeAsync(1000);
       expect(await settled).toBe(true);
       expect(h.entries.filter(entry => entry.customType === "auto-effort:manual-level")).toEqual([
         { customType: "auto-effort:manual-level", data: { version: 1, level: "high" } },
@@ -794,7 +794,7 @@ describe("optional footer action", () => {
     await h.emit("before_agent_start", { prompt: "trivial" }, ctx);
     expect(h.events.filter((e) => e.channel === "quota:pressure").at(-1)?.data.tier).toBe("critical");
     await queryFooterActions(h.pi.events)["effort.toggle"]!.run();
-    await vi.advanceTimersByTimeAsync(400);
+    await vi.advanceTimersByTimeAsync(1000);
     expect(h.events.filter((e) => e.channel === "quota:pressure").at(-1)?.data).toEqual({ provider: "anthropic", tier: "none", p: 0 });
     expect(h.thinking).toBe("high");
     expect(ctx.ui.status.get("auto-effort")).toBeUndefined();
