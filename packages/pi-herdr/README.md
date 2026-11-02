@@ -56,6 +56,14 @@ rows = [
 ]
 ```
 
+## Moving an existing pane
+
+When Herdr moves this Pi's existing pane to another space, pi-herdr automatically resolves its live pane through the original caller identity. It keeps the same conversation, inbox, held messages, background holds, children and awaited replies; it does not start a replacement session. If the live pane cannot be verified, operations are not sent to a guessed or focused pane.
+
+Workspace metadata is recomputed for the destination, not copied. The departed workspace's metadata is not cleared, because another session may share it; pi-herdr stops refreshing its reports and lets their existing TTLs expire. If the destination has a worktree whose checkout differs from Pi's actual checkout, pi-herdr suppresses PR, base and drift reports there. Moving a pane does not change Pi's working directory, checkout or project configuration.
+
+This is automatic handling of an external move, not a new UI, command or `herdr` move action, and it does not migrate the checkout or cwd. A grouped worktree space can contain the existing session; spawning a child instead creates a separate session.
+
 ## The `herdr` tool
 
 One tool for every agent in Herdr: this machine's, or a saved Herdr machine's with `machine` (the label `herdr --machine` takes). `name` is an agent's Herdr name or pane id; this session's children go by their names.
@@ -201,7 +209,7 @@ Nothing is added when nothing changed, and it never starts a turn. The first upd
 | `/crew rules` | opens the directives in `$VISUAL` or `$EDITOR` (else `vi`) in a split beside the pane, which closes when the editor exits; every pi rereads the file on its next run |
 | `/crew fetch` | the coordinator's remote check now, instead of at its next trigger |
 
-A coordinator restarted in the same pane keeps the role; one resumed in another pane takes it back on its first run (its file names its session). Members do not see a moved coordinator until then.
+A live coordinator moved to another pane reconciles its address automatically under the same session; it does not claim or take over a new role. A coordinator restarted in the same pane keeps the role; one resumed in another pane takes it back on its first run (its file names its session). Members see the updated address after reconciliation.
 
 ### Drift and overlap
 

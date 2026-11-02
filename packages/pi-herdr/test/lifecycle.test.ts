@@ -10,6 +10,7 @@ import piHerdr from "../src/index.ts";
 import { processInboxState } from "../src/inbox.ts";
 import { readTranscriptCheckpoint } from "../src/transcript-contract.ts";
 import { fakeCall } from "./core/fake.ts";
+import { relocatingHerdr } from "./relocation-fixture.ts";
 
 afterEach(() => vi.unstubAllEnvs());
 
@@ -735,4 +736,144 @@ test("an awaited peer is a read-only row marked peer: never stoppable, counted a
   expect(section.pill?.(now)).toEqual({ label: "1 child · 1 awaited" });
   void child;
   void state;
+});
+
+test("a live pane move preserves inbox, draft, holds and metadata without replacing the session", async () => {
+  inHerdr();
+  vi.useFakeTimers();
+  const x = relocatingHerdr();
+  const p = fakePi();
+  const base = ctxOf([]);
+  let input!: (data: string) => unknown;
+  const stopInput = vi.fn();
+  let editor = "original draft";
+  const ui = {
+    ...base.ui, getEditorText: () => editor,
+    setEditorText: vi.fn((value: string) => { editor = value; }),
+    onTerminalInput: vi.fn((fn: (data: string) => unknown) => { input = fn; return stopInput; }),
+  };
+  const ctx = { ...base, ui };
+  piHerdr(p.pi, { call: x.f.call, subscribeLocation: x.subscribe, exec: async () => ({ code: 0, stdout: "", stderr: "" }) });
+  try {
+    await p.emit("session_start", {}, ctx);
+    await p.emit("before_agent_start", { messageType: "custom", systemPromptOptions: { sections: {} } }, ctx);
+    p.pi.events.emit("herdr:background", { active: true, id: "still-working", label: "tests" });
+    p.pi.events.emit("herdr:waiting", { active: true, id: "wait", label: "tests" });
+    p.pi.events.emit("herdr:token", { key: "notebook", value: "busy" });
+    p.pi.events.emit("herdr:blocked", { active: true, label: "Which checkout?" });
+    input("d");
+    input(await envelope("relocationbefore"));
+    await vi.advanceTimersByTimeAsync(0);
+    const held = processInboxState().held;
+    expect(held).toHaveLength(1);
+    const firstReports = x.f.log.length;
+    x.move("destination-pane", "destination-space");
+    await vi.advanceTimersByTimeAsync(0);
+    expect(process.env.HERDR_PANE_ID).toBe("w1:p1");
+    expect(ui.onTerminalInput).toHaveBeenCalledTimes(1);
+    expect(stopInput).not.toHaveBeenCalled();
+    expect(ui.setEditorText).not.toHaveBeenCalled();
+    expect(editor).toBe("original draft");
+    expect(processInboxState().held).toBe(held);
+    expect(p.emitted.filter(([kind]) => kind === ACTIVITY_GONE)).toEqual([]);
+    expect(x.tokens).toMatchObject({ inbox: expect.stringContaining("v1:"), typing: "1", notebook: "busy", wait: "tests" });
+    expect(x.tokens.bg).toBeTruthy();
+    expect(x.tokens.summary).toBeTruthy();
+    input(await envelope("relocationafter"));
+    expect(held).toHaveLength(2);
+    p.pi.events.emit("herdr:blocked", { active: false });
+    await vi.advanceTimersByTimeAsync(16_000);
+    expect(p.messages.filter((m) => m.message.customType === "herdr-message")).toHaveLength(2);
+    expect(held).toHaveLength(0);
+    await p.emit("model_select", { model: { id: "new-model" } }, ctx);
+    await vi.advanceTimersByTimeAsync(0);
+    const afterMove = x.f.log.slice(firstReports).filter((e) => e.method === "pane.report_metadata");
+    expect(afterMove.length).toBeGreaterThan(0);
+    expect(afterMove.every((e) => e.params.pane_id === "destination-pane")).toBe(true);
+    expect(afterMove.some((e) => Object.keys(e.params.tokens ?? {}).some((k) => k.startsWith("ack-")))).toBe(true);
+    expect(x.f.of("agent.start")).toEqual([]);
+    await expect(p.tool().execute("self", { action: "send", name: "self", message: "no", await_reply: true }, undefined, undefined, ctx)).rejects.toThrow("own pane");
+    const listed = await p.tool().execute("list", { action: "list" }, undefined, undefined, ctx);
+    expect(listed.content[0].text).toContain("destination-pane");
+    expect(listed.content[0].text).toContain("this session");
+    await p.emit("session_shutdown", {}, ctx);
+    expect(stopInput).toHaveBeenCalledTimes(1);
+    expect(x.state.closedSubscriptions).toBe(1);
+    expect(x.tokens).toEqual({});
+    const ended = x.f.log.length;
+    x.move("unobserved-after-shutdown", "third-space");
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(x.f.log).toHaveLength(ended);
+  } finally {
+    await p.emit("session_shutdown", {}, ctx);
+    vi.useRealTimers();
+  }
+});
+
+test.each(["tab", "split"] as const)("after an unobserved move a requested %s child uses canonical placement and preamble", async (where) => {
+  inHerdr();
+  const x = relocatingHerdr({
+    "agent.get": (params) => ({ result: { agent: { pane_id: params.target, agent_status: "idle", interactive_ready: true, state_change_seq: 1 } } }),
+    "agent.start": () => ({ result: {} }),
+    "agent.prompt": () => ({ result: {} }),
+  });
+  const p = fakePi();
+  const ctx = ctxOf([]);
+  piHerdr(p.pi, { call: x.f.call, exec: async () => ({ code: 0, stdout: "", stderr: "" }) });
+  try {
+    await p.emit("session_start", {}, ctx);
+    x.move("new-source", "new-space", false);
+    expect(x.f.of("agent.start")).toEqual([]);
+    await p.tool().execute("spawn", { action: "spawn", name: "builder", task: "Build it", where }, undefined, undefined, ctx);
+    expect(x.f.of("agent.start")).toHaveLength(1);
+    if (where === "tab") expect(x.f.of("tab.create").at(-1)?.params.workspace_id).toBe("new-space");
+    else expect(x.f.of("pane.split").at(-1)?.params).toMatchObject({ target_pane_id: "new-source", direction: "right" });
+    expect(x.f.of("agent.prompt").at(-1)?.params.text).toContain("herdr pane new-source");
+  } finally {
+    await p.emit("session_shutdown", {}, ctx);
+  }
+});
+
+test.each(["caller", "inbox"])("shutdown during startup's %s publication cannot resurrect timers or the runtime", async (stage) => {
+  inHerdr();
+  vi.useFakeTimers();
+  const x = relocatingHerdr();
+  const p = fakePi();
+  const stop = vi.fn();
+  const base = ctxOf([]);
+  const ctx = { ...base, ui: { ...base.ui, getEditorText: () => "", onTerminalInput: () => stop } };
+  let entered!: () => void;
+  let release!: () => void;
+  const reached = new Promise<void>((resolve) => { entered = resolve; });
+  const paused = new Promise<void>((resolve) => { release = resolve; });
+  let intercepted = false;
+  const call: typeof x.f.call = async (method, params, timeout) => {
+    const reply = await x.f.call(method, params, timeout);
+    if (!intercepted && (stage === "caller" ? method === "pane.current" : method === "pane.report_metadata" && params.source === "pi-herdr-inbox" && (params.tokens as { inbox?: unknown } | undefined)?.inbox)) {
+      intercepted = true;
+      entered();
+      await paused;
+    }
+    return reply;
+  };
+  piHerdr(p.pi, { call, subscribeLocation: x.subscribe, exec: async () => ({ code: 0, stdout: "", stderr: "" }) });
+  try {
+    const starting = p.emit("session_start", {}, ctx);
+    await reached;
+    const shuttingDown = p.emit("session_shutdown", {}, ctx);
+    release();
+    await Promise.all([starting, shuttingDown]);
+    expect(p.emitted.filter(([channel]) => channel === "herdr:ready")).toEqual([]);
+    expect(x.state.closedSubscriptions).toBe(1);
+    expect(vi.getTimerCount()).toBe(0);
+    const count = x.f.log.length;
+    x.move("late-pane", "late-space");
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(x.f.log).toHaveLength(count);
+    expect(stop).toHaveBeenCalledTimes(stage === "inbox" ? 1 : 0);
+  } finally {
+    release();
+    await p.emit("session_shutdown", {}, ctx);
+    vi.useRealTimers();
+  }
 });

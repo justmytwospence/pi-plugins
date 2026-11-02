@@ -27,6 +27,10 @@ test("Herdr guidance separates report-back delegation from persistent handoffs a
   expect(guidelines).toContain("where=split only for deliberate side-by-side");
   expect(guidelines).toContain("otherwise ask before creating one");
   expect(guidelines).toContain("already open");
+  expect(guidelines).toContain("feature/PR worktree request normally keeps this session");
+  expect(guidelines).toContain("move its existing Herdr pane");
+  expect(guidelines).toContain("rather than spawning a replacement");
+  expect(guidelines).toContain("moving layout does not switch Pi's working directory or checkout");
   expect(guidelines).not.toContain("Use herdr_child when the work is long or open-ended");
   // Messaging any agent goes through the tool, not bash `herdr agent prompt`.
   expect(guidelines).toContain("not `herdr agent prompt` in bash");

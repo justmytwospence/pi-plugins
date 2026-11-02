@@ -123,8 +123,13 @@ function fixture(handlers: Parameters<typeof fakeCall>[0] = {}, width = 120) {
   const ctx = { mode: "tui", hasUI: true, isIdle: vi.fn(() => true), cwd: "/checkout", model: { provider: "anthropic", id: "current-model" }, sessionManager: manager, modelRegistry: registry, ui, ...forbidden };
   const pi = { registerCommand: vi.fn(), getThinkingLevel: vi.fn(() => "high"), events: { emit: vi.fn() }, ...forbidden };
   let generation = 1;
+  let locationRevision = 0;
   const uniqueName = vi.fn(async (_wanted: string) => "available-fork");
-  const deps = { call: fake.call, selfPane: "self", uniqueName, runtimeCurrent: () => { const captured = generation; return () => generation === captured; } };
+  const deps = {
+    call: fake.call, selfPane: "self", uniqueName,
+    resolveSelfPane: undefined as (() => Promise<string>) | undefined,
+    runtimeCurrent: () => { const captured = generation; const location = locationRevision; return () => generation === captured && locationRevision === location; },
+  };
   registerTreeFork(pi as unknown as ExtensionAPI, deps);
   const commands = new Map(pi.registerCommand.mock.calls as unknown as [string, { description: string; handler: (args: string, ctx: ExtensionCommandContext) => Promise<unknown> }][]);
   const command = ["tree-fork", commands.get("tree-fork")!] as const;
@@ -146,8 +151,86 @@ function fixture(handlers: Parameters<typeof fakeCall>[0] = {}, width = 120) {
       expect(events.filter(([, e]) => !e.active && e.id === hold.id)).toHaveLength(1);
     }
   };
-  return { dir, manager, question, tip, tool, toolResult, hiddenLeaf, registry, screens, custom, fake, ctx, ui, pi, deps, command, run, runHere, commands, uniqueName, snapshot, assertUntouched, assertNoSourceActions, holds, assertReleased, stale: () => { generation++; } };
+  return { dir, manager, question, tip, tool, toolResult, hiddenLeaf, registry, screens, custom, fake, ctx, ui, pi, deps, command, run, runHere, commands, uniqueName, snapshot, assertUntouched, assertNoSourceActions, holds, assertReleased, stale: () => { generation++; }, relocate: () => { locationRevision++; } };
 }
+
+test.each([
+  ["tree-fork", "tab"], ["tree-fork", "split"], ["fork-here", "tab"], ["fork-here", "split"],
+])("%s resolves before capturing location and launches a fresh %s from canonical self", async (command, where) => {
+  const f = fixture({
+    "pane.get": (p) => {
+      expect(p.pane_id).toBe("moved-self");
+      return { result: { pane: { workspace_id: "moved-workspace" } } };
+    },
+    "pane.layout": (p) => {
+      expect(p.pane_id).toBe("moved-self");
+      return { result: { layout: { panes: [
+        { pane_id: "self", rect: { width: 200, height: 40 } },
+        { pane_id: "moved-self", rect: { width: 120, height: 100 } },
+      ] } } };
+    },
+  });
+  const files = readdirSync(f.dir);
+  const resolve = vi.fn(async () => {
+    expect(readdirSync(f.dir)).toEqual(files);
+    if (resolve.mock.calls.length === 1) {
+      expect(f.ui.custom).not.toHaveBeenCalled();
+      expect(f.ui.select).not.toHaveBeenCalled();
+      f.relocate(); // startup reconciliation happens before the runtime guard is captured
+    } else expect(f.uniqueName).toHaveBeenCalledTimes(1);
+    return "moved-self";
+  });
+  f.deps.resolveSelfPane = resolve;
+  f.ui.select.mockResolvedValue(FORK_DESTINATIONS[where === "tab" ? 0 : 1]);
+  await (command === "tree-fork" ? f.run() : f.runHere());
+  expect(resolve).toHaveBeenCalledTimes(2);
+  if (where === "tab") expect(f.fake.of("tab.create")[0].params.workspace_id).toBe("moved-workspace");
+  else expect(f.fake.of("pane.split")[0].params).toMatchObject({ target_pane_id: "moved-self", direction: "down" });
+  expect(f.fake.of("agent.start")).toHaveLength(1);
+  f.assertReleased(); f.assertUntouched();
+});
+
+test.each([
+  ["tree-fork", "tree"], ["tree-fork", "destination"], ["tree-fork", "naming"],
+  ["fork-here", "destination"], ["fork-here", "naming"],
+])("%s cancels a move during its %s dialog without files or panes; the next command works", async (command, stage) => {
+  let canonical = "self";
+  const f = fixture({ "pane.get": (p) => {
+    expect(p.pane_id).toBe(canonical);
+    return { result: { pane: { workspace_id: "moved-workspace" } } };
+  } });
+  const files = readdirSync(f.dir);
+  const entered = deferred<void>(); const wait = deferred<void>();
+  f.deps.resolveSelfPane = vi.fn(async () => canonical);
+  if (stage === "tree") f.ui.custom.mockImplementationOnce(async () => { entered.resolve(); await wait.promise; return f.tip; });
+  if (stage === "destination") f.ui.select.mockImplementationOnce(async () => { entered.resolve(); await wait.promise; return FORK_DESTINATIONS[0]; });
+  if (stage === "naming") f.registry.complete.mockImplementationOnce(async () => { entered.resolve(); await wait.promise; return { stopReason: "stop", content: [{ type: "text", text: "Moved fork" }] }; });
+  const run = command === "tree-fork" ? f.run : f.runHere;
+  const pending = run(); await entered.promise;
+  canonical = "moved-self"; f.relocate(); wait.resolve(); await pending;
+  expect(f.ui.notify).toHaveBeenCalledWith(`Source session changed or its Herdr pane moved; /${command} cancelled.`, "error");
+  expect(f.fake.log).toEqual([]); expect(readdirSync(f.dir)).toEqual(files);
+  f.assertReleased(); f.assertUntouched();
+  await run();
+  expect(f.fake.of("pane.get")[0].params).toEqual({ pane_id: "moved-self" });
+  expect(f.fake.of("tab.create")[0].params.workspace_id).toBe("moved-workspace");
+  expect(f.fake.of("agent.start")).toHaveLength(1);
+  f.assertReleased(); f.assertUntouched();
+});
+
+test.each(["tree-fork", "fork-here"])("%s cancels a previously missed move found by its second resolution before creating a file", async (command) => {
+  const f = fixture(); const files = readdirSync(f.dir);
+  const resolve = vi.fn(async () => {
+    if (resolve.mock.calls.length === 2) f.relocate();
+    return resolve.mock.calls.length === 1 ? "self" : "moved-self";
+  });
+  f.deps.resolveSelfPane = resolve;
+  await (command === "tree-fork" ? f.run() : f.runHere());
+  expect(resolve).toHaveBeenCalledTimes(2);
+  expect(f.ui.notify).toHaveBeenCalledWith(`Source session changed or its Herdr pane moved; /${command} cancelled.`, "error");
+  expect(f.fake.log).toEqual([]); expect(readdirSync(f.dir)).toEqual(files);
+  f.assertReleased(); f.assertUntouched();
+});
 
 test("registers both independent fork commands and tolerates registration-less hosts", () => {
   const f = fixture();
@@ -329,7 +412,7 @@ test.each(["tree-fork", "fork-here"] as const)("%s runtime invalidation around s
     expect(f.fake.of("agent.start")).toHaveLength(stage === "agent.start" ? 1 : 0);
     expect(f.fake.of("workspace.close")).toEqual(stage === "workspace.create" ? [{ method: "workspace.close", params: { workspace_id: "new-workspace" } }] : []);
     expect(f.fake.of("pane.close")).toEqual([]);
-    expect(f.ui.notify).toHaveBeenCalledWith(expect.stringMatching(/switched or reloaded.*Session file retained/), "error");
+    expect(f.ui.notify).toHaveBeenCalledWith(expect.stringMatching(/changed or its Herdr pane moved.*Session file retained/), "error");
     expect(f.ui.notify.mock.calls.some(([message]) => String(message).startsWith("Fork opened"))).toBe(false);
     expect(readdirSync(f.dir)).toHaveLength(2);
     f.assertReleased(); f.assertUntouched();
@@ -346,7 +429,7 @@ test.each(["tree-fork", "fork-here"] as const)("%s source identity invalidation 
   await (command === "tree-fork" ? f.run() : f.runHere());
   expect(f.fake.of("agent.start")).toEqual([]); expect(f.fake.of("pane.close")).toEqual([]);
   expect(f.fake.of("workspace.close")).toEqual([{ method: "workspace.close", params: { workspace_id: "new-workspace" } }]);
-  expect(f.ui.notify).toHaveBeenCalledWith(expect.stringMatching(/switched or reloaded.*Session file retained: .*Fork space: new-workspace.*Fork pane: new-pane/), "error");
+  expect(f.ui.notify).toHaveBeenCalledWith(expect.stringMatching(/changed or its Herdr pane moved.*Session file retained: .*Fork space: new-workspace.*Fork pane: new-pane/), "error");
   vi.restoreAllMocks(); f.assertReleased(); f.assertUntouched();
 });
 
@@ -403,7 +486,7 @@ test.each(["tree", "destination", "name"])("runtime replacement during %s stops 
   if (stage === "destination") f.ui.select.mockImplementation(async () => { f.stale(); return FORK_DESTINATIONS[0]; });
   if (stage === "name") f.uniqueName.mockImplementation(async () => { f.stale(); return "available-fork"; });
   await f.run(); expect(f.fake.log).toEqual([]); expect(readdirSync(f.dir)).toEqual(files);
-  expect(f.ui.notify).toHaveBeenCalledWith(expect.stringContaining("switched or reloaded"), "error");
+  expect(f.ui.notify).toHaveBeenCalledWith(expect.stringContaining("changed or its Herdr pane moved"), "error");
   f.assertReleased(); f.assertUntouched();
   const customCalls = f.ui.custom.mock.calls.length;
   f.ui.custom.mockResolvedValue(undefined); await f.run(); expect(f.ui.custom).toHaveBeenCalledTimes(customCalls + 1);
@@ -412,7 +495,7 @@ test.each(["tree", "destination", "name"])("runtime replacement during %s stops 
 test.each(["getSessionId", "getSessionFile"] as const)("source identity change (%s) cancels even when runtime generation is unchanged", async (method) => {
   const f = fixture(); f.ui.select.mockImplementation(async () => { vi.spyOn(f.manager, method).mockReturnValue("replacement"); return FORK_DESTINATIONS[0]; });
   await f.run(); expect(f.fake.log).toEqual([]); f.assertReleased();
-  expect(f.ui.notify).toHaveBeenCalledWith(expect.stringContaining("switched or reloaded"), "error");
+  expect(f.ui.notify).toHaveBeenCalledWith(expect.stringContaining("changed or its Herdr pane moved"), "error");
   vi.restoreAllMocks(); f.assertUntouched();
 });
 
@@ -434,7 +517,7 @@ test("append-only progress during selection is allowed without changing the capt
 test.each(["pane.get", "tab.create", "agent.start"])("stale runtime after %s never advances startup or closes a possibly started agent", async (method) => {
   let current = true; const fake = transport();
   const call = vi.fn(fake.call).mockImplementation(async (name, params, timeout) => { const reply = await fake.call(name, params, timeout); if (name === method) current = false; return reply; });
-  await expect(openForkPane({ ...paneOptions(fake), call: call as Call, isCurrent: () => current })).rejects.toThrow(/switched or reloaded.*Session file retained/);
+  await expect(openForkPane({ ...paneOptions(fake), call: call as Call, isCurrent: () => current })).rejects.toThrow(/changed or its Herdr pane moved.*Session file retained/);
   expect(fake.of("agent.start")).toHaveLength(method === "agent.start" ? 1 : 0);
   expect(fake.of("pane.close")).toHaveLength(method === "tab.create" ? 1 : 0);
 });
@@ -466,7 +549,7 @@ test("a thrown transport failure preserves the possibly running pane without ret
 test("stale runtime during busy wait closes the unstarted pane and does not retry", async () => {
   vi.useFakeTimers(); let current = true;
   const fake = transport({ "agent.start": () => failure("agent_pane_busy") });
-  const result = expect(openForkPane({ ...paneOptions(fake), isCurrent: () => current })).rejects.toThrow(/switched or reloaded/);
+  const result = expect(openForkPane({ ...paneOptions(fake), isCurrent: () => current })).rejects.toThrow(/changed or its Herdr pane moved/);
   await vi.advanceTimersByTimeAsync(0); current = false; await vi.runAllTimersAsync(); await result;
   expect(fake.of("agent.start")).toHaveLength(1); expect(fake.of("pane.close")[0].params).toEqual({ pane_id: "new-pane" });
 });
@@ -622,7 +705,7 @@ test.each(["pending", "completed"])("runtime replacement during naming (%s) prev
   }
   await f.run();
   expect(dispose).toHaveBeenCalledTimes(1);
-  expect(f.ui.notify).toHaveBeenCalledWith(expect.stringContaining("switched or reloaded"), "error");
+  expect(f.ui.notify).toHaveBeenCalledWith(expect.stringContaining("changed or its Herdr pane moved"), "error");
   expect(f.uniqueName).not.toHaveBeenCalled(); expect(f.fake.log).toEqual([]);
   expect(readdirSync(f.dir)).toEqual(files); f.assertReleased(); f.assertUntouched();
 });
@@ -901,7 +984,7 @@ test.each(["destination", "naming", "uniqueName"])("fork-here runtime replacemen
   if (stage === "naming") f.registry.complete.mockImplementation(async () => { f.stale(); return { stopReason: "stop", content: [{ type: "text", text: "Topic title" }] }; });
   if (stage === "uniqueName") f.uniqueName.mockImplementation(async () => { f.stale(); return "available-fork"; });
   await f.runHere();
-  expect(f.ui.notify).toHaveBeenCalledWith(expect.stringContaining("switched or reloaded"), "error");
+  expect(f.ui.notify).toHaveBeenCalledWith(expect.stringContaining("changed or its Herdr pane moved"), "error");
   expect(f.fake.log).toEqual([]); expect(readdirSync(f.dir)).toEqual(files); f.assertReleased(); f.assertUntouched();
   f.ui.select.mockResolvedValue(undefined); const calls = f.ui.select.mock.calls.length; await f.runHere(); expect(f.ui.select).toHaveBeenCalledTimes(calls + 1); f.assertReleased();
 });
@@ -917,7 +1000,7 @@ test.each([
   if (stage === "naming") f.registry.complete.mockImplementation(async () => { replace(); return { stopReason: "stop", content: [{ type: "text", text: "Topic title" }] }; });
   if (stage === "uniqueName") f.uniqueName.mockImplementation(async () => { replace(); return "available-fork"; });
   await f.runHere();
-  expect(f.ui.notify).toHaveBeenCalledWith(expect.stringContaining("switched or reloaded"), "error");
+  expect(f.ui.notify).toHaveBeenCalledWith(expect.stringContaining("changed or its Herdr pane moved"), "error");
   expect(f.fake.log).toEqual([]); expect(readdirSync(f.dir)).toEqual(files); f.assertReleased();
   vi.restoreAllMocks(); f.assertUntouched(); f.ui.select.mockResolvedValue(undefined); await f.runHere(); expect(f.ui.select).toHaveBeenCalledTimes(2); f.assertReleased();
 });
@@ -973,7 +1056,7 @@ test.each(["pane.get", "tab.create", "agent.start"])("fork-here runtime replacem
   await f.runHere("Recovery title");
   expect(f.fake.of("agent.start")).toHaveLength(stage === "agent.start" ? 1 : 0);
   expect(f.fake.of("pane.close")).toEqual(stage === "tab.create" ? [{ method: "pane.close", params: { pane_id: "new-pane" } }] : []);
-  expect(f.ui.notify).toHaveBeenCalledWith(expect.stringMatching(/switched or reloaded.*Session file retained/), "error");
+  expect(f.ui.notify).toHaveBeenCalledWith(expect.stringMatching(/changed or its Herdr pane moved.*Session file retained/), "error");
   expect(f.ui.notify.mock.calls.some(([message]) => String(message).startsWith("Fork opened"))).toBe(false);
   expect(readdirSync(f.dir)).toHaveLength(2); f.assertReleased(); f.assertUntouched();
   f.ui.select.mockResolvedValue(undefined); await f.runHere(); expect(f.ui.select).toHaveBeenCalledTimes(2); f.assertReleased();

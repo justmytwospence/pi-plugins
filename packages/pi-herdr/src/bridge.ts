@@ -41,18 +41,33 @@ interface Layout {
   panes?: { pane_id: string; focused?: boolean; rect?: { width: number; height: number } }[];
 }
 
+export interface BridgeLocation {
+  paneId(): string;
+  guarded(current: () => boolean): Call;
+}
+
 export class Bridge {
   private zoomHolds = 0;
   /** Whether pi-herdr zoomed the pane (and so should unzoom it). */
   private zoomedByUs = false;
   private zoomChain: Promise<unknown> = Promise.resolve();
+  private locationEpoch = 0;
 
   private readonly call: Call;
   private readonly pane: PaneReporter;
 
-  constructor(call: Call, pane: PaneReporter) {
+  private readonly location: BridgeLocation;
+
+  constructor(call: Call, pane: PaneReporter, location?: BridgeLocation) {
     this.call = call;
     this.pane = pane;
+    this.location = location ?? { paneId: () => pane.paneId, guarded: () => call };
+  }
+
+  /** Ownership belongs to the departed tab; holds still belong to this session. */
+  relocated(): void {
+    this.locationEpoch++;
+    this.zoomedByUs = false;
   }
 
   token(e: TokenEvent | undefined): Promise<unknown> {
@@ -63,32 +78,34 @@ export class Bridge {
   async notify(e: NotifyEvent | undefined): Promise<void> {
     if (!e?.title) return;
     if (e.unlessFocused) {
-      const pane = await this.call("pane.get", { pane_id: this.pane.paneId });
+      const pane = await this.call("pane.get", { pane_id: this.location.paneId() });
       if (pane.result?.pane?.focused === true) return;
     }
     await this.call("notification.show", { title: e.title, body: e.body, sound: e.sound ?? "none" });
   }
 
   private layout(): Promise<Layout | undefined> {
-    return this.call("pane.layout", { pane_id: this.pane.paneId }).then((r) => r.result?.layout);
+    return this.call("pane.layout", { pane_id: this.location.paneId() }).then((r) => r.result?.layout);
   }
 
   zoom(active: boolean): Promise<unknown> {
+    const epoch = this.locationEpoch;
+    const call = this.location.guarded(() => epoch === this.locationEpoch);
     this.zoomChain = this.zoomChain.then(async () => {
       if (active) {
         this.zoomHolds++;
         if (this.zoomHolds > 1) return;
         const l = await this.layout();
-        if (l?.zoomed !== false) return;
-        const r = await this.call("pane.zoom", { pane_id: this.pane.paneId, mode: "on" });
-        this.zoomedByUs = !r.error;
+        if (l?.zoomed !== false || epoch !== this.locationEpoch) return;
+        const r = await call("pane.zoom", { pane_id: this.location.paneId(), mode: "on" });
+        if (epoch === this.locationEpoch) this.zoomedByUs = !r.error;
         return;
       }
       if (this.zoomHolds === 0) return;
       this.zoomHolds--;
-      if (this.zoomHolds > 0 || !this.zoomedByUs) return;
+      if (this.zoomHolds > 0 || !this.zoomedByUs || epoch !== this.locationEpoch) return;
       this.zoomedByUs = false;
-      await this.call("pane.zoom", { pane_id: this.pane.paneId, mode: "off" });
+      await call("pane.zoom", { pane_id: this.location.paneId(), mode: "off" });
     });
     return this.zoomChain;
   }
@@ -96,15 +113,17 @@ export class Bridge {
   async split(e: SplitEvent | undefined): Promise<void> {
     if (!e?.command) return;
     const report = (ok: boolean, message: string) => e.done?.(ok, message);
+    const epoch = this.locationEpoch;
+    const call = this.location.guarded(() => epoch === this.locationEpoch);
     // A split needs the pane unzoomed; a zoom hold stays counted but is not re-applied.
-    if (this.zoomedByUs || (await this.layout())?.zoomed) {
-      await this.call("pane.zoom", { pane_id: this.pane.paneId, mode: "off" });
-      this.zoomedByUs = false;
+    if ((this.zoomedByUs || (await this.layout())?.zoomed) && epoch === this.locationEpoch) {
+      await call("pane.zoom", { pane_id: this.location.paneId(), mode: "off" });
+      if (epoch === this.locationEpoch) this.zoomedByUs = false;
     }
     const l = await this.layout();
-    const me = l?.panes?.find((p) => p.pane_id === this.pane.paneId);
+    const me = l?.panes?.find((p) => p.pane_id === this.location.paneId());
     const r = await this.call("pane.split", {
-      target_pane_id: this.pane.paneId,
+      target_pane_id: this.location.paneId(),
       direction: splitDirection(me?.rect),
       cwd: e.cwd,
       focus: true,
@@ -124,7 +143,9 @@ export class Bridge {
 
   /** Drop every hold (session end); unzooms if pi-herdr zoomed. */
   async reset(): Promise<void> {
-    if (this.zoomedByUs) await this.call("pane.zoom", { pane_id: this.pane.paneId, mode: "off" });
+    const epoch = this.locationEpoch;
+    const call = this.location.guarded(() => epoch === this.locationEpoch);
+    if (this.zoomedByUs) await call("pane.zoom", { pane_id: this.location.paneId(), mode: "off" });
     this.zoomHolds = 0;
     this.zoomedByUs = false;
   }

@@ -14,6 +14,7 @@ export const FORK_DESTINATIONS = ["New tab", "Split beside this pane", "New spac
 interface ForkDependencies {
   call: Call;
   selfPane: string;
+  resolveSelfPane?(): Promise<string>;
   /** Capture the current runtime generation; the returned guard must survive awaits. */
   runtimeCurrent(): () => boolean;
   uniqueName(wanted: string): Promise<string>;
@@ -39,7 +40,7 @@ export async function openForkPane(opts: PaneOptions): Promise<string> {
   let workspaceId: string | undefined;
   let startAttempted = false;
   const assert = () => {
-    if (!opts.isCurrent()) throw new Error("Source session switched or reloaded; fork startup stopped");
+    if (!opts.isCurrent()) throw new Error("Source session changed or its Herdr pane moved; fork startup stopped");
   };
   try {
     assert();
@@ -130,6 +131,7 @@ export function registerTreeFork(pi: ExtensionAPI, deps: ForkDependencies): void
         if (!requireIdle()) return;
         running = true;
         try {
+          if (deps.resolveSelfPane) await deps.resolveSelfPane();
           const manager = ctx.sessionManager;
           const file = manager.getSessionFile();
           if (!file || !existsSync(file) || statSync(file).size === 0) return ctx.ui.notify(`Save this session before using /${command}.`, "warning");
@@ -144,7 +146,7 @@ export function registerTreeFork(pi: ExtensionAPI, deps: ForkDependencies): void
           const thinking = pi.getThinkingLevel();
           const runtimeCurrent = deps.runtimeCurrent();
           const current = () => runtimeCurrent() && manager.getSessionId() === sessionId && manager.getSessionFile() === file;
-          const assert = () => { if (!current()) throw new Error(`Source session switched or reloaded; /${command} cancelled.`); };
+          const assert = () => { if (!current()) throw new Error(`Source session changed or its Herdr pane moved; /${command} cancelled.`); };
           assert();
           const hold = `${command}:${randomUUID()}`;
           let entryId: string | undefined = direct ? leafId ?? undefined : undefined;
@@ -195,8 +197,11 @@ export function registerTreeFork(pi: ExtensionAPI, deps: ForkDependencies): void
           const name = await deps.uniqueName(slugName(title));
           assert();
           if (!requireIdle()) return;
+          const selfPane = deps.resolveSelfPane ? await deps.resolveSelfPane() : deps.selfPane;
+          assert();
+          if (!requireIdle()) return;
           const forkFile = createTreeFork(file, sessionDir, cwd, entryId);
-          const paneId = await openForkPane({ call: deps.call, selfPane: deps.selfPane, isCurrent: current, where, cwd, name, title, file: forkFile, model, thinking });
+          const paneId = await openForkPane({ call: deps.call, selfPane, isCurrent: current, where, cwd, name, title, file: forkFile, model, thinking });
           assert();
           ctx.ui.notify(`Fork opened: ${title} (${name}, ${paneId}). Original session unchanged.`, "info");
         } catch (error) {

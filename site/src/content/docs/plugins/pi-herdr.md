@@ -56,6 +56,14 @@ rows = [["state_icon", "workspace"], ["branch", "git_status", "$pr"]]
 
 These are Herdr settings, not a pi-herdr JSON settings file. Token visibility depends on sidebar layout as well as extension loading.
 
+## Moving an existing pane
+
+When Herdr moves this Pi's existing pane to another space, pi-herdr automatically resolves its live pane through the original caller identity. The conversation, inbox, held messages, background holds, children and awaited replies stay with the session; no replacement session is started. If the live pane cannot be verified, operations are not sent to a guessed or focused pane.
+
+Workspace metadata is recomputed for the destination rather than copied. The departed workspace's metadata is not cleared, because another session may share it; pi-herdr stops refreshing its reports and lets their existing TTLs expire. If the destination has a worktree whose checkout differs from Pi's actual checkout, PR, base and drift reports are suppressed there. A pane move does not change Pi's working directory, checkout or project configuration.
+
+This handles an external move automatically: there is no new UI, command or `herdr` move action, and no checkout or cwd migration. A grouped worktree space can contain the existing session; spawning a child creates a separate session instead.
+
 ## The herdr tool
 
 One tool reaches every agent in Herdr, on this machine or, with `machine`, on a saved Herdr machine (the label `herdr --machine` takes). `name` is an agent's Herdr name or pane id; this session's children go by their names.
@@ -152,6 +160,7 @@ A crew is one repository's worktree sessions, coordinated from one Pi session, u
 - **Directives everywhere.** Every Pi with pi-herdr in the repository gets a `crew` system prompt section on every run, so the rules survive compaction and restarts. Members also learn who coordinates them and when to message it: a decision outside their branch, a finding that changes other branches' work, or a blocking branch. They are told not to report routine progress.
 - **Crew updates.** Each prompt you send the coordinator carries one compact block listing the worktrees whose state, last turn, or PR changed since its last turn. That includes turns you ran in a worktree yourself. It has at most 12 lines, is added only when something changed, and never starts a turn.
 - **Sync.** `crew` with `op: "sync"` claims the role, makes the Pi already running in each worktree a child, and opens a space for each worktree without an agent, where it runs `pi --continue` to resume that worktree's latest session. It is idempotent. `op: "status"` shows the whole board and the directives. A claim never takes the role from another live coordinator without `takeover`.
+- **Coordinator relocation.** A live coordinator moved to another pane automatically reconciles its address under the same session, without claiming or taking over a new role. A coordinator restarted in the same pane keeps its role; one resumed in another pane takes it back on its first run. Members see the updated address after reconciliation.
 
 - **Drift and overlap.** Each worktree session learns when its base moves under it, on events rather than timers. Only the coordinator fetches: when Herdr's `workspace.metadata_updated` event shows a crew PR turning merged, or when a cheap `git ls-remote` (after each of its turns and every `PI_HERDR_CREW_REMOTE_MS`, default 5 minutes) finds a base's sha changed. Every session watches the repository's shared refs, so any fetch, commit or rebase makes worktree sessions recompute how far they are behind, which of their files also changed upstream, and (git 2.38 or later) whether a rebase would conflict. That shows as a `$drift` space token, as one passive note when it touches the session's own files, and in the coordinator's crew update together with pairs of branches that change the same files. Nothing rebases unless a directive says so.
 

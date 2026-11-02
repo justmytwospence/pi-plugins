@@ -13,6 +13,7 @@ import piHerdr from "../src/index.ts";
 import { PI_CHILD } from "../src/session.ts";
 import { fakeCall } from "./core/fake.ts";
 import { remoteRepo } from "./git-fixture.ts";
+import { relocatingHerdr } from "./relocation-fixture.ts";
 
 const until = async (ok: () => boolean, ms = 3_000) => {
   const end = Date.now() + ms;
@@ -165,13 +166,109 @@ describe("claims, sections and sync in a git repository", () => {
     expect(orphan).toContain("Draft PRs only");
   });
 
-  it("reclaims the role for the same session in a new pane", async () => {
+  it("reclaims an already-running coordinator across successive moves without changing claimedAt or seen", async () => {
+    const h = herdr(g);
+    const crew = new Crew({ call: h.f.call, exec: realExec, selfPane: "w1:p1", now: () => 123 });
+    const session = "/s/coord.jsonl";
+    const me = { paneId: "w1:p1", session, cwd: g.root };
+    await crew.claim(me);
+    const path = join(g.root, ".git/pi-crew/coordinator.json");
+    const original = JSON.parse(readFileSync(path, "utf8"));
+    expect(await crew.reclaim(me)).toBe(true); // first prompt already reclaimed
+    const seen = { [g.a]: "already seen" }; crew.seen = seen;
+    for (const paneId of ["w5:p1", "w6:p8"]) {
+      const moved = { ...me, paneId };
+      expect(await crew.reclaim(moved)).toBe(true);
+      const stored = JSON.parse(readFileSync(path, "utf8"));
+      expect(stored).toEqual({ ...original, paneId });
+      expect(stored.claimedAt).toBe(123);
+      expect(crew.isCoordinator(stored, moved)).toBe(true);
+      expect(crew.seen).toBe(seen);
+      expect(await crew.section(moved)).toContain("You coordinate this repository's worktree sessions");
+    }
+    const bytes = readFileSync(path, "utf8");
+    const renames = h.f.of("agent.rename").length;
+    const herdrName = vi.fn(async () => "member");
+    expect(await crew.reclaim({ paneId: "w7:p1", session: "/s/other.jsonl", cwd: g.root }, herdrName)).toBe(false);
+    expect(herdrName).not.toHaveBeenCalled();
+    expect(h.f.of("agent.rename")).toHaveLength(renames);
+    expect(readFileSync(path, "utf8")).toBe(bytes);
+    expect(crew.seen).toBe(seen);
+  });
+
+  it.each(["repo", "name", "rename"])("stale reclaim after the asynchronous %s lookup cannot write or take over the role", async (stage) => {
+    const h = herdr(g);
+    const originalCrew = new Crew({ call: h.f.call, exec: realExec, selfPane: "w1:p1", now: () => 123 });
+    await originalCrew.claim({ paneId: "w1:p1", session: "/s/coord.jsonl", cwd: g.root });
+    const path = join(g.root, ".git/pi-crew/coordinator.json");
+    const original = readFileSync(path, "utf8");
+    let enter!: () => void; let release!: () => void;
+    const entered = new Promise<void>((done) => { enter = done; });
+    const wait = new Promise<void>((done) => { release = done; });
+    const pause = async () => { enter(); await wait; };
+    let current = true;
+    const call: typeof h.f.call = async (method, params, timeout) => {
+      const reply = await h.f.call(method, params, timeout);
+      if (stage === "rename" && method === "agent.rename") await pause();
+      return reply;
+    };
+    const exec: Exec = async (cmd, args, cwd) => {
+      const reply = await realExec(cmd, args, cwd);
+      if (stage === "repo") await pause();
+      return reply;
+    };
+    const crew = new Crew({ call, exec, selfPane: "w5:p1" });
+    const seen = { [g.a]: "already seen" }; crew.seen = seen;
+    const renames = h.f.of("agent.rename").length;
+    const herdrName = vi.fn(async () => { if (stage === "name") await pause(); return undefined; });
+    const pending = crew.reclaim({ paneId: "w5:p1", session: "/s/coord.jsonl", cwd: g.root }, herdrName, () => current);
+    await entered; current = false; release();
+    expect(await pending).toBe(false);
+    expect(readFileSync(path, "utf8")).toBe(original);
+    expect(crew.coordinator((await crew.repo(g.root))!)?.claimedAt).toBe(123);
+    expect(crew.seen).toBe(seen);
+    expect(h.f.of("agent.rename")).toHaveLength(renames + (stage === "rename" ? 1 : 0));
+    if (stage === "repo") expect(herdrName).not.toHaveBeenCalled();
+  });
+
+  it("an initially cancelled reclaim with a known name does not write", async () => {
     const h = herdr(g);
     const crew = new Crew({ call: h.f.call, exec: realExec, selfPane: "w1:p1" });
     await crew.claim({ paneId: "w1:p1", session: "/s/coord.jsonl", cwd: g.root });
-    expect(await crew.reclaim({ paneId: "w5:p1", session: "/s/coord.jsonl", cwd: g.root })).toBe(true);
-    expect(JSON.parse(readFileSync(join(g.root, ".git/pi-crew/coordinator.json"), "utf8")).paneId).toBe("w5:p1");
-    expect(await crew.reclaim({ paneId: "w6:p1", session: "/s/other.jsonl", cwd: g.root })).toBe(false);
+    const path = join(g.root, ".git/pi-crew/coordinator.json");
+    const original = readFileSync(path, "utf8");
+    const renames = h.f.of("agent.rename").length;
+    expect(await crew.reclaim({ paneId: "w5:p1", session: "/s/coord.jsonl", cwd: g.root, name: "known" }, undefined, () => false)).toBe(false);
+    expect(readFileSync(path, "utf8")).toBe(original);
+    expect(h.f.of("agent.rename")).toHaveLength(renames);
+  });
+
+  it("uses canonical self in status/digest/sync after moving the coordinator in a linked checkout", async () => {
+    const h = herdr(g);
+    let selfPane = "w2:p1";
+    const deps = { call: h.f.call, exec: realExec, get selfPane() { return selfPane; } };
+    const crew = new Crew(deps);
+    const me = { paneId: selfPane, session: "/s/coord.jsonl", cwd: g.a };
+    await crew.claim(me);
+    expect(await crew.reclaim(me)).toBe(true);
+    h.agents[1]!.pane_id = selfPane = "w5:p8";
+    h.agents[1]!.workspace_id = "w5";
+    h.agents[1]!.tokens.summary = "Canonical self summary must not enter the digest";
+    const moved = { ...me, paneId: deps.selfPane };
+    expect(await crew.reclaim(moved)).toBe(true);
+    const status = await crew.status(moved, new Map());
+    expect(status).toContain("w5:p8 idle [this session]");
+    expect(status).not.toContain("w2:p1");
+    const digest = (await crew.digest(moved))!;
+    expect(digest.text).not.toContain("w5:p8");
+    expect(digest.text).not.toContain("Canonical self summary");
+    crew.seen = digest.seen;
+    expect(await crew.digest(moved)).toBeUndefined();
+    const attach = vi.fn();
+    await syncCrew(crew, deps, moved, { children: new Map(), uniqueName: async (name) => name, attach });
+    expect(attach.mock.calls.some(([opts]) => opts.paneId === selfPane)).toBe(false);
+    expect(h.f.of("agent.start").some((c) => c.params.pane_id === selfPane)).toBe(false);
+    expect(crew.seen).toBe(digest.seen);
   });
 
   it("syncs: attaches and names the pi already in one worktree, opens the other and resumes pi there", async () => {
@@ -263,6 +360,35 @@ describe("index.ts wiring", () => {
     await p.command("bogus");
     expect(p.notes.at(-1)![0]).toBe("warning");
     await p.emit("session_shutdown");
+  });
+
+  it("updates the coordinator on a pane move after the first prompt without another prompt", async () => {
+    const x = relocatingHerdr({
+      "session.snapshot": () => ({ result: { snapshot: { workspaces: [], agents: [] } } }),
+    });
+    x.state.cwd = g.root;
+    x.state.session = "/sessions/coordinator.jsonl";
+    const p = harness(g.root);
+    vi.spyOn(p.manager, "getSessionFile").mockReturnValue(x.state.session);
+    piHerdr(p.pi, { call: x.f.call, subscribeLocation: x.subscribe, exec: realExec, pollMs: 1 });
+    try {
+      await p.emit("session_start");
+      const claimed = await p.tool().execute("claim", { action: "crew", op: "claim" }, undefined, undefined, p.ctx);
+      expect(claimed.content[0].text).toContain("This session now coordinates");
+      expect((await p.prompt()).section).toContain("You coordinate this repository's worktree sessions");
+
+      const path = join(g.root, ".git/pi-crew/coordinator.json");
+      const original = JSON.parse(readFileSync(path, "utf8"));
+      expect(original).toMatchObject({ paneId: "w1:p1", session: "/sessions/coordinator.jsonl", claimedAt: expect.any(Number) });
+      x.move("w5:p8", "w5");
+      await vi.waitFor(() => {
+        expect(JSON.parse(readFileSync(path, "utf8"))).toEqual({ ...original, paneId: "w5:p8" });
+      });
+      expect(x.f.of("agent.start")).toEqual([]);
+      expect(x.f.of("agent.rename")).toEqual([]);
+    } finally {
+      await p.emit("session_shutdown");
+    }
   });
 
   it("crew sync makes this session the coordinator; its prompts then carry one update per change, and members get the link", async () => {

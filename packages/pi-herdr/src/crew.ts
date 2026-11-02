@@ -454,19 +454,23 @@ export class Crew {
     return r.error ? undefined : name;
   }
 
-  /** At session start: a coordinator restarted in its pane, or resumed in another, keeps the role. */
-  async reclaim(me: Me, herdrName?: () => Promise<string | undefined>): Promise<boolean> {
+  /** A coordinator restarted, resumed or relocated keeps the role under the same session. */
+  async reclaim(me: Me, herdrName?: () => Promise<string | undefined>, current: () => boolean = () => true): Promise<boolean> {
     const repo = await this.repo(me.cwd);
-    if (!repo) return false;
+    if (!current() || !repo) return false;
     const c = this.coordinator(repo);
     if (!c || !this.isCoordinator(c, me)) return false;
     if (!me.name && herdrName) {
       const own = await herdrName();
+      if (!current()) return false;
       if (own) me = { ...me, name: own };
     }
+    if (!current()) return false;
     const name = await this.ensureName(repo, me, c.name);
+    if (!current()) return false;
     if (c.paneId === me.paneId && c.session === me.session && c.name === name && c.cwd === me.cwd) return true;
     const { name: _old, ...rest } = c;
+    if (!current()) return false;
     this.write(repo, { ...rest, paneId: me.paneId, ...(me.session ? { session: me.session } : {}), ...(name ? { name } : {}), cwd: me.cwd });
     return true;
   }

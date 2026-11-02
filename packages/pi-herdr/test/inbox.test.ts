@@ -537,6 +537,62 @@ describe("rate guard", () => {
   });
 });
 
+describe("agents: relocated self", () => {
+  it("uses the live pane for self guards, broadcasts, list and sender envelopes without excluding remote panes", async () => {
+    let selfPane = "w1:p1";
+    const me = { name: "me", pane_id: selfPane, agent: "pi", agent_status: "idle", cwd: "/r" };
+    const peer = { name: "peer", pane_id: "w3:p1", agent: "pi", agent_status: "idle", cwd: "/r", tokens: { inbox: "v1:99" } };
+    const remote = { name: "remote", pane_id: "w2:p1", agent: "pi", agent_status: "idle", cwd: "/r", tokens: {} };
+    const tokens: Record<string, string> = {};
+    const f = fakeCall({
+      "agent.get": (p) => {
+        const info = [me, peer].find((a) => a.name === p.target || a.pane_id === p.target);
+        return info ? { result: { agent: info } } : { error: { code: "agent_not_found", message: "no" } };
+      },
+      "agent.list": () => ({ result: { agents: [me, peer] } }),
+      "pane.process_info": () => ({ result: { process_info: { foreground_processes: [{ pid: 99 }] } } }),
+      "pane.get": () => ({ result: { pane: { tokens } } }),
+      "pane.send_text": (p) => {
+        tokens[ackTokenName(decodeEnvelope(p.text)!.id)] = "started";
+        return { result: {} };
+      },
+    });
+    const remoteCalls: string[][] = [];
+    const agents = new Agents({
+      call: f.call,
+      exec: async (_cmd, args) => {
+        remoteCalls.push(args);
+        const result = args[3] === "list" ? { agents: [remote] } : args[3] === "get" ? { agent: remote } : {};
+        return { code: 0, stdout: JSON.stringify({ result }), stderr: "" };
+      },
+      get selfPane() { return selfPane; },
+      cwd: () => "/r",
+      self: async () => ({ pane: selfPane, name: "me" }),
+      ackPollMs: 1,
+      ackTimeoutMs: 50,
+    });
+
+    expect(await agents.list()).toContain("me  w1:p1  pi idle  [this session]");
+    selfPane = "w2:p1";
+    me.pane_id = selfPane;
+    await expect(agents.send("me", "x", {})).rejects.toThrow("own pane");
+    await expect(agents.send("w2:p1", "x", {})).rejects.toThrow("own pane");
+    expect(f.of("pane.send_text")).toEqual([]);
+    expect(f.of("agent.prompt")).toEqual([]);
+    expect((await agents.targets({ names: ["me", "w2:p1", "peer"] })).infos.map((a) => a.name)).toEqual(["peer"]);
+    expect((await agents.targets({ cwdPrefix: "/r" })).infos.map((a) => a.name)).toEqual(["peer"]);
+    expect(await agents.list()).toContain("me  w2:p1  pi idle  [this session]");
+    await agents.send("peer", "hello", {});
+    expect(decodeEnvelope(f.of("pane.send_text")[0]!.params.text)?.from).toEqual({ pane: "w2:p1", name: "me" });
+
+    expect((await agents.targets({ names: ["remote"], machine: "NUC" })).infos.map((a) => a.pane_id)).toEqual(["w2:p1"]);
+    expect((await agents.targets({ cwdPrefix: "/r", machine: "NUC" })).infos.map((a) => a.pane_id)).toEqual(["w2:p1"]);
+    expect(await agents.list({ machine: "NUC" })).not.toContain("this session");
+    expect((await agents.send("remote", "hello", { machine: "NUC" })).via).toBe("prompt");
+    expect(remoteCalls.at(-1)).toEqual(["--machine", "NUC", "agent", "prompt", "w2:p1", "hello"]);
+  });
+});
+
 describe("agents: broadcast targets and list", () => {
   const entry = (name: string, pane: string, cwd: string, extra: Record<string, unknown> = {}) => ({ name, pane_id: pane, agent: "pi", agent_status: "idle", cwd, ...extra });
   const world = (agents: ReturnType<typeof entry>[]) => {

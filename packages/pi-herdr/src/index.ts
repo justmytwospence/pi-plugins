@@ -34,8 +34,9 @@
 // follow-up queued mid-turn is dropped when the user presses Esc), each awaited turn's reply once,
 // and nothing calls pi after session_shutdown (a stale runtime throws).
 import { execFile } from "node:child_process";
-import { existsSync } from "node:fs";
+import { existsSync, realpathSync } from "node:fs";
 import { hostname } from "node:os";
+import { resolve as resolvePath } from "node:path";
 import { matchesKey } from "@earendil-works/pi-tui";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
@@ -57,6 +58,7 @@ import { displayAgent, firstUserText, titleFromPrompt } from "./identity.ts";
 import { PR_FIELDS, parsePrView, prToken } from "./core/pr.ts";
 import { PaneReporter, WorkspaceReporter } from "./core/report.ts";
 import { withIntents } from "./intent.ts";
+import { SelfLocation, type LocationDependencies } from "./location.ts";
 import { PI_CHILD } from "./session.ts";
 import { registerTreeFork } from "./tree-fork.ts";
 import { blockedSummary, type SummaryRegistry, turnSummary } from "./summary.ts";
@@ -132,6 +134,8 @@ export interface HerdrDependencies {
   call?: Call;
   /** Tests: the coordinator's herdr event subscription. */
   subscribe?: CrewWatchDeps["subscribe"];
+  /** Tests: this session's pane-move subscription, independent of CrewWatch. */
+  subscribeLocation?: LocationDependencies["subscribe"];
   exec?: Exec;
   pollMs?: number;
 }
@@ -139,7 +143,14 @@ export interface HerdrDependencies {
 export default function piHerdr(pi: ExtensionAPI, dependencies: HerdrDependencies = {}) {
   const target = herdrTarget();
   if (!target) return;
-  const call = dependencies.call ?? socketCall(target.socketPath);
+  const rawCall = dependencies.call ?? socketCall(target.socketPath);
+  const location = new SelfLocation({
+    call: rawCall,
+    callerPaneId: target.paneId,
+    ...(dependencies.subscribeLocation ? { subscribe: dependencies.subscribeLocation } : dependencies.call ? {} : { socketPath: target.socketPath }),
+    onChange: (previous) => { if (previous) onLocationChange(); },
+  });
+  const call = location.call;
   const run = dependencies.exec ?? exec;
   const pane = new PaneReporter(call, target.paneId);
   // The inbox's tokens: `inbox` (refreshed) and acks (never refreshed), apart from display tokens.
@@ -153,7 +164,10 @@ export default function piHerdr(pi: ExtensionAPI, dependencies: HerdrDependencie
   let typingTimer: ReturnType<typeof setTimeout> | undefined;
   /** Whether the `typing` pane token is set (one report per burst of typing). */
   let typingOn = false;
-  const bridge = new Bridge(call, pane);
+  const bridge = new Bridge(call, pane, {
+    paneId: () => location.paneId,
+    guarded: (current) => location.guarded(current),
+  });
   const activity = new ActivityBadges();
   /** Open `herdr:waiting` holds, id to label, oldest first. */
   const waits = new Map<string, string>();
@@ -188,6 +202,8 @@ export default function piHerdr(pi: ExtensionAPI, dependencies: HerdrDependencie
     }
   };
   let workspace: WorkspaceReporter | undefined;
+  let cleaningUp = false;
+  const checkoutRoots = new Map<string, Promise<string | undefined>>();
   let refreshTimer: ReturnType<typeof setInterval> | undefined;
   let prTimer: ReturnType<typeof setInterval> | undefined;
   let prSoon: ReturnType<typeof setTimeout> | undefined;
@@ -236,21 +252,45 @@ export default function piHerdr(pi: ExtensionAPI, dependencies: HerdrDependencie
     void pane.setToken("task", title);
   };
 
-  /** This pane's space, for its tokens (`pr`, `drift`). */
+  const checkoutPath = (path: string) => {
+    try { return realpathSync(path); } catch { return resolvePath(path); }
+  };
+  /** This pane's space, never another worktree's checkout merely because we moved into it. */
   const ensureWorkspace = async (current: () => boolean): Promise<WorkspaceReporter | undefined> => {
+    const self = await location.resolve();
+    if (!self.result || !current()) return undefined;
     if (workspace) return workspace;
-    const self = await call("pane.get", { pane_id: target.paneId });
-    if (!current()) return undefined;
-    const id: string | undefined = self.result?.pane?.workspace_id;
-    if (!id) return undefined;
-    workspace ??= new WorkspaceReporter(call, id);
+    const { workspaceId: id } = self.result;
+    const epoch = generation;
+    const revision = location.revision;
+    const ws = await call("workspace.get", { workspace_id: id });
+    if (!current() || revision !== location.revision || !ws.result?.workspace) return undefined;
+    const checkout: unknown = ws.result.workspace.worktree?.checkout_path;
+    if (ws.result.workspace.worktree) {
+      if (typeof checkout !== "string" || !checkout.trim()) return undefined;
+      let root = checkoutRoots.get(cwd);
+      if (!root) {
+        root = run("git", ["rev-parse", "--show-toplevel"], cwd).then((r) => r.code === 0 && r.stdout.trim() ? checkoutPath(r.stdout.trim()) : undefined);
+        checkoutRoots.set(cwd, root);
+      }
+      const ownCheckout = await root;
+      if (!current() || revision !== location.revision || !ownCheckout || checkoutPath(checkout) !== ownCheckout) return undefined;
+    }
+    const reporter: WorkspaceReporter = new WorkspaceReporter(location.guarded(() =>
+      workspace === reporter && revision === location.revision && location.current?.workspaceId === id &&
+      (cleaningUp || (epoch === generation && active && branchCurrent())),
+    ), id);
+    workspace ??= reporter;
     return workspace;
   };
 
   const refreshPr = async () => {
     if (!branchCurrent() || !prEnabled) return;
     const epoch = generation;
-    const current = () => epoch === generation && branchCurrent();
+    const self = await location.resolve();
+    if (!self.result || epoch !== generation || !branchCurrent()) return;
+    const revision = location.revision;
+    const current = () => epoch === generation && revision === location.revision && branchCurrent();
     const ws = await ensureWorkspace(current);
     if (!ws) return;
     const r = await run("gh", ["pr", "view", "--json", PR_FIELDS], cwd);
@@ -290,8 +330,11 @@ export default function piHerdr(pi: ExtensionAPI, dependencies: HerdrDependencie
     if (driftRunning) { driftAgain = true; return; }
     driftRunning = true;
     const epoch = generation;
-    const current = () => epoch === generation && branchCurrent();
     try {
+      const self = await location.resolve();
+      if (!self.result || epoch !== generation || !branchCurrent()) return;
+      const revision = location.revision;
+      const current = () => epoch === generation && revision === location.revision && branchCurrent();
       if (!(await crewRepo()) || !current()) return;
       const [branch, base] = await Promise.all([currentBranch(run, cwd), prBase ? Promise.resolve(prBase) : defaultBase(run, cwd)]);
       const ws = await ensureWorkspace(current);
@@ -361,7 +404,9 @@ export default function piHerdr(pi: ExtensionAPI, dependencies: HerdrDependencie
     scheduleDrift(0);
     let session: string | undefined;
     try { session = ctx.sessionManager.getSessionFile(); } catch { /* stale */ }
-    await syncCoordinatorWatch({ paneId: target.paneId, ...(session ? { session } : {}), cwd: ctx.cwd });
+    await location.require();
+    if (epoch !== generation || !active) return;
+    await syncCoordinatorWatch({ paneId: location.paneId, ...(session ? { session } : {}), cwd: ctx.cwd });
   };
 
   const schedulePr = (ms: number) => {
@@ -456,24 +501,54 @@ export default function piHerdr(pi: ExtensionAPI, dependencies: HerdrDependencie
 
   /** Who this session is, for messages it sends. */
   const self = async (): Promise<Sender> => {
-    const me = await call<{ agent?: AgentInfo }>("agent.get", { target: target.paneId });
+    await location.require();
+    const me = await call<{ agent?: AgentInfo }>("agent.get", { target: location.paneId });
     let session: string | undefined;
     try { session = pi.getSessionName(); } catch { /* stale runtime */ }
     const name = me.result?.agent?.name;
     const title = (session && session !== recapName ? session : undefined) ?? promptTitle;
-    return { pane: target.paneId, ...(name ? { name } : title ? { title } : {}), host: hostname().split(".")[0], cwd };
+    if (me.error) throw new Error(`Could not identify this session: ${me.error.message}`);
+    return { pane: location.paneId, ...(name ? { name } : title ? { title } : {}), host: hostname().split(".")[0], cwd };
   };
-  const agents = new Agents({ call, exec: run, selfPane: target.paneId, cwd: () => cwd, self });
-  const crew = new Crew({ call, exec: run, selfPane: target.paneId });
+  const agents = new Agents({ call, exec: run, get selfPane() { return location.paneId; }, cwd: () => cwd, self });
+  const crew = new Crew({ call, exec: run, get selfPane() { return location.paneId; } });
   /** Whether this session's first run has checked that a coordinator it was keeps the role. */
   let crewReclaimed = false;
   /** This session as a crew sees it; `named` also asks herdr for this pane's agent name. */
   const crewMe = async (ctx: ExtensionContext, named = false): Promise<Me> => {
     let session: string | undefined;
     try { session = ctx.sessionManager.getSessionFile(); } catch { /* stale runtime */ }
-    const name = named ? (await call<{ agent?: AgentInfo }>("agent.get", { target: target.paneId })).result?.agent?.name : undefined;
-    return { paneId: target.paneId, ...(session ? { session } : {}), ...(name ? { name } : {}), cwd: ctx.cwd };
+    await location.require();
+    const name = named ? (await call<{ agent?: AgentInfo }>("agent.get", { target: location.paneId })).result?.agent?.name : undefined;
+    return { paneId: location.paneId, ...(session ? { session } : {}), ...(name ? { name } : {}), cwd: ctx.cwd };
   };
+
+  /** Layout changes do not replace this conversation or any of its awaited work. */
+  function onLocationChange() {
+    workspace = undefined;
+    prBase = undefined;
+    crewReclaimed = false;
+    bridge.relocated();
+    if (!active) return;
+    const epoch = generation;
+    const revision = location.revision;
+    const current = () => active && epoch === generation && revision === location.revision;
+    schedulePr(0);
+    scheduleDrift(0);
+    // Never re-enter the resolver from its synchronous change callback.
+    queueMicrotask(() => {
+      if (!current() || !lastCtx) return;
+      const ctx = lastCtx;
+      void (async () => {
+        const me = await crewMe(ctx, true);
+        if (!current()) return;
+        const reclaimed = await crew.reclaim(me, undefined, current);
+        if (!current()) return;
+        crewReclaimed = true;
+        if (reclaimed) await syncCoordinatorWatch(me);
+      })().catch(() => undefined);
+    });
+  }
 
   const draftText = () => {
     try { return lastCtx?.ui.getEditorText() ?? ""; } catch { return ""; }
@@ -561,7 +636,7 @@ export default function piHerdr(pi: ExtensionAPI, dependencies: HerdrDependencie
       return sent && { outcome: sent.ack ?? "unconfirmed" };
     },
     callFor: (machine) => agents.endpoint(machine),
-    selfPane: target.paneId,
+    get selfPane() { return location.paneId; },
     exec: run,
     isCurrent: branchCurrent,
     ...(dependencies.pollMs ? { pollMs: dependencies.pollMs } : {}),
@@ -683,6 +758,7 @@ export default function piHerdr(pi: ExtensionAPI, dependencies: HerdrDependencie
     endExternals("the conversation moved to another branch");
     children.shutdown();
     generation++;
+    workspace = undefined;
     restoreBranch(ctx);
   });
 
@@ -701,6 +777,8 @@ export default function piHerdr(pi: ExtensionAPI, dependencies: HerdrDependencie
     owed.clear();
     clearTimers();
     stopInbox();
+    location.stop();
+    workspace = undefined;
     blockedCount = 0;
     if (ctx.mode !== "tui") {
       if (hadSource) {
@@ -711,10 +789,13 @@ export default function piHerdr(pi: ExtensionAPI, dependencies: HerdrDependencie
       if (tools.includes(TOOL)) pi.setActiveTools(tools.filter((t) => t !== TOOL));
       return;
     }
-    active = true;
+    const epoch = generation;
     lastCtx = ctx;
-    anchorBranch();
     cwd = ctx.cwd;
+    await location.start();
+    if (epoch !== generation) return;
+    active = true;
+    anchorBranch();
     modelId = ctx.model?.id;
     thinking = pi.getThinkingLevel();
     promptTitle = undefined;
@@ -732,7 +813,8 @@ export default function piHerdr(pi: ExtensionAPI, dependencies: HerdrDependencie
         else if (inbox.held.length) scheduleFlush();
         return taken;
       });
-      void inboxPane.setToken(INBOX_TOKEN, inboxTokenValue(process.pid), INBOX_TTL_MS);
+      await inboxPane.setToken(INBOX_TOKEN, inboxTokenValue(process.pid), INBOX_TTL_MS);
+      if (!active || epoch !== generation) return;
       // Messages held when the last runtime ended (/reload, /new) go in now.
       if (inbox.held.length) {
         ctx.ui.notify(`Delivering ${inbox.held.length} held message${inbox.held.length === 1 ? "" : "s"} from other agents.`, "info");
@@ -747,9 +829,13 @@ export default function piHerdr(pi: ExtensionAPI, dependencies: HerdrDependencie
     void startCrewWatches(ctx).catch(() => undefined);
 
     refreshTimer = setInterval(() => {
-      void pane.refresh();
-      void inboxPane.refresh();
-      void workspace?.refresh();
+      const epoch = generation;
+      void location.resolve().then((r) => {
+        if (!r.result || !active || epoch !== generation) return;
+        void pane.refresh();
+        void inboxPane.refresh();
+        void workspace?.refresh();
+      });
     }, 15_000);
     refreshTimer.unref?.();
     if (prEnabled) {
@@ -761,7 +847,13 @@ export default function piHerdr(pi: ExtensionAPI, dependencies: HerdrDependencie
   });
 
   pi.on("session_shutdown", async () => {
-    if (!active) return;
+    if (!active) {
+      // Shutdown can arrive while session_start is still resolving the caller.
+      generation++;
+      lastCtx = undefined;
+      location.stop();
+      return;
+    }
     const hadSource = lastCtx?.mode === "tui";
     childrenActivity.dispose();
     endExternals("the session ended");
@@ -778,11 +870,18 @@ export default function piHerdr(pi: ExtensionAPI, dependencies: HerdrDependencie
     owed.clear();
     clearTimers();
     stopInbox();
-    await bridge.reset();
-    await inboxPane.clearTokens();
-    await ackPane.clearTokens();
-    await pane.clearAll();
-    await workspace?.clearTokens();
+    cleaningUp = true;
+    try {
+      await bridge.reset();
+      await inboxPane.clearTokens();
+      await ackPane.clearTokens();
+      await pane.clearAll();
+      await workspace?.clearTokens();
+    } finally {
+      cleaningUp = false;
+      workspace = undefined;
+      location.stop();
+    }
   });
 
   pi.on("model_select", (event) => {
@@ -803,14 +902,17 @@ export default function piHerdr(pi: ExtensionAPI, dependencies: HerdrDependencie
     // the coordinator's update on each prompt the user sends it.
     const epoch = generation;
     const me = await crewMe(ctx);
+    const revision = location.revision;
+    const current = () => epoch === generation && revision === location.revision && branchCurrent();
+    if (!current()) return undefined;
     if (!crewReclaimed) {
       // A coordinator restarted in its pane, or resumed in another, keeps its crew.
       crewReclaimed = true;
-      if (await crew.reclaim(me, async () => (await crewMe(ctx, true)).name).catch(() => false)) await syncCoordinatorWatch(me).catch(() => undefined);
+      if (await crew.reclaim(me, async () => (await crewMe(ctx, true)).name, current).catch(() => false)) await syncCoordinatorWatch(me).catch(() => undefined);
     }
     try {
       const section = await crew.section(me);
-      if (section && epoch === generation) event.systemPromptOptions.sections[CREW_SECTION] = section;
+      if (section && current()) event.systemPromptOptions.sections[CREW_SECTION] = section;
     } catch { /* no crew this run */ }
     if (event.messageType !== "user") return undefined;
     let digest: Awaited<ReturnType<Crew["digest"]>>;
@@ -819,7 +921,7 @@ export default function piHerdr(pi: ExtensionAPI, dependencies: HerdrDependencie
     } catch {
       return undefined;
     }
-    if (!digest || epoch !== generation || !branchCurrent()) return undefined;
+    if (!digest || !current()) return undefined;
     const seen = digest.seen;
     crew.seen = seen;
     safely(() => { pi.appendEntry(SEEN_ENTRY, seen); anchorBranch(); });
@@ -827,8 +929,8 @@ export default function piHerdr(pi: ExtensionAPI, dependencies: HerdrDependencie
   });
   // A turn's summary replaces the last one; it is cleared as a run starts so an alert never shows
   // a stale one, and set before settling, so it is there when herdr's integration reports done.
-  pi.on("agent_start", () => {
-    if (active) void pane.setToken("summary", undefined);
+  pi.on("agent_start", async () => {
+    if (active) await pane.setToken("summary", undefined);
   });
   pi.on("agent_before_settle", async (_event, ctx) => {
     if (!active || ctx.mode !== "tui") return undefined;
@@ -876,7 +978,7 @@ export default function piHerdr(pi: ExtensionAPI, dependencies: HerdrDependencie
       await startCrewWatches(ctx);
       return claimed.text;
     }
-    const synced = await syncCrew(crew, { call, exec: run, selfPane: target.paneId }, me, {
+    const synced = await syncCrew(crew, { call, exec: run, get selfPane() { return location.paneId; } }, me, {
       children: children.records,
       uniqueName: (wanted) => children.uniqueName(wanted),
       attach: (opts) => children.attach(opts),
@@ -888,11 +990,13 @@ export default function piHerdr(pi: ExtensionAPI, dependencies: HerdrDependencie
 
   registerTreeFork(pi, {
     call,
-    selfPane: target.paneId,
+    get selfPane() { return location.paneId; },
+    resolveSelfPane: async () => (await location.require()).paneId,
     uniqueName: (wanted) => children.uniqueName(wanted),
     runtimeCurrent: () => {
       const epoch = generation;
-      return () => epoch === generation && branchCurrent();
+      const revision = location.revision;
+      return () => epoch === generation && revision === location.revision && branchCurrent();
     },
   });
 
@@ -972,6 +1076,7 @@ export default function piHerdr(pi: ExtensionAPI, dependencies: HerdrDependencie
       "Herdr: talk to any agent in herdr (on this machine, or on a saved herdr machine with `machine`) and start persistent, human-led pi sessions (children) for an explicit interactive-session request or a clear handoff to the user. Children are not for delegated work whose purpose is to report back to this session: use a headless subagent instead, even for long or multi-step tasks. action=list shows the agents. send (name, message; delivery when the agent is working) messages any agent; a pi with pi-herdr gets it through its inbox, which never touches the draft in its editor, and the result says whether it started a turn, was steered, queued, held (a dialog is open, or its user is typing) or deferred (it has had many messages from you without its user answering). With await_reply, any agent's answer to that message arrives as a message when its turn ends, like a child's; `bg_wait herdr:<name>` waits for it, alone or with others. send with `names` or `cwd_prefix` instead of `name` broadcasts to several agents at once, with one result line each. read (name) returns its last reply or its screen; wait (name) blocks until its turn ends, then reads it (prefer await_reply). spawn takes `task` (plus optional name, where, branch, model, thinking, focus): a tab shares this checkout in the existing space; a split is for side-by-side interaction; a worktree gets its own space and requires a user-requested independent branch/checkout. A child's replies arrive as messages, so do not poll or wait on it. interrupt and close act on children only. crew (op status|claim|sync) coordinates this repository's worktree sessions from this session: status shows each one's state, PR and last turn; sync opens every worktree's space, resumes its pi and makes it your child; standing rules for all of them go in the directives file it names.",
     promptSnippet: "Message, read and wait on any herdr agent; start persistent human-led pi sessions in herdr for interactive requests or user handoffs, not report-back subagents",
     promptGuidelines: [
+      "A feature/PR worktree request normally keeps this session: move its existing Herdr pane into the worktree's grouped child space rather than spawning a replacement and leaving an idle coordinator. pi-herdr follows pane relocation automatically; moving layout does not switch Pi's working directory or checkout.",
       "Start a herdr child (herdr action=spawn) only for an explicit interactive-session request or a clear persistent, human-led handoff that the user will continue independently. Duration, complexity, the user possibly wanting to watch, and a child's ability to report back are not reasons to use one instead of a headless subagent.",
       "For an interactive handoff sharing the current checkout and branch, use where=tab in the existing Herdr space. Tabs and splits share files; do not treat them as isolated parallel editors. Use where=split only for deliberate side-by-side interaction or when requested, and preserve focus unless asked to switch.",
       "Use where=worktree for an independent branch/checkout only when the user requests a worktree or branch isolation; otherwise ask before creating one. It opens the checkout in its own Herdr space (or adds a tab there if already open). Do not create a new space or worktree merely because work is delegated, long, or parallel.",
@@ -987,6 +1092,9 @@ export default function piHerdr(pi: ExtensionAPI, dependencies: HerdrDependencie
     async execute(_id, params, signal, _onUpdate, ctx) {
       if (!branchCurrent()) throw new Error("The herdr tool needs a current interactive pi session inside herdr.");
       if (!branchAnchor) anchorBranch();
+      const epoch = generation;
+      await location.require();
+      if (epoch !== generation || !branchCurrent()) throw new Error("The herdr session changed while resolving its current pane.");
       const text = (t: string) => ({ content: [{ type: "text" as const, text: t }], details: {} });
       const need = (v: string | undefined, what: string) => {
         if (!v?.trim()) throw new Error(`action=${params.action} needs \`${what}\`.`);
@@ -1026,7 +1134,7 @@ export default function piHerdr(pi: ExtensionAPI, dependencies: HerdrDependencie
         if (known) return { what: await viaRecord(known, message, delivery), awaited: known };
         if (params.await_reply) {
           const info = await agents.get(name, machine);
-          if (!machine && info.pane_id === target.paneId) throw new Error("That is this session's own pane.");
+          if (!machine && info.pane_id === location.paneId) throw new Error("That is this session's own pane.");
           const rec = children.adopt({ name: info.name ?? info.pane_id!, paneId: info.pane_id!, ...(machine ? { machine } : {}), cwd: info.cwd ?? ctx.cwd, task: message });
           try {
             return { what: await viaRecord(rec, message, delivery), awaited: rec };

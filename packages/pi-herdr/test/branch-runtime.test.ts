@@ -6,6 +6,7 @@ import { FORK_BOUNDARY } from "../src/fork-session.ts";
 import piHerdr from "../src/index.ts";
 import { PI_CHILD } from "../src/session.ts";
 import { fakeCall } from "./core/fake.ts";
+import { relocatingHerdr } from "./relocation-fixture.ts";
 
 beforeEach(() => {
   vi.useFakeTimers(); vi.setSystemTime(1_000);
@@ -493,4 +494,103 @@ test("repeated session_start cancels refresh/PR timers and releases old holds be
   await vi.advanceTimersByTimeAsync(300_000);
   expect(x.f.log).toHaveLength(calls);
   expect(gh()).toHaveLength(3);
+});
+
+test("moving a busy parent retains owed reply identity and reload delivers it only once", async () => {
+  const p = harness();
+  const x = relocatingHerdr();
+  const pending = { ...rec("worker", false), turnId: "unmoved-child-turn", pendingReply: "reply owed before parent moved" };
+  save(p, pending);
+  p.state.idle = false;
+  piHerdr(p.pi, { ...deps(x.f.call), subscribeLocation: x.subscribe });
+  await p.emit("session_start");
+  const branch = structuredClone(p.manager.getBranch());
+  const savedCalls = p.rawPi.appendEntry.mock.calls.length;
+  const section = p.section();
+  x.move("parent-now-here", "new-space");
+  await drain();
+  expect(p.manager.getBranch()).toEqual(branch);
+  expect(p.rawPi.appendEntry).toHaveBeenCalledTimes(savedCalls);
+  expect(p.section()).toBe(section);
+  expect(p.emitted.some(([channel]) => channel === ACTIVITY_GONE)).toBe(false);
+  expect(p.messages).toEqual([]);
+  p.state.idle = true;
+  await p.emit("agent_settled");
+  await p.emit("agent_settled");
+  expect(p.messages).toHaveLength(1);
+  expect(p.messages[0].message.content).toBe(pending.pendingReply);
+  expect(JSON.parse(p.messages[0].message.details.turnKey)).toEqual([pending.name, pending.paneId, pending.createdAt, pending.turnId]);
+  await p.emit("session_shutdown");
+  // Restore an older record; its unchanged child's turn receipt still wins after parent relocation.
+  save(p, pending);
+  const fresh = harness(p.manager);
+  piHerdr(fresh.pi, { ...deps(x.f.call), subscribeLocation: x.subscribe });
+  await fresh.emit("session_start");
+  await fresh.emit("agent_settled");
+  expect(fresh.messages).toEqual([]);
+  await fresh.emit("session_shutdown");
+  expect(x.f.of("agent.start")).toEqual([]);
+  expect(vi.getTimerCount()).toBe(0);
+});
+
+test("an old deferred PR result cannot publish into either workspace after relocation", async () => {
+  vi.stubEnv("PI_HERDR_PR", "1");
+  const p = harness();
+  const x = relocatingHerdr();
+  const old = deferred<{ code: number; stdout: string; stderr: string }>();
+  let ghCalls = 0;
+  const pr = (number: number) => ({ code: 0, stdout: JSON.stringify({ number, state: "OPEN", isDraft: false, baseRefName: "main", statusCheckRollup: [] }), stderr: "" });
+  const run = vi.fn(async (cmd: string) => cmd === "gh" ? (++ghCalls === 1 ? old.promise : pr(2)) : { code: 0, stdout: "", stderr: "" });
+  piHerdr(p.pi, { ...deps(x.f.call), subscribeLocation: x.subscribe, exec: run });
+  await p.emit("session_start");
+  await vi.advanceTimersByTimeAsync(2_000);
+  expect(ghCalls).toBe(1);
+  const mark = x.f.log.length;
+  x.move("destination-pane", "destination-space");
+  await drain();
+  old.resolve(pr(1));
+  await drain();
+  const reports = x.f.log.slice(mark).filter((c) => c.method === "workspace.report_metadata");
+  expect(reports.length).toBeGreaterThan(0);
+  expect(reports.every((c) => c.params.workspace_id === "destination-space")).toBe(true);
+  expect(reports.some((c) => String(c.params.tokens?.pr).includes("#2"))).toBe(true);
+  expect(reports.some((c) => String(c.params.tokens?.pr).includes("#1"))).toBe(false);
+  await p.emit("session_shutdown");
+  expect(x.f.log.slice(mark).filter((c) => c.method === "workspace.report_metadata").every((c) => c.params.workspace_id === "destination-space")).toBe(true);
+});
+
+test("a different-checkout destination is not polluted and a compatible move recomputes workspace tokens", async () => {
+  vi.stubEnv("PI_HERDR_PR", "1");
+  const p = harness();
+  let checkout = "/repo";
+  const x = relocatingHerdr({ "workspace.get": (params) => ({ result: { workspace: { workspace_id: params.workspace_id, worktree: { checkout_path: checkout } } } }) });
+  let ghCalls = 0;
+  const run = vi.fn(async (cmd: string, args: string[], cwd?: string) => {
+    if (cmd === "gh") return { code: 0, stdout: JSON.stringify({ number: ++ghCalls, state: "OPEN", baseRefName: "main", statusCheckRollup: [] }), stderr: "" };
+    return { code: 0, stdout: args.includes("--show-toplevel") ? cwd! : "", stderr: "" };
+  });
+  piHerdr(p.pi, { ...deps(x.f.call), subscribeLocation: x.subscribe, exec: run });
+  await p.emit("session_start");
+  await vi.advanceTimersByTimeAsync(2_000);
+  expect(ghCalls).toBe(1);
+  checkout = "/repo/.worktrees/different";
+  const mark = x.f.log.length;
+  x.move("different-checkout-pane", "different-space");
+  await vi.advanceTimersByTimeAsync(30_000);
+  expect(p.ctx.cwd).toBe("/repo");
+  expect(ghCalls).toBe(1);
+  expect(x.f.log.slice(mark).filter((c) => c.method === "workspace.report_metadata")).toEqual([]);
+  checkout = "/repo";
+  x.move("compatible-pane", "compatible-space");
+  await drain();
+  expect(ghCalls).toBe(2);
+  expect(x.f.of("workspace.report_metadata").at(-1)?.params).toMatchObject({ workspace_id: "compatible-space", tokens: { pr: expect.stringContaining("#2") } });
+  // Same-pane session replacement must also invalidate the cache and verify the new checkout.
+  checkout = "/another-checkout";
+  const newCtx = { ...p.ctx, cwd: checkout };
+  await p.emit("session_start", { reason: "switch" }, newCtx);
+  await vi.advanceTimersByTimeAsync(2_000);
+  expect(run.mock.calls.some(([cmd, args, cwd]) => cmd === "git" && args.includes("--show-toplevel") && cwd === checkout)).toBe(true);
+  expect(ghCalls).toBe(3);
+  await p.emit("session_shutdown", {}, newCtx);
 });
