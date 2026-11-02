@@ -283,7 +283,7 @@ export class Inbox {
     if (this.seen.has(env.id)) return undefined;
     this.seen.add(env.id);
     if (this.seen.size > 500) this.seen.delete(this.seen.values().next().value!);
-    const who = env.from.name ?? env.from.title ?? env.from.pane;
+    const who = env.from.name || (env.from.title ? `the pi session "${env.from.title}"` : "an unnamed agent");
     const idle = this.host.isIdle() === true;
     let outcome: Outcome;
     let reason: Reason | undefined;

@@ -23,7 +23,7 @@ import {
   type TuiMouseEventResult,
 } from "@earendil-works/pi-tui";
 import { EDITOR_MODE, EDITOR_SURFACE, INPUT_CONTEXT, requestEditorFactory, requestWorkingStats, type EditorModeContext, type PinnedPrompt, type PromptPinService, type StashController, type SuiteEditor, type WorkingCounter } from "./contract.ts";
-import { contentText, PiChat } from "./pi-chat.ts";
+import { contentText, PiChat, type ToolRenderers } from "./pi-chat.ts";
 import { isNoteMarker } from "./headsup/thread.ts";
 import { displayMessage } from "./quiz/protocol.ts";
 
@@ -46,6 +46,8 @@ export function fitStatus(parts: StatusPart[], width: number, separator: string)
 }
 
 export interface PanelHost {
+  /** Renderer definitions from Sidebar's own live session, if present. */
+  toolDefinition?(name: string): ToolRenderers | undefined;
   /** Title-bar parts: what main is doing, cache figures. */
   status(theme: Theme): StatusPart[];
   /** A question (or a `/` command) from the composer. */
@@ -359,7 +361,7 @@ export class SidebarPanel {
   private recheck = false;
 
   constructor(private readonly tui: TUI, private readonly theme: () => Theme, private readonly host: PanelHost) {
-    this.chat = new PiChat(() => theme(), { cwd: host.cwd, userMessagesFromEvents: true, requestRender: () => tui.requestRender(), displayAssistant: displayMessage });
+    this.chat = new PiChat(() => theme(), { cwd: host.cwd, toolDefinition: (name) => host.toolDefinition?.(name), userMessagesFromEvents: true, requestRender: () => tui.requestRender(), displayAssistant: displayMessage });
     this.syncThinking();
     const body: Component = {
       render: (width) => {

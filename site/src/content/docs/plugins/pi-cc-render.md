@@ -27,6 +27,8 @@ Example of a single card and a grouped card (illustration, not a screenshot):
   ↳ 3 tools · click to show more
 ```
 
+Generic tool arguments expand as labeled fields and ordered items, including literal multiline strings; collapsed agent rows use descriptions or honest generic labels rather than treating routing IDs as names. These are display changes only: tool arguments and literal result text remain unchanged. Tools can opt into their own call or result renderer with `ccstyleOwnCall` or `ccstyleOwnResult`; `excludeRenderers` still keeps selected tools entirely out of restyling.
+
 Entry: `packages/pi-cc-render/src/index.ts`. Enable it through [Install & select](/guides/install/). Every suite entry loads by default, and one Git pin versions the selected components together. The suite manifest also registers two themes, `cc-dark` and `cc-light`. Choose either with `/theme` or the `theme` setting. An explicit selection that lists `themes` should include `packages/pi-cc-render/themes/cc-dark.json` and `packages/pi-cc-render/themes/cc-light.json` if you want them.
 
 The context map and resource listings do not alter stored messages, prompt accounting or tool behavior. Clicking a model can switch the current session's model; clicking an MCP server opens Pi's native manager, where only an action you choose changes its state. One separate exception concerns `write`: the component re-registers it on `session_start` with a wrapper that records the previous file contents, so it can show the change as a diff. If another extension already owns `write`, this component yields and shows a notice instead of a diff.

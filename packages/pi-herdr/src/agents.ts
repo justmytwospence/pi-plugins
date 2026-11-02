@@ -38,6 +38,12 @@ export interface AgentInfo {
   completion_seq?: number;
 }
 
+/** Presentation only: titles and pane addresses never replace Herdr's canonical name. */
+export function agentLabel(info: AgentInfo | undefined): string {
+  if (!info) return "Agent unavailable";
+  return typeof info.name === "string" && info.name.trim() ? info.name : "Unnamed agent";
+}
+
 const SETTLED = new Set(["idle", "done", "blocked"]);
 /** A broadcast reaches at most this many agents. */
 export const MAX_BROADCAST = 20;
@@ -152,7 +158,7 @@ export class Agents {
     const pid = parseInboxToken(info.tokens?.[INBOX_TOKEN]);
     if (pid === undefined || !info.pane_id) return "no";
     const r = await this.endpoint(machine)<{ process_info?: { foreground_processes?: { pid?: number }[] } }>("pane.process_info", { pane_id: info.pane_id });
-    if (!r.result?.process_info) throw new Error(`herdr could not tell what runs in front in ${info.name ?? info.pane_id}'s pane, so nothing was sent: ${errorText(r)}`);
+    if (!r.result?.process_info) throw new Error(`herdr could not tell what runs in front in ${agentLabel(info)}'s pane, so nothing was sent: ${errorText(r)}`);
     return r.result.process_info.foreground_processes?.some((p) => p.pid === pid) ? "yes" : "background";
   }
 
@@ -164,11 +170,11 @@ export class Agents {
   async sendInbox(info: AgentInfo, text: string, delivery: Delivery, opts: { machine?: string; awaitsReply?: boolean } = {}): Promise<{ outcome?: Outcome; reason?: string; ack?: string } | undefined> {
     const state = await this.inboxState(info, opts.machine);
     if (state === "no") return undefined;
-    if (state === "background") throw new Error(`${info.name ?? info.pane_id}'s pi is not in the foreground of its pane (suspended with Ctrl+Z, or a program runs on top of it), so nothing was sent: typing there would reach that program. Try again once pi is back in front.`);
+    if (state === "background") throw new Error(`${agentLabel(info)}'s pi is not in the foreground of its pane (suspended with Ctrl+Z, or a program runs on top of it), so nothing was sent: typing there would reach that program. Try again once pi is back in front.`);
     const call = this.endpoint(opts.machine);
     const env: Envelope = { v: 1, id: newMessageId(), from: await this.deps.self(), text, delivery, ...(opts.awaitsReply ? { awaitsReply: true } : {}) };
     const r = await call("pane.send_text", { pane_id: info.pane_id, text: encodeEnvelope(env) }, 10_000);
-    if (r.error) throw new Error(`herdr could not send to ${info.name ?? info.pane_id}: ${errorText(r)}`);
+    if (r.error) throw new Error(`herdr could not send to ${agentLabel(info)}: ${errorText(r)}`);
     const key = ackTokenName(env.id);
     const step = this.deps.ackPollMs ?? (opts.machine ? 500 : 150);
     const deadline = Date.now() + (this.deps.ackTimeoutMs ?? (opts.machine ? 6_000 : 3_000));
@@ -186,7 +192,7 @@ export class Agents {
     if (Buffer.byteLength(text) > MAX_MESSAGE_BYTES) throw new Error(`The message is over ${MAX_MESSAGE_BYTES / 1024} KB. Write it to a file and send the path instead.`);
     const info = await this.get(name, opts.machine);
     if (!opts.machine && info.pane_id === this.deps.selfPane) throw new Error("That is this session's own pane.");
-    const label = info.name ?? info.pane_id!;
+    const label = agentLabel(info);
     const status = info.agent_status;
     // Steering derails the turn it lands in: that is the sender's choice to make, never a default.
     if ((status === "working" || status === "blocked") && !opts.delivery) throw new Error(`${label} is ${status} on a turn now, so nothing was sent. Read it (action=read) if you need to know what it is doing, then send again with delivery=steer to put the message into that turn (a correction to that work), or delivery=queue for after it (new or separate work).`);
@@ -203,7 +209,7 @@ export class Agents {
   /** The agent's last reply (local pi, idle) or its screen, labeled as such. */
   async read(name: string, opts: { machine?: string; lines?: number } = {}): Promise<string> {
     const info = await this.get(name, opts.machine);
-    const label = info.name ?? info.pane_id!;
+    const label = agentLabel(info);
     const status = info.agent_status ?? "unknown";
     const file = !opts.machine && info.agent === "pi" && info.agent_session?.kind === "path" ? info.agent_session.value : undefined;
     const settled = status === "idle" || status === "done";
@@ -226,7 +232,7 @@ export class Agents {
    */
   async wait(name: string, opts: { machine?: string; timeoutMs?: number; signal?: AbortSignal } = {}): Promise<string> {
     const first = await this.get(name, opts.machine);
-    const label = first.name ?? first.pane_id!;
+    const label = agentLabel(first);
     const step = this.deps.waitPollMs ?? (opts.machine ? 3_000 : 1_000);
     const deadline = Date.now() + Math.min(Math.max(opts.timeoutMs ?? 600_000, 1_000), 3_600_000);
     const startGrace = Date.now() + 5_000;
@@ -298,7 +304,7 @@ export class Agents {
       ].filter(Boolean).join(", ");
       const cwd = a.cwd && home && a.cwd.startsWith(home) ? `~${a.cwd.slice(home.length)}` : a.cwd ?? "";
       const summary = a.tokens?.summary?.replace(/\s+/gu, " ").trim();
-      return `${a.name ?? "-"}  ${a.pane_id}  ${a.agent ?? "?"} ${a.agent_status ?? "?"}${marks ? `  [${marks}]` : ""}  ${cwd}  ${(a.title ?? "").replace(/\s+/gu, " ").slice(0, 60)}${summary ? `  | ${summary}` : ""}`;
+      return `${agentLabel(a)}  ${a.agent ?? "unknown agent type"} ${a.agent_status ?? "status unavailable"}${marks ? `  [${marks}]` : ""}${a.pane_id ? `  [pane: ${a.pane_id}]` : "  [pane unavailable]"}  ${cwd}  ${(a.title ?? "").replace(/\s+/gu, " ").slice(0, 60)}${summary ? `  | ${summary}` : ""}`;
     }).join("\n");
   }
 }

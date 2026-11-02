@@ -292,6 +292,7 @@ export class SidebarController {
       this.tui = tui;
       this.panel = new SidebarPanel(tui, () => this.theme ?? ctx.ui.theme, {
         cwd: ctx.cwd,
+        toolDefinition: (name) => this.agent.toolDefinition(name),
         events: this.pi.events,
         pinService: () => (this.pinService ??= requestPinService(this.pi.events)),
         stash: () => (this.stashController ??= requestStash(this.pi.events, {

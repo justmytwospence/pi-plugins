@@ -43,7 +43,7 @@ import { transcriptCheckpoint } from "./transcript-contract.ts";
 import { ACTIVITY_CHANGED, ACTIVITY_GONE, ACTIVITY_HOST, ACTIVITY_SECTION } from "./activity.ts";
 import { ACTIVITY_CHANNELS, type HoldEvent } from "./core/activity.ts";
 import { ActivityBadges } from "./activity-badges.ts";
-import { Agents, type AgentInfo, MAX_BROADCAST, outcomeText, TYPING_TOKEN } from "./agents.ts";
+import { Agents, type AgentInfo, agentLabel, MAX_BROADCAST, outcomeText, TYPING_TOKEN } from "./agents.ts";
 import { Bridge, type NotifyEvent, type SplitEvent, type TokenEvent } from "./bridge.ts";
 import { ChildrenActivity } from "./children-activity.ts";
 import { BASE_TOKEN, Crew, CREW_MESSAGE, CrewWatch, type CrewWatchDeps, DRIFT_TOKEN, type Me, type Repo, SECTION as CREW_SECTION, SEEN_ENTRY, type Seen, syncCrew } from "./crew.ts";
@@ -1007,18 +1007,22 @@ export default function piHerdr(pi: ExtensionAPI, dependencies: HerdrDependencie
       const replyTail = (rec: ChildRecord) => `Its reply arrives as a message (\`bg_wait herdr:${rec.name}\` waits on it).`;
       const NO_REPLY = "Its reply is not sent back: send with await_reply to receive it, or use action=read (or wait).";
       /** One message to a child, or to an agent whose reply is awaited, through its record. */
-      const viaRecord = async (rec: ChildRecord, message: string, delivery: Delivery | undefined): Promise<string> => {
+      const viaRecord = async (rec: ChildRecord, message: string, delivery: Delivery | undefined, resolved?: AgentInfo): Promise<string> => {
+        // Record names remain routing handles, not necessarily canonical identities.
         if (!delivery) {
           const status = await children.status(rec.name);
           if (status === "working" || status === "blocked") {
-            throw new Error(`${rec.name} is ${status} on a turn now, so nothing was sent. Read it (action=read) if you need to know what it is doing, then send again with delivery=steer to put the message into its current turn (a correction to that work), or delivery=queue to send it when the turn ends (new or separate work).`);
+            const label = agentLabel(resolved ?? await agents.get(rec.paneId, rec.machine).catch(() => undefined));
+            throw new Error(`${label} (routing handle: ${rec.name}) is ${status} on a turn now, so nothing was sent. Read it (action=read) if you need to know what it is doing, then send again with delivery=steer to put the message into its current turn (a correction to that work), or delivery=queue to send it when the turn ends (new or separate work).`);
           }
         }
         const { outcome, delivered } = await children.send(rec.name, message, delivery);
-        if (outcome === "queued") return `Queued for ${rec.name}: it is still working and gets the message when its current turn ends.`;
-        if (delivered) return `Sent to ${rec.name} through its inbox (its draft is untouched): ${outcomeText(rec.name, delivered === "unconfirmed" ? undefined : delivered)}`;
-        if (rec.peer) return `Typed into ${rec.name}'s terminal with herdr agent prompt: it has no pi-herdr inbox, so a draft in its editor would have gone in with the message.`;
-        return outcome === "steered" ? `Sent to ${rec.name} mid-turn: it steers the turn it is working on.` : `Sent to ${rec.name}.`;
+        // Identity lookup follows delivery so it cannot delay lifecycle ownership checks.
+        const label = agentLabel(resolved ?? await agents.get(rec.paneId, rec.machine).catch(() => undefined));
+        if (outcome === "queued") return `Queued for ${label}: it is still working and gets the message when its current turn ends.`;
+        if (delivered) return `Sent to ${label} through its inbox (its draft is untouched): ${outcomeText(label, delivered === "unconfirmed" ? undefined : delivered)}`;
+        if (rec.peer) return `Typed into ${label}'s terminal with herdr agent prompt: it has no pi-herdr inbox, so a draft in its editor would have gone in with the message.`;
+        return outcome === "steered" ? `Sent to ${label} mid-turn: it steers the turn it is working on.` : `Sent to ${label}.`;
       };
       /** One message to one agent. Returns what happened, in words; the reply's tail is the caller's. */
       const sendOne = async (name: string, message: string, delivery: Delivery | undefined): Promise<{ what: string; awaited?: ChildRecord }> => {
@@ -1029,14 +1033,14 @@ export default function piHerdr(pi: ExtensionAPI, dependencies: HerdrDependencie
           if (!machine && info.pane_id === target.paneId) throw new Error("That is this session's own pane.");
           const rec = children.adopt({ name: info.name ?? info.pane_id!, paneId: info.pane_id!, ...(machine ? { machine } : {}), cwd: info.cwd ?? ctx.cwd, task: message });
           try {
-            return { what: await viaRecord(rec, message, delivery), awaited: rec };
+            return { what: await viaRecord(rec, message, delivery, info), awaited: rec };
           } catch (error) {
             children.discard(rec);
             throw error;
           }
         }
         const r = await agents.send(name, message, { delivery, machine });
-        const label = r.info.name ?? r.info.pane_id!;
+        const label = agentLabel(r.info);
         if (r.via === "inbox") return { what: `Sent to ${label} through its inbox (its draft is untouched): ${outcomeText(label, r.outcome, r.reason)}` };
         return { what: `Typed into ${label}'s terminal with herdr agent prompt: ${r.info.agent ?? "the agent"} there has no pi-herdr inbox, so a draft in its editor would have gone in with the message.` };
       };
@@ -1055,7 +1059,8 @@ export default function piHerdr(pi: ExtensionAPI, dependencies: HerdrDependencie
             cwd: ctx.cwd,
           });
           const place = where === "worktree" ? `worktree ${rec.branch} (${rec.cwd})` : where === "split" ? "a split beside this pane" : "a new tab";
-          return text(`Started herdr child "${rec.name}" in ${place}, pane ${rec.paneId}, and sent it the task. Its reply arrives as a message when its turn ends; do not poll.`);
+          const identity = agentLabel(await agents.get(rec.paneId).catch(() => undefined));
+          return text(`Started herdr child ${identity} in ${place} and sent it the task. Routing handle: ${rec.name}; pane: ${rec.paneId}. Its reply arrives as a message when its turn ends; do not poll.`);
         }
         case "send": {
           const message = need(params.message, "message");
@@ -1065,9 +1070,9 @@ export default function piHerdr(pi: ExtensionAPI, dependencies: HerdrDependencie
             if (!infos.length && !missing.length) return text(`No agents${params.cwd_prefix ? ` work under ${params.cwd_prefix}` : ""} to send to.`);
             // Never steer by default: if any target is busy and no delivery was chosen, nothing goes out.
             const busy = infos.filter((i) => (i.agent_status === "working" || i.agent_status === "blocked") && !params.delivery);
-            if (busy.length) throw new Error(`Nothing was sent: ${busy.map((i) => `${i.name ?? i.pane_id} is ${i.agent_status}`).join(", ")}. Send again with delivery=steer (into their current turns) or delivery=queue (after them) for all of them, or leave them out.`);
+            if (busy.length) throw new Error(`Nothing was sent: ${busy.map((i) => `${agentLabel(i)} is ${i.agent_status}`).join(", ")}. Send again with delivery=steer (into their current turns) or delivery=queue (after them) for all of them, or leave them out.`);
             const lines = await Promise.all(infos.map(async (info) => {
-              const label = info.name ?? info.pane_id!;
+              const label = agentLabel(info);
               try {
                 return `${label}: ${(await sendOne(info.pane_id!, message, params.delivery)).what}`;
               } catch (error) {

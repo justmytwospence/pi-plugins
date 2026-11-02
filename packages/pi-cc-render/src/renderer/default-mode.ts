@@ -235,6 +235,11 @@ export function createCcstyleTool(
 				return renderDefault(originalTool, "renderCall", [args, theme, context], String(toolName));
 			}
 
+			if (originalTool.ccstyleOwnCall === true && typeof originalTool.renderCall === "function") {
+				const own = originalTool.renderCall(args, theme, context);
+				if (own) return own;
+			}
+
 			const visualState = resolveToolVisualState(context);
 			const isPending =
 				visualState === "pending" ||

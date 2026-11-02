@@ -44,7 +44,7 @@ Call `system1_judge` with an object containing `state` (an object of evidence) a
 }
 ```
 
-Results contain typed answers, configured order, actual backend/provider/model, latency and reported usage. Bool answers contain a probability; choice answers include the selected label, its confidence and the label distribution; scores can be fractional, with confidence. The tool judges supplied evidence; it does not execute suggested actions. The legacy `jev-ask` shell helper follows the configured order; TypeSafe-specific experimental operations are restricted as described below. The `jev-judgments` skill can use `system1_judge` in Pi.
+Results contain typed answers, configured order, actual backend/provider/model, latency and reported usage. The tool's transcript presentation shows question types and named answers without dumping evidence; expand the result for attempts and reported usage. Routing keys stay out of the display, while the machine-readable payload is unchanged. Bool answers contain a probability; choice answers include the selected label, its confidence and the label distribution; scores can be fractional, with confidence. The tool judges supplied evidence; it does not execute suggested actions. The legacy `jev-ask` shell helper follows the configured order; TypeSafe-specific experimental operations are restricted as described below. The `jev-judgments` skill can use `system1_judge` in Pi.
 
 ## Classifier waterfall
 

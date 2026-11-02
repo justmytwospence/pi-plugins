@@ -30,6 +30,7 @@ import {
   type PlanModeQuestionAnswer,
   planModeQuestionAnswered,
   planModeQuestionCancelled,
+  planModeQuestionRenderer,
 } from "../question-tool.js";
 import {
   addUsage,
@@ -84,6 +85,7 @@ export function plannerExtension(policy: PlannerPolicy): ExtensionFactory {
       description:
         "Ask the user one to three structured questions when a product decision, preference, or tradeoff cannot be discovered by reading the code. Each question has 2-4 meaningful options; the user can also answer in their own words.",
       parameters: PLAN_MODE_QUESTION_PARAMS as never,
+      ...planModeQuestionRenderer,
       async execute(_id, params: unknown, signal) {
         const parsed = normalizePlanModeQuestionParams(params);
         if (!parsed.ok) return planModeQuestionCancelled([], "invalid_input", `Error: ${parsed.error}`) as never;

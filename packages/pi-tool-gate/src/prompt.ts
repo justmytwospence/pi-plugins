@@ -33,7 +33,6 @@ import {
   Spacer,
   Text,
   type TUI,
-  truncateToWidth,
   wrapTextWithAnsi,
 } from "@earendil-works/pi-tui";
 import { beginComposition, type EditorCreator, editorOwnsCancel, inline, type ProseEditor } from "./editor.ts";
@@ -224,7 +223,7 @@ class ApprovalDialog implements Component {
     // options, or a text box for the message, instead of a bare Enter/Esc card.
     options.addChild({
       render: (width: number) => {
-        const question = [truncateToWidth(theme.fg("text", this.question()), Math.max(1, width)), ...this.grantLines(width)];
+        const question = [...this.question().flatMap((line) => wrapTextWithAnsi(theme.fg("text", line), Math.max(1, width))), ...this.grantLines(width)];
         const out = [...question, "", ...this.list.render(width), ""];
         const wrapHint = (text: string) => new Text(text, 0, 0).render(Math.max(1, width));
         if (!this.editing) {
@@ -283,12 +282,12 @@ class ApprovalDialog implements Component {
     return lines.length > 8 ? [...lines.slice(0, 7), this.theme.fg("muted", "...")] : lines;
   }
 
-  /** One line naming the call: the question a phone's card shows over the options. */
-  private question(): string {
+  /** Keep Action/Target in one paragraph: phone readers scan only eight question rows. */
+  private question(): string[] {
     const v = this.a.view;
-    const command = v.tool === "bash" && v.body.kind === "code" ? v.body.text.split("\n")[0]?.trim() : "";
-    const what = v.subject || command;
-    return `Allow ${v.tool}${what ? ` ${what}` : ""}?`.replace(/\s+/g, " ");
+    const command = (v.tool === "bash" || v.tool === "bg_run") && v.body.kind === "code" ? v.body.text.split("\n")[0]?.trim() : "";
+    const flat = (s: string) => s.replace(/[\u0000-\u001f\u007f-\u009f]+/gu, " ").replace(/\s+/gu, " ").trim();
+    return [`Action: ${flat(v.action || v.tool) || "Tool"} · Target: ${flat(v.target || v.subject || command || "Not specified")}`];
   }
 
   get focused(): boolean {

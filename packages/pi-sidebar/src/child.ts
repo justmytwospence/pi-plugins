@@ -26,6 +26,7 @@ import { compactExchange, EXCHANGE_ENTRY } from "./thread.ts";
 import { assembleContext, describeLive, foreignRoleMessage, mainDelta, roleMessage, statusMessage, trimOpenTurn, type MainDelta } from "./transcript.ts";
 import { derivedSessionId, interleave, newPartAt, TRANSCRIPT_TAG, TranscriptParts } from "./foreign.ts";
 import { modelKey, type ModelChoice, type ModelLike } from "./models.ts";
+import type { ToolRenderers } from "./pi-chat.ts";
 
 const BUILTIN_TOOLS = ["read", "grep", "find", "ls", "bash"];
 const COLD_MARGIN_MS = 20_000;
@@ -163,6 +164,11 @@ export class SidebarAgent {
 
   get messages(): readonly AgentMessage[] {
     return this.thread;
+  }
+
+  /** Definitions belong to Sidebar's live session, never main's registry. */
+  toolDefinition(name: string): ToolRenderers | undefined {
+    return this.session?.getToolDefinition(name);
   }
 
   onEvent(listener: (event: SidebarEvent) => void): () => void {

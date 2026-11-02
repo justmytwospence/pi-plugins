@@ -1,3 +1,6 @@
+import type { ToolDefinition } from "@earendil-works/pi-coding-agent";
+import { Text } from "@earendil-works/pi-tui";
+
 export const PLAN_MODE_QUESTION_TOOL_NAME = "plan_mode_question";
 export const MAX_PLAN_MODE_RESPONSE_LENGTH = 4_000;
 
@@ -161,6 +164,100 @@ export function planModeQuestionCancelled(
     ],
     details: { cancelled: true, reason, questions } satisfies PlanModeQuestionDetails,
   };
+}
+
+export const planModeQuestionRenderer = {
+  ccstyleOwnCall: true,
+  ccstyleOwnResult: true,
+  renderCall: (args, _theme, context) => new Text(formatPlanModeQuestionCall(args, context.expanded), 0, 0),
+  renderResult: (result, options, _theme, context) =>
+    new Text(formatPlanModeQuestionResult(result, { ...options, isError: context.isError }), 0, 0),
+} satisfies Pick<ToolDefinition, "renderCall" | "renderResult"> & { ccstyleOwnCall: true; ccstyleOwnResult: true };
+
+/** Display only: tolerate streamed arguments without normalizing or changing the tool input. */
+export function formatPlanModeQuestionCall(input: unknown, expanded = false): string {
+  const questions = isRecord(input) && Array.isArray(input.questions) ? input.questions : [];
+  const lines = ["Plan question"];
+  for (const raw of questions.slice(0, 3)) {
+    if (!isRecord(raw)) continue;
+    const header = typeof raw.header === "string" ? raw.header : "Question";
+    const question = typeof raw.question === "string" ? raw.question : "Preparing question…";
+    lines.push(expanded ? `${header}: ${question}` : preview(`${header}: ${question}`));
+    if (expanded && Array.isArray(raw.options)) {
+      for (const [index, option] of raw.options.entries()) {
+        if (!isRecord(option)) continue;
+        lines.push(`  ${index + 1}. ${typeof option.label === "string" ? option.label : ""}`);
+        if (typeof option.description === "string") lines.push(`     ${option.description}`);
+      }
+    }
+  }
+  if (lines.length === 1) lines.push("Preparing questions…");
+  return lines.join("\n");
+}
+
+/** This tool's JSON is a machine payload; only its known cancellation message needs recovery. */
+export function formatPlanModeQuestionResult(
+  result: { content?: unknown; details?: unknown },
+  options: { expanded?: boolean; isPartial?: boolean; isError?: boolean } = {},
+): string {
+  const details = isRecord(result.details) ? result.details : undefined;
+  const content = questionResultText(result.content);
+  if (options.isError) return `Question failed${content ? `: ${options.expanded ? content : preview(content)}` : "."}`;
+  if (options.isPartial) return "Waiting for answers…";
+  if (details?.cancelled === true) {
+    let message = typeof details.message === "string" ? details.message : undefined;
+    if (message === undefined) {
+      try {
+        const payload: unknown = JSON.parse(content);
+        if (isRecord(payload) && payload.cancelled === true && typeof payload.message === "string") {
+          message = payload.message;
+        }
+      } catch {
+        // Old or interrupted results may not contain this tool's JSON payload.
+      }
+    }
+    const reason = details.reason;
+    const title =
+      reason === "invalid_input"
+        ? "Invalid question"
+        : reason === "ui_unavailable"
+          ? "Question UI unavailable"
+          : reason === "plan_mode_inactive"
+            ? "Plan mode inactive"
+            : "Questions cancelled";
+    return `${title}${message ? `\n${options.expanded ? message : preview(message)}` : ""}`;
+  }
+  if (Array.isArray(details?.answers)) {
+    const lines = ["Answered"];
+    for (const answer of details.answers.slice(0, 3)) {
+      if (!isRecord(answer)) continue;
+      const header = typeof answer.header === "string" ? answer.header : "Question";
+      const value = typeof answer.answer === "string" ? answer.answer : "(no answer)";
+      const label = `${header}${answer.wasCustom === true ? " (custom)" : " (selected)"}`;
+      if (options.expanded && typeof answer.question === "string") lines.push(`${header}: ${answer.question}`);
+      lines.push(options.expanded ? `${label}: ${value}` : preview(`${label}: ${value}`));
+      if (typeof answer.note === "string") {
+        lines.push(`Note: ${options.expanded ? answer.note : preview(answer.note)}`);
+      }
+    }
+    return lines.length === 1 ? "No answers recorded." : lines.join("\n");
+  }
+  return content ? (options.expanded ? content : preview(content)) : "No answers recorded.";
+}
+
+function questionResultText(content: unknown): string {
+  if (!Array.isArray(content)) return "";
+  return content
+    .flatMap((block) =>
+      isRecord(block) && block.type === "text" && typeof block.text === "string" ? [block.text] : [],
+    )
+    .join("\n");
+}
+
+function preview(value: string): string {
+  const single = value.replace(/\s+/gu, " ").trim();
+  const chars = Array.from(single);
+  return chars.length > 200 ? `${chars.slice(0, 199).join("")}…` : single;
 }
 
 function formatPlanModeQuestionPayload(payload: {
