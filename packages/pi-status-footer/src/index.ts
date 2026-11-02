@@ -370,6 +370,13 @@ export const duration = (ms: number): string => {
   if (mins >= 60) return `${Math.floor(mins / 60)}h${mins % 60}m`;
   return `${mins}m`;
 };
+// Fable is selective: show high usage, or an over-trajectory pool near reset.
+function showQuotaWindow(window: { label: string; used?: number; reset?: number }, now: number): boolean {
+  if (!/^fable$/i.test(window.label)) return true;
+  if (window.used === undefined || !Number.isFinite(window.used) || window.reset === undefined || !Number.isFinite(window.reset) || window.reset <= now) return false;
+  const left = window.reset - now;
+  return window.used > 70 || (left < 48 * 3600_000 && window.used > (1 - left / (7 * 86400_000)) * 100);
+}
 const money = (n: number): string => `$${n.toFixed(n > 0 && n < 0.01 ? 3 : 2)}`;
 // Pi's system theme puts accent at the same contrast as muted gray, so the
 // footer's accents (project, model, gauges) read no stronger than its secondary
@@ -1004,17 +1011,16 @@ export function layoutFooter(snapshot: Snapshot, width: number, theme: Paint): F
   const branchShort = outsideGit ? "" : `${branchIcon}${theme.fg("muted", truncateToWidth(clean(g.branch ?? ""), 14))}${suffix}`;
   const phaseText = s.phase ? theme.fg(s.phase === "error" ? "error" : "warning", s.phase) : "";
   const model = theme.bold(theme.fg("accent", shortModel(s.model)));
-  // Preview state is detached from committed provider/action state, main-only and explicit.
+  // Main-only target previews are detached from effective state; the chat line owns phase.
   const draft = !s.readOnly && !s.compact && ["pending", "applying"].includes(s.settingsCycle?.phase ?? "") ? s.settingsCycle : undefined;
   const pending = (key: SettingKey) => draft?.settings.find(setting => setting.key === key);
-  const pendingText = (key: SettingKey) => pending(key) ? theme.fg("warning", ` ${draft!.phase}`) : "";
   const thinking = typeof pending("reasoning")?.target === "string" ? pending("reasoning")!.target as string : s.thinking;
   const automatic = typeof pending("auto-effort")?.target === "boolean" ? pending("auto-effort")!.target : s.actions?.["effort.toggle"]?.active ?? s.autoEffort;
   const reasoningParts: Part[] = thinking ? [
     { text: `${theme.fg("dim", `${ICONS.reasoning} `)}${theme.fg("muted", "reasoning")} ` },
-    ...(automatic ? [{ text: theme.fg("dim", "auto") + pendingText("auto-effort"), action: action("effort.toggle") }, { text: theme.fg("dim", " → ") }] : []),
-    { text: theme.bold(theme.fg(thinkingColor(thinking), clean(thinking))) + pendingText("reasoning"), action: action("reasoning.cycle") },
-    ...(!automatic && action("effort.toggle") ? [{ text: sep }, { text: theme.fg("dim", "auto off") + pendingText("auto-effort"), action: action("effort.toggle") }] : []),
+    ...(automatic ? [{ text: theme.fg("dim", "auto"), action: action("effort.toggle") }, { text: theme.fg("dim", " → ") }] : []),
+    { text: theme.bold(theme.fg(thinkingColor(thinking), clean(thinking))), action: action("reasoning.cycle") },
+    ...(!automatic && action("effort.toggle") ? [{ text: sep }, { text: theme.fg("dim", "auto off"), action: action("effort.toggle") }] : []),
   ] : [];
   const reasoning = reasoningParts.map((part) => part.text).join("");
   const identity = `${model}${reasoning ? `${sep}${reasoning}` : ""}`;
@@ -1074,7 +1080,7 @@ export function layoutFooter(snapshot: Snapshot, width: number, theme: Paint): F
   if (linked && workflow) {
     const flow = s.flow!;
     controlRow(ICONS.workflow, [
-      { ...partsSegment([{ text: workflowBadge(theme, workflow.kind) + pendingText("workflow"), action: workflowAction }], 130), atomic: !!pending("workflow") },
+      { ...partsSegment([{ text: workflowBadge(theme, workflow.kind), action: workflowAction }], 130), atomic: !!pending("workflow") },
       { text: flowStateText, priority: 140 },
       partsSegment([{ text: theme.fg("muted", clean(flow.selectedFlow?.provider ?? s.provider)), action: action("model.open") }], 75),
       ...identitySegments,
@@ -1085,7 +1091,7 @@ export function layoutFooter(snapshot: Snapshot, width: number, theme: Paint): F
   } else {
     controlRow(ICONS.model, identitySegments, s.primaryKeys?.model, action("model.open"));
     if (workflow) controlRow(ICONS.workflow, [
-      { ...partsSegment([{ text: workflowBadge(theme, workflow.kind) + pendingText("workflow"), action: workflowAction }], 130), atomic: !!pending("workflow") },
+      { ...partsSegment([{ text: workflowBadge(theme, workflow.kind), action: workflowAction }], 130), atomic: !!pending("workflow") },
       { text: execPhase ? theme.fg("muted", execPhase) : "", short: theme.fg("muted", execPhase.split(" · ")[0]), priority: 120 },
       { text: theme.fg("muted", execDetail || (execPhase ? "" : WORKFLOW_EXPLANATIONS[workflow.kind])), priority: 70 },
     ], workflow.kind === "exec" ? "/plan-exec" : s.primaryKeys?.workflow ?? workflow.key, workflowAction);
@@ -1093,7 +1099,7 @@ export function layoutFooter(snapshot: Snapshot, width: number, theme: Paint): F
   if (approval) controlRow(ICONS.gate, [
     { ...partsSegment([
       { text: theme.fg("muted", "Approvals") }, { text: sep },
-      { text: theme.fg(modeColor, MODE_NAMES[approval.kind] + (approval.kind === "manual" || approval.kind === "acceptEdits" ? " (legacy)" : "")) + pendingText("approvals"), action: action("approvals.open") },
+      { text: theme.fg(modeColor, MODE_NAMES[approval.kind] + (approval.kind === "manual" || approval.kind === "acceptEdits" ? " (legacy)" : "")), action: action("approvals.open") },
     ], 120), atomic: !!pending("approvals") },
     { text: gateStatus ? clean(gateStatus) : "", short: gateStatus?.replace(/^Gate (\d+) auto · (\d+) pushed back · (\d+) asked$/u, "Gate $1/$2/$3"), priority: 60 },
   ], s.primaryKeys?.approvals ?? approval.key, action("approvals.open"));
@@ -1173,12 +1179,7 @@ export function layoutFooter(snapshot: Snapshot, width: number, theme: Paint): F
       const age = Math.max(0, s.now - (usage.observedAt ?? s.now));
       const expired = usage.windows.some((window) => window.reset !== undefined && window.reset <= s.now);
       const stale = isUsageStale(usage, s.now);
-      const shown = usage.windows.filter((window) => {
-        if (!/^fable$/i.test(window.label)) return true;
-        if (window.reset === undefined || window.reset <= s.now || window.used === undefined) return false;
-        const left = window.reset - s.now;
-        return left < 48 * 3600_000 && window.used > (1 - left / (7 * 86400_000)) * 100;
-      });
+      const shown = usage.windows.filter((window) => showQuotaWindow(window, s.now));
       const windows = shown.map((window): Segment => {
         const value = window.used;
         const color = stale || value === undefined || value < 70 ? "muted" : heat(value);
@@ -1209,14 +1210,7 @@ export function layoutFooter(snapshot: Snapshot, width: number, theme: Paint): F
     const age = Math.max(0, s.now - quota.updated);
     const expired = quota.windows.some((w) => w.reset !== undefined && w.reset <= s.now);
     const stale = age >= QUOTA_STALE_MS || expired;
-    // Fable's weekly pool shows only when over trajectory (used above the elapsed share
-    // of its 7 days) and under 48 hours from reset.
-    const shown = quota.windows.filter((w) => {
-      if (!/^fable$/i.test(w.label)) return true;
-      if (w.reset === undefined || w.reset <= s.now) return false;
-      const left = w.reset - s.now;
-      return left < 48 * 3600_000 && w.used > (1 - left / (7 * 86400_000)) * 100;
-    });
+    const shown = quota.windows.filter((window) => showQuotaWindow(window, s.now));
     const windows = shown.map((w): Segment => {
       let reset = "";
       // Expired windows share the row's reset-due alert; do not repeat it.
@@ -1344,6 +1338,8 @@ export default function statusFooter(pi: ExtensionAPI): void {
     },
     getActions: () => discoveredActions,
     cycleReasoning: stageReasoning,
+    captureCycleTrigger: () => cycles.captureTrigger(),
+    withCycleTrigger: (trigger, run) => cycles.withTrigger(trigger, run),
     cancelSettings: reason => cycles.cancel(reason),
     notify: (message, type) => ctx?.ui.notify(message, type),
     refresh: () => requestRender?.(),
@@ -1841,7 +1837,7 @@ export default function statusFooter(pi: ExtensionAPI): void {
         schedule();
         return current() && prepared ? layoutFooter(prepared, width, liftAccent(theme)) : { lines: [], hits: [] };
       }, () => `${interactionGeneration}:${tui.terminal?.columns}:${tui.terminal?.rows}`,
-      (action) => interactions.available(action), (action) => interactions.activate(action));
+      (action) => interactions.available(action), (action) => interactions.activate(action, "pointer"));
       footerControls = component;
       const unsubscribe = footerData.onBranchChange(() => { if (current()) { branch = footerData.getGitBranch(); void updateGit(true); render(); } });
       const dispose = () => {
@@ -2077,7 +2073,7 @@ export default function statusFooter(pi: ExtensionAPI): void {
           "Provider limits: subscription allowance is distinct from API throttles, balances and cost. Google local OAuth uses its internal read-only quota endpoint; vault custody has no quota capability. Muse CLI usage --json currently exposes availability only; successful window format remains unverified.",
           ...accountDetails,
           `Working row: ${showWorking ? "on" : "off"} (streamed output tokens, estimated as chars/4 until the provider reports a count, and elapsed time after ${SHOW_TIMER_AFTER_MS / 1000}s). MCP chip: ${showMcp ? "on" : "off"} (built-in MCP servers with non-hidden tools over servers enabled in mcp.json; approximate, and absent when another extension publishes an mcp status).`,
-          `Controls: ${JSON.stringify({ ...interactions.describe(), ...footerControls?.describe(), settingsCycle: cycles.snapshot() ? { phase: cycles.snapshot()!.phase, keys: cycles.snapshot()!.settings.map(setting => setting.key) } : undefined })}. This in-memory diagnostic records only the last pointer event, not text or account data.`,
+          `Controls: ${JSON.stringify({ ...interactions.describe(), ...footerControls?.describe(), settingsCycle: cycles.snapshot() ? { phase: cycles.snapshot()!.phase, keys: cycles.snapshot()!.settings.map(setting => setting.key), input: cycles.inputStatus() } : undefined })}. This in-memory diagnostic records only the last pointer event, not text or account data.`,
           "/status on: active account source only; /status all: also show configured remote providers (at most two rows, remaining sources in details); /status native: restore Pi footer; /status working on|off, /status mcp on|off. Choices survive reload/resume in this session.",
         ].join("\n"), "info");
         return;

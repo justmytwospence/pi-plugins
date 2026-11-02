@@ -21,7 +21,7 @@ process.env.XDG_CONFIG_HOME = resolve(temp, 'xdg');
 const cycleParticipants = new Set(['pi-plan-mode', 'pi-tool-gate', 'pi-auto-effort', 'pi-status-footer']);
 const cycleEvents = new Set(['session_start', 'session_tree', 'session_before_switch', 'session_before_fork',
   'session_before_tree', 'session_before_compact', 'ui_prompt_start', 'session_shutdown', 'before_agent_start',
-  'model_select', 'thinking_level_select', 'input']);
+  'model_select', 'thinking_level_select', 'message_start', 'input']);
 const ownsCycles = extension => extension.entryRenderers?.has('settings:cycle') === true;
 function signature(extension) {
   const shared = ownsCycles(extension);

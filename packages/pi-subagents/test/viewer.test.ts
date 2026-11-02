@@ -240,6 +240,27 @@ test("a subagent's session draws as Pi draws main: transcript, working row, edit
   v.dispose();
 });
 
+test("remote extension calls use readable fallbacks without pretending worker renderer functions were transmitted", () => {
+  const run = fakeRun({ child: {} as never, state: { turns: 1, startedAt: Date.now() } });
+  const args = Object.freeze({ query: "cache", request: Object.freeze({ prose: "first\nsecond" }) });
+  const literal = '{"machine":"unchanged"}';
+  const message = Object.freeze({ role: "assistant", content: Object.freeze([{ type: "toolCall", id: "worker-call-id", name: "remote_catalog", arguments: args }]) });
+  const result = Object.freeze({ role: "toolResult", toolCallId: "worker-call-id", toolName: "remote_catalog", content: Object.freeze([{ type: "text", text: literal }]) });
+  const before = JSON.stringify({ message, result });
+  run.conversation.apply({ type: "message_end", message });
+  run.conversation.apply({ type: "message_end", message: result });
+  const { v } = setup([run], 60);
+  expect(text(v.render(120))).toContain("Remote catalog");
+  expect(text(v.render(120))).toContain("Query: cache");
+  expect(text(v.render(120))).toContain(literal);
+  expect(text(v.render(120))).not.toContain("worker-call-id");
+  // Child RPC carries data, not the worker's extension renderer closures. Expansion remains local.
+  v.handleInput("\x0f"); // app.tools.expand (Ctrl+O)
+  expect(text(v.render(120))).toMatch(/Prose:\s*\n\s*first\s*\n\s*second/u);
+  expect(JSON.stringify({ message, result })).toBe(before);
+  v.dispose();
+});
+
 test("it follows new output until scrolled up, and again from the end", () => {
   const { v, runs } = setup([liveRun()], 20);
   const c = runs[0]!.conversation;

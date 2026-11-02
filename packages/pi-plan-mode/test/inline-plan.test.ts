@@ -787,6 +787,9 @@ test("standalone toggles preview without allocation and apply only the final loc
   vi.useFakeTimers();
   try {
     const h = setupWorkflowLifecycle();
+    const getBranch = () =>
+      h.mock.entries.map((entry, index) => ({ type: "custom", id: `workflow-entry-${index}`, ...entry }));
+    Object.assign(h.ctx.sessionManager, { getBranch, getLeafId: () => getBranch().at(-1)?.id ?? null });
     await h.emit("session_start");
     const pending = h.inline.toggle(h.ctx);
     assert.equal(h.inline.active, false);
@@ -795,7 +798,7 @@ test("standalone toggles preview without allocation and apply only the final loc
     assert.equal(h.mock.entries.filter((entry) => entry.customType === INLINE_ENTRY).length, 0);
     assert.deepEqual(workflowTransitions(h.mock), []);
     assert.equal(settingsCycles(h.mock.pi).snapshot()?.phase, "pending");
-    await vi.advanceTimersByTimeAsync(399);
+    await vi.advanceTimersByTimeAsync(999);
     assert.equal(h.inline.active, false);
     await vi.advanceTimersByTimeAsync(1);
     assert.equal(await pending, true);
@@ -805,9 +808,14 @@ test("standalone toggles preview without allocation and apply only the final loc
     assert.deepEqual(workflowTransitions(h.mock), [], "the settings journal replaces the cycle badge");
     assert.equal(h.mock.entries.filter((entry) => entry.customType === "settings:cycle").length, 1);
     const leaving = h.inline.toggle(h.ctx);
-    await vi.advanceTimersByTimeAsync(400);
+    await vi.advanceTimersByTimeAsync(1000);
     assert.equal(await leaving, true);
     assert.equal(h.inline.active, false);
+    assert.equal(
+      h.mock.entries.filter((entry) => entry.customType === "settings:cycle").length,
+      1,
+      "completed batches reuse the history row",
+    );
     assert.deepEqual(workflowTransitions(h.mock), []);
     await h.inline.enter(h.ctx);
     assert.equal(workflowTransitions(h.mock).length, 1, "an explicit entry still presents its normal badge");
@@ -824,7 +832,7 @@ test("standalone Plan round trips are true no-ops with one journal anchor and no
     const first = h.inline.toggle(h.ctx);
     await vi.advanceTimersByTimeAsync(300);
     const second = h.inline.toggle(h.ctx);
-    await vi.advanceTimersByTimeAsync(399);
+    await vi.advanceTimersByTimeAsync(999);
     assert.equal(h.inline.active, false);
     assert.equal(h.plansDirectory.mock.calls.length, 0);
     await vi.advanceTimersByTimeAsync(1);
@@ -877,7 +885,7 @@ test("a delegated Plan user cycle reuses the gate's settled promise and single s
     assert.equal(h.inline.active, false);
     assert.equal(h.plansDirectory.mock.calls.length, 0);
     assert.equal(h.mock.entries.filter((entry) => entry.customType === "settings:cycle").length, 1);
-    await vi.advanceTimersByTimeAsync(400);
+    await vi.advanceTimersByTimeAsync(1000);
     assert.deepEqual(await Promise.all([first, second]), [true, true]);
     assert.equal(workflow, "plan");
     assert.equal(h.inline.active, true);
@@ -901,7 +909,7 @@ for (const explicit of ["enter", "work", "execution", "restore"] as const) {
       else await h.emit("session_tree");
       assert.equal(await pending, false);
       assert.equal(h.inline.active, explicit === "enter");
-      await vi.advanceTimersByTimeAsync(400);
+      await vi.advanceTimersByTimeAsync(1000);
       assert.equal(h.inline.active, explicit === "enter");
       assert.equal(h.plansDirectory.mock.calls.length, explicit === "enter" ? 1 : 0);
     } finally {
@@ -929,7 +937,7 @@ test("explicit Plan entry tools cancel pending cycling and allocate immediately"
     assert.equal(h.inline().active, true);
     assert.ok(h.inline().planFile);
     assert.equal(settingsCycles(h.mock.pi).snapshot()?.phase, "cancelled");
-    await vi.advanceTimersByTimeAsync(400);
+    await vi.advanceTimersByTimeAsync(1000);
     assert.equal(h.inline().active, true);
   } finally {
     vi.useRealTimers();
@@ -959,7 +967,7 @@ test("a Plan review cancels an exit preview and still waits for explicit approva
     assert.equal(h.inline().active, true);
     assert.equal(h.mock.thinkingLevels.length, 0);
     assert.equal(settingsCycles(h.mock.pi).snapshot()?.phase, "cancelled");
-    await vi.advanceTimersByTimeAsync(400);
+    await vi.advanceTimersByTimeAsync(1000);
     assert.equal(h.inline().active, true);
     assert.equal(h.mock.thinkingLevels.length, 0);
   } finally {

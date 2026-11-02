@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
-import { initTheme } from "@earendil-works/pi-coding-agent";
+import { initTheme, type ToolDefinition } from "@earendil-works/pi-coding-agent";
+import { visibleWidth } from "@earendil-works/pi-tui";
 import { test, vi } from "vitest";
 import type { FamilyService, PreparedAgent } from "../src/family-contract.js";
 import { consultantAccess, otherTools, otherToolsNode, resolveAccess } from "../src/planner/access.js";
@@ -8,7 +9,9 @@ import { plannerExtension } from "../src/planner/extension.js";
 import type { PlannerSessionFactory, PlannerSessionOptions } from "../src/planner/session.js";
 import { buildToolTree, leaves } from "../src/tool-tree.js";
 
-type Tool = {
+type Tool = Partial<Pick<ToolDefinition, "renderCall" | "renderResult">> & {
+  ccstyleOwnCall?: boolean;
+  ccstyleOwnResult?: boolean;
   name: string;
   execute(id: string, params: unknown, signal?: AbortSignal, onUpdate?: unknown, ctx?: unknown): Promise<unknown>;
 };
@@ -129,6 +132,55 @@ test("planner questions go to the lane, and a skipped question says so", async (
   };
   assert.equal(answered.details.cancelled, false);
   assert.equal(asked.length, 2);
+});
+
+test("planner question owner renderers are registered and render at narrow widths without changing results", async () => {
+  const { tools } = loadExtension(
+    plannerExtension({
+      ...access(["read"]).policy,
+      ask: async () => undefined,
+      onPlan: () => undefined,
+    }) as never,
+  );
+  const questionTool = tools.get("plan_mode_question");
+  assert.ok(questionTool?.renderCall);
+  assert.ok(questionTool.renderResult);
+  assert.equal(questionTool.ccstyleOwnCall, true);
+  assert.equal(questionTool.ccstyleOwnResult, true);
+  const args = Object.freeze({
+    questions: [
+      {
+        id: "opaque_id",
+        header: "Scope",
+        question: "How broad?",
+        options: [
+          { label: "Small", description: "Only the bug." },
+          { label: "Broad", description: "Include cleanup." },
+        ],
+      },
+    ],
+  });
+  const result = await questionTool.execute("question-call-id", args);
+  const saved = structuredClone(result);
+  for (const width of [46, 120, 180]) {
+    for (const expanded of [false, true]) {
+      const context = { expanded, isError: false } as never;
+      const callLines = questionTool.renderCall(args as never, {} as never, context).render(width);
+      const resultLines = questionTool
+        .renderResult(result as never, { expanded, isPartial: false }, {} as never, context)
+        .render(width);
+      assert.match(callLines.join("\n"), /Scope: How broad\?/u);
+      assert.match(resultLines.join("\n"), /Questions cancelled/u);
+      assert.doesNotMatch(resultLines.join("\n"), /"cancelled"|"reason"/u);
+      assert.ok([...callLines, ...resultLines].every((line) => visibleWidth(line) <= width));
+    }
+  }
+  assert.deepEqual(result, saved);
+  assert.deepEqual((result as { details: unknown }).details, {
+    cancelled: true,
+    reason: "cancelled",
+    questions: args.questions,
+  });
 });
 
 /** A fake planner session: prompts play a script of events and tool calls. */

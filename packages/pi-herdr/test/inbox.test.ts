@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { Agents, MAX_BROADCAST, outcomeText } from "../src/agents.ts";
+import { Agents, agentLabel, MAX_BROADCAST, outcomeText } from "../src/agents.ts";
 import { DraftGuard } from "../src/draft-guard.ts";
 import {
   ackTokenName,
@@ -572,7 +572,7 @@ describe("agents: relocated self", () => {
       ackTimeoutMs: 50,
     });
 
-    expect(await agents.list()).toContain("me  w1:p1  pi idle  [this session]");
+    expect(await agents.list()).toContain("me  pi idle  [this session]  [pane: w1:p1]");
     selfPane = "w2:p1";
     me.pane_id = selfPane;
     await expect(agents.send("me", "x", {})).rejects.toThrow("own pane");
@@ -581,7 +581,7 @@ describe("agents: relocated self", () => {
     expect(f.of("agent.prompt")).toEqual([]);
     expect((await agents.targets({ names: ["me", "w2:p1", "peer"] })).infos.map((a) => a.name)).toEqual(["peer"]);
     expect((await agents.targets({ cwdPrefix: "/r" })).infos.map((a) => a.name)).toEqual(["peer"]);
-    expect(await agents.list()).toContain("me  w2:p1  pi idle  [this session]");
+    expect(await agents.list()).toContain("me  pi idle  [this session]  [pane: w2:p1]");
     await agents.send("peer", "hello", {});
     expect(decodeEnvelope(f.of("pane.send_text")[0]!.params.text)?.from).toEqual({ pane: "w2:p1", name: "me" });
 
@@ -647,6 +647,26 @@ describe("agents: broadcast targets and list", () => {
     const remote = world([entry("r", "w9:p1", "/home/s/repo")]);
     expect((await remote.agents.targets({ cwdPrefix: "/home/s", machine: "NUC" })).infos.map((i) => i.name)).toEqual(["r"]);
     expect(remote.calls[0]).toEqual(["--machine", "NUC", "agent", "list"]);
+  });
+
+  it("uses canonical names without inventing identities from titles or pane addresses", async () => {
+    expect(agentLabel(undefined)).toBe("Agent unavailable");
+    expect(agentLabel({ name: "", pane_id: "w9:p1", title: "Helpful title" })).toBe("Unnamed agent");
+    expect(agentLabel({ name: "  ", pane_id: "w9:p1" })).toBe("Unnamed agent");
+    expect(agentLabel({ name: "canonical-123", title: "Different title" })).toBe("canonical-123");
+    const w = world([
+      entry("canonical-123", "w2:p1", "/x", { title: "Same title" }),
+      entry("another", "w3:p1", "/x", { title: "Same title" }),
+      entry("", "w4:p1", "/x", { title: "Same title", agent_status: undefined }),
+    ]);
+    const out = await w.agents.list();
+    expect(out).toContain("canonical-123  pi idle  [pane: w2:p1]");
+    expect(out).toContain("another  pi idle  [pane: w3:p1]");
+    expect(out).toContain("Unnamed agent  pi status unavailable  [pane: w4:p1]");
+    expect((await w.agents.get("w2:p1")).name).toBe("canonical-123");
+    expect(out.split("\n").filter(line => line.startsWith("Same title"))).toEqual([]);
+    expect(await w.agents.read("w2:p1")).toMatch(/^canonical-123: idle/);
+    expect(await w.agents.read("w4:p1")).toMatch(/^Unnamed agent: unknown/);
   });
 
   it("lists typing, awaited and child marks, and each agent's summary", async () => {

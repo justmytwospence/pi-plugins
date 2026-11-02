@@ -72,7 +72,9 @@ function toolTitle(tool: any): string {
 }
 
 function isGroupable(value: unknown): boolean {
-	return value instanceof ToolExecutionComponent && !NON_GROUPABLE.has(toolName(value));
+	return value instanceof ToolExecutionComponent && !NON_GROUPABLE.has(toolName(value)) &&
+		(value as any).toolDefinition?.ccstyleOwnCall !== true &&
+		(value as any).builtInToolDefinition?.ccstyleOwnCall !== true;
 }
 
 function isIgnorable(value: unknown): boolean {

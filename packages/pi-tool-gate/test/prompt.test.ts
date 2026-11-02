@@ -55,11 +55,35 @@ describe("the approval dialog's rule rows", () => {
     const d = open(approval({ grant: ["Rule: Bash(git push:*)", "Rule: Bash(rm -rf build)"] }), 46);
     await Promise.resolve();
     const lines = d.screen().split("\n");
-    const question = lines.findIndex((l) => l.trim().startsWith("Allow bash"));
-    expect(lines.slice(question, question + 3).map((l) => l.trim())).toEqual(["Allow bash git push origin feature?", "Rule: Bash(git push:*)", "Rule: Bash(rm -rf build)"]);
+    const question = lines.findIndex((l) => l.trim().startsWith("Action:"));
+    const finalQuestion = lines.slice(question, lines.findIndex((l) => l.includes("→ Allow once"))).map((l) => l.trim()).filter(Boolean);
+    expect(finalQuestion.join(" ")).toContain("Action: bash");
+    expect(finalQuestion.join(" ")).toContain("Target: git push origin feature");
+    expect(finalQuestion).toContain("Rule: Bash(git push:*)");
+    expect(finalQuestion).toContain("Rule: Bash(rm -rf build)");
     const rows = lines.map((l) => l.replace(/^\s*→?\s*/u, "").trim());
     for (const option of [...OPTIONS, "Block with a message"]) expect(rows).toContain(option);
     for (const option of [...OPTIONS, "Block with a message"]) expect(option.length).toBeLessThanOrEqual(42);
+    d.press(ESC);
+    expect(await d.answer).toEqual({ choice: "Block" });
+  });
+
+  test.each([46, 120, 180])("two-rule approvals leave room for the activity and blocked footer at %s columns", async (width) => {
+    const command = "cd ~/Projects/app && git push origin feature && curl -s -X POST https://api.example.com/v1/deployments/1234567890/restart";
+    const grant = ["Rule: Bash(git push:*)", "Rule: Bash(curl -s -X POST https://api.example.com/v1/deployments/1234567890/restart?force=true&notify=all)"];
+    const d = open(approval({
+      view: { tool: "bash", subject: "", body: { kind: "code", lang: "bash", text: command } },
+      agentCase: "The rebase rewrote the branch.", grant,
+    }), width);
+    await Promise.resolve();
+    const lines = d.screen().split("\n");
+    // A collapsed Sidebar preserves one transcript row; activity + separator + footer need three.
+    expect(lines.length + 1 + 3).toBeLessThanOrEqual(40);
+    expect(lines.at(-1)).toMatch(/^─+$/u);
+    const questionLines = lines.slice(lines.findIndex((line) => line.trim().startsWith("Action:")), lines.findIndex((line) => line.includes("→ Allow once"))).filter((line) => line.trim());
+    expect(questionLines.length).toBeLessThanOrEqual(8);
+    const question = questionLines.join("").replace(/\s+/gu, "");
+    for (const part of ["Action: bash", `Target: ${command}`, ...grant]) expect(question).toContain(part.replace(/\s+/gu, ""));
     d.press(ESC);
     expect(await d.answer).toEqual({ choice: "Block" });
   });
@@ -76,6 +100,29 @@ describe("the approval dialog's rule rows", () => {
     expect(text.split("\n").every((line) => line.length <= width)).toBe(true);
     d.press(DOWN, DOWN, ENTER);
     expect(await d.answer).toEqual({ choice: "Allow rule in this project" });
+  });
+
+  test.each([46, 120, 180])("explicit generic action and target appear in the final question at %s columns", async (width) => {
+    const view = { tool: "deploy", subject: "", action: "deploy restart", target: "production-api", body: { kind: "code" as const, lang: undefined, text: "preview only" } };
+    const d = open(approval({ view, grant: ["Rule: Deploy(restart)"] }), width);
+    await Promise.resolve();
+    const lines = d.screen().split("\n");
+    const start = lines.findIndex((line) => line.trim().startsWith("Action:"));
+    const end = lines.findIndex((line) => line.includes("→ Allow once"));
+    const finalQuestion = lines.slice(start, end).map((line) => line.trim()).join(" ");
+    expect(finalQuestion).toContain("Action: deploy restart");
+    expect(finalQuestion).toContain("Target: production-api");
+    expect(finalQuestion).toContain("Rule: Deploy(restart)");
+    d.press(ESC);
+    await d.answer;
+  });
+
+  test("legacy views with no subject or command say the target is not specified", async () => {
+    const d = open(approval({ view: { tool: "deploy", subject: "", body: { kind: "code", lang: undefined, text: "" } } }));
+    await Promise.resolve();
+    expect(d.screen()).toContain("Target: Not specified");
+    d.press(ESC);
+    await d.answer;
   });
 
   test("long rules wrap, and a very long list is cut", async () => {

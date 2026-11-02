@@ -118,6 +118,8 @@ function statusFooter(width, statuses, { compact = false, phase = 'idle', flow, 
   assert.ok(lines.every(line => visibleWidth(line) <= width), `footer rows fit ${width} columns`);
   if (readOnly) assert.deepEqual(layout.hits, [], 'other-session chrome must remain read-only despite a main preview');
   const plain = lines.map(stripVTControlCharacters);
+  assert.doesNotMatch(plain.join('\n'), /\bpending\b|\bapplying\b/iu,
+    'footer values do not duplicate the transcript phase indicator');
   const linked = !readOnly && flow?.operatingMode === 'linked';
   const effectiveKind = absorbed.exec !== undefined ? 'exec' : absorbed.workflow?.kind;
   const preview = !compact && !readOnly && ['pending', 'applying'].includes(settingsCycle?.phase) ? settingsCycle : undefined;
@@ -139,11 +141,21 @@ function statusFooter(width, statuses, { compact = false, phase = 'idle', flow, 
       assert.ok(!workflow[0].includes('Approvals'), 'approvals stay separate from workflow');
       // Hints yield before critical state at narrow widths; Sidebar also probes smaller widths.
       if (!preview && !linked && !absorbed.exec && width >= (kind === 'exec' ? 120 : 46)) assert.ok(workflow[0].includes(WORKFLOW_EXPLANATIONS[kind]), `workflow row explains ${kind} when space permits: ${workflow[0]}`);
-      if (preview && width >= 46) assert.ok(workflow[0].includes(preview.phase), 'draft workflow must explicitly say pending/applying, not look effective');
+      if (preview && width >= 46) assert.ok(workflow[0].includes(badge), 'draft workflow retains the target badge in its existing semantic row');
       if (!linked && kind === 'exec' && width >= 46) assert.match(workflow[0], /\/plan-exec\s*$/u, 'Independent Exec offers status, never a workflow cycle');
       if (linked && !absorbed.exec && !flow.blocked && width >= 120) assert.ok(workflow[0].includes(flow.selectedFlow.provider), 'Linked combines provider and workflow on one row');
     }
     assert.equal(approvals.length, absorbed.mode ? 1 : 0, 'Approvals keeps its own row');
+    if (preview && width >= 46 && approvals.length) {
+      const approval = preview.settings.find(item => item.key === 'approvals');
+      if (approval) assert.ok(approvals[0].includes(approval.label), 'normal approval row retains the preview target without a phase suffix');
+    }
+    if (preview && width >= 120) {
+      const reasoning = preview.settings.find(item => item.key === 'reasoning');
+      if (reasoning) assert.ok(plain.some(line => line.includes('reasoning') && line.includes(reasoning.label)), 'normal model row retains the reasoning target');
+      const effort = preview.settings.find(item => item.key === 'auto-effort');
+      if (effort && autoEffort !== undefined) assert.ok(plain.some(line => line.includes('reasoning') && line.includes(effort.target ? 'auto' : 'auto off')), 'normal auto-effort segment retains the target');
+    }
     if (linked) {
       assert.equal(lines.length, (absorbed.marimo?.length ?? 0) + 4 + (providerUsage?.length ?? 0), 'Linked removes only the duplicate model row');
       if (flow.blocked && width >= 46) assert.match(plain.join('\n'), /blocked/iu, 'an unavailable Linked flow must not look healthy');
@@ -250,6 +262,7 @@ const RULES = {
   held: 'it changes something other people see',
 };
 const FOLDER = { kind: 'dirs', grant: ['Folder: reads in ~/Projects/other'], tool: 'read', command: '', held: "reads ~/Projects/other/a.ts, outside this project's directories" };
+const GENERIC = { tool: 'deploy', action: 'deploy restart', target: 'production-api', command: 'preview only', held: 'restarts a service' };
 
 async function approvalLines(width, spec = {}) {
   let lines;
@@ -262,7 +275,7 @@ async function approvalLines(width, spec = {}) {
   };
   const options = approvalOptions(spec.kind, spec.plural);
   void askApproval(ctx, {
-    view: { tool: spec.tool ?? 'bash', subject: spec.tool === 'read' ? '~/Projects/other/a.ts' : '', body: { kind: 'code', lang: 'bash', text: spec.command ?? 'git push --force origin main' } },
+    view: { tool: spec.tool ?? 'bash', subject: spec.tool === 'read' ? '~/Projects/other/a.ts' : '', ...(spec.action ? { action: spec.action, target: spec.target } : {}), body: { kind: 'code', lang: 'bash', text: spec.command ?? 'git push --force origin main' } },
     held: spec.held ?? 'force-pushes main/master',
     agentCase: 'The rebase rewrote the branch.',
     options,
@@ -544,13 +557,19 @@ const DIALOGS = [
   { name: 'ask single', lines: (w) => questionLines([question(false)], w), herdr: { options: 4, multi: false }, collie: { kind: 'prompt-select', options: 4 }, },
   { name: 'ask multi', lines: (w) => questionLines([question(true)], w), herdr: { multi: true }, collie: { kind: 'multi-select' }, },
   { name: 'tool-gate approval', lines: approvalLines, herdr: { options: 3, multi: false }, collie: { kind: 'prompt-select' }, },
+  { name: 'tool-gate approval (generic action and target)', lines: w => approvalLines(w, GENERIC), questionIncludes: ['Action: deploy restart', 'Target: production-api'], herdr: { options: 3, multi: false }, collie: { kind: 'prompt-select' } },
   ...[
     ['tool-gate approval (rule)', RULE],
     ['tool-gate approval (two rules)', RULES],
     ['tool-gate approval (folder)', FOLDER],
   ].map(([name, spec]) => {
     const rows = [...approvalOptions(spec.kind, spec.plural), 'Block with a message'];
-    return { name, lines: (w) => approvalLines(w, spec), herdr: { options: rows.length, multi: false, labels: rows }, collie: { kind: 'prompt-select', wraps: rows } };
+    return {
+      name, lines: (w) => approvalLines(w, spec),
+      // Compare all target/rule characters below, ignoring whitespace inserted by screen wrapping.
+      questionIncludes: [`Action: ${spec.tool ?? 'bash'}`, `Target: ${spec.tool === 'read' ? '~/Projects/other/a.ts' : spec.command}`, ...spec.grant],
+      herdr: { options: rows.length, multi: false, labels: rows }, collie: { kind: 'prompt-select', wraps: rows },
+    };
   }),
   ...[0, 1, 2].flatMap(count => [false, true].map(changed => ({
     name: `plan approval (${count} targets${changed ? ', effort changed' : ''})`,
@@ -639,6 +658,9 @@ for (const width of [46, 120, 180]) {
 const editor = new CustomEditor({ ...tui, terminal: { rows: HEIGHT, columns: 180 } }, themeModule.getEditorTheme(), kb, { paddingX: 0 });
 editor.setText('next step');
 const usageReady = { provider: 'google', source: 'Google Antigravity subscription', state: 'ready', observedAt: NOW, windows: [{ label: '5h', used: 25, reset: NOW + 3_600_000 }] };
+const usageFable = used => ({ provider: 'anthropic', source: 'Anthropic subscription', state: 'ready', observedAt: NOW, windows: [{ label: 'Fable', used, reset: NOW + 3 * 86400_000 }] });
+const fable71 = usageFable(71);
+const fable100 = usageFable(100);
 const usageUnavailable = { provider: 'openai', source: 'OpenAI subscription', state: 'unavailable', windows: [], reason: 'Subscription limits are unavailable.' };
 const usageLocal = { provider: 'ollama', source: 'Local inference', state: 'not-applicable', windows: [], reason: 'Local inference has no account quota.' };
 // Account data must not expand the dialog's one-row, noninteractive footer.
@@ -646,6 +668,10 @@ for (const width of [46, 120, 180]) {
   const blocked = statusFooter(width, modeStatuses('plan', 'auto'), { compact: true, providerUsage: [usageReady, usageUnavailable], providerUsageMore: 3 });
   assert.equal(blocked.length, 1);
   assert.doesNotMatch(stripVTControlCharacters(blocked[0]), /Google|OpenAI|\+3 more/u);
+  for (const usage of [fable71, fable100]) {
+    const fableBlocked = statusFooter(width, modeStatuses('plan', 'auto'), { compact: true, providerUsage: [usage] });
+    assert.equal(fableBlocked.length, 1, 'Fable usage must not add a blocked footer row');
+  }
 }
 // Match the real helper's JSON-only snapshot contract. Rendering is delegated to its
 // registered public entry renderer, not a lookalike Text or a second settings formatter.
@@ -667,7 +693,13 @@ function cycleHistory(phase) {
   assert.equal(renderers.has('settings:cycle-state'), false, 'state snapshots never render independent history rows');
   const renderer = renderers.get('settings:cycle');
   assert.ok(renderer, 'use the actual helper entry renderer');
-  return renderer({ type: 'custom', customType: 'settings:cycle', data: { version: 1, ...cycleSnapshot(phase) } }, {}, theme);
+  const component = renderer({ type: 'custom', customType: 'settings:cycle', data: { version: 1, ...cycleSnapshot(phase) } }, {}, theme);
+  for (const width of [46, 120, 180]) {
+    const history = component.render(width).map(stripVTControlCharacters).join('\n');
+    assert.ok(history.includes(`Settings ${phase}`), 'the real history component, not the footer, labels phase');
+    if (phase === 'pending' || phase === 'applying') assert.match(history, /Workflow plan/u, 'the real history component retains the latest target');
+  }
+  return component;
 }
 for (const width of [46, 120, 180]) for (const phase of ['pending', 'applying']) {
   for (const compact of [false, true]) {
@@ -710,6 +742,8 @@ const FOOTERS = [
   // (including any activity pill/separator), rather than comparing unreadable baselines.
   { name: 'high status count', statuses: modeStatuses('plan', 'yolo'), highStatus: true },
   { name: 'provider ready', statuses: modeStatuses('plan', 'auto'), providerUsage: [usageReady] },
+  { name: 'Fable 71%', statuses: modeStatuses('plan', 'auto'), providerUsage: [fable71] },
+  { name: 'Fable 100% high status', statuses: modeStatuses('plan', 'yolo'), providerUsage: [fable100], highStatus: true },
   { name: 'provider unavailable', statuses: modeStatuses('plan', 'auto'), providerUsage: [usageUnavailable] },
   { name: 'provider local', statuses: modeStatuses('plan', 'auto'), providerUsage: [usageLocal] },
   { name: 'status all providers', statuses: modeStatuses('plan', 'auto'), providerUsage: [usageReady, usageUnavailable], providerUsageMore: 3 },
@@ -761,7 +795,14 @@ const IDLE = [
 for (const width of [46, 120, 180]) {
   for (const fixture of FOOTERS) {
     for (const withActivity of [false, true]) {
-      const rendered = idleFooter(width, fixture, withActivity ? 2 : 0).map(stripVTControlCharacters).join('\n');
+      const footerLines = idleFooter(width, fixture, withActivity ? 2 : 0);
+      const rendered = footerLines.map(stripVTControlCharacters).join('\n');
+      if (fixture.providerUsage?.includes(fable71) || fixture.providerUsage?.includes(fable100)) {
+        const used = fixture.providerUsage[0].windows[0].used;
+        assert.equal(footerLines.length + (withActivity ? 2 : 0), fixture.highStatus ? 13 : 6 + (withActivity ? 2 : 0), 'Fable keeps the existing row budget');
+        assert.match(rendered, new RegExp(`Fable.*${used}%`, 'u'), 'Fable retains its percentage at every width');
+        if (width >= 120) assert.match(rendered, /resets in 3d0h/u, 'wide Fable row retains its multi-day countdown');
+      }
       if (fixture.providerUsage?.length) {
         assert.ok(fixture.providerUsage.length <= 2, 'at most two account rows');
         if (fixture.providerUsage.includes(usageReady)) assert.match(rendered, /Google.*5h.*25%/u, 'ready usage keeps its measured percentage');
@@ -1232,6 +1273,7 @@ screens.forEach((screen, i) => {
     if (h === null) problems.push('Ovis: no card');
     else {
       if (dialog.question && h.question.replace(/\s+/g, ' ').trim() !== dialog.question) problems.push(`Ovis: question ${JSON.stringify(h.question)}`);
+      for (const part of dialog.questionIncludes ?? []) if (!h.question.replace(/\s+/g, '').includes(part.replace(/\s+/g, ''))) problems.push(`Ovis: question missing ${JSON.stringify(part)}: ${JSON.stringify(h.question)}`);
       if (dialog.herdr.multi !== undefined && h.multi !== dialog.herdr.multi) problems.push(`Ovis: multi_select ${h.multi}`);
       if (dialog.herdr.options !== undefined && h.options.length !== dialog.herdr.options) problems.push(`Ovis: options ${JSON.stringify(h.options)}`);
       else if (dialog.herdr.labels !== undefined && JSON.stringify(h.options) !== JSON.stringify(dialog.herdr.labels)) problems.push(`Ovis: labels ${JSON.stringify(h.options)}`);
@@ -1257,6 +1299,7 @@ screens.forEach((screen, i) => {
     if (card?.kind !== wanted) read.push(`Collie: ${card?.kind ?? 'no card'}, wanted ${wanted}`);
     else if (wanted === dialog.collie.kind && dialog.collie.options !== undefined && card.options.length !== dialog.collie.options) read.push(`Collie: options ${JSON.stringify(card.options)}`);
     if (card?.kind === wanted && wanted !== 'unread-dialog' && dialog.question && card.question.replace(/\s+/g, ' ').trim() !== dialog.question) read.push(`Collie: question ${JSON.stringify(card.question)}`);
+    if (card?.kind === wanted && wanted !== 'unread-dialog') for (const part of dialog.questionIncludes ?? []) if (!card.question.replace(/\s+/g, '').includes(part.replace(/\s+/g, ''))) read.push(`Collie: question missing ${JSON.stringify(part)}: ${JSON.stringify(card.question)}`);
     if (card?.kind === wanted && dialog.collie.labels && JSON.stringify(card.options.slice(0, dialog.collie.labels.length)) !== JSON.stringify(dialog.collie.labels)) read.push(`Collie: labels ${JSON.stringify(card.options)}`);
     if (dialog.collie.wraps && wrapsRow(dialog.collie.wraps, screen.width)) read.push(`an option is wider than ${screen.width - 4} columns, and Pi's own select wraps it with no gutter`);
     problems.push(...read);

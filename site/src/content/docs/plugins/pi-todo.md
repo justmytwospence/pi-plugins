@@ -32,7 +32,7 @@ The agent uses `todo` to create and update the list. `/todos` displays the full 
 | `delete` | `id` | Tombstones the task rather than removing its historical identity. |
 | `clear` | None | Removes all tasks and resets the id counter. |
 
-A `create`, `update` or `delete` result ends with the whole non-deleted list (`- [X]`/`- [ ]` rows, `(in progress: …)` and `(blocked: waiting on #n)` notes), so the agent sees where the list stands without a `list` call and [herdr-web-ui](/guides/clients/#herdr-and-herdr-web-ui) shows the call as a checklist.
+A `create`, `update` or `delete` result ends with the whole non-deleted list (`- [X]`/`- [ ]` rows, `(in progress: …)` and `(blocked: waiting on #n)` notes), so the agent sees where the list stands without a `list` call and [Ovis](/guides/clients/#herdr-and-ovis) shows the call as a checklist.
 
 Status values are `pending`, `in_progress`, `completed` and `deleted`. Completed tasks cannot return to in-progress; deleted tasks are terminal. Use `addBlockedBy` and `removeBlockedBy` for additive dependency updates rather than resending the whole set. Unknown or deleted dependencies, self-dependencies and cycles are rejected without changing state. Metadata merges by key; an update value of `null` removes that key.
 

@@ -35,7 +35,7 @@ The `$bg` pane token uses compact icon/count badges: `⑂ 2` for pending subagen
 
 `$wait` names what a turn kept open only to wait is waiting on (pi-bg's `bg_wait`, or its wait for a job at the turn's end), from `herdr:waiting` holds. The pane stays working, but typing ends the wait, so a client that reads the token can send a message at once instead of queueing it; herdr-web-ui's fork does with `HERDR_WEB_WAIT_TOKEN=wait`, and shows `Waiting on …` in its chat. Same TTL as `$bg`.
 
-The session name you set (not Recap's automatic one), or the first prompt's first line, becomes the pane title and `$task`. The displayed agent name includes model and effort. `$pr` is a space token describing the checkout branch's PR, refreshed at session start, after turns, and every three minutes. Set `PI_HERDR_PR=0` to disable PR reporting.
+The session name you set (not Recap's automatic one), or the first prompt's first line, becomes the pane title and `$task`. Pane title and model/effort context are separate from the canonical Herdr agent name. `$pr` is a space token describing the checkout branch's PR, refreshed at session start, after turns, and every three minutes. Set `PI_HERDR_PR=0` to disable PR reporting.
 
 `$summary` is one line (at most 80 characters) on what the last turn did or what the agent waits on, for notification tools such as herdr-native-notify. As a turn settles, a small model summarizes the prompt, tool calls, and final reply, before Pi reports the turn finished (about 1-2 seconds, capped at 4). A one-line reply is used as is; without a model, or on an error, timeout, or interrupted turn, the reply's first sentence stands in. While a dialog holds `herdr:blocked`, the token is its question (a pending `ask_user_question`'s first question, else the dialog's label). It is cleared as each run starts. With [Recap](/plugins/pi-recap/) loaded, a settled turn's line is Recap's recap instead (one shared request), so the notification matches Recap's idle line above the editor.
 
@@ -78,6 +78,8 @@ One tool reaches every agent in Herdr, on this machine or, with `machine`, on a 
 | `interrupt` | A child's `name`; sends Escape to end its current turn. |
 | `close` | A child's `name`; closes the pane, retaining the session file. |
 | `crew` | `op`: `status` (default), `claim` or `sync`; optional `takeover`. The repository's worktree sessions, coordinated from this session; see [Crews](#crews). |
+
+Human-facing agent labels use Herdr's canonical `AgentInfo.name`, not a title or pane ID. Missing names read **Unnamed agent**; a failed identity lookup reads **Agent unavailable**. Lists show pane addresses separately as `pane: …` routing information. A child's routing handle and `bg_wait` identifier remain unchanged even when its displayed identity differs; tool arguments, delivery records and events retain their original identifiers.
 
 The tool was called `herdr_child` before it reached agents other than children.
 

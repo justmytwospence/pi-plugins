@@ -1,7 +1,7 @@
 // A conversation as Pi itself shows it (a planner's or your main agent's in plan mode, Sidebar's, a subagent's):
 // Pi's own message and tool components, fed by the session's events the way Pi's interactive mode
-// feeds its chat, so Markdown, thinking, tool calls and results, and every extension tool's renderer
-// look as they do in Pi. Plan mode adds only notes (plan submitted, delivered, stopped) and labels
+// feeds its chat: originating tool renderers where available, native built-ins next, then readable
+// display-only fallbacks (remote worker events carry no renderer functions). Plan mode adds notes and labels
 // for messages someone else sent (your main agent); Sidebar hides quiz blocks (`displayAssistant`).
 // Copied verbatim into pi-plan-mode (src/app/pi-chat.ts), pi-sidebar (src/pi-chat.ts) and
 // pi-subagents (src/ui/pi-chat.ts); change all three (scripts/test-contracts.mjs checks they stay
@@ -23,6 +23,7 @@ import {
 import {
   type Component,
   Container,
+  getCapabilities,
   Spacer,
   Text,
   type TuiMouseEvent,
@@ -34,7 +35,7 @@ export type ToolRenderers = ConstructorParameters<typeof ToolExecutionComponent>
 
 export interface PiChatOptions {
   cwd: string;
-  /** The tool's definition in the session that ran it; built-in tools fall back to Pi's renderers. */
+  /** The originating session's definition; native tools and readable unknown-tool fallbacks follow. */
   toolDefinition?(name: string): ToolRenderers | undefined;
   /** Show user messages as their events arrive (your main session); planners label theirs instead. */
   userMessagesFromEvents?: boolean;
@@ -287,7 +288,7 @@ export class PiChat {
       call.name,
       call.id,
       call.arguments,
-      { showImages: false },
+      { showImages: true },
       this.renderers(call.name),
       ui,
       this.options.cwd,
@@ -297,20 +298,18 @@ export class PiChat {
     return component;
   }
 
-  /** The session's definition, with Pi's built-in renderers for what it leaves out (as Pi does). */
-  private renderers(name: string): ToolRenderers | undefined {
-    const definition = this.options.toolDefinition?.(name) as
-      | (NonNullable<ToolRenderers> & { renderCall?: unknown; renderResult?: unknown })
-      | undefined;
+  /** Originating definitions win, then native tools, then display-only readable fallbacks. */
+  private renderers(name: string): ToolRenderers {
+    const definition = this.options.toolDefinition?.(name);
     this.builtIns ??= builtInRenderers(this.options.cwd);
-    const builtIn = this.builtIns[name] as typeof definition;
-    if (!definition) return builtIn;
-    if (!builtIn) return definition;
+    const builtIn = this.builtIns[name];
+    const fallback = fallbackRenderers(name);
     return {
+      ...builtIn,
       ...definition,
-      renderCall: definition.renderCall ?? builtIn.renderCall,
-      renderResult: definition.renderResult ?? builtIn.renderResult,
-    } as ToolRenderers;
+      renderCall: definition?.renderCall ?? builtIn?.renderCall ?? fallback.renderCall,
+      renderResult: definition?.renderResult ?? builtIn?.renderResult ?? fallback.renderResult,
+    };
   }
 
   private add(component: Component) {
@@ -341,10 +340,111 @@ function builtInRenderers(cwd: string): Record<string, ToolRenderers> {
       const definition = create(cwd) as { name: string };
       renderers[definition.name] = definition as ToolRenderers;
     } catch {
-      // A tool Pi cannot build here renders with the default renderer.
+      // A tool Pi cannot build here uses the display-only fallback.
     }
   }
   return renderers;
+}
+
+/** Only display-created values are formatted; literal result strings are never JSON-parsed. */
+function fallbackRenderers(name: string): NonNullable<ToolRenderers> {
+  return {
+    renderCall(args, theme, context) {
+      const title = theme.fg("toolTitle", theme.bold(label(name)));
+      const fields = readableFields(args);
+      const preview = fields
+        .slice(0, 3)
+        .map((line) => line.trim())
+        .join(" · ");
+      const body = context.expanded ? fields.join("\n") : shorten(preview, 180);
+      const pending = context.isPartial ? (context.executionStarted ? "Working…" : "Pending…") : "";
+      return new Text([title, body, pending && theme.fg("muted", pending)].filter(Boolean).join("\n"), 0, 0);
+    },
+    renderResult(result, options, theme, context) {
+      const blocks = Array.isArray(result.content) ? result.content : [];
+      const text = contentText(blocks);
+      const lines = text.length > 0 ? text.split("\n") : readableFields(result.details);
+      const images = blocks.filter((block) => block.type === "image");
+      // ToolExecutionComponent owns native image rendering. Keep a visible placeholder otherwise.
+      if (!context.showImages || !getCapabilities().images) {
+        for (const image of images) lines.push(`[Image: ${clean(image.mimeType ?? "unknown format")}]`);
+      }
+      const status = context.isError ? "Error" : options.isPartial ? "Working…" : "Completed";
+      if (!lines.length && !images.length) lines.push(options.isPartial ? "Waiting for output…" : "No output.");
+      const visible = options.expanded ? lines : lines.slice(0, 8);
+      const body = visible.map((line) => clean(line)).join("\n");
+      const compact = shorten(body, 1_200);
+      const more = !options.expanded && (visible.length < lines.length || compact !== body);
+      return new Text(
+        [
+          theme.fg(context.isError ? "error" : "muted", status),
+          options.expanded ? body : compact,
+          ...(more ? ["… more output (expand to view)"] : []),
+        ].join("\n"),
+        0,
+        0,
+      );
+    },
+  };
+}
+
+function clean(text: string): string {
+  // Preserve newlines and tabs but never execute control sequences supplied by a tool.
+  // biome-ignore lint/suspicious/noControlCharactersInRegex: terminal display boundary
+  return text.replace(/[\u0000-\u0008\u000b-\u001f\u007f-\u009f]/g, "");
+}
+
+function label(value: string): string {
+  const text = clean(value)
+    .replace(/([a-z])([A-Z])/g, "$1 $2")
+    .replace(/[_-]+/g, " ");
+  return text ? text.charAt(0).toUpperCase() + text.slice(1) : "Tool";
+}
+
+function shorten(text: string, limit: number): string {
+  const points = Array.from(text);
+  return points.length > limit ? `${points.slice(0, limit - 1).join("")}…` : text;
+}
+
+/** Bounded field/list traversal, without serializing multiline strings or changing its input. */
+function readableFields(value: unknown): string[] {
+  if (value === undefined) return [];
+  const lines: string[] = [];
+  const seen = new Set<object>();
+  let remaining = 16_000;
+  const push = (line: string) => {
+    if (remaining <= 0 || lines.length >= 2_000) return;
+    const shown = shorten(clean(line), remaining);
+    lines.push(shown);
+    remaining -= shown.length + 1;
+  };
+  const walk = (item: unknown, prefix: string, depth: number) => {
+    if (remaining <= 0 || lines.length >= 2_000) return;
+    if (item !== null && typeof item === "object") {
+      if (seen.has(item)) return push(`${prefix}[Circular]`);
+      if (depth >= 8) return push(`${prefix}… (nested details omitted)`);
+      const entries = Array.isArray(item)
+        ? item.map((entry, index) => [`${index + 1}.`, entry] as const)
+        : Object.entries(item).map(([key, entry]) => [`${label(key)}:`, entry] as const);
+      if (!entries.length) return push(`${prefix}${Array.isArray(item) ? "(empty list)" : "(empty object)"}`);
+      seen.add(item);
+      if (prefix.trim()) push(prefix.trimEnd());
+      const indent = "  ".repeat(depth);
+      for (const [key, entry] of entries) walk(entry, `${indent}${key} `, depth + 1);
+      seen.delete(item);
+    } else {
+      const text = item === "" ? '""' : String(item);
+      const parts = text.split("\n");
+      if (parts.length === 1) push(`${prefix}${text}`);
+      else {
+        push(prefix.trimEnd());
+        for (const part of parts) push(`${"  ".repeat(depth)}${part}`);
+      }
+    }
+  };
+  walk(value, "", 0);
+  if (remaining <= 0 || lines.length >= 2_000) lines.push("… (display limit reached)");
+  return lines;
 }
 
 function toolCalls(message: Message): ToolCall[] {

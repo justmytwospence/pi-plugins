@@ -90,6 +90,26 @@ describe("tool summaries", () => {
     expect(stripTerminalSequences(fitToolCallSummary(bash, 12)).length).toBeLessThanOrEqual(12);
   });
 
+  test("Agent and suite subagent grouping summaries describe the work without IDs", async () => {
+    const { toolCallSummary } = await import("../src/renderer/tool/names.ts");
+    const opts = { variant: "grouping" as const };
+    const agent = toolCallSummary("Agent", { subagent_type: "reviewer", prompt: "Inspect the patch" }, opts);
+    expect(agent.main).toContain("reviewer");
+    const subagent = toolCallSummary("subagent", { agent: "reviewer", task: "Inspect the patch" }, opts);
+    expect(`${subagent.main} ${subagent.detail}`).toContain("Inspect the patch");
+    expect(`${agent.main} ${subagent.main}`).not.toContain("undefined");
+  });
+
+  test("generic nested multiline arguments stay readable in expanded input", async () => {
+    const { formatToolInputArgs } = await import("../src/renderer/tool/result.ts");
+    const text = formatToolInputArgs({ options: { items: [{ message: "first line\nsecond line" }] } });
+    expect(text).toContain("first line\n");
+    expect(text).toContain("second line");
+    expect(text).not.toContain("first line\\nsecond line");
+    expect(formatToolInputArgs({ options: { empty: "", no: false, zero: 0, absent: null } })).toContain('empty: ""');
+    expect(formatToolInputArgs({ empty: "" })).toBe('empty: ""');
+  });
+
   test("pi-bg's tools read as command rows on their task", async () => {
     const { toolCallSummary, backgroundTaskTitle } = await import("../src/renderer/tool/names.ts");
     const row = (name: string, args: any) => { const s = toolCallSummary(name, args); return `${s.main}${s.detail}`; };
@@ -309,7 +329,7 @@ describe("real Pi execution cards with cc-render", () => {
             expect(text).toContain(name === "ask_planner" ? "Ask planner" : "Finish plan");
             const call = plain((component as any).callRendererComponent.render(width)).join("\n");
             expect(call).not.toContain(name === "ask_planner" ? "Consultation ·" : "Implementation review");
-            if (name === "finish_plan" && width === 120) expect(text).toContain('"report":');
+            if (name === "finish_plan" && width === 120) expect(text).toContain("report: Implemented approved scope.");
           }
         }
       }

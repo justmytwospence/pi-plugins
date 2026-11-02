@@ -511,6 +511,25 @@ test("await_reply tracks any agent: its reply is a message, bg_wait can take it 
   await p.emit("session_shutdown", { type: "session_shutdown", reason: "quit" }, ctx);
 });
 
+test("pane-addressed sends display canonical names while retaining canonical wait routing", async () => {
+  inHerdr();
+  const w = agentsHerdr({ other: peerAgent("canonical-name", "w7:p1", { title: "Not the identity" }) });
+  const p = fakePi();
+  piHerdr(p.pi, { call: w.f.call, exec: async () => ({ code: 0, stdout: "", stderr: "" }), pollMs: 60_000 });
+  const ctx = ctxOf([]);
+  await p.emit("session_start", { type: "session_start", reason: "startup" }, ctx);
+  const sent = textOf(await p.tool().execute("t", { action: "send", name: "w7:p1", message: "Review", await_reply: true }, undefined, undefined, ctx));
+  expect(sent).toContain("Typed into canonical-name's terminal");
+  expect(sent).toContain("bg_wait herdr:canonical-name");
+  expect(sent).not.toContain("Typed into w7:p1");
+  expect(sent).not.toContain("Not the identity");
+  expect(w.f.of("agent.prompt")[0]!.params).toMatchObject({ target: "w7:p1", text: "Review" });
+  w.agents.other!.agent_status = "working";
+  await expect(p.tool().execute("again", { action: "send", name: "canonical-name", message: "More" }, undefined, undefined, ctx)).rejects.toThrow("canonical-name (routing handle: canonical-name) is working");
+  expect(w.f.of("agent.prompt")).toHaveLength(1);
+  await p.emit("session_shutdown", { type: "session_shutdown", reason: "quit" }, ctx);
+});
+
 test("an awaited reply nobody consumed is delivered once as a message when pi is idle", async () => {
   inHerdr();
   const w = agentsHerdr({ other: peerAgent("other", "w7:p1") });
@@ -559,7 +578,7 @@ test("await_reply refuses a working agent without a delivery, discards a failed 
   expect(textOf(await p.tool().execute("t", { action: "list" }, undefined, undefined, ctx))).not.toContain("Children, and agents");
   await p.tool().execute("t", { action: "send", name: "busy", message: "x", await_reply: true, delivery: "steer" }, undefined, undefined, ctx);
   const list = textOf(await p.tool().execute("t", { action: "list" }, undefined, undefined, ctx));
-  expect(list).toContain("busy  w7:p1  codex working  [awaited]");
+  expect(list).toContain("busy  codex working  [awaited]  [pane: w7:p1]");
   expect(list).toContain("peer");
   await p.emit("session_shutdown", { type: "session_shutdown", reason: "quit" }, ctx);
   expect(p.emitted.filter(([c, d]) => c === "bg:external" && d.state === "failed").map(([, d]) => d.id)).toEqual(["herdr:busy"]);

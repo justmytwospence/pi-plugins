@@ -754,6 +754,30 @@ function formatBashInputBody(
 	};
 }
 
+/** Render nested values as fields and ordered items, without escaping literal strings. */
+function appendInputValue(lines: string[], value: unknown, label: string, indent: string, seen: Set<object>, maxChars: number): void {
+	if (lines.join("\n").length >= maxChars) return;
+	if (value === null || typeof value !== "object") {
+		const text = sanitizeToolResultText(value === undefined ? "undefined" : value === "" ? '""' : String(value));
+		if (text.includes("\n")) {
+			lines.push(`${indent}${label}`);
+			for (const line of text.split("\n")) lines.push(`${indent}  ${line}`);
+		} else lines.push(`${indent}${label} ${text}`);
+		return;
+	}
+	if (seen.has(value)) { lines.push(`${indent}${label} [circular]`); return; }
+	if (seen.size >= 64) { lines.push(`${indent}${label} …`); return; }
+	const entries = Object.entries(value);
+	if (!entries.length) { lines.push(`${indent}${label} ${Array.isArray(value) ? "[]" : "{}"}`); return; }
+	lines.push(`${indent}${label}`);
+	seen.add(value);
+	for (const [key, item] of entries) {
+		if (lines.join("\n").length >= maxChars) { lines.push("…"); break; }
+		appendInputValue(lines, item, Array.isArray(value) ? `${Number(key) + 1}.` : `${sanitizeToolResultText(key)}:`, `${indent}  `, seen, maxChars);
+	}
+	seen.delete(value);
+}
+
 /** Pretty-print tool call args for the expanded Input section. */
 export function formatToolInputBody(
 	args: unknown,
@@ -771,12 +795,13 @@ export function formatToolInputBody(
 		return { text: text.length > maxChars ? `${text.slice(0, maxChars)}…` : text };
 	}
 	if (Array.isArray(args)) {
-		try {
-			const json = JSON.stringify(args, null, 2);
-			return { text: json.length > maxChars ? `${json.slice(0, maxChars)}…` : json };
-		} catch {
-			return { text: sanitizeToolResultText(String(args)) };
+		const lines: string[] = [];
+		for (const [index, value] of args.entries()) {
+			if (lines.join("\n").length >= maxChars) { lines.push("…"); break; }
+			appendInputValue(lines, value, `${index + 1}.`, "", new Set([args]), maxChars);
 		}
+		const text = lines.join("\n");
+		return { text: text.length > maxChars ? `${text.slice(0, maxChars)}…` : text };
 	}
 
 	const entries = Object.entries(args as Record<string, unknown>).filter(
@@ -835,7 +860,7 @@ export function formatToolInputBody(
 					lines.push(`  ${line}`);
 				}
 			} else {
-				lines.push(`${key}: ${safeValue}`);
+				lines.push(`${key}: ${safeValue === "" ? '\"\"' : safeValue}`);
 			}
 			continue;
 		}
@@ -843,17 +868,7 @@ export function formatToolInputBody(
 			lines.push(`${key}: ${String(value)}`);
 			continue;
 		}
-		try {
-			const json = JSON.stringify(value, null, 2);
-			if (json.includes("\n")) {
-				lines.push(`${key}:`);
-				for (const line of json.split("\n")) lines.push(`  ${line}`);
-			} else {
-				lines.push(`${key}: ${json}`);
-			}
-		} catch {
-			lines.push(`${key}: [unserializable]`);
-		}
+		appendInputValue(lines, value, `${key}:`, "", new Set([args]), maxChars);
 	}
 	const text = lines.join("\n");
 	// After truncation, line numbers no longer align with colored lines, so return plain text only

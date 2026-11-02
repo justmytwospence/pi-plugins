@@ -282,7 +282,7 @@ describe("settings cycle safety", () => {
     return request.result!;
   };
 
-  test.each(["workflow", "approval"] as const)("%s preview preserves a finishing classifier until the 400ms commit", async key => {
+  test.each(["workflow", "approval"] as const)("%s preview preserves a finishing classifier until the 1000ms commit", async key => {
     vi.useFakeTimers();
     const s = setup(safe);
     await s.h.emit("session_start", {}, s.ctx);
@@ -293,7 +293,7 @@ describe("settings cycle safety", () => {
     await entered.promise;
     const settled = cycle(s, key);
     expect(settingsCycles(s.h.pi).snapshot()?.phase).toBe("pending");
-    await vi.advanceTimersByTimeAsync(399);
+    await vi.advanceTimersByTimeAsync(999);
     expect(s.h.entries.filter(e => e.customType === WORKFLOW_ENTRY || e.customType === APPROVAL_ENTRY)).toHaveLength(0);
     result.resolve({ model: "jev-latest", stopReason: "stop", answers: safe, usage: usage(300) });
     expect(await pending).toBeUndefined();
@@ -313,7 +313,7 @@ describe("settings cycle safety", () => {
     const pending = s.h.emit("tool_call", call("bash", { command: "npm test" }), s.ctx);
     await entered.promise;
     const settled = cycle(s, key);
-    await vi.advanceTimersByTimeAsync(399);
+    await vi.advanceTimersByTimeAsync(999);
     result.resolve("Allow once");
     expect(await pending).toBeUndefined();
     expect(settingsCycles(s.h.pi).snapshot()?.phase).toBe("pending");
@@ -331,7 +331,7 @@ describe("settings cycle safety", () => {
     const pending = s.h.emit("tool_call", call("bash", { command: "npm test" }), s.ctx);
     await entered.promise;
     const settled = cycle(s, key);
-    await vi.advanceTimersByTimeAsync(400);
+    await vi.advanceTimersByTimeAsync(1000);
     expect(await settled).toBe(true);
     result.resolve({ model: "jev-latest", stopReason: "stop", answers: safe, usage: usage(300) });
     expect(await pending).toMatchObject({ block: true, reason: expect.stringMatching(/modes changed.*reevaluated/su) });
@@ -349,7 +349,7 @@ describe("settings cycle safety", () => {
     const pending = s.h.emit("tool_call", call("bash", { command: "npm test" }), s.ctx);
     await entered.promise;
     const settled = cycle(s, key);
-    await vi.advanceTimersByTimeAsync(399);
+    await vi.advanceTimersByTimeAsync(999);
     expect(settingsCycles(s.h.pi).snapshot()?.phase).toBe("pending");
     await vi.advanceTimersByTimeAsync(1);
     expect(await settled).toBe(true);
@@ -373,7 +373,7 @@ describe("settings cycle safety", () => {
     else s.h.pi.events.emit("workflow-mode:exec", { active: true, source: "transition" });
     expect(await settled).toBe(false);
     const entries = structuredClone(s.h.entries);
-    await vi.advanceTimersByTimeAsync(400);
+    await vi.advanceTimersByTimeAsync(1000);
     expect(s.h.entries).toEqual(entries);
     expect(settingsCycles(s.h.pi).snapshot()?.phase).toBe("cancelled");
   });
@@ -392,7 +392,7 @@ describe("settings cycle safety", () => {
       else s.h.pi.events.emit(MODE_SET, { mode: "auto" });
     });
     const settled = cycle(s, "approval");
-    await vi.advanceTimersByTimeAsync(400);
+    await vi.advanceTimersByTimeAsync(1000);
     expect(await settled).toBe(false);
     expect(explicit).toHaveBeenCalledOnce();
     expect(settings.snapshot()).toMatchObject({ phase: "interrupted", reason: "Approvals selected explicitly." });
@@ -401,7 +401,7 @@ describe("settings cycle safety", () => {
       { version: 1, mode: "bypassPermissions" }, { version: 1, mode: "auto" },
     ]);
     const entries = structuredClone(s.h.entries);
-    await vi.advanceTimersByTimeAsync(800);
+    await vi.advanceTimersByTimeAsync(2000);
     expect(s.h.entries).toEqual(entries);
   });
 
@@ -413,7 +413,7 @@ describe("settings cycle safety", () => {
     expect(await cycle(s, "workflow")).toBe(false);
     expect(settingsCycles(s.h.pi).snapshot()).toBeUndefined();
     expect(s.ctx.ui.notes.at(-1)?.message).toContain("Exec");
-    await vi.advanceTimersByTimeAsync(400);
+    await vi.advanceTimersByTimeAsync(1000);
     expect(s.h.entries.some(e => e.customType === "settings:cycle")).toBe(false);
   });
 });
@@ -823,7 +823,7 @@ describe("awaited Linked gate transitions", () => {
     s.ctx.isIdle = () => true;
     const pending: { userInitiated: boolean; result?: Promise<boolean> } = { userInitiated: true };
     s.h.pi.events.emit(WORKFLOW_CYCLE, pending);
-    await vi.advanceTimersByTimeAsync(399);
+    await vi.advanceTimersByTimeAsync(999);
     expect(queryFlow(s.h.pi.events)?.workflow).toBe("work");
     s.ctx.isIdle = () => false;
     await vi.advanceTimersByTimeAsync(1);
@@ -847,7 +847,7 @@ describe("awaited Linked gate transitions", () => {
       const approvals: { result?: Promise<boolean> } = {};
       s.h.pi.events.emit(WORKFLOW_CYCLE, workflow);
       s.h.pi.events.emit(MODE_CYCLE, approvals);
-      await vi.advanceTimersByTimeAsync(400);
+      await vi.advanceTimersByTimeAsync(1000);
       await entered.promise;
       expect(settings.snapshot()).toMatchObject({ phase: "applying", settings: [
         { key: "workflow", baseline: "chat", target: "plan" },
@@ -882,7 +882,7 @@ describe("awaited Linked gate transitions", () => {
       expect(s.ctx.ui.status.get("permission-mode")).toContain("auto");
       expect(settings.snapshot()).toEqual(journal);
       const entries = structuredClone(s.h.entries);
-      await vi.advanceTimersByTimeAsync(800);
+      await vi.advanceTimersByTimeAsync(2000);
       expect(s.h.entries).toEqual(entries);
       expect(s.setModel).toHaveBeenCalledOnce();
       expect(s.jev.calls).toEqual([]);
@@ -1143,6 +1143,7 @@ test("a held call is pushed back with Jev's reasons and suggestion; the agent's 
   branch.push(assistantEntry("Publishing is the whole point of the release you asked for.", [{ type: "toolCall", id: "t2", name: "bash", arguments: {} }]));
   ctx.ui.selectAnswers.push("Allow rule for this session");
   expect(await h.emit("tool_call", call("bash", { command: "npm publish" }, "t2"), ctx)).toBeUndefined();
+  expect(ctx.ui.selects[0]?.title).toContain("Action: bash\nTarget: npm publish");
   expect(ctx.ui.selects[0]?.title).toMatch(/Held: it changes something other people see/u);
   expect(ctx.ui.selects[0]?.title).toMatch(/Agent: Publishing is the whole point/u);
   expect(ctx.ui.selects[0]?.options).toEqual([
@@ -1411,7 +1412,8 @@ describe("herdr", () => {
         const result: any = await h.emit("tool_call", call("bash", { command: "npm publish" }), ctx);
         expect(result?.block).toBe(answer === "Block" ? true : undefined);
         expect(h.events.map((e) => e.channel)).toEqual(["herdr:blocked", "ui.select", "herdr:blocked"]);
-        expect(h.events[0]?.data).toEqual({ active: true, label: "Allow? bash: npm publish" });
+        expect(h.events[0]?.data).toEqual({ active: true, label: "Allow? bash — npm publish" });
+        expect(h.events[1]?.data).toContain("Action: bash\nTarget: npm publish");
         expect(h.events[2]?.data).toEqual({ active: false });
       }
     } finally {
@@ -1453,7 +1455,7 @@ describe("herdr", () => {
       await long.h.emit("tool_call", call("bash", { command: `npm publish ${"--tag next ".repeat(20)}` }), long.ctx);
       const label: string = long.h.events[0]?.data.label;
       expect(label).toHaveLength(60);
-      expect(label).toMatch(/^Allow\? bash: npm publish --tag next .*…$/u);
+      expect(label).toMatch(/^Allow\? bash — npm publish --tag next .*…$/u);
     } finally {
       DEFAULT_CONFIG.pushBack = true;
     }

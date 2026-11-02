@@ -11,7 +11,7 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import { Markdown, Text } from "@earendil-works/pi-tui";
 import { setToolsActive } from "./active-tools.js";
-import { PiChat, piChatTheme } from "./app/pi-chat.js";
+import { PiChat, piChatTheme, type ToolRenderers } from "./app/pi-chat.js";
 import type { ModelSpec } from "./implementation-models.js";
 import type { PlannerAgent, PlannerStats, PlannerStatus } from "./planner/agent.js";
 import { consultMessage, MAIN_AGENT_GUIDELINES } from "./planner/prompt.js";
@@ -50,11 +50,17 @@ export interface MainChatBridge {
 }
 
 export function registerMainChat(pi: ExtensionAPI, bridge: MainChatBridge) {
+  // These definitions belong to main; no SDK-private session lookup is needed for its mirror.
+  const definitions = new Map<string, ToolRenderers>();
+  const registerTool: ExtensionAPI["registerTool"] = (definition) => {
+    definitions.set(definition.name, definition as ToolRenderers);
+    pi.registerTool(definition);
+  };
   pi.registerMessageRenderer<PlanMessageDetails>(PLAN_MESSAGE_TYPE, (message, options, theme) =>
     renderPlanMessage(message, options.expanded, theme),
   );
 
-  pi.registerTool({
+  registerTool({
     name: ASK_PLANNER_TOOL,
     label: "Ask planner",
     description:
@@ -62,6 +68,10 @@ export function registerMainChat(pi: ExtensionAPI, bridge: MainChatBridge) {
     promptSnippet: "Ask a /planners planner (A or B) about its plan or research",
     promptGuidelines: MAIN_AGENT_GUIDELINES,
     defaultActive: false,
+    ...({ ccstyleOwnCall: true, ccstyleOwnResult: true } as const),
+    renderCall: (args, _theme, context) => new Text(formatMainToolCall(ASK_PLANNER_TOOL, args, context.expanded), 0, 0),
+    renderResult: (result, options, _theme, context) =>
+      new Text(formatMainToolResult(result, { ...options, isError: context.isError }), 0, 0),
     parameters: {
       type: "object",
       additionalProperties: false,
@@ -103,7 +113,7 @@ export function registerMainChat(pi: ExtensionAPI, bridge: MainChatBridge) {
     },
   });
 
-  pi.registerTool({
+  registerTool({
     name: SUBMIT_MERGED_TOOL,
     label: "Submit merged plan",
     description:
@@ -111,6 +121,11 @@ export function registerMainChat(pi: ExtensionAPI, bridge: MainChatBridge) {
     promptSnippet: "Record the merged plan for the current /planners run (only when the user asks)",
     promptGuidelines: MAIN_AGENT_GUIDELINES,
     defaultActive: false,
+    ...({ ccstyleOwnCall: true, ccstyleOwnResult: true } as const),
+    renderCall: (args, _theme, context) =>
+      new Text(formatMainToolCall(SUBMIT_MERGED_TOOL, args, context.expanded), 0, 0),
+    renderResult: (result, options, _theme, context) =>
+      new Text(formatMainToolResult(result, { ...options, isError: context.isError }), 0, 0),
     parameters: {
       type: "object",
       additionalProperties: false,
@@ -135,6 +150,7 @@ export function registerMainChat(pi: ExtensionAPI, bridge: MainChatBridge) {
       );
     },
   });
+  return (name: string): ToolRenderers | undefined => definitions.get(name);
 }
 
 /** Turn the main agent's run tools on while a run is active, and off again after. */
@@ -168,6 +184,8 @@ export class MainAgentView {
       onChange(): void;
       /** Your session's working directory, for tool renderers. */
       cwd?(): string;
+      /** Definitions from this main session only, never a planner's registry. */
+      toolDefinition?(name: string): ToolRenderers | undefined;
     },
   ) {
     this.stats.endedAt = this.stats.startedAt;
@@ -175,7 +193,11 @@ export class MainAgentView {
   }
 
   private newChat() {
-    return new PiChat(piChatTheme, { cwd: this.source.cwd?.() ?? process.cwd(), userMessagesFromEvents: true });
+    return new PiChat(piChatTheme, {
+      cwd: this.source.cwd?.() ?? process.cwd(),
+      toolDefinition: (name) => this.source.toolDefinition?.(name),
+      userMessagesFromEvents: true,
+    });
   }
 
   /** A line from plan mode itself (a plan delivered, a planner failed). */
@@ -280,6 +302,62 @@ export class MainAgentView {
     }
     this.source.onChange();
   }
+}
+
+/** Compact display summaries only; execution still receives the original prose. */
+export function formatMainToolCall(
+  name: typeof ASK_PLANNER_TOOL | typeof SUBMIT_MERGED_TOOL,
+  args: unknown,
+  expanded = false,
+) {
+  const input = args && typeof args === "object" ? (args as Record<string, unknown>) : {};
+  if (name === ASK_PLANNER_TOOL) {
+    const planner =
+      typeof input.planner === "string" && input.planner.trim() ? compactProse(input.planner) : "not specified";
+    const message = typeof input.message === "string" ? input.message : "";
+    const head = `Ask planner ${planner}`;
+    return message ? `${head}\n${expanded ? message : compactProse(message)}` : `${head}\nPreparing question…`;
+  }
+  const plan = typeof input.plan === "string" ? input.plan : "";
+  const lines = plan ? plan.split("\n").length : 0;
+  const head = `Submit merged plan · ${lines} lines`;
+  return expanded ? `${head}\n${plan}` : `${head} · ctrl+o to expand`;
+}
+
+/** Lifecycle labels are derived from this tool's existing prose, not new persisted metadata. */
+export function formatMainToolResult(
+  result: { content?: unknown },
+  options: { expanded?: boolean; isPartial?: boolean; isError?: boolean } = {},
+): string {
+  const body = contentText(result.content);
+  const state = options.isError
+    ? "Failed"
+    : options.isPartial
+      ? "Working"
+      : body.startsWith("Stopped waiting;")
+        ? "Aborted"
+        : /^Planner .+ failed:/u.test(body)
+          ? "Failed"
+          : /^Planner .+ is waiting for the user/u.test(body)
+            ? "Asking"
+            : /^Planner .+ is still working/u.test(body)
+              ? "Working"
+              : body.startsWith("No /planners run") || body.startsWith("There is no planner")
+                ? "Unavailable"
+                : body === "Say what to ask the planner." || body === "The plan is empty."
+                  ? "Invalid input"
+                  : body
+                    ? "Completed"
+                    : "Empty result";
+  if (!body) return state;
+  if (options.expanded) return `${state}\n${body}`;
+  const lines = body.split("\n").length;
+  return `${state}\n${compactProse(body)}${lines > 1 ? `\n${lines} lines · ctrl+o to expand` : ""}`;
+}
+
+function compactProse(value: string): string {
+  const chars = Array.from(value.replace(/\s+/gu, " ").trim());
+  return chars.length > 200 ? `${chars.slice(0, 199).join("")}…` : chars.join("");
 }
 
 function renderPlanMessage(

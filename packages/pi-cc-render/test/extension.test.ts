@@ -489,6 +489,36 @@ describe("extension factory", () => {
   });
 });
 
+describe("ccstyle own call renderer", () => {
+  test("opt-in takes precedence, while absent or false uses ccstyle and off uses the original", async () => {
+    const { createCcstyleTool } = await import("../src/renderer/default-mode.ts");
+    const { config } = await import("../src/config/config.ts");
+    const saved = config.mode;
+    const theme = { fg: (_color: string, text: string) => text, bg: (_color: string, text: string) => text, bold: (text: string) => text };
+    const args = { task: "Inspect the patch" };
+    const context = { state: {} };
+    const own = { render: () => ["own call"], invalidate() {} };
+    const renderCall = vi.fn(() => own);
+    try {
+      config.mode = "on";
+      const optedIn = createCcstyleTool({ name: "custom", ccstyleOwnCall: true, renderCall }, new Map() as any);
+      expect(optedIn.renderCall(args, theme, context)).toBe(own);
+      expect(renderCall).toHaveBeenCalledWith(args, theme, context);
+      for (const flag of [undefined, false]) {
+        renderCall.mockClear();
+        const wrapped = createCcstyleTool({ name: "custom", ccstyleOwnCall: flag, renderCall }, new Map() as any);
+        expect(wrapped.renderCall(args, theme, context)).not.toBe(own);
+        expect(renderCall).not.toHaveBeenCalled();
+        config.mode = "off";
+        expect(wrapped.renderCall(args, theme, context)).toBe(own);
+        config.mode = "on";
+      }
+    } finally {
+      config.mode = saved;
+    }
+  });
+});
+
 describe("Pi 1.2.0 resource loader", () => {
   test("loads the standalone package from an isolated copy", async () => {
     const isolated = resolve(temp, "isolated", "pi-cc-render");

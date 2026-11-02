@@ -3,6 +3,7 @@ import { basename } from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { JsonValue } from "@earendil-works/pi-ai";
 import { Type } from "typebox";
+import { Text } from "@earendil-works/pi-tui";
 import { FOOTER_ACTIONS_CHANNEL, type FooterActionsRequest } from "./footer-actions.ts";
 import { HERDR_BLOCKED } from "./herdr.ts";
 import { createDecisionsProvider } from "./provider.ts";
@@ -19,6 +20,8 @@ import {
   subscribeSystem1Events,
   system1Path,
   type System1Backend,
+  type System1Outcome,
+  type ClassifierUsage,
 } from "./system1.ts";
 import {
   DEFAULT_CLASSIFIER,
@@ -123,6 +126,43 @@ const outputSchema = Type.Union([
 const SUBCOMMANDS = ["status", "jev", "openai", "order", "retry"];
 const USAGE =
   "Use /system1, /system1 status, /system1 jev, /system1 openai, /system1 order jev openai, or /system1 retry.";
+
+// Bound and sanitize presentation only; the original tool payload remains untouched.
+const display = (value: unknown, limit = 300) => {
+  const text = String(value).replace(/[\x00-\x1f\x7f-\x9f]/gu, " ");
+  return text.length > limit ? `${text.slice(0, limit - 1)}…` : text;
+};
+const usageLine = (usage: ClassifierUsage) =>
+  `tokens: ${usage.totalTokens} (input ${usage.input}, output ${usage.output}, cache read ${usage.cacheRead}, write ${usage.cacheWrite}); cost: ${usage.cost.total} (input ${usage.cost.input}, output ${usage.cost.output}, cache read ${usage.cost.cacheRead}, write ${usage.cost.cacheWrite})`;
+
+function resultPresentation(data: System1Outcome, expanded: boolean): string {
+  const lines: string[] = [];
+  if (data.ok) {
+    lines.push(`${display(data.backend)} · ${display(data.provider)}/${display(data.model)} · ${data.fallback ? "fallback" : "primary"}`);
+    const entries = Object.entries(data.answers);
+    for (const [name, value] of expanded ? entries : entries.slice(0, 40)) {
+      const answer = value.type === "bool" ? `bool probability ${value.probability}`
+        : value.type === "choice" ? `choice ${display(value.choice)} · confidence ${value.confidence}`
+        : `score ${value.score} · confidence ${value.confidence}`;
+      lines.push(`${display(name)}: ${answer}`);
+    }
+    if (!expanded && entries.length > 40) lines.push(`… ${entries.length - 40} more answer${entries.length === 41 ? "" : "s"} (expand to view)`);
+  } else {
+    const label = data.code === "refused" ? "Refused" : data.code === "cancelled" ? "Cancelled" : "Error";
+    lines.push(`${label} (${display(data.code)}): ${display(data.reason)}`);
+  }
+  if (expanded) {
+    lines.push(`Latency: ${data.latencyMs}ms`);
+    if (data.usage) lines.push(`Usage: ${usageLine(data.usage)}`);
+    lines.push(`Attempts: ${data.attempts.length}`);
+    for (const item of data.attempts.slice(0, 20)) {
+      lines.push(`  ${display(item.backend)} · ${display(item.provider)}/${display(item.model)} · ${display(item.status)}${item.code ? ` · ${display(item.code)}` : ""}${item.reason ? ` — ${display(item.reason)}` : ""} · ${item.latencyMs}ms · ${item.sdkCalls} calls${item.retryAt === undefined ? "" : ` · retry at ${item.retryAt}`}`);
+      if (item.usage) lines.push(`    Usage: ${usageLine(item.usage)}`);
+    }
+    if (data.attempts.length > 20) lines.push(`  … ${data.attempts.length - 20} more attempts`);
+  }
+  return lines.join("\n");
+}
 
 export default async function system1Extension(pi: ExtensionAPI): Promise<void> {
   const provider = await createDecisionsProvider();
@@ -357,6 +397,25 @@ export default async function system1Extension(pi: ExtensionAPI): Promise<void> 
     parameters: Type.Object({ state: record(), questions: Type.Record(Type.String(), question) }),
     outputSchema,
     annotations: { readOnlyHint: true, destructiveHint: false },
+    ...({ ccstyleOwnCall: true, ccstyleOwnResult: true } as const),
+    renderCall(args, theme) {
+      const entries = Object.values(args?.questions ?? {});
+      const counts = new Map<string, number>();
+      for (const entry of entries) {
+        const type = typeof entry?.type === "string" ? display(entry.type, 30) : "unknown";
+        counts.set(type, (counts.get(type) ?? 0) + 1);
+      }
+      const types = [...counts].map(([type, count]) => `${type}: ${count}`).join(", ");
+      return new Text(`${theme.fg("toolTitle", theme.bold("System 1 judgment"))} · ${entries.length} question${entries.length === 1 ? "" : "s"}${types ? ` (${types})` : ""}`, 0, 0);
+    },
+    renderResult(result, { expanded, isPartial }, theme) {
+      const data = result.details as System1Outcome | undefined;
+      if (!data || typeof data.ok !== "boolean") {
+        const literal = result.content.filter(block => block.type === "text").map(block => block.text).join("\n");
+        return new Text(literal ? display(literal, expanded ? 20_000 : 2_000) : theme.fg("muted", isPartial ? "Judgment pending" : "Judgment unavailable"), 0, 0);
+      }
+      return new Text(resultPresentation(data, expanded), 0, 0);
+    },
     async execute(_id, input, signal, _onUpdate, ctx) {
       const data = await askSystem1(ctx.modelRegistry, DEFAULT_CLASSIFIER, input.state, input.questions, signal);
       return {

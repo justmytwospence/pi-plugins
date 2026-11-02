@@ -8,7 +8,12 @@ import type { FamilyService, PreparedAgent } from "../family-contract.js";
 import { formatModelSpec, type ModelSpec } from "../implementation-models.js";
 import { describeToolArgs, PlannerTrace } from "../planner-trace.js";
 import { buildPlannerConversation, buildPlannerTranscript, PLANNER_SEED_END_ENTRY } from "../planners.js";
-import type { PlanModeQuestion, PlanModeQuestionAnswer } from "../question-tool.js";
+import {
+  PLAN_MODE_QUESTION_TOOL_NAME,
+  type PlanModeQuestion,
+  type PlanModeQuestionAnswer,
+  planModeQuestionRenderer,
+} from "../question-tool.js";
 import { addUsage as addUsageTo, emptyUsage, PLAN_SUBAGENTS_TOOL_NAME, type Usage } from "../scout-process.js";
 import { SubagentTracker } from "../subagent-progress.js";
 import { type PlannerPolicy, plannerExtension } from "./extension.js";
@@ -153,7 +158,9 @@ export class PlannerAgent {
     this.sessionFile = options.sessionFile;
     this.chat = new PiChat(piChatTheme, {
       cwd: options.cwd,
-      toolDefinition: (name) => this.handle?.session.getToolDefinition?.(name) as never,
+      toolDefinition: (name) =>
+        (this.handle?.session.getToolDefinition?.(name) ??
+          (name === PLAN_MODE_QUESTION_TOOL_NAME ? planModeQuestionRenderer : undefined)) as never,
     });
     if (options.sessionFile) this.seedChat(options.sessionFile);
     if (options.plan) {
