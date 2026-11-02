@@ -106,6 +106,7 @@ import {
   readPlanModeSettings,
   updatePlanModeSettings,
 } from "./settings.js";
+import { settingsCycles } from "./settings-cycle.js";
 import { resolveSystem1Route, resolveSystem1Target, SYSTEM1_CHANGED } from "./system1.js";
 import { applyAlwaysOffer, applyJevPick, buildToolTree, leafCapabilities, type ToolNode } from "./tool-tree.js";
 import { type ToolPreselection, ToolTreeView } from "./tool-tree-view.js";
@@ -1265,10 +1266,11 @@ export default async function plan(pi: ExtensionAPI, dependencies: PlanDependenc
       description: "Toggle plan mode",
       handler: async (ctx) => {
         const epoch = branchEpoch;
+        const trigger = settingsCycles(pi).captureTrigger();
         await initialized;
         await sessionReady;
         if (!runtimeActive || epoch !== branchEpoch) return;
-        await inline.toggle(ctx);
+        await inline.toggle(ctx, trigger);
       },
     });
   }

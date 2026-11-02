@@ -83,13 +83,23 @@ function fixture({ width = 120, sidebar = false, vim = false, regular = false, b
   const state = { generation: 1, active: true, blocked: 0, promptDepth: 0, idle: true, linked: false, editor, tui, actions: {} };
   const calls = [];
   const cancellations = [];
+  const scopes = [];
+  const reasoningTriggers = [];
+  const captureCycleTrigger = vi.fn(() => state.keyTrigger);
+  const withCycleTrigger = (trigger, run) => {
+    const previous = state.cycleTrigger;
+    state.cycleTrigger = trigger;
+    scopes.push(trigger);
+    try { return run(); } finally { state.cycleTrigger = previous; }
+  };
   const notify = vi.fn();
   const refresh = vi.fn();
   const controller = createFooterActionController({
     getEditor: () => state.editor, getTui: () => state.tui, getGeneration: () => state.generation,
     isCurrent: () => state.active, getBlocked: () => state.blocked, getPromptDepth: () => state.promptDepth,
     isIdle: () => state.idle, isLinked: () => state.linked, getActions: () => state.actions, notify, refresh,
-    cycleReasoning: () => { calls.push("native.reasoning"); },
+    cycleReasoning: () => { calls.push("native.reasoning"); reasoningTriggers.push(state.cycleTrigger); },
+    captureCycleTrigger, withCycleTrigger,
     cancelSettings: reason => { cancellations.push(reason); },
   });
   const originalInput = editor.handleInput;
@@ -155,7 +165,8 @@ function fixture({ width = 120, sidebar = false, vim = false, regular = false, b
     return { x: hit.startCol, y: row + hit.row, width: lastWidth };
   }
   return { state, editor, tui, terminal, component, controller, calls, cancellations, notify, refresh, native, originalInput,
-    release, dock, footer, kb, side, scroll, root, splitState, point, closeSelector, get selector() { return selector; } };
+    release, dock, footer, kb, side, scroll, root, splitState, point, closeSelector, scopes, reasoningTriggers, captureCycleTrigger,
+    get selector() { return selector; } };
 }
 
 test("half-open ANSI/Unicode cell ranges and inline hint exclude icons, separators, padding and omitted segments", () => {
@@ -405,6 +416,61 @@ for (const vim of [false, true]) {
   });
 }
 
+for (const vim of [false, true]) for (const regular of [false, true]) {
+  test(`${vim ? "pi-vim" : "CustomEditor"} ${regular ? "main screen" : "fullscreen"}: native key scope, release filtering and explicit pointer isolation`, async () => {
+    const f = fixture({ vim, regular, bindings: { "app.thinking.cycle": "ctrl+t" } });
+    const draft = f.editor.getText();
+    const trigger = { kind: "keyboard", epoch: 1, serial: 1, modifiers: 4, event: "press" };
+    f.state.keyTrigger = trigger;
+    f.terminal.send("\x1b[116;5u");
+    assert.deepEqual(f.reasoningTriggers, [trigger], "the original native action captures the current raw-key token");
+    assert.equal(f.captureCycleTrigger.mock.calls.length, 1);
+    f.terminal.send("\x1b[116;5:3u", "\x1b[57442;1:3u");
+    assert.equal(f.reasoningTriggers.length, 1, "ordinary and modifier release cannot invoke the native action again");
+    await f.controller.activate("reasoning.cycle");
+    assert.deepEqual(f.reasoningTriggers.at(-1), { kind: "pointer" }, "pointer must not inherit even a still-visible keyboard token");
+    assert.equal(f.captureCycleTrigger.mock.calls.length, 1, "pointer origin does not ask for a key token");
+    assert.equal(f.state.cycleTrigger, undefined, "scope exits synchronously");
+    f.state.keyTrigger = undefined;
+    await f.controller.activate("reasoning.cycle", "keyboard");
+    assert.deepEqual(f.reasoningTriggers.at(-1), { kind: "programmatic" }, "missing raw key evidence is not fabricated");
+    f.tui.setFocus(f.side);
+    const scopes = f.scopes.length;
+    await f.controller.activate("reasoning.cycle", "keyboard");
+    await f.controller.activate("effort.toggle");
+    assert.equal(f.scopes.length, scopes, "Sidebar/non-main focus never enters a settings scope");
+    f.tui.setFocus(f.editor);
+    f.state.promptDepth++;
+    await f.controller.activate("reasoning.cycle", "keyboard");
+    assert.equal(f.scopes.length, scopes, "a native dialog blocks even an explicitly supplied keyboard origin");
+    assert.equal(f.editor.getText(), draft);
+    assert.equal(f.tui.getFocusedComponent(), f.editor);
+  });
+}
+
+test("pointer provider scope covers only synchronous invocation, not an awaited picker lifetime", async () => {
+  const f = fixture();
+  const pending = deferred();
+  const observations = [];
+  f.state.keyTrigger = { kind: "keyboard", epoch: 1, serial: 8, modifiers: 4, event: "repeat" };
+  f.state.actions["approvals.open"].run = async () => {
+    observations.push(f.state.cycleTrigger);
+    await pending.promise;
+    observations.push(f.state.cycleTrigger);
+  };
+  const opening = f.controller.activate("approvals.open");
+  assert.deepEqual(observations, [{ kind: "pointer" }]);
+  assert.equal(f.state.cycleTrigger, undefined);
+  assert.equal(f.captureCycleTrigger.mock.calls.length, 0);
+  pending.resolve();
+  await opening;
+  assert.deepEqual(observations, [{ kind: "pointer" }, undefined]);
+  f.state.actions["effort.toggle"].run = () => { assert.deepEqual(f.state.cycleTrigger, { kind: "pointer" }); throw new Error("scope failure"); };
+  await f.controller.activate("effort.toggle");
+  assert.equal(f.state.cycleTrigger, undefined, "throwing providers cannot leak a scope");
+  assert.match(f.notify.mock.calls.at(-1)[0], /scope failure/);
+});
+
 test("native history and registered shortcut precedence are retained; unrelated model cycle is untouched", async () => {
   const f = fixture({ bindings: { "tui.editor.historyPrevious": "alt+p" } });
   f.state.linked = true;
@@ -418,6 +484,8 @@ test("native history and registered shortcut precedence are retained; unrelated 
   f.editor.actionHandlers.set("app.model.cycleForward", () => f.calls.push("cycle"));
   f.terminal.send("\x10");
   assert.deepEqual(f.calls, ["shortcut", "cycle"]);
+  assert.deepEqual(f.scopes, [], "history and explicit shortcuts never enter the settings-cycle scope");
+  assert.equal(f.captureCycleTrigger.mock.calls.length, 0);
 });
 
 test("native autocomplete Escape precedence survives a colliding Linked model binding", async () => {
@@ -435,6 +503,7 @@ test("native autocomplete Escape precedence survives a colliding Linked model bi
   assert.deepEqual(f.calls, []);
   assert.equal(f.editor.getText(), "");
   assert.equal(f.editor.actionHandlers.get("app.model.select"), f.native);
+  assert.deepEqual(f.scopes, [], "autocomplete Escape never captures a settings trigger");
 });
 
 test("pi-vim Normal commands retain precedence over a colliding model binding", async () => {
@@ -444,6 +513,7 @@ test("pi-vim Normal commands retain precedence over a colliding model binding", 
   await tick();
   assert.deepEqual(f.calls, []);
   assert.notEqual(f.editor.getText(), "unsent 界 draft\nsecond line", "Vim x remains an edit, not a flow picker");
+  assert.deepEqual(f.scopes, [], "Vim edits never enter the settings scope");
 });
 
 test("Linked keyboard routing denies unavailable/busy/prompt/blocked actions rather than falling through to native", async () => {

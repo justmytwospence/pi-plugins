@@ -118,6 +118,8 @@ function statusFooter(width, statuses, { compact = false, phase = 'idle', flow, 
   assert.ok(lines.every(line => visibleWidth(line) <= width), `footer rows fit ${width} columns`);
   if (readOnly) assert.deepEqual(layout.hits, [], 'other-session chrome must remain read-only despite a main preview');
   const plain = lines.map(stripVTControlCharacters);
+  assert.doesNotMatch(plain.join('\n'), /\bpending\b|\bapplying\b/iu,
+    'footer values do not duplicate the transcript phase indicator');
   const linked = !readOnly && flow?.operatingMode === 'linked';
   const effectiveKind = absorbed.exec !== undefined ? 'exec' : absorbed.workflow?.kind;
   const preview = !compact && !readOnly && ['pending', 'applying'].includes(settingsCycle?.phase) ? settingsCycle : undefined;
@@ -139,11 +141,21 @@ function statusFooter(width, statuses, { compact = false, phase = 'idle', flow, 
       assert.ok(!workflow[0].includes('Approvals'), 'approvals stay separate from workflow');
       // Hints yield before critical state at narrow widths; Sidebar also probes smaller widths.
       if (!preview && !linked && !absorbed.exec && width >= (kind === 'exec' ? 120 : 46)) assert.ok(workflow[0].includes(WORKFLOW_EXPLANATIONS[kind]), `workflow row explains ${kind} when space permits: ${workflow[0]}`);
-      if (preview && width >= 46) assert.ok(workflow[0].includes(preview.phase), 'draft workflow must explicitly say pending/applying, not look effective');
+      if (preview && width >= 46) assert.ok(workflow[0].includes(badge), 'draft workflow retains the target badge in its existing semantic row');
       if (!linked && kind === 'exec' && width >= 46) assert.match(workflow[0], /\/plan-exec\s*$/u, 'Independent Exec offers status, never a workflow cycle');
       if (linked && !absorbed.exec && !flow.blocked && width >= 120) assert.ok(workflow[0].includes(flow.selectedFlow.provider), 'Linked combines provider and workflow on one row');
     }
     assert.equal(approvals.length, absorbed.mode ? 1 : 0, 'Approvals keeps its own row');
+    if (preview && width >= 46 && approvals.length) {
+      const approval = preview.settings.find(item => item.key === 'approvals');
+      if (approval) assert.ok(approvals[0].includes(approval.label), 'normal approval row retains the preview target without a phase suffix');
+    }
+    if (preview && width >= 120) {
+      const reasoning = preview.settings.find(item => item.key === 'reasoning');
+      if (reasoning) assert.ok(plain.some(line => line.includes('reasoning') && line.includes(reasoning.label)), 'normal model row retains the reasoning target');
+      const effort = preview.settings.find(item => item.key === 'auto-effort');
+      if (effort && autoEffort !== undefined) assert.ok(plain.some(line => line.includes('reasoning') && line.includes(effort.target ? 'auto' : 'auto off')), 'normal auto-effort segment retains the target');
+    }
     if (linked) {
       assert.equal(lines.length, (absorbed.marimo?.length ?? 0) + 4 + (providerUsage?.length ?? 0), 'Linked removes only the duplicate model row');
       if (flow.blocked && width >= 46) assert.match(plain.join('\n'), /blocked/iu, 'an unavailable Linked flow must not look healthy');
@@ -674,7 +686,13 @@ function cycleHistory(phase) {
   assert.equal(renderers.has('settings:cycle-state'), false, 'state snapshots never render independent history rows');
   const renderer = renderers.get('settings:cycle');
   assert.ok(renderer, 'use the actual helper entry renderer');
-  return renderer({ type: 'custom', customType: 'settings:cycle', data: { version: 1, ...cycleSnapshot(phase) } }, {}, theme);
+  const component = renderer({ type: 'custom', customType: 'settings:cycle', data: { version: 1, ...cycleSnapshot(phase) } }, {}, theme);
+  for (const width of [46, 120, 180]) {
+    const history = component.render(width).map(stripVTControlCharacters).join('\n');
+    assert.ok(history.includes(`Settings ${phase}`), 'the real history component, not the footer, labels phase');
+    if (phase === 'pending' || phase === 'applying') assert.match(history, /Workflow plan/u, 'the real history component retains the latest target');
+  }
+  return component;
 }
 for (const width of [46, 120, 180]) for (const phase of ['pending', 'applying']) {
   for (const compact of [false, true]) {

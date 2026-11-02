@@ -12,7 +12,11 @@ Regression fixtures for the actual splash + editor/footer should render at 46, 1
 
 ## Settings-cycle history
 
-Rapid workflow/standalone Plan, reasoning, auto-effort and approval cycles share a 400 ms trailing preview. The main transcript has one combined, UI-only settings anchor backed by hidden append-only snapshots; neither it nor pending/applying footer values are an editor, phone composer or send target. Previews are not effective settings or protection. The existing footer rows and 13-status-row budget do not grow; blocked and other-session read-only views must not advertise draft controls.
+Rapid workflow/standalone Plan, reasoning, auto-effort and approval cycles share a preview. The main transcript has one combined, UI-only settings anchor backed by hidden append-only snapshots; neither it nor footer target values are an editor, phone composer or send target. Previews are not effective settings or protection. The existing footer rows and 13-status-row budget do not grow; blocked and other-session read-only views must not advertise draft controls.
+
+Keyboard cycles commit when all participating modifiers are released if release reporting is negotiated through the actual terminal path and the current held state is confirmed. SSH, Herdr and tmux paths are negotiated, not assumed to support it. Otherwise, including first or fast interactions while negotiation or held state is unconfirmed, unmodified keys, pointer and programmatic cycles, the final choice applies after 1000 ms of inactivity; each accepted cycle restarts that fallback. A confirmed hold has no unconditional timeout: if a release is lost with no later input, it cannot be distinguished from a continuing hold. Each batch has its own transaction; consecutive completed successful or unchanged batches reuse one UI-only history row until a boundary such as submit, an explicit choice, unrelated output or navigation. The row shows the latest batch, not an aggregate of earlier changes.
+
+Footer target previews have no pending/applying suffix; only the chat line labels phase.
 
 Exercise pending, applying and restored history with both client parsers at 46, 120 and 180 columns, including blocked and read-only views. Interrupted previews restore as cancelled or interrupted, never replay; compaction need not retain old history lines. Do not add client allowances.
 

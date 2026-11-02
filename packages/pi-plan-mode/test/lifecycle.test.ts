@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { type ExtensionCommandContext, initTheme } from "@earendil-works/pi-coding-agent";
-import { test } from "vitest";
+import { afterEach, test, vi } from "vitest";
 import {
   ACTIVITY_CHANGED,
   ACTIVITY_GONE,
@@ -18,6 +18,7 @@ import { SUBAGENT_PROGRESS_KIND } from "../src/subagent-progress.js";
 import { createCustomSelectorHarness, createMockContext, createMockPi } from "./support.js";
 
 initTheme("dark");
+afterEach(() => vi.restoreAllMocks());
 const tick = () => new Promise((resolve) => setTimeout(resolve, 0));
 const settings = { thinkingLevel: "inherit" as const, toggleShortcut: "ctrl+alt+p" as const, jevToolSelection: false };
 
@@ -164,6 +165,10 @@ test("factory awaits shortcut settings, and the plan-mode shortcut awaits sessio
   await factory;
   const shortcut = mock.shortcuts.get("ctrl+alt+p");
   assert.ok(shortcut);
+  const cycles = settingsCycles(mock.pi);
+  const trigger = { kind: "keyboard", epoch: 1, serial: 1, modifiers: 6, event: "press" } as const;
+  const captured = vi.spyOn(cycles, "captureTrigger").mockReturnValue(trigger);
+  const staged = vi.spyOn(cycles, "stage");
   next = new Promise((done) => {
     resolve = done;
   });
@@ -177,6 +182,8 @@ test("factory awaits shortcut settings, and the plan-mode shortcut awaits sessio
     (mock.events.get("session_start") ?? []).map((handler) => handler({ reason: "startup" }, ctx)),
   );
   const pressed = shortcut.handler(ctx);
+  assert.equal(captured.mock.calls.length, 1, "capture the originating key before initialization awaits");
+  captured.mockReturnValue(undefined);
   await tick();
   mock.eventBus.emit(ACTIVITY_HOST, {});
   assert.equal(offers, 0, "an initializing branch cannot offer its disposed source");
@@ -187,6 +194,7 @@ test("factory awaits shortcut settings, and the plan-mode shortcut awaits sessio
   await tick();
   assert.equal(context.statuses.get("workflow-mode"), "workflow: work (ctrl+alt+p to cycle)");
   assert.equal(settingsCycles(mock.pi).snapshot()?.phase, "pending");
+  assert.equal(staged.mock.calls.at(-1)?.[2], trigger, "retain the same key token across initialization awaits");
   assert.equal(await settingsCycles(mock.pi).flush(), true);
   await pressed;
   // Without pi-tool-gate, the shortcut toggles plan mode in this conversation.

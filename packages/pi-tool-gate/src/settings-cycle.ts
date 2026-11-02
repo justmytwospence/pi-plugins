@@ -2,6 +2,18 @@ import { randomUUID } from "node:crypto";
 import { stripVTControlCharacters } from "node:util";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { truncateToWidth } from "@earendil-works/pi-tui";
+import {
+  createSettingsCycleInput,
+  type SettingCycleTrigger,
+  type SettingsCycleInputPorts,
+  type SettingsCycleInputStatus,
+} from "./settings-cycle-input.js";
+
+export type { SettingCycleTrigger, SettingsCycleInputPorts, SettingsCycleInputStatus } from "./settings-cycle-input.js";
+export const SETTINGS_CYCLE_IDLE_MS = 1000;
+export interface SettingsCycleOptions {
+  inputPorts?: Partial<SettingsCycleInputPorts>;
+}
 
 export type SettingKey = "workflow" | "reasoning" | "auto-effort" | "approvals";
 export type SettingValue = string | boolean;
@@ -39,7 +51,14 @@ export interface SettingCycleChange<T extends SettingValue> {
   current(): boolean;
 }
 export interface SettingCycles {
-  stage<T extends SettingValue>(ctx: ExtensionContext, change: SettingCycleChange<T>): Promise<boolean>;
+  stage<T extends SettingValue>(
+    ctx: ExtensionContext,
+    change: SettingCycleChange<T>,
+    trigger?: SettingCycleTrigger,
+  ): Promise<boolean>;
+  captureTrigger(): SettingCycleTrigger | undefined;
+  withTrigger<T>(trigger: SettingCycleTrigger, run: () => T): T;
+  inputStatus(): SettingsCycleInputStatus;
   snapshot(): SettingCycleSnapshot | undefined;
   flush(): Promise<boolean>;
   cancel(reason: string): void;
@@ -57,8 +76,26 @@ const names: Record<SettingKey, string> = {
 };
 type Change = SettingCycleChange<any>;
 type Item = { change: Change; baseline: SettingValue; target: SettingValue; actual: SettingValue };
+type LiveRow = {
+  rowId: string;
+  anchor: string | null;
+  epoch: number;
+  session: string;
+  checkpoint: string | null;
+  reusable: boolean;
+  owners: Map<SettingKey, Change>;
+};
 type Burst = {
-  id: string;
+  token: object;
+  rowId: string;
+  row: LiveRow;
+  checkpoint: string | null;
+  ownEntries: Set<string>;
+  committing: boolean;
+  launched: boolean;
+  inputStarted: boolean;
+  activations: number;
+  activatedAt: number;
   ctx: ExtensionContext;
   session: string;
   anchor: string | null;
@@ -105,23 +142,76 @@ function validSnapshot(value: unknown): value is SettingCycleSnapshot {
   );
 }
 
-export function settingsCycles(pi: ExtensionAPI): SettingCycles {
+export function settingsCycles(pi: ExtensionAPI, options: SettingsCycleOptions = {}): SettingCycles {
   const request: { type: string; coordinator?: SettingCycles } = { type: "discover" };
   pi.events.emit(SETTINGS_CYCLE_CHANNEL, request);
   if (request.coordinator) return request.coordinator;
   const journal = new Map<string, SettingCycleSnapshot>();
   const guards = new Set<() => string | undefined>();
   let burst: Burst | undefined;
+  let liveRow: LiveRow | undefined;
+  let epoch = 0;
   let alive = true;
   let latest: SettingCycleSnapshot | undefined;
   let inFlight = false;
   let running: { burst: Burst; done: Promise<void> } | undefined;
   const modelIdentity = (ctx: ExtensionContext) => (ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : "");
+  const leaf = (ctx: ExtensionContext) =>
+    ctx.sessionManager.getLeafId?.() ?? ctx.sessionManager.getBranch().at(-1)?.id ?? null;
+  const seal = () => {
+    if (liveRow) liveRow.reusable = false;
+  };
+  const settingRecords = new Set([
+    "tool-gate:workflow",
+    "tool-gate:approvals",
+    "tool-gate:flow",
+    "tool-gate:chat-notice",
+    "plan-mode:inline",
+    "auto-effort:state",
+    "auto-effort:manual-level",
+  ]);
+  // Check every append, not just the final leaf: a setter may persist its own
+  // settings, but it must not hide unrelated output below the editable row.
+  const checkpoint = (b: Burst) => {
+    try {
+      const branch = b.ctx.sessionManager.getBranch();
+      const start = b.checkpoint === null ? -1 : branch.findIndex((entry) => entry.id === b.checkpoint);
+      if (b.checkpoint !== null && start < 0) b.row.reusable = false;
+      for (const entry of branch.slice(start + 1)) {
+        if (b.ownEntries.has(entry.id)) continue;
+        if (b.committing && entry.type === "custom" && settingRecords.has(entry.customType)) continue;
+        if (b.active && (entry.type === "model_change" || entry.type === "thinking_level_change")) continue;
+        b.row.reusable = false;
+      }
+      b.checkpoint = leaf(b.ctx);
+    } catch {
+      // Retiring session managers must not strand settlement or make a row reusable.
+      b.row.reusable = false;
+    }
+  };
+  const reconcileDeadline = (b: Burst) => {
+    if (b.timer) clearTimeout(b.timer);
+    b.timer = undefined;
+    if (burst !== b || b.stopped || b.launched || b.phase !== "pending") return;
+    if (input.status().mode === "modifier-release") return;
+    b.timer = setTimeout(() => launch(b), Math.max(0, b.activatedAt + SETTINGS_CYCLE_IDLE_MS - Date.now()));
+  };
+  const input = createSettingsCycleInput(options.inputPorts ?? {}, {
+    release: () => {
+      if (burst) launch(burst);
+    },
+    mode: () => {
+      if (burst) reconcileDeadline(burst);
+    },
+    cancel: (reason) => cancel(reason),
+  });
 
   const inBranch = (b: Burst) =>
     alive &&
+    b.row.epoch === epoch &&
     b.ctx.sessionManager.getSessionId() === b.session &&
-    (b.anchor === null || b.ctx.sessionManager.getBranch().some((e) => e.id === b.anchor));
+    (b.anchor === null || b.ctx.sessionManager.getBranch().some((e) => e.id === b.anchor)) &&
+    (b.row.anchor === null || b.ctx.sessionManager.getBranch().some((e) => e.id === b.row.anchor));
   const owned = (b: Burst) =>
     !b.stopped && inBranch(b) && Object.values(b.items).every((item) => item.change.current());
   const makeSnapshot = (b: Burst, phase: SettingCyclePhase, reason?: string): SettingCycleSnapshot => {
@@ -144,30 +234,53 @@ export function settingsCycles(pi: ExtensionAPI): SettingCycles {
       }
       settings.push({ key, baseline: item.baseline, target: item.target, actual, label });
     }
-    return { id: b.id, phase, settings, ...(reason ? { reason } : {}) };
+    return { id: b.rowId, phase, settings, ...(reason ? { reason } : {}) };
   };
   const publish = (b: Burst, phase: SettingCyclePhase, reason?: string, anchor = false) => {
     const snapshot = makeSnapshot(b, phase, reason);
     b.phase = phase;
     if (!burst || burst === b) latest = snapshot;
-    journal.set(b.id, snapshot);
-    pi.appendEntry(anchor ? "settings:cycle" : "settings:cycle-state", { version: 1, ...copySnapshot(snapshot) });
+    journal.set(b.rowId, snapshot);
+    checkpoint(b);
+    const before = b.checkpoint;
+    const customType = anchor ? "settings:cycle" : "settings:cycle-state";
+    pi.appendEntry(customType, { version: 1, ...copySnapshot(snapshot) });
+    const branch = b.ctx.sessionManager.getBranch();
+    const start = before === null ? -1 : branch.findIndex((entry) => entry.id === before);
+    const entry = branch[start + 1];
+    if (
+      entry?.type === "custom" &&
+      entry.customType === customType &&
+      (entry.data as SettingCycleSnapshot | undefined)?.id === b.rowId
+    ) {
+      b.ownEntries.add(entry.id);
+      if (anchor) b.row.anchor = entry.id;
+    } else b.row.reusable = false;
+    checkpoint(b);
     pi.events.emit(SETTINGS_CYCLE_CHANNEL, { type: "changed", snapshot: copySnapshot(snapshot) });
   };
   const settle = (b: Burst, value: boolean) => {
     if (b.timer) clearTimeout(b.timer);
     b.timer = undefined;
-    if (burst === b) burst = undefined;
+    if (!value || (b.phase !== "applied" && b.phase !== "unchanged")) b.row.reusable = false;
+    checkpoint(b);
+    if (value && b.row.reusable && inBranch(b)) b.row.checkpoint = b.checkpoint;
+    if (burst === b) {
+      burst = undefined;
+      input.close();
+    }
     if (!b.settled) {
       b.settled = true;
       b.resolve(value);
     }
   };
   const cancel = (reason: string) => {
+    seal();
     const b = burst;
+    if (b) b.stopped = true;
+    input.close();
     if (!b) return;
     const canWrite = inBranch(b);
-    b.stopped = true;
     try {
       if (canWrite) publish(b, b.phase === "applying" ? "interrupted" : "cancelled", reason);
     } catch {
@@ -181,6 +294,7 @@ export function settingsCycles(pi: ExtensionAPI): SettingCycles {
     b.timer = undefined;
     if (b.phase !== "pending" || b.stopped) return;
     let applied = false;
+    b.committing = true;
     inFlight = true;
     try {
       if (!owned(b)) {
@@ -235,6 +349,7 @@ export function settingsCycles(pi: ExtensionAPI): SettingCycles {
         const item = b.items[key]!;
         b.active = key;
         const ok = await item.change.apply(item.target, targets);
+        checkpoint(b);
         b.active = undefined;
         if (!owned(b)) {
           if (burst === b) cancel("session changed");
@@ -251,6 +366,7 @@ export function settingsCycles(pi: ExtensionAPI): SettingCycles {
       publish(b, "applied");
       settle(b, true);
     } catch (error) {
+      checkpoint(b);
       b.active = undefined;
       if (owned(b)) {
         const changed = Object.values(b.items).some((item) => {
@@ -264,10 +380,14 @@ export function settingsCycles(pi: ExtensionAPI): SettingCycles {
       }
       settle(b, false);
     } finally {
+      b.committing = false;
       inFlight = false;
     }
   };
   const launch = (b: Burst) => {
+    if (burst !== b || b.phase !== "pending" || b.stopped || b.launched || b.settled) return;
+    b.launched = true;
+    input.close();
     let finish!: () => void;
     const done = new Promise<void>((resolve) => {
       finish = resolve;
@@ -281,12 +401,17 @@ export function settingsCycles(pi: ExtensionAPI): SettingCycles {
       });
   };
   const service: SettingCycles = {
-    stage<T extends SettingValue>(ctx: ExtensionContext, change: SettingCycleChange<T>): Promise<boolean> {
+    stage<T extends SettingValue>(
+      ctx: ExtensionContext,
+      change: SettingCycleChange<T>,
+      trigger?: SettingCycleTrigger,
+    ): Promise<boolean> {
       if (inFlight || burst?.phase === "applying") {
         ctx.ui.notify("Wait for the current settings change to finish.", "warning");
         return Promise.resolve(false);
       }
       if (ctx.mode !== "tui" || !ctx.hasUI) {
+        seal();
         return (async () => {
           try {
             const reason = change.validate();
@@ -311,11 +436,44 @@ export function settingsCycles(pi: ExtensionAPI): SettingCycles {
           const promise = new Promise<boolean>((r) => {
             resolve = r;
           });
+          const session = ctx.sessionManager.getSessionId();
+          const branch = ctx.sessionManager.getBranch();
+          const owner = liveRow?.owners.get(change.key);
+          if (
+            liveRow &&
+            (!liveRow.reusable ||
+              liveRow.epoch !== epoch ||
+              liveRow.session !== session ||
+              liveRow.anchor === null ||
+              !branch.some((entry) => entry.id === liveRow?.anchor) ||
+              leaf(ctx) !== liveRow.checkpoint ||
+              (owner && owner.owner !== change.owner))
+          )
+            seal();
+          if (!liveRow?.reusable)
+            liveRow = {
+              rowId: randomUUID(),
+              anchor: null,
+              epoch,
+              session,
+              checkpoint: leaf(ctx),
+              reusable: true,
+              owners: new Map(),
+            };
           burst = {
-            id: randomUUID(),
+            token: {},
+            rowId: liveRow.rowId,
+            row: liveRow,
+            checkpoint: leaf(ctx),
+            ownEntries: new Set(),
+            committing: false,
+            launched: false,
+            inputStarted: false,
+            activations: 0,
+            activatedAt: Date.now(),
             ctx,
-            session: ctx.sessionManager.getSessionId(),
-            anchor: ctx.sessionManager.getLeafId?.() ?? null,
+            session,
+            anchor: leaf(ctx),
             items: {},
             phase: "pending",
             model: modelIdentity(ctx),
@@ -334,20 +492,31 @@ export function settingsCycles(pi: ExtensionAPI): SettingCycles {
         const baseline = previous?.baseline ?? change.read();
         const target = change.next((previous?.target ?? baseline) as T);
         b.items[change.key] = { change, baseline, target, actual: previous?.actual ?? baseline };
-        const first = !journal.has(b.id);
+        b.row.owners.set(change.key, change);
+        b.activatedAt = Date.now();
+        const activationVersion = ++b.activations;
+        const activation = trigger ?? input.captureTrigger() ?? { kind: "programmatic" as const };
+        const first = !journal.has(b.rowId);
         publish(b, "pending", undefined, first);
         if (first && !b.stopped && burst === b) publish(b, "pending");
         if (b.stopped || burst !== b) return b.promise;
-        if (b.timer) clearTimeout(b.timer);
-        b.timer = setTimeout(() => {
-          launch(b);
-        }, 400);
+        // A synchronous publication listener may have accepted a newer stage.
+        if (b.activations === activationVersion) {
+          if (!b.inputStarted) {
+            b.inputStarted = true;
+            input.begin(b.token, activation);
+          } else input.touch(activation);
+          reconcileDeadline(b);
+        }
         return b.promise;
       } catch {
         if (burst) cancel("settings change failed");
         return Promise.resolve(false);
       }
     },
+    captureTrigger: () => input.captureTrigger(),
+    withTrigger: (trigger, run) => input.withTrigger(trigger, run),
+    inputStatus: () => input.status(),
     snapshot: () => (latest ? copySnapshot(latest) : undefined),
     flush: () => {
       const b = burst;
@@ -401,6 +570,8 @@ export function settingsCycles(pi: ExtensionAPI): SettingCycles {
     };
   });
   const reconstruct = (ctx: ExtensionContext) => {
+    liveRow = undefined;
+    epoch++;
     journal.clear();
     latest = undefined;
     for (const entry of ctx.sessionManager.getBranch()) {
@@ -433,8 +604,10 @@ export function settingsCycles(pi: ExtensionAPI): SettingCycles {
     }
   };
   pi.on("session_start", (_event, ctx) => {
+    cancel("session changed");
     alive = true;
     reconstruct(ctx);
+    input.bind(ctx);
   });
   pi.on("session_tree", (_event, ctx) => {
     cancel("session changed");
@@ -456,6 +629,8 @@ export function settingsCycles(pi: ExtensionAPI): SettingCycles {
     cancel("dialog opened");
   });
   pi.on("session_shutdown", () => {
+    seal();
+    input.dispose();
     alive = false;
     if (burst) {
       burst.stopped = true;
@@ -466,29 +641,31 @@ export function settingsCycles(pi: ExtensionAPI): SettingCycles {
     latest = undefined;
   });
   pi.on("before_agent_start", () => {
+    seal();
     if (burst?.phase === "pending") cancel("run started");
+  });
+  pi.on("message_start", () => {
+    seal();
   });
   pi.on("model_select", (_event, ctx) => {
     // Shortcut contexts snapshot their model. Event contexts report the live one.
+    if (!burst) seal();
     if (burst?.phase === "pending" && modelIdentity(ctx) !== burst.model) cancel("model changed");
   });
   pi.on("thinking_level_select", () => {
+    if (!burst) seal();
     const item = burst?.items.reasoning;
     if (burst?.phase === "pending" && item && item.change.read() !== item.baseline) cancel("reasoning changed");
   });
   pi.on("input", async (event) => {
+    seal();
     const b = burst ?? running?.burst;
     if (!b) return;
     const success = await service.flush();
     if (running?.burst === b) await running.done;
     if (success) return;
-    if (
-      alive &&
-      b.ctx.sessionManager.getSessionId() === b.session &&
-      (b.anchor === null || b.ctx.sessionManager.getBranch().some((e) => e.id === b.anchor)) &&
-      journal.has(b.id)
-    ) {
-      const previous = journal.get(b.id)!;
+    if (inBranch(b) && journal.has(b.rowId)) {
+      const previous = journal.get(b.rowId)!;
       const reason = [
         previous.reason,
         "message not sent",

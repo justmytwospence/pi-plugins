@@ -711,7 +711,7 @@ test("pi-marimo's Lens selections get their own row under the marimo row", () =>
   assert.deepEqual(mod.absorbStatuses(new Map([["marimo-lens", "lens ready"]]), { claudeRow: true }).rest, ["lens ready"]);
 });
 
-test("settings previews stay distinct from committed state in normal main rows without changing the row budget", () => {
+test("settings previews show targets without phase suffixes or changes to effective state and row budget", () => {
   for (const linked of [false, true]) for (const phase of ["pending", "applying"]) for (const width of [46, 120, 180]) {
     const s = { ...fixture(), workflow: { kind: "work", key: "alt+w" }, mode: { kind: "auto", key: "alt+a" },
       actions: { "workflow.cycle": {}, "reasoning.cycle": {}, "effort.toggle": { active: true }, "approvals.open": {} },
@@ -727,11 +727,12 @@ test("settings previews stay distinct from committed state in normal main rows w
     const text = layout.lines.map(plain).join("\n");
     assert.equal(layout.lines.length, before.lines.length);
     assert.ok(layout.lines.every(line => visibleWidth(line) <= width));
-    assert.match(text, new RegExp(`PLAN ${phase}`));
-    assert.match(text, new RegExp(`yolo ${phase}`));
+    assert.match(text, /PLAN/);
+    assert.match(text, /yolo/);
+    assert.doesNotMatch(text, /pending|applying/);
     if (width >= 120) {
-      assert.match(text, new RegExp(`high ${phase}`));
-      assert.match(text, new RegExp(`auto off ${phase}`));
+      assert.match(text, /high/);
+      assert.match(text, /auto off/);
       assert.match(text, /opus-5\.5/, "Linked preview retains the effective physical model");
     }
     assert.equal(s.workflow.kind, "work"); assert.equal(s.mode.kind, "auto"); assert.equal(s.actions["effort.toggle"].active, true);
@@ -746,14 +747,19 @@ test("settings previews stay distinct from committed state in normal main rows w
   }
 });
 
-test("narrow previews never display an unlabeled truncated pending value", () => {
+test("narrow previews retain atomic values without phase suffixes or partial-value hits", () => {
   const s = { ...fixture(), workflow: { kind: "work" }, mode: { kind: "auto" },
+    actions: { "approvals.open": {} },
     settingsCycle: { id: "preview", phase: "pending", settings: [{ key: "approvals", baseline: "auto", target: "acceptEdits", actual: "auto", label: "accept edits" }] } };
   for (let width = 1; width < 46; width++) {
-    const rows = mod.renderFooter(s, width, theme);
-    for (const row of rows) {
+    const layout = mod.layoutFooter(s, width, theme);
+    for (const row of layout.lines) {
       assert.ok(visibleWidth(row) <= width);
-      if (row.includes("accept edits")) assert.match(row, /pending/);
+      assert.doesNotMatch(plain(row), /pending|applying/);
+    }
+    for (const hit of layout.hits.filter(hit => hit.action === "approvals.open")) {
+      assert.ok(hit.startCol >= 0 && hit.endCol <= width);
+      assert.match(plain(layout.lines[hit.row]), /accept edits \(legacy\)/);
     }
   }
 });

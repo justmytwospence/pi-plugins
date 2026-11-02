@@ -824,6 +824,32 @@ export default function (pi) {
       assert.equal(test.record.workflows.length, workflowsBefore + 1, 'one final workflow publication');
       assert.equal(visibleTransitions(current).length, transitionsBefore, 'journal replaces legacy cycle transition markers');
       assert.match(test.statuses.get('permission-mode'), /yolo/u);
+      const originalAnchor = structuredClone(anchors()[0]);
+      const firstRow = originalAnchor.data.id;
+      // Five completed workflow batches, including pauses beyond the fallback,
+      // must edit one journal-backed line while each batch really activates its role.
+      for (const target of ['work', 'plan', 'work', 'plan']) {
+        await new Promise(resolve => setTimeout(resolve, 1050));
+        const before = { models: test.record.models.length, workflows: test.record.workflows.length,
+          records: structuredClone(entries()) };
+        const batch = [cycle('workflow-mode:cycle')];
+        if (target === 'plan') batch.push(cycle('workflow-mode:cycle'));
+        assert.equal(current.model.id, target === 'plan' ? 'work' : 'plan', 'the previous role stays effective throughout preview');
+        assert.deepEqual(await deadline(Promise.all(batch), `completed ${target} batch`), batch.map(() => true));
+        assert.equal(test.flow().workflow, target);
+        assert.equal(current.model.id, target, 'each completed batch activates only its final role model');
+        assert.equal(test.record.models.length, before.models + 1, 'no intermediate Linked role activation');
+        assert.equal(test.record.workflows.length, before.workflows + 1);
+        assert.equal(anchors().length, 1, 'consecutive completed batches retain one visible journal anchor');
+        assert.deepEqual(anchors()[0], originalAnchor, 'the original native anchor record is append-only and immutable');
+        assert.deepEqual(entries().slice(0, before.records.length), before.records, 'later batches never rewrite earlier records');
+        const latest = entries().filter(entry => entry.customType === 'settings:cycle-state').at(-1).data;
+        assert.equal(latest.id, firstRow);
+        assert.equal(latest.phase, 'applied');
+        assert.equal(latest.settings.find(item => item.key === 'workflow').target, target, 'history shows this batch, not a cumulative baseline');
+      }
+      assert.doesNotMatch(JSON.stringify(current.sessionManager.buildSessionContext().messages), /settings:cycle|Settings pending/u,
+        'neither the reused visible anchor nor hidden snapshots enter model context');
 
       await test.command('/mode work');
       assert.equal(test.flow().workflow, 'work', 'explicit /mode remains immediate');
@@ -845,6 +871,14 @@ export default function (pi) {
       assert.deepEqual({ records: customRecords(current), flow: test.flow(), models: test.record.models,
         workflows: test.record.workflows }, noOp, 'round trip invokes no model setter, workflow event or ordinary persistence');
       assert.equal(entries().filter(entry => entry.customType === 'settings:cycle-state').at(-1).data.phase, 'unchanged');
+      const unchangedRow = anchors().at(-1).data.id;
+      const beforeUnchanged = anchors().length;
+      const unchangedAgain = [cycle('workflow-mode:cycle'), cycle('workflow-mode:cycle'), cycle('workflow-mode:cycle')];
+      assert.deepEqual(await deadline(Promise.all(unchangedAgain), 'second unchanged batch'), [true, true, true]);
+      assert.equal(anchors().length, beforeUnchanged, 'completed no-op batches reuse the row without allocating a visible anchor');
+      assert.equal(entries().filter(entry => entry.customType === 'settings:cycle-state').at(-1).data.id, unchangedRow);
+      assert.deepEqual({ records: customRecords(current), flow: test.flow(), models: test.record.models,
+        workflows: test.record.workflows }, noOp, 'repeated no-op allocates no role/model/workflow state');
 
       // An entered failing Linked role setter must not allow a later permission relaxation.
       authHook = async () => { throw new Error('Local final role activation refused'); };
