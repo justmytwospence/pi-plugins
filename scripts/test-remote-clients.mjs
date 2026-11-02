@@ -2,19 +2,19 @@
 // the suite's dialogs through Pi's real theme and components, as they sit over the one-row footer
 // pi-status-footer draws while `herdr:blocked` is held, and runs every screen through each installed
 // client's own reader:
-//   - herdr-web-ui: `parseInteractivePrompt` from its installed bundle (docs/clients.md, "herdr-web-ui
-//     compatibility");
+//   - Ovis (formerly herdr-web-ui): `parseInteractivePrompt` from a source checkout or installed bundle;
 //   - Collie: the pi adapter of a Collie checkout, given this machine's `frames.toml`.
 // A client that is not installed is skipped, so this is not part of `npm test`: run it with
 // `npm run check:clients` after changing a dialog, the footer or a below-editor widget.
 // With Sidebar (pi-sidebar) open, every dialog is drawn again in Sidebar's real split, collapsed as
 // the controller collapses it while a dialog waits, and main's idle editor must read as it does
 // without Sidebar.
-// Overrides: HERDR_WEB_UI_DIR, COLLIE_DIR (a checkout with frames.toml support), COLLIE_FRAMES.
+// Overrides: OVIS_DIR, legacy HERDR_WEB_UI_DIR, COLLIE_DIR, COLLIE_FRAMES.
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
 import { spawnSync } from 'node:child_process';
-import { existsSync, mkdtempSync, readdirSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, writeFileSync } from 'node:fs';
+import { resolveOvisDirectory, assertRemoteClientsPresent } from './lib/remote-client-paths.mjs';
 import { homedir, tmpdir } from 'node:os';
 import path from 'node:path';
 import { createJiti } from 'jiti';
@@ -58,15 +58,10 @@ const { registerTreeFork, FORK_TITLE, FORK_DESTINATIONS } = await jiti.import('.
 const { nextPromptScreens } = await import('./remote-clients/next-prompt.mjs');
 
 const HERE = path.dirname(new URL(import.meta.url).pathname);
-const herdrDir = process.env.HERDR_WEB_UI_DIR ?? latest(path.join(homedir(), '.local/share/herdr-web-ui'), /^remote-v\d+$/);
+const ovis = resolveOvisDirectory();
 const collieDir = process.env.COLLIE_DIR ?? path.join(homedir(), 'Projects/collie');
 const framesFile = process.env.COLLIE_FRAMES ?? path.join(homedir(), '.config/collie/frames.toml');
 
-function latest(dir, pattern) {
-  if (!existsSync(dir)) return undefined;
-  const found = readdirSync(dir).filter((name) => pattern.test(name)).sort((a, b) => Number(a.match(/\d+/)) - Number(b.match(/\d+/)));
-  return found.length ? path.join(dir, found.at(-1)) : undefined;
-}
 
 initTheme('dark', false);
 const theme = themeModule.theme;
@@ -1122,17 +1117,22 @@ const dir = mkdtempSync(path.join(tmpdir(), 'pi-remote-clients-'));
 const screensFile = path.join(dir, 'screens.json');
 writeFileSync(screensFile, JSON.stringify(screens.map((s) => ({ ...s, text: stripVTControlCharacters(s.ansi) }))));
 
-function probe(label, script, cwd, extra = []) {
+function probe(label, script, cwd, extra = [], runtime = 'bun') {
   // The history/footer/Sidebar matrix exceeds spawnSync's default 1 MiB JSON output limit.
-  const run = spawnSync('bun', [path.join(HERE, 'remote-clients', script), screensFile, ...extra], { cwd, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 });
+  const run = spawnSync(runtime, [path.join(HERE, 'remote-clients', script), screensFile, ...extra], { cwd, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 });
   if (run.error || run.status !== 0) throw new Error(`${label} probe failed:\n${run.error?.message ?? (run.stderr || run.stdout)}`);
   return JSON.parse(run.stdout);
 }
 
 const results = {};
-if (herdrDir && existsSync(path.join(herdrDir, 'server/prompt.ts'))) results.herdr = probe('herdr-web-ui', 'herdr.ts', herdrDir, [herdrDir]);
-else console.log('SKIP herdr-web-ui: no installed bundle (HERDR_WEB_UI_DIR)');
-if (existsSync(path.join(collieDir, 'web/src/lib/frame-declarations.ts'))) results.collie = probe('Collie', 'collie.ts', path.join(collieDir, 'web'), [collieDir, framesFile]);
+const colliePresent = existsSync(path.join(collieDir, 'web/src/lib/frame-declarations.ts'));
+assertRemoteClientsPresent({ ovis: Boolean(ovis), collie: colliePresent }, process.env.REQUIRE_REMOTE_CLIENTS === '1');
+if (ovis) {
+  console.log(`Ovis parser: ${ovis.kind} ${ovis.directory}${ovis.kind === 'source' ? ' (not installed validation)' : ''}`);
+  const directory = path.resolve(ovis.directory);
+  results.herdr = probe('Ovis', 'herdr.ts', directory, [directory], ovis.kind === 'bundle' ? path.resolve(ovis.bun) : ovis.bun);
+} else console.log('SKIP Ovis: no installed bundle (OVIS_DIR or HERDR_WEB_UI_DIR)');
+if (colliePresent) results.collie = probe('Collie', 'collie.ts', path.join(collieDir, 'web'), [collieDir, framesFile]);
 else console.log('SKIP Collie: no checkout with frames.toml support (COLLIE_DIR)');
 
 if (results.herdr) {
@@ -1168,7 +1168,7 @@ screens.forEach((screen, i) => {
   const problems = [];
   if (screen.terminal) {
     const h = results.herdr?.[i], c = results.collie?.[i];
-    if (h) problems.push(`herdr-web-ui: terminal misidentified as question: ${JSON.stringify(h)}`);
+    if (h) problems.push(`Ovis: terminal misidentified as question: ${JSON.stringify(h)}`);
     if (c?.blocks.some(block => block.kind !== 'raw')) problems.push(`Collie: terminal misidentified as card: ${JSON.stringify(c.blocks)}`);
     if (c && (['empty', 'draft'].includes(c.composer) || c.draft !== null)) problems.push(`Collie: terminal misidentified as Pi composer: ${JSON.stringify({ composer: c.composer, draft: c.draft })}`);
     report(label, problems);
@@ -1180,7 +1180,7 @@ screens.forEach((screen, i) => {
     // its hint is above a compact footer. That is the actual control, not a map
     // tile or a chat send target. Check its complete card, not a blanket allowance.
     if (results.herdr && JSON.stringify(h) !== JSON.stringify(screen.herdrNative ?? null)) {
-      problems.push(`herdr-web-ui: native control wanted ${JSON.stringify(screen.herdrNative ?? null)}, got ${JSON.stringify(h)}`);
+      problems.push(`Ovis: native control wanted ${JSON.stringify(screen.herdrNative ?? null)}, got ${JSON.stringify(h)}`);
     }
     if (c) {
       const mirrors = c.blocks.filter(b => b.kind === 'unread-dialog');
@@ -1198,9 +1198,9 @@ screens.forEach((screen, i) => {
     const expectedComposer = screen.expectedComposer ?? 'draft';
     const expectedDraft = Object.hasOwn(screen, 'expectedDraft') ? screen.expectedDraft : 'next step';
     const h = results.herdr, c = results.collie;
-    if (h && JSON.stringify(h[i]) !== JSON.stringify(h[screen.idle])) problems.push(`herdr-web-ui: ${JSON.stringify(h[i])}, without Sidebar ${JSON.stringify(h[screen.idle])}`);
+    if (h && JSON.stringify(h[i]) !== JSON.stringify(h[screen.idle])) problems.push(`Ovis: ${JSON.stringify(h[i])}, without Sidebar ${JSON.stringify(h[screen.idle])}`);
     const kinds = (r) => JSON.stringify({ blocks: r.blocks.filter((b) => b.kind !== 'raw'), composer: r.composer, draft: r.draft });
-    if (h?.[i] !== null && h?.[i] !== undefined) problems.push(`herdr-web-ui: idle editor misidentified as question: ${JSON.stringify(h[i])}`);
+    if (h?.[i] !== null && h?.[i] !== undefined) problems.push(`Ovis: idle editor misidentified as question: ${JSON.stringify(h[i])}`);
     if (c) {
       if (c[i].composer !== expectedComposer || (c[i].draft?.trim() ?? null) !== expectedDraft) problems.push(`Collie: wanted ${expectedComposer} composer containing ${JSON.stringify(expectedDraft)}, got ${JSON.stringify({ composer: c[i].composer, draft: c[i].draft })}`);
       if (c[i].blocks.some(b => b.kind !== 'raw')) problems.push(`Collie: idle editor misidentified as card: ${JSON.stringify(c[i].blocks)}`);
@@ -1216,7 +1216,7 @@ screens.forEach((screen, i) => {
     // Tree navigation and searchable prompt history stay terminal-only. Collie may mirror the whole pane with
     // its declared Escape control, but must not lift a selection card or partial dialog.
     const c = results.collie?.[i];
-    if (h) problems.push(`herdr-web-ui: terminal picker misidentified as question: ${JSON.stringify(h)}`);
+    if (h) problems.push(`Ovis: terminal picker misidentified as question: ${JSON.stringify(h)}`);
     if (c) {
       const mirrors = c.blocks.filter(b => b.kind === 'unread-dialog');
       if (mirrors.length > 1 || c.blocks.some(b => b.kind !== 'raw' && b.kind !== 'unread-dialog') || mirrors.some(b =>
@@ -1229,12 +1229,12 @@ screens.forEach((screen, i) => {
     return;
   }
   if (h !== undefined) {
-    if (h === null) problems.push('herdr-web-ui: no card');
+    if (h === null) problems.push('Ovis: no card');
     else {
-      if (dialog.question && h.question.replace(/\s+/g, ' ').trim() !== dialog.question) problems.push(`herdr-web-ui: question ${JSON.stringify(h.question)}`);
-      if (dialog.herdr.multi !== undefined && h.multi !== dialog.herdr.multi) problems.push(`herdr-web-ui: multi_select ${h.multi}`);
-      if (dialog.herdr.options !== undefined && h.options.length !== dialog.herdr.options) problems.push(`herdr-web-ui: options ${JSON.stringify(h.options)}`);
-      else if (dialog.herdr.labels !== undefined && JSON.stringify(h.options) !== JSON.stringify(dialog.herdr.labels)) problems.push(`herdr-web-ui: labels ${JSON.stringify(h.options)}`);
+      if (dialog.question && h.question.replace(/\s+/g, ' ').trim() !== dialog.question) problems.push(`Ovis: question ${JSON.stringify(h.question)}`);
+      if (dialog.herdr.multi !== undefined && h.multi !== dialog.herdr.multi) problems.push(`Ovis: multi_select ${h.multi}`);
+      if (dialog.herdr.options !== undefined && h.options.length !== dialog.herdr.options) problems.push(`Ovis: options ${JSON.stringify(h.options)}`);
+      else if (dialog.herdr.labels !== undefined && JSON.stringify(h.options) !== JSON.stringify(dialog.herdr.labels)) problems.push(`Ovis: labels ${JSON.stringify(h.options)}`);
     }
   }
   const c = results.collie?.[i];
@@ -1271,4 +1271,4 @@ function report(label, problems) {
   } else console.log(`ok   ${label}`);
 }
 assert.equal(failures, 0, `${failures} screen(s) not read as their client should read them`);
-console.log(`PASS ${Object.keys(results).join(' + ')} read ${screens.length} frames: waiting dialogs, native controls and actual composers`);
+console.log(`PASS ${Object.keys(results).map(key => key === 'herdr' ? 'Ovis' : 'Collie').join(' + ')} read ${screens.length} frames: waiting dialogs, native controls and actual composers`);

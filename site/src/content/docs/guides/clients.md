@@ -5,11 +5,13 @@ description: What remote Pi clients can render, and where terminal access is sti
 
 The suite preserves rich desktop dialogs. There is no remote-client UI setting to switch: TUI sessions use terminal components, while RPC sessions use supported Pi dialogs. Terminal access and native chat controls are different capabilities.
 
+Ovis and Collie target main only. Pi Sidebar's conversation, draft and controls are not remote targets; its frame boundaries tell a client which region to exclude when reading main. Neither client switches focus into Sidebar. Ovis's own workspace and pane navigation remains available.
+
 ## Startup context chart
 
 [pi-cc-render's startup chart](/plugins/pi-cc-render/#startup-splash) shows estimated context as a non-input strip **above the chat**. The chart is not a composer or send target; the ordinary editor remains the only place to type a message. In fullscreen, model rows select a model for the current session and MCP rows open Pi's native manager; the manager's controls are separate from the map. Regular mode retains `/model` and `/mcp`.
 
-Client regression fixtures should show the actual splash alongside the editor and footer at 46, 120 and 180 columns, with Sidebar absent/open and the native MCP manager open/closed. Both herdr-web-ui and Collie parsers must find only the real editor and normal idle composer, with no false input or send target in the map. These are compatibility requirements, not a claim that the new fixtures or live clients have been validated.
+Client regression fixtures should show the actual splash alongside the editor and footer at 46, 120 and 180 columns, with Sidebar absent/open and the native MCP manager open/closed. Both Ovis and Collie parsers must find only the real editor and normal idle composer, with no false input or send target in the map. These are compatibility requirements, not a claim that the new fixtures or live clients have been validated.
 
 ## Subagent views and questions
 
@@ -17,11 +19,13 @@ A subagent viewer must yield both screen and keyboard to main's questions and ap
 
 Regression coverage uses real running and ended subagent views at 46, 120 and 180 columns, standalone and hosted beside Sidebar. It checks visible dialogs with both phone parsers and actual terminal input dispatch, including paging the focused worker. Read-only views expose no composer; a running worker's steering draft must not be confused with main's or Sidebar's draft. Parser checks do not replace testing the live clients.
 
-## Herdr and herdr-web-ui
+## Herdr and Ovis
 
 Install Herdr's official Pi integration for lifecycle state and session identity. [pi-herdr](/plugins/pi-herdr/) adds metadata and orchestration; it does not replace that integration.
 
-herdr-web-ui reads the running TUI and session store, rather than launching Pi in RPC mode. It builds a chat card for a Pi dialog when the screen ends the way Pi's own select and input dialogs do: a question, a blank line, one row per option, a blank line, then Pi's key hint (`↑↓ navigate  enter select  escape/ctrl+c cancel`, or `enter submit  escape/ctrl+c cancel` over a `›` field), followed by at most two footer lines. The questionnaire, permission prompts and plan approval all end that way, so a phone gets their options as buttons and their free-text fields (Type something., notes, Block with a message) as a text box. Multiple-choice questions are drawn as OmO's ask_user_question form, which herdr-web-ui shows as a checkbox card with a Submit button. While any dialog holds `herdr:blocked`, [pi-status-footer](/plugins/pi-status-footer/) shrinks to one row for the same reason, leaving room for one activity row (pi-bg's shells, subagents).
+[Ovis](https://github.com/devswha/ovis), formerly herdr-web-ui, reads the running TUI and session store, rather than launching Pi in RPC mode. It builds a chat card for a Pi dialog when the screen ends the way Pi's own select and input dialogs do: a question, a blank line, one row per option, a blank line, then Pi's key hint (`↑↓ navigate  enter select  escape/ctrl+c cancel`, or `enter submit  escape/ctrl+c cancel` over a `›` field), followed by at most two footer lines. The questionnaire, permission prompts and plan approval all end that way, so a phone gets their options as buttons and their free-text fields (Type something., notes, Block with a message) as a text box. Multiple-choice questions are drawn as OmO's ask_user_question form, which Ovis shows as a checkbox card with a Submit button. While any dialog holds `herdr:blocked`, [pi-status-footer](/plugins/pi-status-footer/) shrinks to one row for the same reason, leaving room for one activity row (pi-bg's shells, subagents).
+
+An approval's highlighted call preview above the final question/options block is not automatically part of the phone card. Check the card's actual question and target as well as its buttons; structured tool arguments and results remain separate from this screen-reading contract.
 
 Limits: a card appears only with the cursor on the first row (as for Pi's own dialogs); a question showing a side-by-side preview and `/planners` still need the terminal. A multiple-choice question's typed answer is its numbered `Other` option: tick it on the phone and a text-box card follows.
 
@@ -31,7 +35,7 @@ Plan approval/edit/feedback waits report `herdr:blocked`, like questions and per
 
 On iPhone, web push requires iOS 16.4+, HTTPS, and installing the site through Safari's **Add to Home Screen**. Open the installed app, enable **Alerts**, and send a test from its alert settings. The server must remain running. Alerts are suppressed while any app window is visible and focused on any device; test pushes bypass suppression.
 
-See the [herdr-web-ui guide](https://github.com/devswha/herdr-web-ui/blob/main/docs/guide.md) for current setup and behavior.
+See the [Ovis guide](https://github.com/devswha/ovis/blob/main/docs/guide.md) for current setup and behavior.
 
 Sidebar can share the primary pane with planner and subagent views. Closing Sidebar expands the current view; closing that view returns to main without closing Sidebar. Native dialogs temporarily take the full width. The Sidebar conversation is read-only and belongs to the explicitly enrolled session family, not all sessions on the machine; it does not change the primary view's human controls. Family coverage may be partial or unavailable. See [pi-sidebar](/plugins/pi-sidebar/) for transcript retrieval and limits.
 
@@ -45,7 +49,7 @@ To send a message in one tap and lift those cards, Collie has to find Pi's edito
 [pi]
 rule_glyphs = "━"
 rule_labels = "ends"
-status_rows = 12
+status_rows = 13
 status_indent = 1
 status_blank_rows = 1
 option_gutter = "│"
@@ -57,6 +61,8 @@ panel_beside = { rule = "│", pointers = "◂▸" }
 ```
 
 Collie reads it at startup: run `collie restart` after an edit. Collie's phone app also shows the footer's rows under Chat; Settings → pi → Show the status line turns that off per device.
+
+If a question remains beside a declared panel, its visible selection does not prove where keyboard input would go. Collie keeps that main view read-only, without choice or implicit Escape buttons; use the terminal. Ordinary suite dialogs collapse Sidebar or take the full width, so their remote controls remain supported.
 
 ## Paseo
 
@@ -79,6 +85,14 @@ Omnigent's native Pi harness runs the actual TUI and injects web messages throug
 
 The audited native bridge publishes idle at `agent_end`, which can precede Pi's final `agent_settled` boundary. Do not treat that status as proof that automatic continuations have finished.
 
-## Audit baseline
+## Compatibility checks
+
+Run `REQUIRE_REMOTE_CLIENTS=1 npm run check:clients` from the suite checkout to require both readers. Without strict mode, a missing client can be skipped for development; that is not compatibility sign-off. The runner covers the checked screen matrix at 46, 120 and 180 columns, including blocked footers, activity rows, Sidebar and real composer ownership.
+
+`OVIS_DIR` selects an Ovis source checkout or installed runtime; the legacy `HERDR_WEB_UI_DIR` remains a lower-priority alias. Automatic discovery selects the numerically newest valid `remote-vN` bundle from `~/.local/share/herdr-web-ui` and `~/.local/share/ovis`. Current Ovis still uses the legacy runtime root. Invalid explicit overrides fail instead of silently choosing another parser. `COLLIE_DIR` and `COLLIE_FRAMES` select the Collie checkout and operator frame declaration.
+
+Source and installed checks prove different things. An explicit Ovis source checkout uses Bun from PATH; an installed bundle uses its own `bin/bun`. The runner reports which one it checked. Validate the refreshed source and the actual installed bundle, and match the latter to the deployed app's remote-bundle version before claiming current-client compatibility. A passing source run does not prove a phone has connected to an updated runtime.
+
+## Historical audit baseline
 
 Collie was checked against its pi reader on the `frames.toml` branch (`npm run check:clients`, 46 and 120 columns) and live from a phone on a two-machine crew. The herdr-web-ui layout was checked against its v17, v27 (0.4.8) and v31 (0.4.12) prompt parsers (`parseInteractivePrompt`) at 46 and 120 columns; other limits against herdr-web-ui `dc2f11de`, Paseo `4a3ff87e` and Omnigent `f8f69988`. Custom question/gate frames were tested against the web prompt parser; the standard plan selector was recognized. This is not a live iPhone or end-to-end model test. Newer client revisions may behave differently.

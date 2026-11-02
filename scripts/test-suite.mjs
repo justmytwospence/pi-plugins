@@ -13,6 +13,7 @@ const scripts = [
   ['scripts/test-contracts.mjs'],
   ['scripts/test-question-flow.mjs'],
   ['scripts/test-dialog-focus.mjs'],
+  ['--test', 'scripts/remote-clients/client-paths.test.mjs'],
   ['scripts/test-lifecycle.mjs'],
   ['scripts/test-family-sidebar.mjs'],
   ['scripts/test-mode-flow.mjs'],

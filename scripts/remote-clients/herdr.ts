@@ -1,10 +1,10 @@
-// herdr-web-ui's own reader over the rendered screens (../test-remote-clients.mjs). Run with bun:
-// `bun herdr.ts <screens.json> <herdr-web-ui bundle dir>`. Prints one card (or null) per screen.
+// Ovis's own reader over the rendered screens (../test-remote-clients.mjs). Run with its Bun:
+// `bun herdr.ts <screens.json> <Ovis source or bundle directory>`. Prints one card (or null) per screen.
 import { readFileSync } from "node:fs";
 import path from "node:path";
 
-const [screensFile, bundle] = process.argv.slice(2) as [string, string];
-const { parseInteractivePrompt, answerKeys } = await import(path.join(bundle, "server/prompt.ts"));
+const [screensFile, directory] = process.argv.slice(2) as [string, string];
+const { parseInteractivePrompt, answerKeys } = await import(path.join(directory, "server/prompt.ts"));
 const screens: { text: string; answer?: { option_index?: number; custom_text?: string } }[] = JSON.parse(readFileSync(screensFile, "utf8"));
 const cards = screens.map(({ text, answer }) => {
   const card = parseInteractivePrompt("pi", text);
