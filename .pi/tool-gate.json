@@ -1,6 +1,15 @@
 {
   "directories": {
-    "read": ["~/Projects/herdr-*"],
-    "write": ["~/Projects/dotfiles"]
+    "read": [
+      "~/Projects/herdr-*",
+      "~/Projects/ovis",
+      "~/Projects/collie",
+      "~/Projects/homelab"
+    ],
+    "write": [
+      "~/Projects/dotfiles",
+      "~/Projects/herdr-web-ui",
+      "~/Projects/collie"
+    ]
   }
 }
