@@ -207,17 +207,18 @@ export function createProviderUsageCollector(options: CollectorOptions = {}) {
         post("https://daily-cloudcode-pa.googleapis.com/v1internal:retrieveUserQuotaSummary", { project }),
         post("https://daily-cloudcode-pa.googleapis.com/v1internal:fetchAvailableModels", { project }),
       ]);
-      const unsupported = (response: Response) => response.status === 404 || response.status === 501;
-      if ((!summaryResponse.ok && !unsupported(summaryResponse)) || (!modelResponse.ok && !unsupported(modelResponse)))
+      if (!summaryResponse.ok || !modelResponse.ok)
         return unavailable("google", GOOGLE_SOURCE, "Google quota request was refused or unavailable.");
-      const summary = summaryResponse.ok ? parseGoogleSummary(await readJson(summaryResponse), now()) : undefined;
-      const model = modelResponse.ok ? parseGoogleModels(await readJson(modelResponse), source.model, now(), source.variant ?? "gemini-4-argon-medium") : undefined;
-      if (summary?.state === "unavailable" || model?.state === "unavailable")
-        return unavailable("google", GOOGLE_SOURCE, summary?.reason ?? model?.reason ?? "Google returned invalid model quota.");
-      const windows = [...(summary?.windows.filter(window => window.pool === "Gemini") ?? []), ...(model?.windows ?? [])];
-      if (!windows.length) return unavailable("google", GOOGLE_SOURCE, "Google returned no recognizable quota windows.");
-      const times = [summary, model].filter((result): result is ProviderUsage => !!result && result.windows.some(window => window.pool === "Gemini")).map(result => result.observedAt!);
-      return { provider: "google", source: GOOGLE_SOURCE, state: "ready", observedAt: Math.min(...times), windows };
+      const summary = parseGoogleSummary(await readJson(summaryResponse), now());
+      const model = parseGoogleModels(await readJson(modelResponse), source.model, now(), source.variant ?? "gemini-4-argon-medium");
+      if (summary.state === "unavailable" || model.state === "unavailable")
+        return unavailable("google", GOOGLE_SOURCE, summary.reason ?? model.reason ?? "Google returned invalid model quota.");
+      const windows = [...summary.windows.filter(window => window.pool === "Gemini"), ...model.windows];
+      if (!["5h", "weekly", "Argon weekly"].every(label => windows.some(window => window.label === label && window.pool === "Gemini")) ||
+          !windows.some(window => window.label === "Argon weekly" && window.model === source.model) ||
+          !windows.some(window => window.label === "model" && window.model === source.model))
+        return unavailable("google", GOOGLE_SOURCE, "Google returned no complete applicable Argon quota.");
+      return { provider: "google", source: GOOGLE_SOURCE, state: "ready", observedAt: Math.min(summary.observedAt!, model.observedAt!), windows };
     }
     const response = await post("https://daily-cloudcode-pa.googleapis.com/v1internal:retrieveUserQuotaSummary", { project });
     if (response.status === 404 || response.status === 501) {
@@ -267,7 +268,10 @@ export function createProviderUsageCollector(options: CollectorOptions = {}) {
       current.controller = active;
       const pending = collect(source, active.signal).then(result => {
         if (disposed || slots.get(slotKey) !== current || active.signal.aborted) return unavailable(source.provider, source.provider, "Usage request was cancelled.");
-        if (result.state === "ready" || !current.last || current.last.state !== "ready") current.last = result;
+        // A failed Argon refresh cannot borrow a prior ready allowance for this
+        // exact variant. Other collectors retain their existing transient fallback.
+        if (source.provider === "google" && source.model === "antigravity-gemini-4-argon" ||
+            result.state === "ready" || !current.last || current.last.state !== "ready") current.last = result;
         return current.last;
       }).finally(() => { if (slots.get(slotKey) === current) current.flight = undefined; });
       current.flight = pending;

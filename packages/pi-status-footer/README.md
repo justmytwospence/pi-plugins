@@ -43,12 +43,20 @@ message replace this one after startup or reload. Its working-row stats and MCP
 chip are part of this component now.
 
 - `/status on`: custom footer, limits for the active provider only (default).
-- `/status all`: also keep the other subscription account's limits visible
-  (Claude acct on Codex, Codex acct on Claude, both on other providers).
+- `/status all`: also show configured subscription accounts within a two-row
+  budget (the modern OpenAI and Codex aliases count as one Codex account row).
 - `/status native`: restore Pi's built-in footer immediately.
 - `/status` or `/status details`: show detailed measurements and explain sources.
 - `/status working on|off`: the working-row statistics (default on).
 - `/status mcp on|off`: the built-in MCP chip (default on).
+The separately selectable [pi-model-waterfall](../pi-model-waterfall/README.md) extension owns
+`waterfall/auto` and `/waterfall`. This footer neither registers nor routes that
+model. When the router is present, it publishes a detached, credential-free
+`pi-plugins.model-waterfall.v1` snapshot so the footer can show its selected
+physical model without a new row, control, or inference request. For Argon,
+it reads only the routed physical reasoning variant, not a generic model quota.
+The footer works without the router. The older `muse-code` provider is never shown as a
+verified Muse subscription reading.
 
 The selections persist in the session without entering model context. New sessions
 start with the custom footer and both extras on. Native mode still keeps the cached account
@@ -204,7 +212,7 @@ labeled.
 - **Claude acct:** subscription limits from `GET https://api.anthropic.com/api/oauth/usage`,
   the endpoint Claude Code's `/status` uses. Authenticated with Pi's own `anthropic`
   subscription login (via `modelRegistry.getApiKeyForProvider`, so Pi handles refresh),
-  so it describes the account Pi bills; cached in `pi-oauth-usage.json` (below).
+  so it describes Pi's own account; cached through the shared read-only quota library (below).
   Each Anthropic response's `anthropic-ratelimit-unified-*` headers update the 5h and
   week windows in between, as in Claude Code. When Pi has no Anthropic subscription
   login (an API key), it falls back to the shared Claude Code OAuth usage cache at
@@ -215,20 +223,18 @@ labeled.
 - **Codex acct:** ChatGPT-plan limits from `GET https://chatgpt.com/backend-api/wham/usage`,
   the endpoint Codex CLI's `/status` uses. Authenticated with Pi's own `openai-codex`
   OAuth login (via `modelRegistry.getApiKeyForProvider`, so Pi handles refresh) and
-  the account id in that token. Modern `openai` sessions show this separate Codex
-  account row while inference remains on the selected OpenAI model.
+  the account id in that token, so it describes the separately signed-in Codex account, not necessarily modern OpenAI inference.
   The URL is fixed; the token is never sent anywhere else. Named pools in
   `additional_rate_limits` (for example a reserve model) keep their API names.
-  The shared reader reuses fresh readings for 5 minutes while an OpenAI or Codex
-  model is active (or `/status all`). Pi sessions on the same account share
-  `${XDG_CACHE_HOME:-~/.cache}/pi-subscription-usage/openai-codex-<account-digest>.json`,
-  with a lock coordinating fetches. Each refresh rechecks Pi's legacy login;
-  missing or changed authentication clears the previous account's reading.
-  Passive Codex events and response headers request revalidation through this
-  reader rather than publishing account-unidentified payloads. No model call is
-  made. Failed refreshes may reuse a same-account reading only while it remains
-  under ten minutes old and none of its windows is reset-due; otherwise limits
-  are unavailable.
+  Both inference providers display one Codex account row while keeping their
+  model choices separate; the modern token is never sent to this endpoint.
+  The account-bound shared reader reuses fresh windows for five minutes under
+  `${XDG_CACHE_HOME:-~/.cache}/pi-subscription-usage/` and rechecks Pi's Codex
+  login on every refresh. Missing or changed credentials retire the previous
+  account's reading. Stream events and response headers trigger a reader
+  refresh; their identity-free values are never assigned directly to a quota
+  row. No model call is made. Failed refreshes reuse only a still-valid
+  same-account reading and otherwise report limits unavailable.
 - **stale:** cache/header snapshot is at least ten minutes old or its reset time
   has passed. Never assume the provider reset a quota to zero without fresh data.
 - **extra:** shared Claude account extra usage enabled/disabled state. An old spent
@@ -253,11 +259,11 @@ Submitting an ordinary prompt flushes the preview first. If application fails, t
 Rendering performs no filesystem, subprocess or network operations. Git is read
 asynchronously on startup, settlement and branch changes, with a three-second
 minimum ordinary refresh interval. A 15-second clock refreshes idle state; shared
-quota reads/refreshes run at most once per minute ordinarily. The Claude reading
-is cached for five minutes in the status line's cache directory: with Pi's
-subscription login in `pi-oauth-usage.json` under a `.pi-fetch.lock` directory,
-so however many Pi sessions are open, one fetches. Without one, it uses the cache
-Claude Code's status line keeps (`oauth-usage.json`), refreshing it when stale
+quota reads/refreshes run at most once per minute ordinarily. Pi's subscription
+Claude reading is cached for five minutes under
+`${XDG_CACHE_HOME:-~/.cache}/pi-subscription-usage/`, account-bound and locked
+across sessions. Without a Pi login, the footer instead uses the cache Claude
+Code's status line keeps (`oauth-usage.json`), refreshing it when stale
 with Claude Code's OAuth token from the Keychain (or `~/.claude/.credentials.json`)
 under the status line's own `.fetch.lock`. Either token is sent only to
 Anthropic's OAuth usage endpoint. Both usage requests are in-process `fetch` calls with a

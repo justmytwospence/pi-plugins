@@ -201,6 +201,7 @@ describe("collector", () => {
       if (url.endsWith("loadCodeAssist")) return project();
       if (url.endsWith("retrieveUserQuotaSummary")) return json({ groups: [{ buckets: [
         { bucketId: "gemini-5h", remainingFraction: 0.8 },
+        { bucketId: "gemini-weekly", remainingFraction: 0.9 },
         { bucketId: "gemini-argon-wtu-weekly", remainingFraction: 0.7 },
       ] }] });
       return json({ models: {
@@ -210,12 +211,30 @@ describe("collector", () => {
     } });
     const medium = await collector.refresh({ ...argon, variant: "gemini-4-argon-medium" });
     const high = await collector.refresh({ ...argon, variant: "gemini-4-argon-high" });
-    for (const [result, expected] of [[medium, [20, 30, 20]], [high, [20, 30, 99]]]) {
-      assert.equal(result.state, "ready");
+    for (const [result, expected] of [[medium, [20, 10, 30, 20]], [high, [20, 10, 30, 99]]]) {
+      assert.equal(result.state, "ready", result.reason);
       assert.equal(result.windows.length, expected.length);
       result.windows.forEach((window, index) => assert.ok(Math.abs(window.used - expected[index]) < 1e-9));
     }
     assert.equal((await collector.refresh({ ...argon, variant: "gemini-4-argon-unknown" })).state, "unavailable");
+    collector.dispose();
+  });
+
+  it.each(["5h", "weekly", "Argon weekly", "model"])("requires the %s Argon quota alongside the other applicable windows", async missing => {
+    const buckets = [
+      { bucketId: "gemini-5h", remainingFraction: 0.5 },
+      { bucketId: "gemini-weekly", remainingFraction: 0.5 },
+      { bucketId: "gemini-argon-wtu-weekly", remainingFraction: 0.5 },
+    ];
+    const ids = { "5h": "gemini-5h", weekly: "gemini-weekly", "Argon weekly": "gemini-argon-wtu-weekly" };
+    const collector = createProviderUsageCollector({ now: () => now, fetch: async url => {
+      if (url.endsWith("loadCodeAssist")) return project();
+      if (url.endsWith("retrieveUserQuotaSummary")) return json({ groups: [{ buckets: buckets.filter(bucket => bucket.bucketId !== ids[missing]) }] });
+      return json({ models: missing === "model" ? {} : { "gemini-4-argon-medium": { quotaInfo: { remainingFraction: 0.9 } } } });
+    } });
+    const result = await collector.refresh(argon);
+    assert.equal(result.state, "unavailable");
+    assert.deepEqual(result.windows, []);
     collector.dispose();
   });
 
@@ -233,7 +252,7 @@ describe("collector", () => {
   });
 
   it.each(["summary", "models"])("fails closed when an Argon quota endpoint %s is unavailable", async unavailableEndpoint => {
-    for (const failure of [() => json({}, 503), () => new Response("not json"), () => { throw new Error("offline failure"); }]) {
+    for (const failure of [() => json({}, 404), () => json({}, 501), () => json({}, 503), () => new Response("not json"), () => { throw new Error("offline failure"); }]) {
       const calls = [];
       const collector = createProviderUsageCollector({ now: () => now, fetch: async url => {
         calls.push(url);
@@ -247,6 +266,49 @@ describe("collector", () => {
       assert.deepEqual(result.windows, []);
       assert.equal(calls.length, 3); collector.dispose();
     }
+  });
+
+  it.each(["summary", "models"])("does not reuse an old ready Argon reading after a malformed %s refresh", async broken => {
+    let clock = now, attempts = 0;
+    const credential = "ya29.synthetic_token-1";
+    const collector = createProviderUsageCollector({ now: () => clock, fetch: async (url, init) => {
+      assert.equal(init.headers.Authorization, `Bearer ${credential}`);
+      if (url.endsWith("loadCodeAssist")) { attempts++; return project(); }
+      if (url.endsWith("retrieveUserQuotaSummary")) return json({ groups: [{ buckets: [
+        { bucketId: "gemini-5h", remainingFraction: 0.8 }, { bucketId: "gemini-weekly", remainingFraction: 0.6 },
+        { bucketId: "gemini-argon-wtu-weekly", remainingFraction: attempts === 1 || broken !== "summary" ? 0.5 : "invalid" },
+      ] }] });
+      return json({ models: { "gemini-4-argon-medium": { quotaInfo: { remainingFraction: attempts === 1 || broken !== "models" ? 0.8 : "invalid" } } } });
+    } });
+    assert.equal((await collector.refresh(argon)).state, "ready");
+    clock += 300_000;
+    const failed = await collector.refresh(argon);
+    assert.equal(failed.state, "unavailable");
+    assert.deepEqual(failed.windows, []);
+    assert.doesNotMatch(JSON.stringify(failed), /ya29|synthetic-project/);
+    assert.strictEqual(await collector.refresh(argon), failed);
+    assert.equal(attempts, 2);
+    collector.dispose();
+  });
+
+  it.each(["summary", "models"])("does not reuse a ready Argon reading when the %s endpoint becomes unavailable", async broken => {
+    let clock = now, attempts = 0;
+    const collector = createProviderUsageCollector({ now: () => clock, fetch: async url => {
+      if (url.endsWith("loadCodeAssist")) { attempts++; return project(); }
+      if (url.endsWith("retrieveUserQuotaSummary")) return broken === "summary" && attempts === 2 ? json({}, 501) : json({ groups: [{ buckets: [
+        { bucketId: "gemini-5h", remainingFraction: 0.5 }, { bucketId: "gemini-weekly", remainingFraction: 0.5 },
+        { bucketId: "gemini-argon-wtu-weekly", remainingFraction: 0.5 },
+      ] }] });
+      return broken === "models" && attempts === 2 ? json({}, 404) : json({ models: { "gemini-4-argon-medium": { quotaInfo: { remainingFraction: 0.5 } } } });
+    } });
+    assert.equal((await collector.refresh(argon)).state, "ready");
+    clock += 300_000;
+    const failed = await collector.refresh(argon);
+    assert.equal(failed.state, "unavailable");
+    assert.deepEqual(failed.windows, []);
+    assert.strictEqual(await collector.refresh(argon), failed);
+    assert.equal(attempts, 2);
+    collector.dispose();
   });
 
   it("refuses redirects, errors, malformed or oversized bodies and never falls back on refusal", async () => {

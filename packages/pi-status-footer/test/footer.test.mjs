@@ -5,32 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { stripVTControlCharacters as plain } from "node:util";
-import { afterAll, afterEach, beforeEach, test, vi } from "vitest";
-
-// Never consult a developer's login/cache or let an unstubbed request escape.
-// Claude's macOS Keychain fallback is a child process, so shadow it as well.
-const sandbox = await mkdtemp(path.join(os.tmpdir(), "pi-footer-offline-"));
-const isolatedEnv = ["HOME", "XDG_CACHE_HOME", "CLAUDE_CONFIG_DIR", "CLAUDE_STATUSLINE_CACHE_DIR", "PI_STATUS_FOOTER_CLAUDE_USAGE_CMD", "PATH"];
-const originalEnv = new Map(isolatedEnv.map((key) => [key, process.env[key]]));
-await writeFile(path.join(sandbox, "security"), "#!/bin/sh\nexit 1\n", { mode: 0o755 });
-process.env.HOME = sandbox;
-process.env.XDG_CACHE_HOME = sandbox;
-process.env.CLAUDE_CONFIG_DIR = path.join(sandbox, "claude");
-process.env.CLAUDE_STATUSLINE_CACHE_DIR = path.join(sandbox, "claude-cache");
-delete process.env.PI_STATUS_FOOTER_CLAUDE_USAGE_CMD;
-process.env.PATH = `${sandbox}${path.delimiter}${process.env.PATH ?? ""}`;
-const originalFetch = globalThis.fetch;
-let unexpectedRequests = [];
-const offlineFetch = async (url) => { unexpectedRequests.push(String(url)); throw new Error("Unstubbed footer request"); };
-beforeEach(() => { unexpectedRequests = []; globalThis.fetch = offlineFetch; });
-afterEach(() => { assert.deepEqual(unexpectedRequests, [], "all footer requests must use a synthetic transport"); });
-afterAll(async () => {
-  globalThis.fetch = originalFetch;
-  for (const [key, value] of originalEnv) {
-    if (value === undefined) delete process.env[key]; else process.env[key] = value;
-  }
-  await rm(sandbox, { recursive: true, force: true });
-});
+import { test, vi } from "vitest";
 
 const modules = fileURLToPath(new URL("../node_modules/@earendil-works/", import.meta.url));
 const root = path.join(modules, "pi-coding-agent");
@@ -83,17 +58,21 @@ test("Claude percentages are never heuristically multiplied, and scoped limits a
     five_hour: { utilization: 0.5, resets_at: "2026-09-23T14:00:00.488018+00:00" },
     limits: [
       { kind: "weekly_all", percent: 52 },
-      { kind: "weekly_scoped", percent: 74, scope: { model: { display_name: "Fable" } } },
-      { kind: "weekly_scoped", percent: 6, scope: { model: { display_name: "Future model" } } },
-      { kind: "weekly_scoped", percent: "bad", scope: {} },
+      { kind: "weekly_scoped", percent: 74, resets_at: "2026-09-30T14:00:00Z", scope: { model: { display_name: "Fable" } } },
+      { kind: "weekly_scoped", percent: 6, resets_at: "2026-09-30T14:00:00Z", scope: { model: { display_name: "Future model" } } },
     ],
     spend: { enabled: false, used: { amount_minor: 15421, exponent: 2, currency: "USD" }, limit: { amount_minor: 15000, exponent: 2 } },
   }, now);
   assert.deepEqual(parsed.windows.map((w) => [w.label, w.used]), [["5h", 0.5], ["week", 52], ["Fable", 74], ["Future model", 6]]);
   assert.equal(parsed.windows[0].reset, Date.parse("2026-09-23T14:00:00.488018+00:00"));
   assert.deepEqual(parsed.extra, { enabled: false, used: 154.21, limit: 150, currency: "USD" });
+  assert.deepEqual(mod.parseClaudeQuota({ five_hour: { utilization: 0.5 }, limits: [
+    { kind: "weekly_scoped", percent: "bad", scope: {} }] }, now).windows, [],
+    "a malformed applicable scope invalidates all windows instead of silently disappearing");
   assert.deepEqual(mod.parseClaudeQuota(null, now).windows, []);
   assert.deepEqual(mod.parseClaudeQuota({ five_hour: { utilization: -1 } }, now).windows, []);
+  assert.deepEqual(mod.parseClaudeQuota({ seven_day_opus: { utilization: 96, resets_at: "2026-09-30T14:00:00Z" } }, now).windows,
+    [{ label: "Opus", used: 96, reset: Date.parse("2026-09-30T14:00:00Z") }]);
 });
 
 test("Codex headers support case, windows, reset epochs and durations, and missing data", () => {
@@ -119,10 +98,11 @@ test("Claude limit headers are fractions with epoch-second resets, and update ca
   assert.equal(mod.parseClaudeHeaders({ "anthropic-ratelimit-unified-5h-utilization": "" }, now), undefined);
   assert.equal(mod.parseClaudeHeaders({ "anthropic-ratelimit-unified-5h-utilization": "-1" }, now), undefined);
   const cached = mod.parseClaudeQuota({ five_hour: { utilization: 80 }, limits: [
-    { kind: "weekly_scoped", percent: 74, scope: { model: { display_name: "Fable" } } }] }, now - 60_000);
+    { kind: "weekly_scoped", percent: 74, resets_at: "2026-09-30T14:00:00Z", scope: { model: { display_name: "Fable" } } }] }, now - 60_000);
   const merged = mod.mergeQuota(cached, quota);
   assert.deepEqual(merged.windows.map((w) => [w.label, w.used]), [["5h", 12.5], ["Fable", 74], ["week", 94]]);
   assert.equal(merged.updated, now);
+  assert.equal(merged.windows.find((window) => window.label === "Fable").observedAt, now - 60_000);
 });
 
 // Shape of ChatGPT's GET /backend-api/wham/usage (identity fields omitted).
@@ -774,7 +754,7 @@ test("external text is sanitized and over-100 gauges are bounded", () => {
 });
 
 function host(entries = [], cwd = os.tmpdir(), mode = "tui", nativeBranch = null) {
-  const handlers = new Map(), commands = new Map(), statuses = new Map(), notices = [], workingMessages = [];
+  const handlers = new Map(), commands = new Map(), virtualModels = new Map(), statuses = new Map(), notices = [], workingMessages = [];
   const commandInfos = [], tools = [];
   let footer, editorFactory, disposed = 0, paints = 0, name = "", trusted = false;
   const listeners = new Map();
@@ -793,6 +773,7 @@ function host(entries = [], cwd = os.tmpdir(), mode = "tui", nativeBranch = null
     },
     registerEntryRenderer() {},
     registerCommand(key, command) { commands.set(key, command); },
+    registerVirtualModel(definition) { virtualModels.set(`${definition.provider}/${definition.id}`, definition); },
     getThinkingLevel: () => "xhigh", getSessionName: () => name,
     appendEntry(customType, data) { entries.push({ type: "custom", customType, data }); },
     getCommands: () => commandInfos, getAllTools: () => tools,
@@ -801,7 +782,7 @@ function host(entries = [], cwd = os.tmpdir(), mode = "tui", nativeBranch = null
     mode, cwd, model: { provider: "openai-codex", id: "gpt-6-astra", contextWindow: 200000, reasoning: true },
     sessionManager: { getEntries: () => entries, getBranch: () => entries, getSessionId: () => "footer-test", getLeafId: () => entries.at(-1)?.id ?? null },
     modelRegistry: { isUsingOAuth: () => true,
-      getApiKeyForProvider: async () => undefined },
+      getApiKeyForProvider: async (p) => p === "openai-codex" ? jwt({ "https://api.openai.com/auth": { chatgpt_account_id: "acct-1" } }) : undefined },
     isIdle: () => true, hasPendingMessages: () => false, isProjectTrusted: () => trusted,
     getContextUsage: () => ({ tokens: null, percent: null, contextWindow: 200000 }),
     ui: {
@@ -824,12 +805,91 @@ function host(entries = [], cwd = os.tmpdir(), mode = "tui", nativeBranch = null
     },
   };
   mod.default(pi);
-  return { handlers, commands, ctx, entries, statuses, notices, pi, workingMessages, commandInfos, tools,
+  return { handlers, commands, virtualModels, ctx, entries, statuses, notices, pi, workingMessages, commandInfos, tools,
     set trusted(value) { trusted = value; },
     get editorFactory() { return editorFactory; }, set editorFactory(f) { editorFactory = f; },
     get footer() { return footer; }, get disposed() { return disposed; }, get paints() { return paints; },
   };
 }
+
+test("footer displays an optional read-only waterfall snapshot without owning routing", async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "pi-footer-waterfall-"));
+  const originalFetch = globalThis.fetch, originalCache = process.env.CLAUDE_STATUSLINE_CACHE_DIR;
+  process.env.CLAUDE_STATUSLINE_CACHE_DIR = dir;
+  const calls = [];
+  globalThis.fetch = async (url) => { calls.push(String(url)); throw new Error("Offline test: no network"); };
+  let h;
+  try {
+    h = host([], dir);
+    h.ctx.model = { provider: "waterfall", id: "auto", api: "pi-virtual", contextWindow: 0 };
+    h.ctx.modelRegistry.getApiKeyForProvider = async () => undefined;
+    h.ctx.modelRegistry.find = (provider, id) => ({ provider, id, api: "fake-provider", contextWindow: 200000, reasoning: true });
+    let route;
+    h.pi.events.on("pi-plugins.model-waterfall.v1", request => {
+      if (request.kind === "query" && route) request.snapshot = structuredClone(route);
+    });
+    await h.handlers.get("session_start")({}, h.ctx);
+    assert.equal(h.virtualModels.size, 0, "the footer never registers a router");
+    assert.equal(h.commands.has("waterfall"), false);
+    assert.match(plain(h.footer.render(160).join("\n")), /auto/);
+    route = { version: 1, physical: { provider: "anthropic", id: "claude-opus-5-5", thinkingLevel: "medium" }, skipped: [], observedAt: Date.now() };
+    await refreshFrame(h);
+    assert.match(plain(h.footer.render(160).join("\n")), /auto.*opus-5\.5/);
+    await h.commands.get("status").handler("details", h.ctx);
+    assert.match(h.notices.at(-1), /waterfall\/auto → anthropic\/claude-opus-5-5/);
+    h.ctx.modelRegistry.find = () => { throw new Error("physical model removed"); };
+    assert.match(plain(h.footer.render(160).join("\n")), /Claude · limits unavailable/);
+    route = undefined;
+    await refreshFrame(h);
+    assert.doesNotMatch(plain(h.footer.render(160).join("\n")), /auto.*opus-5\.5/);
+    assert.ok(calls.every(url => url.includes("api.anthropic.com")), "an event snapshot never requests another provider's credentials");
+  } finally {
+    await h?.handlers.get("session_shutdown")?.({}, h.ctx);
+    globalThis.fetch = originalFetch;
+    if (originalCache === undefined) delete process.env.CLAUDE_STATUSLINE_CACHE_DIR; else process.env.CLAUDE_STATUSLINE_CACHE_DIR = originalCache;
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("waterfall footer reads only the routed Argon variant, never a generic medium quota", async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "pi-footer-argon-"));
+  const originalFetch = globalThis.fetch;
+  const resetTime = new Date(Date.now() + 3_600_000).toISOString();
+  const called = [];
+  globalThis.fetch = async (url) => {
+    called.push(String(url));
+    if (String(url).endsWith("loadCodeAssist")) return new Response(JSON.stringify({ cloudaicompanionProject: "synthetic-project" }));
+    if (String(url).endsWith("retrieveUserQuotaSummary")) return new Response(JSON.stringify({ groups: [{ buckets: [
+      { bucketId: "gemini-5h", remainingFraction: 0.9, resetTime },
+      { bucketId: "gemini-weekly", remainingFraction: 0.9, resetTime },
+      { bucketId: "gemini-argon-wtu-weekly", remainingFraction: 0.9, resetTime },
+    ] }] }));
+    return new Response(JSON.stringify({ models: {
+      "gemini-4-argon-high": { quotaInfo: { remainingFraction: 0.01, resetTime } },
+      "gemini-4-argon-medium": { quotaInfo: { remainingFraction: 0.8, resetTime } },
+    } }));
+  };
+  let h;
+  try {
+    h = host([], dir);
+    h.ctx.model = { provider: "waterfall", id: "auto", api: "pi-virtual", contextWindow: 0 };
+    h.ctx.modelRegistry.find = (provider, id) => ({ provider, id, api: "google", baseUrl: "https://cloudcode-pa.googleapis.com", contextWindow: 200000, reasoning: true });
+    h.ctx.modelRegistry.getApiKeyForProvider = async provider => provider === "google" ? "ya29.synthetic" : undefined;
+    let route = { version: 1, physical: { provider: "google", id: "antigravity-gemini-4-argon", thinkingLevel: "high", quotaVariant: "gemini-4-argon-high" }, skipped: [], observedAt: Date.now() };
+    h.pi.events.on("pi-plugins.model-waterfall.v1", request => { if (request.kind === "query") request.snapshot = structuredClone(route); });
+    await h.handlers.get("session_start")({}, h.ctx);
+    await vi.waitFor(() => assert.match(plain(h.footer.render(160).join("\n")), /Google.*model 99% used/));
+    assert.equal(called.filter(url => url.endsWith("fetchAvailableModels")).length, 1);
+    route = { ...route, physical: { ...route.physical, thinkingLevel: "medium", quotaVariant: "gemini-4-argon-medium" } };
+    await h.handlers.get("model_select")({}, h.ctx);
+    assert.doesNotMatch(plain(h.footer.render(160).join("\n")), /model 99% used/);
+    await vi.waitFor(() => assert.match(plain(h.footer.render(160).join("\n")), /Google.*model 20% used/));
+  } finally {
+    await h?.handlers.get("session_shutdown")?.({}, h.ctx);
+    globalThis.fetch = originalFetch;
+    await rm(dir, { recursive: true, force: true });
+  }
+});
 
 function syntheticCodex(h, account = "acct-1") {
   h.ctx.modelRegistry.getApiKeyForProvider = async (provider) => provider === "openai-codex"
@@ -1013,8 +1073,8 @@ test("factory is inert in non-TUI modes and does not replace the editor", async 
   }
 });
 
-// Hold OAuth lookup open so shutdown must abort the shared reader as well as
-// cancel footer timers. The reader clears its own deadline asynchronously.
+// Hold OAuth lookup open so shutdown must cancel both owned timer handles.
+// All quota IO is isolated; saved callbacks can be invoked after cancellation.
 async function withLifecycleHost(run) {
   const dir = await mkdtemp(path.join(os.tmpdir(), "pi-footer-cleanup-"));
   const oldHome = process.env.HOME, oldCache = process.env.CLAUDE_STATUSLINE_CACHE_DIR;
@@ -1308,10 +1368,10 @@ test("normal repeated shutdown and reload leave fresh timers and no stale callba
 
 test("lifecycle: native fallback, mode persistence, provider isolation, reload and cleanup", async () => {
   const dir = await mkdtemp(path.join(os.tmpdir(), "pi-footer-lifecycle-"));
-  const oldHome = process.env.HOME;
+  const oldHome = process.env.HOME, oldXdg = process.env.XDG_CACHE_HOME;
   const oldTmux = process.env.TMUX;
   const oldHerdr = process.env.HERDR_ENV;
-  process.env.HOME = dir; delete process.env.TMUX; delete process.env.HERDR_ENV;
+  process.env.HOME = dir; process.env.XDG_CACHE_HOME = dir; delete process.env.TMUX; delete process.env.HERDR_ENV;
   const timers = new Set();
   const realSetInterval = globalThis.setInterval, realClearInterval = globalThis.clearInterval;
   globalThis.setInterval = (callback) => { const timer = { callback, unref() {} }; timers.add(timer); return timer; };
@@ -1321,7 +1381,7 @@ test("lifecycle: native fallback, mode persistence, provider isolation, reload a
   const usedPercent = 25;
   globalThis.fetch = async (url, init) => {
     fetches.push({ url, headers: init.headers });
-    return quotaResponse(usedPercent);
+    return new Response(JSON.stringify(codexUsage(usedPercent, Date.now() + 30_000)), { status: 200 });
   };
   const settle = () => new Promise((resolve) => setImmediate(resolve));
   let h;
@@ -1366,7 +1426,7 @@ test("lifecycle: native fallback, mode persistence, provider isolation, reload a
     await h.handlers.get("after_provider_response")({ headers: {
       "x-codex-primary-used-percent": "45", "x-codex-primary-window-minutes": "10080" } }, h.ctx);
     await settle();
-    assert.match(h.footer.render(120).join("\n"), /Codex\s+week 25% used.*gpt-reserve 0%/, "identity-free headers only refresh the verified reading");
+    assert.match(h.footer.render(120).join("\n"), /Codex\s+week 25% used.*gpt-reserve 0%/, "identity-free headers only refresh verified readings");
     for (const timer of timers) timer.callback();
     await settle();
     assert.equal(fetches.length, 1, "usage endpoint is throttled");
@@ -1412,7 +1472,7 @@ test("lifecycle: native fallback, mode persistence, provider isolation, reload a
     if (h) await h.handlers.get("session_shutdown")({}, h.ctx);
     globalThis.setInterval = realSetInterval; globalThis.clearInterval = realClearInterval;
     globalThis.fetch = realFetch;
-    for (const [key, value] of [["HOME", oldHome], ["TMUX", oldTmux], ["HERDR_ENV", oldHerdr]]) {
+    for (const [key, value] of [["HOME", oldHome], ["XDG_CACHE_HOME", oldXdg], ["TMUX", oldTmux], ["HERDR_ENV", oldHerdr]]) {
       if (value === undefined) delete process.env[key]; else process.env[key] = value;
     }
     await rm(dir, { recursive: true, force: true });
@@ -1421,14 +1481,14 @@ test("lifecycle: native fallback, mode persistence, provider isolation, reload a
 
 test("Claude limits use Pi's own subscription login, with no Claude Code login, and response headers", async () => {
   const dir = await mkdtemp(path.join(os.tmpdir(), "pi-footer-claude-"));
-  const oldCache = process.env.CLAUDE_STATUSLINE_CACHE_DIR;
-  process.env.CLAUDE_STATUSLINE_CACHE_DIR = dir;
+  const oldCache = process.env.CLAUDE_STATUSLINE_CACHE_DIR, oldXdg = process.env.XDG_CACHE_HOME;
+  process.env.CLAUDE_STATUSLINE_CACHE_DIR = dir; process.env.XDG_CACHE_HOME = dir;
   const realFetch = globalThis.fetch, fetches = [];
   const reset = new Date(Date.now() + 3 * 3600_000).toISOString();
   globalThis.fetch = async (url, init) => {
     fetches.push({ url, headers: init.headers });
     const body = JSON.stringify({ five_hour: { utilization: 20, resets_at: reset }, seven_day: { utilization: 40, resets_at: reset } });
-    return { ok: true, text: async () => body };
+    return new Response(body, { status: 200 });
   };
   let h;
   try {
@@ -1453,18 +1513,19 @@ test("Claude limits use Pi's own subscription login, with no Claude Code login, 
     if (h) await h.handlers.get("session_shutdown")({}, h.ctx);
     globalThis.fetch = realFetch;
     if (oldCache === undefined) delete process.env.CLAUDE_STATUSLINE_CACHE_DIR; else process.env.CLAUDE_STATUSLINE_CACHE_DIR = oldCache;
+    if (oldXdg === undefined) delete process.env.XDG_CACHE_HOME; else process.env.XDG_CACHE_HOME = oldXdg;
     await rm(dir, { recursive: true, force: true });
   }
 });
 
-test("Codex sessions share verified readings; identity-free events refresh without ingesting payloads", async () => {
+test("Codex sessions share verified readings; identity-free events cannot update account data", async () => {
   const dir = await mkdtemp(path.join(os.tmpdir(), "pi-footer-codex-"));
   const oldXdg = process.env.XDG_CACHE_HOME;
   process.env.XDG_CACHE_HOME = dir;
   const realFetch = globalThis.fetch, fetches = [];
   globalThis.fetch = async (url, init) => {
     fetches.push({ url, headers: init.headers });
-    return quotaResponse();
+    return new Response(JSON.stringify(codexUsage(25, Date.now() + 30_000)), { status: 200 });
   };
   const hosts = [];
   try {
@@ -1476,8 +1537,8 @@ test("Codex sessions share verified readings; identity-free events refresh witho
     await first.handlers.get("provider_stream_event")({ provider: "openai-codex", data: { type: "codex.rate_limits",
       rate_limits: { primary: { used_percent: 46, window_minutes: 10080, reset_at: Date.now() / 1000 + 86400 } }, additional_rate_limits: null } }, first.ctx);
     await settle();
-    assert.match(first.footer.render(160).join("\n"), /Codex\s+week 25% used.*gpt-reserve 0%/, "event values cannot acquire the current account's identity");
-    // A second session on the same account reads the shared reading instead of fetching.
+    assert.match(first.footer.render(160).join("\n"), /Codex\s+week 25% used.*gpt-reserve 0%/, "an event cannot acquire the current account's identity");
+    // A second session on the same account reads the shared verified reading.
     const second = syntheticCodex(host([], dir), "shared-account"); hosts.push(second);
     await second.handlers.get("session_start")({}, second.ctx);
     await vi.waitFor(() => assert.match(second.footer.render(160).join("\n"), /Codex\s+week 25% used.*gpt-reserve 0%/));
@@ -1487,258 +1548,6 @@ test("Codex sessions share verified readings; identity-free events refresh witho
     globalThis.fetch = realFetch;
     if (oldXdg === undefined) delete process.env.XDG_CACHE_HOME; else process.env.XDG_CACHE_HOME = oldXdg;
     await rm(dir, { recursive: true, force: true });
-  }
-});
-
-// Modern inference stays separate from the legacy account-only source. Every
-// fixture has its own cache home and synthetic registry/transport; no host login.
-async function withOpenAIAccount(run) {
-  const dir = await mkdtemp(path.join(os.tmpdir(), "pi-footer-openai-"));
-  const oldCache = process.env.XDG_CACHE_HOME;
-  const realFetch = globalThis.fetch;
-  process.env.XDG_CACHE_HOME = dir;
-  const h = host([], dir), resolutions = [], fetches = [];
-  const state = { account: "account-A", token: undefined, rejected: false };
-  const model = { provider: "openai", id: "gpt-modern", contextWindow: 200000, reasoning: true };
-  h.ctx.model = model;
-  h.ctx.modelRegistry.getAvailable = () => [model]; // Zero legacy inference models.
-  h.ctx.modelRegistry.getProvider = (id) => ({ getModels: () => id === "openai" ? [model] : [] });
-  h.ctx.modelRegistry.getApiKeyForProvider = async (provider) => {
-    resolutions.push(provider);
-    assert.equal(provider, "openai-codex", "quota resolution may ask only for the separate legacy login");
-    if (state.rejected) throw new Error("synthetic registry rejection");
-    return state.token ?? (state.account ? jwt({ "https://api.openai.com/auth": { chatgpt_account_id: state.account } }) : undefined);
-  };
-  h.pi.setModel = () => { assert.fail("account refresh must not select an inference model"); };
-  h.pi.sendUserMessage = () => { assert.fail("account refresh must not prompt inference"); };
-  globalThis.fetch = async (url, init) => {
-    assert.equal(url, "https://chatgpt.com/backend-api/wham/usage");
-    const account = init.headers["chatgpt-account-id"];
-    assert.equal(init.headers.Authorization, `Bearer ${jwt({ "https://api.openai.com/auth": { chatgpt_account_id: account } })}`);
-    fetches.push({ url, init, account });
-    const body = codexUsage(account === "account-B" ? 67 : 25, Date.now());
-    body.additional_rate_limits[0].limit_name = account === "account-B" ? "B-reserve" : "A-reserve";
-    return new Response(JSON.stringify(body));
-  };
-  try { await run({ h, state, resolutions, fetches, model }); }
-  finally {
-    await h.handlers.get("session_shutdown")({}, h.ctx);
-    await settle();
-    globalThis.fetch = realFetch;
-    if (oldCache === undefined) delete process.env.XDG_CACHE_HOME; else process.env.XDG_CACHE_HOME = oldCache;
-    await rm(dir, { recursive: true, force: true });
-  }
-}
-
-test("modern OpenAI uses one cached Codex account row with zero legacy models and no child render I/O", async () => {
-  await withOpenAIAccount(async ({ h, resolutions, fetches, model }) => {
-    await h.handlers.get("session_start")({}, h.ctx);
-    await vi.waitFor(() => assert.match(footerText(h), /Codex\s+week 25% used.*A-reserve/));
-    await h.commands.get("status").handler("on", h.ctx);
-    await settle();
-    assert.equal(fetches.length, 1);
-    assert.deepEqual([...new Set(resolutions)], ["openai-codex"]);
-    assert.equal(h.ctx.model, model);
-    assert.match(footerText(h), /gpt-modern/);
-    assert.equal(h.ctx.model.provider, "openai");
-    assert.equal(h.footer.render(180).filter((line) => /Codex/.test(plain(line))).length, 1);
-    assert.doesNotMatch(footerText(h), /OpenAI · limits unavailable|diagnostic|unverified|warning/i);
-    const chrome = { version: 1 };
-    h.pi.events.emit("pi-plugins.session-chrome.v1", chrome);
-    const child = { cwd: h.ctx.cwd, provider: "openai", model: "gpt-child", thinking: "low",
-      context: { tokens: 10, contextWindow: 1000, percent: 1 }, totals: fixture().totals };
-    const before = { resolutions: resolutions.length, fetches: fetches.length };
-    h.ctx.modelRegistry.getAvailable = () => { assert.fail("child render must not discover providers"); };
-    h.ctx.modelRegistry.getApiKeyForProvider = () => { assert.fail("render must not resolve auth"); };
-    for (const width of [46, 120, 180]) {
-      for (let i = 0; i < 3; i++) {
-        const rows = chrome.service.footer(child, width, theme).map(plain);
-        assert.equal(rows.filter((line) => /Codex/.test(line)).length, 1);
-        assert.match(rows.join("\n"), /25% used/);
-        assert.doesNotMatch(rows.join("\n"), /ctrl\+|alt\+|warning|diagnostic/i);
-        assert.ok(rows.every((line) => visibleWidth(line) <= width));
-        h.footer.render(width);
-      }
-    }
-    assert.deepEqual({ resolutions: resolutions.length, fetches: fetches.length }, before);
-    assert.deepEqual(h.notices, ["Custom footer enabled"], "only the ordinary /status on confirmation, no account-mapping notice");
-  });
-});
-
-for (const auth of ["missing", "rejected", "malformed", "no-account-claim"]) {
-  test(`modern OpenAI with ${auth} legacy auth is unavailable without a fallback`, async () => {
-    await withOpenAIAccount(async ({ h, state, resolutions, fetches }) => {
-      if (auth === "missing") state.account = undefined;
-      if (auth === "rejected") state.rejected = true;
-      if (auth === "malformed") state.token = "synthetic-not-a-jwt";
-      if (auth === "no-account-claim") state.token = jwt({ sub: "synthetic-user" });
-      await h.handlers.get("session_start")({}, h.ctx);
-      await vi.waitFor(async () => {
-        await h.commands.get("status").handler("details", h.ctx);
-        assert.match(h.notices.at(-1), /openai-codex \(Codex account\): limits unavailable: (?:Pi's subscription OAuth credential is unavailable|Account quota is unavailable)/);
-      });
-      assert.deepEqual([...new Set(resolutions)], ["openai-codex"]);
-      assert.equal(fetches.length, 0);
-      for (const width of [46, 120, 180]) {
-        const text = footerText(h, width);
-        assert.equal(text.split("\n").filter((line) => /Codex/.test(line)).length, 1);
-        assert.match(text, /Codex · limits unavailable/);
-        assert.doesNotMatch(text, /OpenAI · limits unavailable|0% used|diagnostic|unverified/i);
-      }
-    });
-  });
-}
-
-test("all-mode and details deduplicate OpenAI/Codex aliases, keep two rows and count remaining sources", async () => {
-  await withOpenAIAccount(async ({ h, model }) => {
-    const configured = [model, { provider: "openai-codex", id: "legacy-model" },
-      { provider: "alpha", id: "remote" }, { provider: "beta", id: "remote" }, { provider: "gamma", id: "remote" }];
-    h.ctx.modelRegistry.getAvailable = () => configured;
-    h.ctx.modelRegistry.getProvider = (id) => ({ getModels: () => configured.filter((entry) => entry.provider === id) });
-    await h.handlers.get("session_start")({}, h.ctx);
-    await vi.waitFor(() => assert.match(footerText(h), /week 25% used/));
-    await h.commands.get("status").handler("all", h.ctx);
-    await settle();
-    for (const width of [46, 120, 180]) {
-      const rows = h.footer.render(width).map(plain);
-      assert.equal(rows.filter((line) => /Codex|limits unavailable/.test(line)).length, 2);
-      assert.equal(rows.filter((line) => /Codex/.test(line)).length, 1);
-      assert.match(rows.join("\n"), /alpha · limits unavailable · \+2 more/);
-      assert.doesNotMatch(rows.join("\n"), /OpenAI · limits unavailable/);
-    }
-    const before = h.notices.length;
-    await h.commands.get("status").handler("details", h.ctx);
-    assert.equal(h.notices.length, before + 1, "details is the only notice");
-    const details = h.notices.at(-1);
-    assert.match(details, /Model: openai\/gpt-modern/);
-    assert.equal(details.split("\n").filter((line) => line.startsWith("openai-codex (")).length, 1);
-    assert.match(details, /openai-codex \(Codex account\): week 25% used/);
-    for (const id of ["alpha", "beta", "gamma"]) assert.match(details, new RegExp(`^${id} \\(`, "m"));
-    assert.doesNotMatch(details, /^openai \(|Diagnostic Codex|applicability to modern OpenAI|Codex quota only/im);
-    const accountLine = details.split("\n").find((line) => line.startsWith("openai-codex ("));
-    assert.doesNotMatch(accountLine, /diagnostic|unverified|disclaimer/i);
-  });
-});
-
-test("Codex refresh rechecks unchanged identity, clears auth loss and never lends A's pools to B", async () => {
-  await withOpenAIAccount(async ({ h, state, resolutions, fetches }) => {
-    await h.handlers.get("session_start")({}, h.ctx);
-    await vi.waitFor(() => assert.match(footerText(h), /25% used.*A-reserve/));
-    const previousResolutions = resolutions.length;
-    await h.handlers.get("model_select")({}, h.ctx);
-    await vi.waitFor(() => assert.ok(resolutions.length >= previousResolutions + 2));
-    assert.equal(fetches.length, 1, "unchanged identity uses the shared five-minute cache");
-    state.account = undefined;
-    await h.handlers.get("model_select")({}, h.ctx);
-    await vi.waitFor(() => assert.match(footerText(h), /Codex · limits unavailable/));
-    assert.doesNotMatch(footerText(h), /25% used|A-reserve/);
-    state.account = "account-B";
-    await h.handlers.get("model_select")({}, h.ctx);
-    await vi.waitFor(() => assert.match(footerText(h), /67% used.*B-reserve/));
-    assert.doesNotMatch(footerText(h), /25% used|A-reserve/);
-    assert.deepEqual(fetches.map((call) => call.account), ["account-A", "account-B"]);
-    await h.commands.get("status").handler("details", h.ctx);
-    assert.doesNotMatch(h.notices.at(-1), /25% used|A-reserve/);
-  });
-});
-
-for (const transition of ["account-change", "reload"]) {
-  test(`a late Codex transport ignoring abort cannot publish across ${transition}`, async () => {
-    await withOpenAIAccount(async ({ h, state, fetches }) => {
-      const transport = globalThis.fetch;
-      let release;
-      globalThis.fetch = async (url, init) => {
-        if (init.headers["chatgpt-account-id"] !== "account-A") return transport(url, init);
-        fetches.push({ account: "account-A", init });
-        return new Promise((resolve) => { release = resolve; }); // Deliberately ignores signal.
-      };
-      await h.handlers.get("session_start")({}, h.ctx);
-      await vi.waitFor(() => assert.equal(typeof release, "function"));
-      const oldFooter = h.footer;
-      state.account = "account-B";
-      if (transition === "reload") {
-        await h.handlers.get("session_shutdown")({}, h.ctx);
-        await h.handlers.get("session_start")({}, h.ctx);
-        await vi.waitFor(() => assert.match(footerText(h), /67% used.*B-reserve/));
-        assert.equal(fetches[0].init.signal.aborted, true);
-        assert.deepEqual(oldFooter.render(180), []);
-      } else {
-        await h.handlers.get("model_select")({}, h.ctx);
-      }
-      release(quotaResponse(91));
-      if (transition === "account-change") {
-        await vi.waitFor(async () => {
-          await h.commands.get("status").handler("details", h.ctx);
-          assert.match(h.notices.at(-1), /subscription account changed during the quota read/);
-        });
-        assert.match(footerText(h), /Codex · limits unavailable/);
-        await h.handlers.get("model_select")({}, h.ctx);
-      }
-      await vi.waitFor(() => assert.match(footerText(h), /67% used.*B-reserve/));
-      await settle();
-      assert.doesNotMatch(footerText(h), /91% used|A-reserve/);
-    });
-  });
-}
-
-test("modern OpenAI headers and stream events never update or refresh the legacy Codex observation", async () => {
-  await withOpenAIAccount(async ({ h, resolutions, fetches }) => {
-    await h.handlers.get("session_start")({}, h.ctx);
-    await vi.waitFor(() => assert.match(footerText(h), /25% used.*A-reserve/));
-    const before = resolutions.length;
-    await h.handlers.get("after_provider_response")({ headers: {
-      "x-codex-primary-used-percent": "93", "x-codex-primary-window-minutes": "10080" } }, h.ctx);
-    await h.handlers.get("provider_stream_event")({ provider: "openai", data: { type: "codex.rate_limits",
-      rate_limits: { primary: { used_percent: 94, window_minutes: 10080 } } } }, h.ctx);
-    await settle();
-    assert.equal(resolutions.length, before);
-    assert.equal(fetches.length, 1);
-    assert.match(footerText(h), /25% used.*A-reserve/);
-    assert.doesNotMatch(footerText(h), /93%|94%/);
-  });
-});
-
-test("legacy Codex headers and events revalidate identity instead of assigning passive data to another account", async () => {
-  await withOpenAIAccount(async ({ h, state, resolutions, fetches }) => {
-    await h.handlers.get("session_start")({}, h.ctx);
-    await vi.waitFor(() => assert.match(footerText(h), /25% used.*A-reserve/));
-    h.ctx.model = { ...h.ctx.model, provider: "openai-codex" };
-    state.account = undefined;
-    const before = resolutions.length;
-    await h.handlers.get("after_provider_response")({ headers: {
-      "x-codex-primary-used-percent": "93", "x-codex-primary-window-minutes": "10080" } }, h.ctx);
-    await vi.waitFor(() => assert.match(footerText(h), /Codex · limits unavailable/));
-    assert.ok(resolutions.length > before, "headers trigger an identity-safe refresh");
-    assert.doesNotMatch(footerText(h), /25%|93%|A-reserve/);
-    state.account = "account-B";
-    await h.handlers.get("provider_stream_event")({ provider: "openai-codex", data: { type: "codex.rate_limits",
-      rate_limits: { primary: { used_percent: 94, window_minutes: 10080 } } } }, h.ctx);
-    await vi.waitFor(() => assert.match(footerText(h), /67% used.*B-reserve/));
-    assert.doesNotMatch(footerText(h), /25%|93%|94%|A-reserve/);
-    assert.deepEqual(fetches.map((call) => call.account), ["account-A", "account-B"]);
-  });
-});
-
-test("OpenAI's single Codex row preserves ready, unavailable, stale, reset-due and blocked layouts", () => {
-  const ready = { provider: "openai-codex", source: "Codex account", state: "ready", observedAt: now,
-    windows: [{ label: "week", used: 25, reset: now + 86400_000, observedAt: now }] };
-  const states = [
-    [ready, /week 25% used/],
-    [{ ...ready, state: "unavailable", windows: [], observedAt: undefined }, /Codex · limits unavailable/],
-    [{ ...ready, observedAt: now - 11 * 60_000, windows: [{ ...ready.windows[0], observedAt: now - 11 * 60_000 }] }, /stale/],
-    [{ ...ready, windows: [{ ...ready.windows[0], reset: now - 1 }] }, /reset due/],
-  ];
-  for (const [observation, expected] of states) for (const width of [46, 120, 180]) {
-    const snapshot = { ...fixture(), provider: "openai", model: "gpt-modern", quotas: [], providerUsage: [observation] };
-    const rows = mod.renderFooter(snapshot, width, theme).map(plain);
-    assert.equal(rows.filter((line) => /Codex/.test(line)).length, 1);
-    assert.match(rows.join("\n"), expected);
-    assert.doesNotMatch(rows.join("\n"), /OpenAI · limits unavailable|diagnostic|unverified/i);
-    assert.ok(rows.every((line) => visibleWidth(line) <= width));
-    const blocked = mod.renderFooter({ ...snapshot, compact: true }, width, theme).map(plain);
-    assert.equal(blocked.length, 1);
-    assert.ok(visibleWidth(blocked[0]) <= width);
-    assert.doesNotMatch(blocked[0], /Codex|ctrl\+|alt\+|limits unavailable|diagnostic/i);
   }
 });
 
@@ -2805,6 +2614,7 @@ test("provider snapshots distinguish local and remote sources and bound all-mode
     await vi.waitFor(() => assert.match(plain(h.footer.render(180).join("\n")), /Codex · limits unavailable/));
     await h.commands.get("status").handler("details", h.ctx);
     assert.match(h.notices.at(-1), /openai-codex \(Codex account\): limits unavailable/);
+    assert.doesNotMatch(h.notices.at(-1), /openai \(OpenAI subscription\)/);
     await h.commands.get("status").handler("all", h.ctx);
     await vi.waitFor(() => assert.match(plain(h.footer.render(180).join("\n")), /alpha · limits unavailable · \+1 more/));
     for (const width of [46, 120, 180]) {
@@ -2824,6 +2634,258 @@ test("provider snapshots distinguish local and remote sources and bound all-mode
   } finally {
     await h.handlers.get("session_shutdown")({}, h.ctx);
     globalThis.fetch = realFetch;
+  }
+});
+
+// Modern inference stays separate from the legacy account-only source. Every
+// fixture has its own cache home and synthetic registry/transport; no host login.
+async function withOpenAIAccount(run) {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "pi-footer-openai-"));
+  const oldCache = process.env.XDG_CACHE_HOME;
+  const realFetch = globalThis.fetch;
+  process.env.XDG_CACHE_HOME = dir;
+  const h = host([], dir), resolutions = [], fetches = [];
+  const state = { account: "account-A", token: undefined, rejected: false };
+  const model = { provider: "openai", id: "gpt-modern", contextWindow: 200000, reasoning: true };
+  h.ctx.model = model;
+  h.ctx.modelRegistry.getAvailable = () => [model]; // Zero legacy inference models.
+  h.ctx.modelRegistry.getProvider = (id) => ({ getModels: () => id === "openai" ? [model] : [] });
+  h.ctx.modelRegistry.getApiKeyForProvider = async (provider) => {
+    resolutions.push(provider);
+    assert.equal(provider, "openai-codex", "quota resolution may ask only for the separate legacy login");
+    if (state.rejected) throw new Error("synthetic registry rejection");
+    return state.token ?? (state.account ? jwt({ "https://api.openai.com/auth": { chatgpt_account_id: state.account } }) : undefined);
+  };
+  h.pi.setModel = () => { assert.fail("account refresh must not select an inference model"); };
+  h.pi.sendUserMessage = () => { assert.fail("account refresh must not prompt inference"); };
+  globalThis.fetch = async (url, init) => {
+    assert.equal(url, "https://chatgpt.com/backend-api/wham/usage");
+    const account = init.headers["chatgpt-account-id"];
+    assert.equal(init.headers.Authorization, `Bearer ${jwt({ "https://api.openai.com/auth": { chatgpt_account_id: account } })}`);
+    fetches.push({ url, init, account });
+    const body = codexUsage(account === "account-B" ? 67 : 25, Date.now());
+    body.additional_rate_limits[0].limit_name = account === "account-B" ? "B-reserve" : "A-reserve";
+    return new Response(JSON.stringify(body));
+  };
+  try { await run({ h, state, resolutions, fetches, model }); }
+  finally {
+    await h.handlers.get("session_shutdown")({}, h.ctx);
+    await settle();
+    globalThis.fetch = realFetch;
+    if (oldCache === undefined) delete process.env.XDG_CACHE_HOME; else process.env.XDG_CACHE_HOME = oldCache;
+    await rm(dir, { recursive: true, force: true });
+  }
+}
+
+test("modern OpenAI uses one cached Codex account row with zero legacy models and no child render I/O", async () => {
+  await withOpenAIAccount(async ({ h, resolutions, fetches, model }) => {
+    await h.handlers.get("session_start")({}, h.ctx);
+    await vi.waitFor(() => assert.match(footerText(h), /Codex\s+week 25% used.*A-reserve/));
+    await h.commands.get("status").handler("on", h.ctx);
+    await settle();
+    assert.equal(fetches.length, 1);
+    assert.deepEqual([...new Set(resolutions)], ["openai-codex"]);
+    assert.equal(h.ctx.model, model);
+    assert.match(footerText(h), /gpt-modern/);
+    assert.equal(h.ctx.model.provider, "openai");
+    assert.equal(h.footer.render(180).filter((line) => /Codex/.test(plain(line))).length, 1);
+    assert.doesNotMatch(footerText(h), /OpenAI · limits unavailable|diagnostic|unverified|warning/i);
+    const chrome = { version: 1 };
+    h.pi.events.emit("pi-plugins.session-chrome.v1", chrome);
+    const child = { cwd: h.ctx.cwd, provider: "openai", model: "gpt-child", thinking: "low",
+      context: { tokens: 10, contextWindow: 1000, percent: 1 }, totals: fixture().totals };
+    const before = { resolutions: resolutions.length, fetches: fetches.length };
+    h.ctx.modelRegistry.getAvailable = () => { assert.fail("child render must not discover providers"); };
+    h.ctx.modelRegistry.getApiKeyForProvider = () => { assert.fail("render must not resolve auth"); };
+    for (const width of [46, 120, 180]) {
+      for (let i = 0; i < 3; i++) {
+        const rows = chrome.service.footer(child, width, theme).map(plain);
+        assert.equal(rows.filter((line) => /Codex/.test(line)).length, 1);
+        assert.match(rows.join("\n"), /25% used/);
+        assert.doesNotMatch(rows.join("\n"), /ctrl\+|alt\+|warning|diagnostic/i);
+        assert.ok(rows.every((line) => visibleWidth(line) <= width));
+        h.footer.render(width);
+      }
+    }
+    assert.deepEqual({ resolutions: resolutions.length, fetches: fetches.length }, before);
+    assert.deepEqual(h.notices, ["Custom footer enabled"], "only the ordinary /status on confirmation, no account-mapping notice");
+  });
+});
+
+for (const auth of ["missing", "rejected", "malformed", "no-account-claim"]) {
+  test(`modern OpenAI with ${auth} legacy auth is unavailable without a fallback`, async () => {
+    await withOpenAIAccount(async ({ h, state, resolutions, fetches }) => {
+      if (auth === "missing") state.account = undefined;
+      if (auth === "rejected") state.rejected = true;
+      if (auth === "malformed") state.token = "synthetic-not-a-jwt";
+      if (auth === "no-account-claim") state.token = jwt({ sub: "synthetic-user" });
+      await h.handlers.get("session_start")({}, h.ctx);
+      await vi.waitFor(async () => {
+        await h.commands.get("status").handler("details", h.ctx);
+        assert.match(h.notices.at(-1), /openai-codex \(Codex account\): limits unavailable: (?:Pi's subscription OAuth credential is unavailable|Account quota is unavailable)/);
+      });
+      assert.deepEqual([...new Set(resolutions)], ["openai-codex"]);
+      assert.equal(fetches.length, 0);
+      for (const width of [46, 120, 180]) {
+        const text = footerText(h, width);
+        assert.equal(text.split("\n").filter((line) => /Codex/.test(line)).length, 1);
+        assert.match(text, /Codex · limits unavailable/);
+        assert.doesNotMatch(text, /OpenAI · limits unavailable|0% used|diagnostic|unverified/i);
+      }
+    });
+  });
+}
+
+test("all-mode and details deduplicate OpenAI/Codex aliases, keep two rows and count remaining sources", async () => {
+  await withOpenAIAccount(async ({ h, model }) => {
+    const configured = [model, { provider: "openai-codex", id: "legacy-model" },
+      { provider: "alpha", id: "remote" }, { provider: "beta", id: "remote" }, { provider: "gamma", id: "remote" }];
+    h.ctx.modelRegistry.getAvailable = () => configured;
+    h.ctx.modelRegistry.getProvider = (id) => ({ getModels: () => configured.filter((entry) => entry.provider === id) });
+    await h.handlers.get("session_start")({}, h.ctx);
+    await vi.waitFor(() => assert.match(footerText(h), /week 25% used/));
+    await h.commands.get("status").handler("all", h.ctx);
+    await settle();
+    for (const width of [46, 120, 180]) {
+      const rows = h.footer.render(width).map(plain);
+      assert.equal(rows.filter((line) => /Codex|limits unavailable/.test(line)).length, 2);
+      assert.equal(rows.filter((line) => /Codex/.test(line)).length, 1);
+      assert.match(rows.join("\n"), /alpha · limits unavailable · \+2 more/);
+      assert.doesNotMatch(rows.join("\n"), /OpenAI · limits unavailable/);
+    }
+    const before = h.notices.length;
+    await h.commands.get("status").handler("details", h.ctx);
+    assert.equal(h.notices.length, before + 1, "details is the only notice");
+    const details = h.notices.at(-1);
+    assert.match(details, /Model: openai\/gpt-modern/);
+    assert.equal(details.split("\n").filter((line) => line.startsWith("openai-codex (")).length, 1);
+    assert.match(details, /openai-codex \(Codex account\): week 25% used/);
+    for (const id of ["alpha", "beta", "gamma"]) assert.match(details, new RegExp(`^${id} \\(`, "m"));
+    assert.doesNotMatch(details, /^openai \(|Diagnostic Codex|applicability to modern OpenAI|Codex quota only/im);
+    const accountLine = details.split("\n").find((line) => line.startsWith("openai-codex ("));
+    assert.doesNotMatch(accountLine, /diagnostic|unverified|disclaimer/i);
+  });
+});
+
+test("Codex refresh rechecks unchanged identity, clears auth loss and never lends A's pools to B", async () => {
+  await withOpenAIAccount(async ({ h, state, resolutions, fetches }) => {
+    await h.handlers.get("session_start")({}, h.ctx);
+    await vi.waitFor(() => assert.match(footerText(h), /25% used.*A-reserve/));
+    const previousResolutions = resolutions.length;
+    await h.handlers.get("model_select")({}, h.ctx);
+    await vi.waitFor(() => assert.ok(resolutions.length >= previousResolutions + 2));
+    assert.equal(fetches.length, 1, "unchanged identity uses the shared five-minute cache");
+    state.account = undefined;
+    await h.handlers.get("model_select")({}, h.ctx);
+    await vi.waitFor(() => assert.match(footerText(h), /Codex · limits unavailable/));
+    assert.doesNotMatch(footerText(h), /25% used|A-reserve/);
+    state.account = "account-B";
+    await h.handlers.get("model_select")({}, h.ctx);
+    await vi.waitFor(() => assert.match(footerText(h), /67% used.*B-reserve/));
+    assert.doesNotMatch(footerText(h), /25% used|A-reserve/);
+    assert.deepEqual(fetches.map((call) => call.account), ["account-A", "account-B"]);
+    await h.commands.get("status").handler("details", h.ctx);
+    assert.doesNotMatch(h.notices.at(-1), /25% used|A-reserve/);
+  });
+});
+
+for (const transition of ["account-change", "reload"]) {
+  test(`a late Codex transport ignoring abort cannot publish across ${transition}`, async () => {
+    await withOpenAIAccount(async ({ h, state, fetches }) => {
+      const transport = globalThis.fetch;
+      let release;
+      globalThis.fetch = async (url, init) => {
+        if (init.headers["chatgpt-account-id"] !== "account-A") return transport(url, init);
+        fetches.push({ account: "account-A", init });
+        return new Promise((resolve) => { release = resolve; }); // Deliberately ignores signal.
+      };
+      await h.handlers.get("session_start")({}, h.ctx);
+      await vi.waitFor(() => assert.equal(typeof release, "function"));
+      const oldFooter = h.footer;
+      state.account = "account-B";
+      if (transition === "reload") {
+        await h.handlers.get("session_shutdown")({}, h.ctx);
+        await h.handlers.get("session_start")({}, h.ctx);
+        await vi.waitFor(() => assert.match(footerText(h), /67% used.*B-reserve/));
+        assert.equal(fetches[0].init.signal.aborted, true);
+        assert.deepEqual(oldFooter.render(180), []);
+      } else {
+        await h.handlers.get("model_select")({}, h.ctx);
+      }
+      release(quotaResponse(91));
+      if (transition === "account-change") {
+        await vi.waitFor(async () => {
+          await h.commands.get("status").handler("details", h.ctx);
+          assert.match(h.notices.at(-1), /subscription account changed during the quota read/);
+        });
+        assert.match(footerText(h), /Codex · limits unavailable/);
+        await h.handlers.get("model_select")({}, h.ctx);
+      }
+      await vi.waitFor(() => assert.match(footerText(h), /67% used.*B-reserve/));
+      await settle();
+      assert.doesNotMatch(footerText(h), /91% used|A-reserve/);
+    });
+  });
+}
+
+test("modern OpenAI headers and stream events never update or refresh the legacy Codex observation", async () => {
+  await withOpenAIAccount(async ({ h, resolutions, fetches }) => {
+    await h.handlers.get("session_start")({}, h.ctx);
+    await vi.waitFor(() => assert.match(footerText(h), /25% used.*A-reserve/));
+    const before = resolutions.length;
+    await h.handlers.get("after_provider_response")({ headers: {
+      "x-codex-primary-used-percent": "93", "x-codex-primary-window-minutes": "10080" } }, h.ctx);
+    await h.handlers.get("provider_stream_event")({ provider: "openai", data: { type: "codex.rate_limits",
+      rate_limits: { primary: { used_percent: 94, window_minutes: 10080 } } } }, h.ctx);
+    await settle();
+    assert.equal(resolutions.length, before);
+    assert.equal(fetches.length, 1);
+    assert.match(footerText(h), /25% used.*A-reserve/);
+    assert.doesNotMatch(footerText(h), /93%|94%/);
+  });
+});
+
+test("legacy Codex headers and events revalidate identity instead of assigning passive data to another account", async () => {
+  await withOpenAIAccount(async ({ h, state, resolutions, fetches }) => {
+    await h.handlers.get("session_start")({}, h.ctx);
+    await vi.waitFor(() => assert.match(footerText(h), /25% used.*A-reserve/));
+    h.ctx.model = { ...h.ctx.model, provider: "openai-codex" };
+    state.account = undefined;
+    const before = resolutions.length;
+    await h.handlers.get("after_provider_response")({ headers: {
+      "x-codex-primary-used-percent": "93", "x-codex-primary-window-minutes": "10080" } }, h.ctx);
+    await vi.waitFor(() => assert.match(footerText(h), /Codex · limits unavailable/));
+    assert.ok(resolutions.length > before, "headers trigger an identity-safe refresh");
+    assert.doesNotMatch(footerText(h), /25%|93%|A-reserve/);
+    state.account = "account-B";
+    await h.handlers.get("provider_stream_event")({ provider: "openai-codex", data: { type: "codex.rate_limits",
+      rate_limits: { primary: { used_percent: 94, window_minutes: 10080 } } } }, h.ctx);
+    await vi.waitFor(() => assert.match(footerText(h), /67% used.*B-reserve/));
+    assert.doesNotMatch(footerText(h), /25%|93%|94%|A-reserve/);
+    assert.deepEqual(fetches.map((call) => call.account), ["account-A", "account-B"]);
+  });
+});
+
+test("OpenAI's single Codex row preserves ready, unavailable, stale, reset-due and blocked layouts", () => {
+  const ready = { provider: "openai-codex", source: "Codex account", state: "ready", observedAt: now,
+    windows: [{ label: "week", used: 25, reset: now + 86400_000, observedAt: now }] };
+  const states = [
+    [ready, /week 25% used/],
+    [{ ...ready, state: "unavailable", windows: [], observedAt: undefined }, /Codex · limits unavailable/],
+    [{ ...ready, observedAt: now - 11 * 60_000, windows: [{ ...ready.windows[0], observedAt: now - 11 * 60_000 }] }, /stale/],
+    [{ ...ready, windows: [{ ...ready.windows[0], reset: now - 1 }] }, /reset due/],
+  ];
+  for (const [observation, expected] of states) for (const width of [46, 120, 180]) {
+    const snapshot = { ...fixture(), provider: "openai", model: "gpt-modern", quotas: [], providerUsage: [observation] };
+    const rows = mod.renderFooter(snapshot, width, theme).map(plain);
+    assert.equal(rows.filter((line) => /Codex/.test(line)).length, 1);
+    assert.match(rows.join("\n"), expected);
+    assert.doesNotMatch(rows.join("\n"), /OpenAI · limits unavailable|diagnostic|unverified/i);
+    assert.ok(rows.every((line) => visibleWidth(line) <= width));
+    const blocked = mod.renderFooter({ ...snapshot, compact: true }, width, theme).map(plain);
+    assert.equal(blocked.length, 1);
+    assert.ok(visibleWidth(blocked[0]) <= width);
+    assert.doesNotMatch(blocked[0], /Codex|ctrl\+|alt\+|limits unavailable|diagnostic/i);
   }
 });
 

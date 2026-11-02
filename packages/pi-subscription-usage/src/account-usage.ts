@@ -19,6 +19,7 @@ export interface AccountUsageContext {
 export interface AccountUsageOptions { signal?: AbortSignal }
 
 const CODEX_JWT_CLAIM = "https://api.openai.com/auth";
+const invalidApplicable = Symbol("invalid applicable Claude quota");
 const record = (value: unknown): RecordValue =>
   value !== null && typeof value === "object" && !Array.isArray(value) ? value as RecordValue : {};
 const number = (value: unknown): number | undefined =>
@@ -29,7 +30,7 @@ const timestamp = (value: unknown): number | undefined => {
   return result !== undefined && Number.isFinite(result) ? result : undefined;
 };
 
-export function parseClaudeQuota(raw: unknown, updated: number): Quota {
+export function parseClaudeQuota(raw: unknown, updated: number): Quota & { [invalidApplicable]?: true } {
   const data = record(raw);
   const windows: QuotaWindow[] = [];
   const add = (label: string, used: unknown, reset: unknown) => {
@@ -42,12 +43,19 @@ export function parseClaudeQuota(raw: unknown, updated: number): Quota {
     const limit = limits.find((item) => item.kind === kind);
     add(label, flat.utilization ?? limit?.percent, flat.resets_at ?? limit?.resets_at);
   }
-  const opus = record(data.seven_day_opus);
-  if (opus.utilization !== undefined) add("Opus", opus.utilization, opus.resets_at);
+  let malformedApplicable = Object.hasOwn(data, "limits") && !Array.isArray(data.limits);
+  if (Object.hasOwn(data, "seven_day_opus")) {
+    const opus = record(data.seven_day_opus);
+    if (number(opus.utilization) === undefined || number(opus.utilization)! > 100 || timestamp(opus.resets_at) === undefined)
+      malformedApplicable = true;
+    else add("Opus", opus.utilization, opus.resets_at);
+  }
   for (const limit of limits) {
     if (limit.kind !== "weekly_scoped") continue;
-    const scope = record(record(limit.scope).model);
-    if (typeof scope.display_name === "string") add(scope.display_name, limit.percent, limit.resets_at);
+    const name = record(record(limit.scope).model).display_name;
+    if (typeof name !== "string" || !clean(name) || name !== clean(name) || number(limit.percent) === undefined || number(limit.percent)! > 100 || timestamp(limit.resets_at) === undefined)
+      malformedApplicable = true;
+    else add(name, limit.percent, limit.resets_at);
   }
   // These API fields are percentage points. 0.5 means 0.5%, never guess 50%.
   const extra = record(data.extra_usage);
@@ -66,6 +74,10 @@ export function parseClaudeQuota(raw: unknown, updated: number): Quota {
     limit: capMinor === undefined ? undefined : capMinor / 10 ** capExponent,
     currency: typeof currency === "string" ? clean(currency) : undefined,
   };
+  if (malformedApplicable) {
+    quota.windows = [];
+    return Object.assign(quota, { [invalidApplicable]: true as const });
+  }
   return quota;
 }
 
@@ -361,7 +373,7 @@ async function lock(file: string, signal: AbortSignal): Promise<(() => Promise<v
   }
 }
 
-async function fetchQuota(id: Identity, signal: AbortSignal): Promise<ProviderUsage | undefined> {
+async function fetchQuota(id: Identity, signal: AbortSignal): Promise<ProviderUsage | typeof invalidApplicable | undefined> {
   const anthropic = id.provider === "anthropic";
   const response = await bounded(fetch(anthropic ? "https://api.anthropic.com/api/oauth/usage" : "https://chatgpt.com/backend-api/wham/usage", {
     method: "GET", redirect: "error", credentials: "omit", signal,
@@ -385,9 +397,14 @@ async function fetchQuota(id: Identity, signal: AbortSignal): Promise<ProviderUs
       chunks.push(Buffer.from(part.value));
     }
     check(signal);
-    const raw: unknown = JSON.parse(Buffer.concat(chunks, length).toString("utf8"));
+    let raw: unknown;
+    try { raw = JSON.parse(Buffer.concat(chunks, length).toString("utf8")); }
+    catch { return anthropic ? invalidApplicable : undefined; }
     const now = Date.now();
-    return reading(anthropic ? parseClaudeQuota(raw, now) : parseCodexUsage(raw, now), id);
+    const quota = anthropic ? parseClaudeQuota(raw, now) : parseCodexUsage(raw, now);
+    if (anthropic && invalidApplicable in quota) return invalidApplicable;
+    const parsed = reading(quota, id);
+    return anthropic && !parsed ? invalidApplicable : parsed;
   } finally {
     // Do not await an uncooperative transport's cancellation.
     if (reader) void reader.cancel().catch(() => undefined);
@@ -421,6 +438,14 @@ async function collect(id: Identity, key: string, signal: AbortSignal): Promise<
       if (!release) await pause(signal);
     }
     const fetched = await fetchQuota(id, signal);
+    if (fetched === invalidApplicable) {
+      // This account's new applicable window is unknown. Neither an older ready
+      // observation nor its persisted copy may attest that the quota is safe.
+      const invalid = unavailable(id.provider, "An applicable account quota is invalid or unavailable.");
+      remember(key, invalid);
+      await unlink(file).catch(() => undefined);
+      return invalid;
+    }
     if (fetched && fresh(fetched, MAX_AGE_MS)) {
       remember(key, fetched);
       await writeCache(file, id, fetched, signal);

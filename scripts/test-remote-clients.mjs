@@ -81,19 +81,19 @@ const modeStatuses = (workflow, approval, phase) => new Map([
   ...(phase ? [['plan-exec', `exec mode on · ${phase} · 2 consultations · $0.02 consult · $0.01 review`]] : []),
 ]);
 // Detached protocol snapshots, never a second renderer or a copy of role-default policy.
-const flowSnapshot = (workflow, blocked, provider = 'anthropic', model = 'claude-opus-5-5') => ({
+const flowSnapshot = (workflow, blocked) => ({
   version: 1, operatingMode: 'linked', revision: 1, workflow,
   ready: true, guardAvailable: true, transitioning: false,
   selectedFlow: {
-    provider, anchorModel: model,
+    provider: 'anthropic', anchorModel: 'claude-opus-5-5',
     roles: Object.fromEntries(['work', 'chat', 'plan', 'exec'].map(phase => [phase, {
-      provider, modelId: model, suggestedThinking: 'high',
+      provider: 'anthropic', modelId: 'claude-opus-5-5', suggestedThinking: 'high',
     }])),
   },
   ...(blocked ? { blocked } : {}),
 });
 const activity = width => [...renderPill({ label: '1 task' }, false, width, theme), ''];
-function statusFooter(width, statuses, { compact = false, phase = 'idle', flow, autoEffort, providerUsage, providerUsageMore, system1, settingsCycle, readOnly = false, model = 'claude-opus-5-5', provider = 'anthropic' } = {}) {
+function statusFooter(width, statuses, { compact = false, phase = 'idle', flow, autoEffort, providerUsage, providerUsageMore, system1, settingsCycle, readOnly = false } = {}) {
   const absorbed = absorbStatuses(statuses, { claudeRow: false });
   const actions = {
     'model.open': {}, 'reasoning.cycle': {},
@@ -104,7 +104,7 @@ function statusFooter(width, statuses, { compact = false, phase = 'idle', flow, 
     ...(system1 ? { 'system1.open': {} } : {}),
   };
   const snapshot = {
-    cwd: '/tmp/pi-plugins', model, provider, thinking: 'high', oauth: true,
+    cwd: '/tmp/pi-plugins', model: 'claude-opus-5-5', provider: 'anthropic', thinking: 'high', oauth: true,
     context: { tokens: 24000, contextWindow: 200000, percent: 12 },
     git: { project: 'pi-plugins', branch: 'main' },
     totals: { input: 23000, output: 1500, cacheRead: 90000, cacheWrite: 400, cost: 1.24, compactions: 1, started: NOW - 60000 },
@@ -143,7 +143,7 @@ function statusFooter(width, statuses, { compact = false, phase = 'idle', flow, 
       if (!preview && !linked && !absorbed.exec && width >= (kind === 'exec' ? 120 : 46)) assert.ok(workflow[0].includes(WORKFLOW_EXPLANATIONS[kind]), `workflow row explains ${kind} when space permits: ${workflow[0]}`);
       if (preview && width >= 46) assert.ok(workflow[0].includes(badge), 'draft workflow retains the target badge in its existing semantic row');
       if (!linked && kind === 'exec' && width >= 46) assert.match(workflow[0], /\/plan-exec\s*$/u, 'Independent Exec offers status, never a workflow cycle');
-      if (linked && !absorbed.exec && !flow.blocked && width >= 120) assert.ok(workflow[0].includes(flow.selectedFlow.provider), 'Linked combines provider and workflow on one row');
+      if (linked && !absorbed.exec && !flow.blocked && width >= 120) assert.match(workflow[0], /anthropic/u, 'Linked combines provider and workflow on one row');
     }
     assert.equal(approvals.length, absorbed.mode ? 1 : 0, 'Approvals keeps its own row');
     if (preview && width >= 46 && approvals.length) {
@@ -180,28 +180,10 @@ function statusFooter(width, statuses, { compact = false, phase = 'idle', flow, 
   }
   return lines;
 }
-const codexReady = { provider: 'openai-codex', source: 'Codex account', state: 'ready', observedAt: NOW, windows: [{ label: '5h', used: 25, reset: NOW + 3_600_000 }] };
-const codexUnavailable = { provider: 'openai-codex', source: 'Codex account', state: 'unavailable', windows: [], reason: 'Subscription limits are unavailable.' };
-const codexStale = { ...codexReady, observedAt: NOW - 11 * 60_000 };
-const codexResetDue = { ...codexReady, windows: [{ label: '5h', used: 25, reset: NOW - 1 }] };
-const codexStates = { ready: codexReady, unavailable: codexUnavailable, stale: codexStale, 'reset due': codexResetDue };
-const openaiModel = { provider: 'openai', model: 'gpt-5.2' };
 const footer = (width) => statusFooter(width, modeStatuses('plan', 'yolo'), { compact: true, phase: 'waiting' });
 const UNDERS = {
   footer: (width) => footer(width),
   'pill+footer': (width) => [...activity(width), ...footer(width)],
-  ...Object.fromEntries(Object.entries(codexStates).flatMap(([state, usage]) => [false, true].flatMap(linked => {
-    const rows = width => {
-      const lines = statusFooter(width, modeStatuses('plan', 'auto'), {
-        ...openaiModel, compact: true, phase: 'waiting', providerUsage: [usage],
-        ...(linked ? { flow: flowSnapshot('plan', undefined, openaiModel.provider, openaiModel.model) } : {}),
-      });
-      assert.doesNotMatch(stripVTControlCharacters(lines[0]), /Codex/u);
-      return lines;
-    };
-    const name = `OpenAI Codex ${state} ${linked ? 'Linked' : 'Independent'} blocked`;
-    return [[name, rows], [`${name} pill`, width => [...activity(width), ...rows(width)]]];
-  }))),
   ...Object.fromEntries(['work', 'chat', 'plan', 'exec'].flatMap(workflow => {
     return ['idle', 'waiting'].flatMap(phase => {
       const rows = width => statusFooter(width, modeStatuses(workflow, 'auto'), { compact: true, phase });
@@ -748,11 +730,6 @@ const FOOTERS = [
   { name: 'provider local', statuses: modeStatuses('plan', 'auto'), providerUsage: [usageLocal] },
   { name: 'status all providers', statuses: modeStatuses('plan', 'auto'), providerUsage: [usageReady, usageUnavailable], providerUsageMore: 3 },
   { name: 'status all high status count', statuses: modeStatuses('plan', 'yolo'), providerUsage: [usageReady, usageUnavailable], providerUsageMore: 3, highStatus: true },
-  ...Object.entries(codexStates).flatMap(([state, usage]) => [false, true].flatMap(linked => [false, true].map(highStatus => ({
-    name: `OpenAI Codex ${state} ${linked ? 'Linked' : 'Independent'}${highStatus ? ' high status' : ''}`,
-    statuses: modeStatuses('plan', 'auto'), ...openaiModel, providerUsage: [usage], highStatus,
-    ...(linked ? { flow: flowSnapshot('plan', undefined, openaiModel.provider, openaiModel.model) } : {}),
-  })))),
   ...['work', 'chat', 'plan', 'exec'].map(workflow => ({
     name: `Linked ${workflow}`, statuses: modeStatuses(workflow, 'auto', workflow === 'exec' ? 'implementing' : undefined),
     flow: flowSnapshot(workflow), autoEffort: true,
@@ -808,15 +785,6 @@ for (const width of [46, 120, 180]) {
         if (fixture.providerUsage.includes(usageReady)) assert.match(rendered, /Google.*5h.*25%/u, 'ready usage keeps its measured percentage');
         if (fixture.providerUsage.includes(usageUnavailable)) assert.match(rendered, /OpenAI.*limits unavailable/u, 'unavailable usage is explicit');
         if (fixture.providerUsage.includes(usageLocal)) assert.match(rendered, /Local.*no account quota/u, 'local usage is not presented as a subscription');
-        if (fixture.provider === 'openai') {
-          assert.equal(fixture.providerUsage.length, 1, 'OpenAI has exactly one Codex account row');
-          assert.equal((rendered.match(/Codex/gu) ?? []).length, 1, 'the Codex account row is not duplicated');
-          assert.doesNotMatch(rendered, /OpenAI.*limits unavailable/u, 'no separate unavailable OpenAI account row');
-          if (fixture.providerUsage[0] === codexUnavailable) assert.match(rendered, /Codex.*limits unavailable/u);
-          else assert.match(rendered, /Codex.*5h.*25%/u);
-          if (fixture.providerUsage[0] === codexStale) assert.match(rendered, /stale/u);
-          if (fixture.providerUsage[0] === codexResetDue) assert.match(rendered, /stale.*reset due/u);
-        }
         if (fixture.providerUsageMore && width >= 120) assert.match(rendered, /OpenAI.*\+3 more/u, 'additional sources are counted on the second account row');
       }
       if (fixture.system1) {

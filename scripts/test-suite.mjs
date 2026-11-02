@@ -29,7 +29,16 @@ const env = { ...process.env, PI_CODING_AGENT_DIR: agentDir };
 delete env.PI_SUBAGENT;
 delete env.PI_SUBAGENT_DEPTH;
 try {
-  for (const args of scripts) {
+  // This private dependency is not a selectable Pi extension, so the
+  // component runner cannot discover its standalone quota/credential tests.
+  const shared = spawnSync('npm', ['--prefix', 'packages/pi-subscription-usage', 'run', 'check'], {
+    cwd: root, stdio: 'inherit', env,
+  });
+  if (shared.error || shared.status !== 0) {
+    console.error(`FAIL shared usage library${shared.error ? `: ${shared.error.message}` : ''}`);
+    process.exitCode = shared.status || 1;
+  }
+  for (const args of process.exitCode ? [] : scripts) {
     const result = spawnSync(process.execPath, args, {
       cwd: root, stdio: 'inherit', env,
     });
@@ -37,15 +46,6 @@ try {
       console.error(`FAIL ${args.join(' ')}${result.error ? `: ${result.error.message}` : ''}`);
       process.exitCode = result.status || 1;
       break;
-    }
-  }
-  if (!process.exitCode) {
-    const result = spawnSync('npm', ['run', 'check'], {
-      cwd: join(root, 'packages/pi-subscription-usage'), stdio: 'inherit', env,
-    });
-    if (result.error || result.status !== 0) {
-      console.error(`FAIL pi-subscription-usage check${result.error ? `: ${result.error.message}` : ''}`);
-      process.exitCode = result.status || 1;
     }
   }
 } finally {

@@ -29,15 +29,15 @@ test("Claude endpoint preserves percentage points, reset dates, scoped windows a
   const quota = parseClaudeQuota({
     five_hour: { utilization: 94.99, resets_at: "2026-09-23T14:00:00Z" },
     seven_day: { utilization: 95 },
-    seven_day_opus: { utilization: 100 },
-    limits: [{ kind: "weekly_scoped", percent: 0.5, scope: { model: { display_name: "Fable" } } }],
+    seven_day_opus: { utilization: 100, resets_at: "2026-09-30T12:00:00Z" },
+    limits: [{ kind: "weekly_scoped", percent: 0.5, resets_at: "2026-09-30T12:00:00Z", scope: { model: { display_name: "Fable" } } }],
     spend: { enabled: true, used: { amount_minor: 15421, exponent: 2, currency: "USD" }, limit: { amount_minor: 15000, exponent: 2 } },
   }, now);
   assert.deepEqual(quota.windows, [
     { label: "5h", used: 94.99, reset: now + 7200_000 },
     { label: "week", used: 95, reset: undefined },
-    { label: "Opus", used: 100, reset: undefined },
-    { label: "Fable", used: 0.5, reset: undefined },
+    { label: "Opus", used: 100, reset: now + 7 * 86400_000 },
+    { label: "Fable", used: 0.5, reset: now + 7 * 86400_000 },
   ]);
   assert.deepEqual(quota.extra, { enabled: true, used: 154.21, limit: 150, currency: "USD" });
   assert.equal(quota.updated, now);
@@ -51,6 +51,22 @@ test("Claude handles alternate limits and malformed endpoint values", () => {
   assert.deepEqual(parseClaudeQuota({ limits: [{ kind: "session", percent: 95, resets_at: "invalid" },
     { kind: "weekly_all", percent: 100 }] }, now).windows,
   [{ label: "5h", used: 95, reset: undefined }, { label: "week", used: 100, reset: undefined }]);
+});
+
+test("Claude rejects each malformed present applicable quota rather than retaining generic windows", () => {
+  const valid = { utilization: 25, resets_at: "2026-09-30T12:00:00Z" };
+  const scoped = { kind: "weekly_scoped", percent: 25, resets_at: valid.resets_at, scope: { model: { display_name: "Fable" } } };
+  const generic = { five_hour: { utilization: 10 }, seven_day: { utilization: 20 } };
+  for (const opus of [null, {}, { ...valid, utilization: undefined }, { ...valid, utilization: "25" },
+    { ...valid, utilization: 101 }, { ...valid, resets_at: undefined }, { ...valid, resets_at: "invalid" }]) {
+    assert.deepEqual(parseClaudeQuota({ ...generic, seven_day_opus: opus }, now).windows, []);
+  }
+  for (const limit of [{ ...scoped, percent: undefined }, { ...scoped, percent: NaN },
+    { ...scoped, percent: 101 }, { ...scoped, resets_at: undefined }, { ...scoped, resets_at: "invalid" },
+    { ...scoped, scope: undefined }, { ...scoped, scope: { model: { display_name: "" } } }]) {
+    assert.deepEqual(parseClaudeQuota({ ...generic, limits: [limit] }, now).windows, []);
+  }
+  assert.deepEqual(parseClaudeQuota({ ...generic, seven_day_opus: valid, limits: [scoped] }, now).windows.map(w => w.label), ["5h", "week", "Opus", "Fable"]);
 });
 
 test("Claude headers use fractions and epoch seconds, not endpoint units", () => {
@@ -98,7 +114,7 @@ test("Codex headers parse case-insensitively, resets and malformed values", () =
 test("partial header merges retain old window observation times and replace reset semantics", () => {
   const old = now - 11 * 60_000;
   const base = parseClaudeQuota({ five_hour: { utilization: 80, resets_at: now + 300_000 }, seven_day: { utilization: 95 },
-    limits: [{ kind: "weekly_scoped", percent: 100, scope: { model: { display_name: "Fable" } } }] }, old);
+    limits: [{ kind: "weekly_scoped", percent: 100, resets_at: now + 300_000, scope: { model: { display_name: "Fable" } } }] }, old);
   const update = parseClaudeHeaders({ "anthropic-ratelimit-unified-5h-utilization": "0.9499" }, now);
   const merged = mergeQuota(base, update);
   assert.equal(merged.updated, now);
@@ -145,6 +161,35 @@ test("cold Anthropic read is single-flight, cached, and bound to the Pi credenti
   assert.equal(fetcher.mock.calls.length, 2);
   assert.equal((await readPiAnthropicUsage(context("sk-ant-api-key"))).state, "unavailable");
   assert.equal(fetcher.mock.calls.length, 2);
+});
+
+for (const kind of ["Opus", "scoped", "JSON"]) test(`a newly malformed Claude ${kind} response invalidates prior ready memory and disk cache`, async () => {
+  await isolatedCache();
+  let clock = Date.now();
+  const date = vi.spyOn(Date, "now").mockImplementation(() => clock);
+  try {
+    const token = "sk-ant-oat-test-applicable-quota";
+    let body = { five_hour: { utilization: 10, resets_at: clock + 3600_000 },
+      seven_day_opus: { utilization: 90, resets_at: clock + 3600_000 } };
+    const fetcher = vi.fn(async () => kind === "JSON" && body === null ? new Response("bad json") : json(body));
+    vi.stubGlobal("fetch", fetcher);
+    assert.equal((await readPiAnthropicUsage(context(token))).state, "ready");
+    clock += 300_000;
+    body = kind === "JSON" ? null : { five_hour: { utilization: 10, resets_at: clock + 3600_000 },
+      ...(kind === "Opus" ? { seven_day_opus: { utilization: "0", resets_at: new Date(clock + 3600_000).toISOString() } } :
+        { limits: [{ kind: "weekly_scoped", percent: "0", resets_at: new Date(clock + 3600_000).toISOString(), scope: { model: { display_name: "Fable" } } }] }) };
+    const malformed = await readPiAnthropicUsage(context(token));
+    assert.equal(malformed.state, "unavailable");
+    assert.deepEqual(malformed.windows, []);
+    assert.doesNotMatch(JSON.stringify(malformed), /sk-ant|Fable/);
+    assert.equal(fetcher.mock.calls.length, 2);
+    // A new module instance must not recover the previously persisted ready reading.
+    vi.resetModules();
+    const coldRead = (await import("../src/account-usage.ts")).readPiAnthropicUsage;
+    assert.equal((await coldRead(context(token))).state, "unavailable");
+    assert.equal((await readPiAnthropicUsage(context(token))).state, "unavailable");
+    assert.equal(fetcher.mock.calls.length, 4);
+  } finally { date.mockRestore(); }
 });
 
 test("Codex reads only account-bound OAuth diagnostics and rejects reset-due readings", async () => {
