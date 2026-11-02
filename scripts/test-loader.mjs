@@ -36,12 +36,15 @@ function signature(extension) {
       .filter(([, count]) => count > 0).sort(),
   };
 }
-async function load(packages, noSkills = true) {
+async function load(packages, noSkills = true, reloads = 1) {
   const loader = new DefaultResourceLoader({
     cwd: temp, agentDir: temp, settingsManager: SettingsManager.inMemory({ packages }),
     noSkills, noPromptTemplates: true, noThemes: true, noContextFiles: true,
   });
-  await loader.reload();
+  for (let pass = 0; pass < reloads; pass++) {
+    await loader.reload();
+    assert.deepEqual(loader.getExtensions().errors, [], `extension reload ${pass + 1} must not report errors`);
+  }
   const result = loader.getExtensions();
   assert.deepEqual(result.errors, [], 'extension loading must not report errors');
   return noSkills ? result.extensions : { extensions: result.extensions, skills: loader.getSkills() };
@@ -81,6 +84,14 @@ try {
     assert.deepEqual(signature(isolatedExtensions[0]), signature(all[i]));
     console.log(`PASS ${plugin.name}: isolated, standalone, filtered, suite registrations match`);
   }
+  for (const order of [['pi-model-waterfall', 'pi-status-footer'], ['pi-status-footer', 'pi-model-waterfall']]) {
+    const pair = await load(order.map(name => resolve(root, 'packages', name)), true, 2);
+    assert.equal(pair.length, 2);
+    assert.deepEqual(pair.map(e => e.path), order.map(name => resolve(root, 'packages', name, 'src/index.ts')));
+    assert.equal(pair.filter(e => e.commands.has('waterfall')).length, 1, 'only the standalone router registers /waterfall');
+    assert.equal(pair.filter(e => e.commands.has('status')).length, 1, 'only the footer registers /status');
+  }
+  console.log('PASS router/footer in either load order, including reload; only one owner per command');
   const none = await load([{ source: root, extensions: [], skills: [], prompts: [], themes: [] }], false);
   assert.equal(none.extensions.length, 0);
   assert.equal(none.skills.skills.length, 0);

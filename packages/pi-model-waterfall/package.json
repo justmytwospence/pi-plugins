@@ -1,0 +1,29 @@
+{
+  "name": "@justmytwospence/pi-model-waterfall",
+  "version": "0.1.2",
+  "description": "Fail-closed subscription-only virtual model routing for Pi.",
+  "type": "module",
+  "private": true,
+  "license": "MIT",
+  "pi": { "extensions": ["./src/index.ts"] },
+  "scripts": {
+    "check": "npm run typecheck && npm test",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@justmytwospence/pi-subscription-usage": "file:../pi-subscription-usage"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-ai": "*",
+    "@earendil-works/pi-agent-core": "*"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-coding-agent": "1.2.0",
+    "@types/node": "^22.0.0",
+    "typescript": "^7.0.0",
+    "vitest": "^5.0.0"
+  },
+  "repository": { "type": "git", "url": "https://github.com/justmytwospence/pi-plugins", "directory": "packages/pi-model-waterfall" }
+}

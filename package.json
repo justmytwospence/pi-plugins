@@ -21,6 +21,7 @@
       "./packages/pi-ask-user-question/src/index.ts",
       "./packages/pi-system1/src/index.ts",
       "./packages/pi-plan-mode/src/index.ts",
+      "./packages/pi-model-waterfall/src/index.ts",
       "./packages/pi-status-footer/src/index.ts",
       "./packages/pi-rewind/src/index.ts",
       "./packages/pi-clear-screen/src/index.ts",

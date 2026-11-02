@@ -1,0 +1,9 @@
+# pi-model-waterfall
+
+An independently selectable Pi virtual model (`waterfall/auto`) with a read-only `/waterfall` status command. It checks subscription allowance before routing, with a strict 95% cutoff on every applicable window. No API-key or pay-as-you-go fallback is permitted. The extension does not require the status footer.
+
+The fixed candidate order is Anthropic Opus 5.5, modern OpenAI Sol, Google Antigravity Argon, Muse Wonder. **OpenAI is disabled** because Codex quota has not been verified to cover modern Sol; **Muse is disabled** because cross-provider history (images and tool results) cannot yet be handed off losslessly and the user has not accepted that degradation. Google Argon needs an exact quota for the physical model's effective (clamped) reasoning variant, shared Gemini limits and its Argon weekly limit. Changed accounts and malformed or unknown quotas fail closed. Carbon and Flash are not candidates.
+
+Pi persists a verified physical route in branch-local virtual-model state. A matching continuation, retry or pending-tool steering rechecks eligibility and retains the same thinking level; new user turns and direct calls perform a fresh check. `/waterfall` and the synchronous `pi-plugins.model-waterfall.v1` query show only the last detached, credential-free snapshot and do not read quotas or call a model. Session changes and manual model selection clear displayed status.
+
+The suite manifest lists this independently selectable extension; it does not select `waterfall/auto` as Pi's default model. Do not enable automatic four-rung routing as a default or treat the chain as fully verified until the OpenAI and Muse blockers are resolved. Offline tests use fake quotas; no authenticated probes are needed.

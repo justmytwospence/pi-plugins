@@ -23,6 +23,7 @@ export const groups = [
     { name: "pi-cache-guard", label: "Cache guard", description: "Cache-expiry warnings, a cache clock and optional classifier-guided context trimming." },
     { name: "pi-auto-effort", label: "Auto effort", description: "Classifier-guided reasoning levels, bounded by your manual ceiling." },
     { name: "pi-status-footer", label: "Status footer", description: "Context, Git and provider-aware usage in one responsive footer." },
+    { name: "pi-model-waterfall", label: "Model waterfall", description: "Optional subscription-only virtual model with fail-closed quota checks and no paid-API fallback." },
     { name: "pi-context", label: "Context breakdown", description: "See what fills the context window, part by part, with previews." },
     { name: "pi-compact-plan", label: "Compaction plan", description: "Say what comes next, answer a question if needed, then approve the compaction focus." },
     { name: "pi-trends", label: "Session trends", description: "Context %, effort, tokens, cost and tool calls charted per model call." },
