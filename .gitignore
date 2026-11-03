@@ -11,3 +11,5 @@ site/.astro/
 .vercel
 .env*
 evals/results/
+.pi/tasks/
+**/.pi/tasks/
