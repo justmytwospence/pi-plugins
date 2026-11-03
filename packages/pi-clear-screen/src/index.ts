@@ -17,10 +17,6 @@ import { getKeybindings } from "@earendil-works/pi-tui";
 import { clearHandlerOf, routeCtrlC, routeEscape } from "./interrupt.ts";
 import { TRANSCRIPT_ROWS, type TranscriptHooks, type TranscriptRowsContext } from "./transcript-contract.ts";
 
-// setup runs before the replacement's session_start. Carry plain data, never stale APIs.
-type Selection = { provider: string; modelId: string; thinkingLevel: ExtensionContext["thinkingLevel"] };
-const RESTORE_ENTRY = "clear-screen:model-restore";
-
 const KEY = "ctrl+l";
 const SENTINEL = "\u0000pi-clear-screen\u0000";
 
@@ -116,20 +112,8 @@ export default function (pi: ExtensionAPI) {
     stopKeys?.(); stopKeys = undefined;
   };
 
-  pi.on("session_start", async (event, ctx) => {
+  pi.on("session_start", async (_event, ctx) => {
     cleanup();
-    if (event.reason === "new") {
-      const entry = ctx.sessionManager.getBranch().find((entry) => entry.type === "custom" && entry.customType === RESTORE_ENTRY);
-      const selection = entry?.type === "custom" ? entry.data as Selection : undefined;
-      if (selection) {
-        const model = ctx.modelRegistry.find(selection.provider, selection.modelId);
-        if (!model || !(await pi.setModel(model))) {
-          ctx.ui.notify(`Could not preserve ${selection.provider}/${selection.modelId} after /clear`, "error");
-        } else if (selection.thinkingLevel !== undefined) {
-          pi.setThinkingLevel(selection.thinkingLevel);
-        }
-      }
-    }
     if (ctx.mode !== "tui") return;
     tui = grabTui(ctx);
     // Ctrl+C interrupts a running turn, and Esc/Ctrl+C take queued prompts back before they stop
@@ -149,18 +133,10 @@ export default function (pi: ExtensionAPI) {
   pi.on("session_shutdown", cleanup);
 
   pi.registerCommand("clear", {
-    description: "Start a fresh session, keeping the current model and thinking level",
+    // Same as /new: the fresh session picks its model and thinking level the way startup does.
+    description: "Start a fresh session with the startup model and thinking level",
     handler: async (_args, ctx) => {
-      const selection = ctx.model && {
-        provider: ctx.model.provider,
-        modelId: ctx.model.id,
-        thinkingLevel: ctx.thinkingLevel,
-      };
-      await ctx.newSession({
-        setup: async (manager) => {
-          if (selection) manager.appendCustomEntry(RESTORE_ENTRY, selection);
-        },
-      });
+      await ctx.newSession();
     },
   });
   pi.registerCommand("exit", {

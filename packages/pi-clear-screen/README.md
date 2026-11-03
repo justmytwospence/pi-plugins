@@ -44,7 +44,7 @@ Esc with prompts queued runs Pi's `app.message.dequeue` (Alt+Up) instead of stop
 
 ## Commands
 
-`/clear` starts a fresh session while keeping the active provider, model and thinking level. Unlike Ctrl+L, it clears model context. `/new` retains Pi's normal startup-selection behavior. `/exit` exits Pi.
+`/clear` starts a fresh session, like `/new`: the model and thinking level are chosen the way startup chooses them (CLI flags, scoped models, then `defaultModel` and `defaultThinkingLevel`), not carried over from the session being cleared. Unlike Ctrl+L, it clears model context. `/exit` exits Pi.
 
 This component supplies both `/clear` and `/exit`. Do not enable pi-cc-extensions alongside it: that package, now superseded by suite components such as pi-cc-render, registers the same aliases. pi-cc-render does not.
 

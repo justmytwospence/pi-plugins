@@ -26,41 +26,16 @@ function instance(model, thinkingLevel = 'high', manager = { entries: [], getBra
   return { ctx, calls, commands, handlers, stop() { handlers.get('session_shutdown')({}, ctx); active = false; } };
 }
 
-test('/clear restores model and thinking through the fresh extension instance', async () => {
+test('/clear starts a plain new session and carries nothing over', async () => {
   const old = instance({ provider: 'openai-codex', id: 'selected' }, 'xhigh');
-  const fresh = instance({ provider: 'anthropic', id: 'startup' });
-  let stale = false;
-  const original = old.ctx;
-  const ctx = new Proxy(original, { get(target, key) { assert.ok(!stale, 'never use stale ctx'); return target[key]; } });
-  original.newSession = async options => {
-    old.stop(); stale = true;
-    await options.setup(fresh.ctx.sessionManager);
-    await fresh.handlers.get('session_start')({ reason: 'new' }, fresh.ctx);
-    return { cancelled: false };
-  };
-  await old.commands.get('clear').handler('', ctx);
-  assert.deepEqual(old.calls, []);
-  assert.deepEqual(fresh.calls, [['model', { provider: 'openai-codex', id: 'selected' }], ['thinking', 'xhigh']]);
-  fresh.stop();
-});
-
-test('cancelled /clear leaves the current selection alone', async () => {
-  const old = instance({ provider: 'test', id: 'selected' });
-  old.ctx.newSession = async () => ({ cancelled: true });
+  const args = [];
+  old.ctx.newSession = async (...a) => { args.push(...a); old.stop(); return { cancelled: false }; };
   await old.commands.get('clear').handler('', old.ctx);
+  assert.deepEqual(args, []);
   assert.deepEqual(old.calls, []);
-  old.stop();
 });
 
-test('/clear without a selected model still creates a session', async () => {
-  const old = instance(undefined);
-  let created = false;
-  old.ctx.newSession = async options => { created = true; old.stop(); await options.setup({ appendCustomEntry() { assert.fail('no selection to restore'); } }); return { cancelled: false }; };
-  await old.commands.get('clear').handler('', old.ctx);
-  assert.ok(created);
-});
-
-test('real Pi runtime clears context and preserves a non-startup selection across repeated replacements', async () => {
+test('real Pi runtime clears context and returns to the startup selection across repeated replacements', async () => {
   const dir = mkdtempSync(resolve(tmpdir(), 'pi-clear-model-'));
   let runtime;
   try {
@@ -86,17 +61,18 @@ test('real Pi runtime clears context and preserves a non-startup selection acros
     } });
     runtime.setRebindSession(bind);
     await bind(runtime.session);
-    await runtime.session.setModel(selected);
-    runtime.session.setThinkingLevel('high');
     for (let i = 0; i < 2; i++) {
       const old = runtime.session;
+      await old.setModel(selected);
+      old.setThinkingLevel('high');
+      assert.equal(old.thinkingLevel, 'high');
       old.sessionManager.appendMessage({ role: 'user', content: [{ type: 'text', text: 'discard this context' }], timestamp: Date.now() });
       old.refreshContext();
       await old.prompt('/clear');
       assert.notEqual(runtime.session, old);
-      assert.equal(runtime.session.model.provider, selected.provider);
-      assert.equal(runtime.session.model.id, selected.id);
-      assert.equal(runtime.session.thinkingLevel, 'high');
+      assert.equal(runtime.session.model.provider, startup.provider);
+      assert.equal(runtime.session.model.id, startup.id);
+      assert.equal(runtime.session.thinkingLevel, 'low');
       assert.equal(runtime.session.messages.length, 0);
     }
   } finally {

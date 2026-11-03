@@ -35,7 +35,7 @@ Stock Pi's Esc during a run restores every queued prompt to the editor and stops
 
 ## Session commands
 
-`/clear` starts a fresh session while preserving the active provider, model and thinking level, including a selection different from the startup model. It clears conversation context; Ctrl+L only clears the view. `/new` keeps Pi's normal behavior. `/exit` exits Pi.
+`/clear` starts a fresh session, like `/new`: the model and thinking level are chosen the way startup chooses them (CLI flags, scoped models, then `defaultModel` and `defaultThinkingLevel`), not carried over from the session being cleared. It clears conversation context; Ctrl+L only clears the view. `/exit` exits Pi.
 
 Keep this component the only owner of `/clear` and `/exit`. The retired pi-cc-extensions package registered the same aliases; it is superseded by suite components such as [pi-cc-render](/plugins/pi-cc-render/), which do not register them, and should not be enabled alongside the suite.
 
