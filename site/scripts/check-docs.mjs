@@ -69,16 +69,17 @@ for (const [name, shortcut] of Object.entries(suiteShortcuts)) {
 }
 const profileSection = keyboard.split("## Optional personal profile")[1] ?? "";
 const profileBlock = profileSection.match(/^```json\n([\s\S]*?)^```/m);
-const todoProfileBlock = profileSection.split("### Optional todo rebind")[1]?.match(/^```json\n([\s\S]*?)^```/m);
+const gateProfileBlock = profileSection.split("### Approvals key")[1]?.match(/^```json\n([\s\S]*?)^```/m);
 try {
   const profile = JSON.parse(profileBlock?.[1] ?? "null");
   if (!profile || JSON.stringify(profile["app.editor.external"]) !== "[]" ||
       JSON.stringify(profile["tui.altScreen.bottom"]) !== '["ctrl+g","ctrl+end"]') {
     fail("Labeled personal profile must separate external-editor chord from Ctrl+G transcript tail.");
   }
-  const todoProfile = JSON.parse(todoProfileBlock?.[1] ?? "null");
-  if (todoProfile?.collapseKey !== "ctrl+t" || profile?.["app.thinking.toggle"] !== "ctrl+shift+t") {
-    fail("Optional personal todo rebind must pair Ctrl+T with explicitly relocated native thinking.");
+  const gateProfile = JSON.parse(gateProfileBlock?.[1] ?? "null");
+  if (gateProfile?.approvalShortcut !== "ctrl+y" || JSON.stringify(profile?.["tui.editor.yank"]) !== "[]" ||
+      profile?.["app.thinking.cycle"] === "shift+tab" || profile?.["app.thinking.toggle"] === "ctrl+t") {
+    fail("Personal approvals key must pair Ctrl+Y with unbound native yank, and the profile must free Shift+Tab and Ctrl+T.");
   }
 } catch { fail("Invalid optional personal keymap or todo profile."); }
 
