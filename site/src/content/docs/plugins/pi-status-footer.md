@@ -46,7 +46,7 @@ Terminal labels and rows on this page are examples, not screenshots.
 
 ### Control rows and key hints
 
-Each control row has one primary hint immediately after its content, as a dim ` · <key>` suffix without alignment padding: the first effective configured `app.model.select` key for the model/combined row, the provider's workflow key for Independent workflow, and its approval key for Approvals. An Independent Exec row uses `/plan-exec`, not a workflow-cycle key. The layout reserves space for the hint before fitting content, but drops hints at very narrow widths to retain critical state; core control rows never wrap. Context and other telemetry rows gain no invented global keys.
+Each control row has one primary hint immediately after its content, as a dim ` · <key>` suffix without alignment padding: the first effective configured `app.model.select` key for the model/combined row (when it has none, the first `app.thinking.cycle` key for a reasoning model), the provider's workflow key for Independent workflow, and its approval key for Approvals. An Independent Exec row uses `/plan-exec`, not a workflow-cycle key. The layout reserves space for the hint before fitting content, but drops hints at very narrow widths to retain critical state; core control rows never wrap. Context and other telemetry rows gain no invented global keys.
 
 Simplified examples, omitting icons and other rows, with the [optional personal keymap](/guides/keyboard/#optional-personal-profile) (`alt+p` is not a suite default):
 
@@ -79,7 +79,7 @@ With the actual main editor focused in fullscreen Pi, a plain single left click 
 
 | Visible value | Action |
 | --- | --- |
-| Model or provider; model-row trailing hint | Native model picker in Independent; combined flow/workflow picker in Linked. |
+| Model or provider; model-row trailing hint (the effort-cycle key's hint cycles effort instead) | Native model picker in Independent; combined flow/workflow picker in Linked. |
 | Reasoning level | Stage the next reasoning level, using the same cycle as the configured native key in either operating mode. |
 | `auto` or `auto off` | Toggle auto effort, when its provider offers the action. |
 | Work/Chat/Plan badge | Cycle base workflow; in Linked, stay in the selected provider. |

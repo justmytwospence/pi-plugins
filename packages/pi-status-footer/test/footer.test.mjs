@@ -2917,3 +2917,18 @@ test("child chrome clears main flow, mutable workflow, auto-effort and key metad
     }
   } finally { await h.handlers.get("session_shutdown")({}, h.ctx); }
 });
+
+test("model row hint falls back to the effort-cycle key when the model picker has none", () => {
+  const theme = getThemeByName("dark");
+  const base = controlledFixture();
+  const modelRow = (layout) => layout.lines.findIndex((line) => line.includes(mod.ICONS.model));
+  const both = mod.layoutFooter({ ...base, primaryKeys: { ...base.primaryKeys, reasoning: "ctrl+t" } }, 180, theme);
+  assert.match(plain(both.lines[modelRow(both)]), / · alt\+p$/u, "the model picker's key keeps priority");
+  const fallback = mod.layoutFooter({ ...base, primaryKeys: { ...base.primaryKeys, model: undefined, reasoning: "ctrl+t" } }, 180, theme);
+  const row = modelRow(fallback);
+  assert.match(plain(fallback.lines[row]), / · ctrl\+t$/u);
+  const hint = fallback.hits.find((hit) => hit.row === row && hitText(fallback, hit) === "ctrl+t");
+  assert.equal(hint?.action, "reasoning.cycle");
+  const noReasoning = mod.layoutFooter({ ...base, thinking: undefined, primaryKeys: { ...base.primaryKeys, model: undefined, reasoning: "ctrl+t" } }, 180, theme);
+  assert.doesNotMatch(plain(noReasoning.lines[modelRow(noReasoning)]), /ctrl\+t/u, "no effort hint for a model without reasoning");
+});

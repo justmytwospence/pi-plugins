@@ -79,7 +79,7 @@ export interface Snapshot {
   system1?: System1Status;
   actions?: FooterControlState;
   settingsCycle?: SettingCycleSnapshot;
-  primaryKeys?: { model?: string; workflow?: string; approvals?: string };
+  primaryKeys?: { model?: string; reasoning?: string; workflow?: string; approvals?: string };
   /** Other-session chrome is string-only: no inherited controls or primary hints. */
   readOnly?: boolean;
   cwd: string; model: string; provider: string; thinking?: string; oauth: boolean;
@@ -930,6 +930,10 @@ export function layoutFooter(snapshot: Snapshot, width: number, theme: Paint): F
     { text: phaseText, priority: 120 },
     { text: s.queued ? theme.fg("warning", "queued") : "", priority: 115 },
   ];
+  // The model row's hint: the model picker's key, or else, for a reasoning model, the effort-cycle key.
+  const reasoningKey = s.thinking ? s.primaryKeys?.reasoning : undefined;
+  const modelKey = s.primaryKeys?.model || reasoningKey;
+  const modelKeyAction = s.primaryKeys?.model ? action("model.open") : reasoningKey ? action("reasoning.cycle") : undefined;
   if (linked && workflow) {
     const flow = s.flow!;
     controlRow(ICONS.workflow, [
@@ -940,9 +944,9 @@ export function layoutFooter(snapshot: Snapshot, width: number, theme: Paint): F
       { text: execPhase ? theme.fg("muted", execPhase) : "", short: theme.fg("muted", execPhase.split(" · ")[0]), priority: 120 },
       { text: execDetail ? theme.fg("muted", execDetail) : "", priority: 60 },
       { text: flow.blocked ? theme.fg("error", clean(flow.blocked)) : "", priority: 20 },
-    ], s.primaryKeys?.model, action("model.open"));
+    ], modelKey, modelKeyAction);
   } else {
-    controlRow(ICONS.model, identitySegments, s.primaryKeys?.model, action("model.open"));
+    controlRow(ICONS.model, identitySegments, modelKey, modelKeyAction);
     if (workflow) controlRow(ICONS.workflow, [
       { ...partsSegment([{ text: workflowBadge(theme, workflow.kind), action: workflowAction }], 130), atomic: !!pending("workflow") },
       { text: execPhase ? theme.fg("muted", execPhase) : "", short: theme.fg("muted", execPhase.split(" · ")[0]), priority: 120 },
@@ -1127,7 +1131,7 @@ export default function statusFooter(pi: ExtensionAPI): void {
   let quotaFlight: Promise<void> | undefined;
   let borderGauge = false;
   let mainEditor: FooterEditor | undefined, mainTui: FooterTui | undefined;
-  let mainKeys: { getKeys?(action: "app.model.select"): readonly string[] } | undefined;
+  let mainKeys: { getKeys?(action: "app.model.select" | "app.thinking.cycle"): readonly string[] } | undefined;
   let releaseInput: (() => void) | undefined;
   let releaseCycleGuard: (() => void) | undefined;
   let promptDepth = 0, interactionGeneration = 0;
@@ -1634,6 +1638,7 @@ export default function statusFooter(pi: ExtensionAPI): void {
       flow: discoveredFlow, system1: discoveredSystem1, actions: controls, settingsCycle: cycles.snapshot(),
       primaryKeys: {
         model: controls["model.open"] ? mainKeys?.getKeys?.("app.model.select")?.[0] : undefined,
+        reasoning: controls["reasoning.cycle"] ? mainKeys?.getKeys?.("app.thinking.cycle")?.[0] : undefined,
         workflow: discoveredActions["workflow.cycle"] ? discoveredActions["workflow.cycle"].key ?? "" : absorbed.workflow?.key,
         approvals: discoveredActions["approvals.open"] ? discoveredActions["approvals.open"].key ?? "" : absorbed.mode?.key,
       },
