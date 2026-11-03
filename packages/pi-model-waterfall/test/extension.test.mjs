@@ -25,6 +25,7 @@ const fixture = (available = models) => {
     on(name, fn) { handlers.set(name, fn); },
     events: { on(name, fn) { events.set(name, fn); }, emit(name, request) { events.get(name)?.(request); } },
     registerVirtualModel(definition) { virtual = definition; }, registerCommand(name, command) { commands.set(name, command); },
+    getThinkingLevel() { return "medium"; },
   };
   modelWaterfall(pi);
   const output = [];
@@ -201,5 +202,30 @@ describe("standalone virtual model", () => {
     const f = fixture();
     f.pi.events.emit(WATERFALL_CHANNEL, { kind: "other" });
     assert.equal(queryWaterfall(f.pi.events).version, 1);
+  });
+  it("ignores weekly limits scoped to other models and routes Opus without a 5h window", async () => {
+    claude.windows = [{ label: "week", used: 10, observedAt: now(), reset: now() + 60_000 },
+      { label: "Fable", used: 99, observedAt: now(), reset: now() + 60_000 }];
+    const f = fixture();
+    assert.equal((await f.route(f.request(), f.ctx)).model.provider, "anthropic");
+    claude.windows.push({ label: "Opus 5.5", used: 96, observedAt: now(), reset: now() + 60_000 });
+    assert.equal((await f.route(f.request(), f.ctx)).model.provider, "google");
+    claude.windows = [{ label: "Fable", used: 1, observedAt: now(), reset: now() + 60_000 }];
+    assert.equal((await f.route(f.request(), f.ctx)).model.provider, "google");
+    assert.match(queryWaterfall(f.pi.events).skipped[0].reason, /weekly allowance is unknown/);
+  });
+  it("publishes every rung in order from a background assessment on session start", async () => {
+    claude = quota("anthropic", 97);
+    const f = fixture();
+    assert.equal(queryWaterfall(f.pi.events).rungs, undefined);
+    f.handlers.get("session_start")({}, f.ctx);
+    await vi.waitFor(() => assert.ok(queryWaterfall(f.pi.events).rungs));
+    const rungs = queryWaterfall(f.pi.events).rungs;
+    assert.deepEqual(rungs.map(r => [r.provider, r.state]), [["anthropic", "exhausted"], ["openai", "disabled"], ["google", "available"], ["muse-sdk", "disabled"]]);
+    assert.ok(rungs[0].resetAt > now());
+    f.handlers.get("session_tree")();
+    assert.equal(queryWaterfall(f.pi.events).rungs.length, 4, "route clears keep the subscription view");
+    f.handlers.get("session_shutdown")();
+    assert.equal(queryWaterfall(f.pi.events).rungs, undefined);
   });
 });

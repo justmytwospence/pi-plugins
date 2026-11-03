@@ -2,13 +2,30 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
 import { clampThinkingLevel, type Model } from "@earendil-works/pi-ai";
 import { createProviderUsageCollector, readPiAnthropicUsage, type ProviderUsage, type UsageSource } from "@justmytwospence/pi-subscription-usage";
-import { chooseWaterfall, forPhysicalModel, stickyPhysicalModel, WATERFALL_MODELS, waterfallUnavailable,
+import { chooseWaterfall, evaluateAllowance, forPhysicalModel, stickyPhysicalModel, WATERFALL_MODELS, waterfallUnavailable,
   type RouteState, type WaterfallCandidate } from "./decision.ts";
-import { WATERFALL_CHANNEL, type WaterfallRequest, type WaterfallSnapshot } from "./waterfall-contract.ts";
+import { WATERFALL_CHANNEL, type WaterfallRequest, type WaterfallRung, type WaterfallSnapshot } from "./waterfall-contract.ts";
 
 const OPENAI_REASON = "Codex quota applicability to modern Sol has not been verified.";
 const MUSE_REASON = "Muse historical image and tool-result handoff is lossy and has not been accepted.";
 const cancelled = () => new Error("Waterfall quota check cancelled.");
+/** Rung state is display-only; reassess at most this often outside a route. */
+const ASSESS_MS = 60_000;
+const DISABLED = new Set([OPENAI_REASON, MUSE_REASON]);
+
+/** Classify one checked rung for display: why it would or would not be chosen now. */
+export function rungState(candidate: WaterfallCandidate, now: number): WaterfallRung {
+  const { provider, model } = candidate;
+  if (!candidate.verified) {
+    const reason = candidate.reason ?? "Subscription routing is not verified.";
+    return { provider, model, state: DISABLED.has(reason) ? "disabled" : "unknown", reason };
+  }
+  const reason = evaluateAllowance(candidate.reading, now);
+  if (!reason) return { provider, model, state: "available" };
+  const spent = candidate.reading?.windows.filter(w => typeof w.used === "number" && w.used >= 95 && w.reset !== undefined) ?? [];
+  if (!spent.length) return { provider, model, state: "unknown", reason };
+  return { provider, model, state: "exhausted", reason, resetAt: Math.max(...spent.map(w => w.reset!)) };
+}
 
 /** An Argon quota variant must match the physical model's mapped reasoning level. */
 function argonVariant(model: Model<any>, level: ThinkingLevel): string | undefined {
@@ -39,14 +56,43 @@ export default function modelWaterfall(pi: ExtensionAPI): void {
   let collector = createProviderUsageCollector();
   let snapshot: WaterfallSnapshot = { version: 1, skipped: [], observedAt: Date.now() };
   let generation = 0;
+  // Rung state survives route-snapshot clears: it describes the subscriptions, not a branch.
+  let rungs: { list: WaterfallRung[]; at: number } | undefined;
+  let session = 0, assessing = false, assessedAt = 0;
+  let ticker: ReturnType<typeof setInterval> | undefined;
   const clear = () => { generation++; snapshot = { version: 1, skipped: [], observedAt: Date.now() }; };
-  pi.on("session_start", () => { clear(); collector.dispose(); collector = createProviderUsageCollector(); });
+  const assess = async (ctx: ExtensionContext | undefined, force = false) => {
+    if (!ctx?.modelRegistry || assessing || (!force && Date.now() - assessedAt < ASSESS_MS)) return;
+    const mine = session;
+    assessing = true; assessedAt = Date.now();
+    try {
+      const level = (pi.getThinkingLevel?.() ?? "medium") as ThinkingLevel;
+      const list: WaterfallRung[] = [];
+      for (const physical of WATERFALL_MODELS) {
+        const checked = await candidate(ctx, physical, level).catch((): WaterfallCandidate =>
+          ({ provider: physical.provider, model: physical.id, verified: false, reason: "Subscription quota read failed." }));
+        list.push(rungState(checked, Date.now()));
+      }
+      if (mine === session) rungs = { list, at: Date.now() };
+    } finally { assessing = false; }
+  };
+  const stopTicker = () => { if (ticker) clearInterval(ticker); ticker = undefined; };
+  pi.on("session_start", (_event, ctx) => {
+    clear(); session++; rungs = undefined; assessedAt = 0; collector.dispose(); collector = createProviderUsageCollector();
+    stopTicker();
+    if (!ctx) return;
+    void assess(ctx, true);
+    // Allowances reset while a session sits idle; quota reads are cached for minutes.
+    ticker = setInterval(() => void assess(ctx), 5 * ASSESS_MS);
+    ticker.unref?.();
+  });
   pi.on("session_tree", clear);
   pi.on("model_select", clear);
-  pi.on("session_shutdown", () => { clear(); collector.dispose(); });
+  pi.on("agent_settled", (_event, ctx) => { void assess(ctx); });
+  pi.on("session_shutdown", () => { clear(); session++; rungs = undefined; stopTicker(); collector.dispose(); });
   pi.events.on(WATERFALL_CHANNEL, (value: unknown) => {
     const request = value as WaterfallRequest;
-    if (request?.kind === "query") request.snapshot = structuredClone(snapshot);
+    if (request?.kind === "query") request.snapshot = structuredClone(rungs ? { ...snapshot, rungs: rungs.list, rungsObservedAt: rungs.at } : snapshot);
   });
 
   const candidate = async (ctx: ExtensionContext, physical: typeof WATERFALL_MODELS[number], level: ThinkingLevel, signal?: AbortSignal): Promise<WaterfallCandidate> => {
@@ -71,11 +117,12 @@ export default function modelWaterfall(pi: ExtensionAPI): void {
       if (provider === "anthropic") {
         reading = await interruptible(readPiAnthropicUsage(ctx, { signal }), signal);
         if (reading.state !== "ready") return fail("Pi Anthropic OAuth account allowance is unavailable.");
-        // Friendly names of scoped limits other than Opus cannot establish applicability.
-        if (reading.windows.some(w => w.label !== "5h" && w.label !== "week" && !/opus/i.test(w.label)))
-          return fail("An Anthropic model-scoped allowance cannot be mapped to Opus.");
-        if (!reading.windows.some(w => w.label === "5h") || !reading.windows.some(w => w.label === "week"))
-          return fail("Required Anthropic 5h or weekly allowance is unknown.");
+        // Weekly limits scoped to another model (named by its display name, such as
+        // "Fable") do not bind Opus. The all-models weekly window must be known; a 5h
+        // window binds whenever the plan reports one, and is absent when it has none.
+        const windows = reading.windows.filter(w => w.label === "5h" || w.label === "week" || /opus/i.test(w.label));
+        if (!windows.some(w => w.label === "week")) return fail("Required Anthropic weekly allowance is unknown.");
+        reading = { ...reading, windows };
       } else {
         googleToken = await interruptible(ctx.modelRegistry.getApiKeyForProvider("google"), signal);
         if (!googleToken) return fail("A local Antigravity OAuth credential is unavailable.");
