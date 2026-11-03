@@ -168,7 +168,7 @@ Keyboard cycles commit when all participating modifiers are released if release 
 
 Submitting an ordinary prompt flushes the pending changes first. If application fails, the message is blocked and interactive text is recoverable from native prompt history; a newer draft is not replaced. Leaving main focus, opening dialogs/selectors, external model or relevant setting changes, session/branch navigation, compaction and reload/shutdown cancel pending previews. Restored interrupted history is never reapplied.
 
-Footer control rows show one primary effective key immediately after the content as a dim ` · <key>` suffix: the first configured model-selector key, the provider's workflow key on Independent's separate workflow row, and its approvals key. The Independent Exec row shows `/plan-exec`. Very narrow layouts may omit a hint to keep important state. For example, `gpt-6-sol · alt+p` uses a personal model-selector binding, not a suite default. Context, cache, skills and MCP do not receive invented global keys.
+Footer control rows show one primary effective key immediately after the content as a dim ` · <key>` suffix: the first configured model-selector key, the provider's workflow key on Independent's separate workflow row, and its approvals key. The Independent Exec row shows `/plan-exec`. Very narrow layouts may omit a hint to keep important state. For example, `gpt-6-sol · alt+p` uses a personal model-selector binding, not a suite default; with no model-selector key the row shows no hint. Context, cache, skills and MCP do not receive invented global keys.
 
 In fullscreen Pi, plain single clicks on visible footer values invoke the same owner controls when the actual main editor has focus: model/provider opens a picker, reasoning cycles, `auto`/`auto off` toggles effort, the base-workflow badge cycles, and Approvals opens its picker. Context, Skills and Cache inspect; MCP opens its native manager when the optional bridge is available. Padding, separators and omitted/truncated labels are inert. Dialogs, overlays, native selectors and blocked holds suspend clicks; selection gestures are not remapped. Regular terminal mode stays keyboard-operated, and other-session chrome is read-only. Use `/status details` for control diagnostics if a click fails; verify the actual terminal path with Sidebar closed, after `/reload`, and with Sidebar open. Isolated tests are not field verification. See the [footer reference](/plugins/pi-status-footer/#fullscreen-clicks) for optional-provider and focus limits.
 
@@ -221,19 +221,20 @@ Merge, `/reload`, then inspect `/hotkeys` and startup diagnostics. An array repl
 
 ## Optional personal profile
 
-**This is a labeled personal configuration, not stock Pi or automatic suite behavior.** It moves model/effort controls, binds dedicated history and reserves Ctrl+G for returning to the transcript tail. The external editor remains available through pi-vim's Ctrl+X Ctrl+E chord when that component is selected. This profile also relocates native thinking and tree no-tools filtering to Ctrl+Shift+T so that a separately configured todo toggle can use Ctrl+T.
+**This is a labeled personal configuration, not stock Pi or automatic suite behavior.** It keeps every frequent control on a Ctrl key, binds dedicated history and reserves Ctrl+G for returning to the transcript tail. The model picker has no key: `/model` or the footer's model segment opens it, which also frees Ctrl+L for clear-screen. Effort cycles on Ctrl+T, opencode's variant-cycle key; Ctrl+O already expands thinking with pi-cc-render, so the native thinking-block toggle is unbound. Ctrl+Y gives up Pi's yank so that tool-gate can toggle approvals on it. The external editor remains available through pi-vim's Ctrl+X Ctrl+E chord when that component is selected.
 
 ```json
 {
-  "app.model.select": ["alt+p", "alt+m"],
+  "app.model.select": [],
   "app.model.cycleForward": [],
   "app.model.cycleBackward": [],
-  "app.thinking.cycle": "alt+t",
-  "app.thinking.toggle": "ctrl+shift+t",
+  "app.thinking.cycle": "ctrl+t",
+  "app.thinking.toggle": [],
   "app.tree.filter.noTools": "ctrl+shift+t",
   "app.tree.filter.labeledOnly": "ctrl+shift+l",
   "app.editor.external": [],
   "app.exit": [],
+  "tui.editor.yank": [],
   "tui.altScreen.bottom": ["ctrl+g", "ctrl+end"],
   "tui.editor.historyPrevious": "ctrl+p",
   "tui.editor.historyNext": "ctrl+n",
@@ -242,19 +243,19 @@ Merge, `/reload`, then inspect `/hotkeys` and startup diagnostics. An array repl
 }
 ```
 
-### Optional todo rebind
+### Approvals key
 
-To pair the profile above with pi-todo, merge this into `~/.pi/agent/pi-todo.json` (or project `.pi/pi-todo.json`), preserving `maxWidgetLines`, `guidance` and any unrelated settings:
+tool-gate reads its keys from `~/.config/agents/tool-gate.json` (or project `.pi/tool-gate.json`). Pair the profile with:
 
 ```json
 {
-  "collapseKey": "ctrl+t"
+  "approvalShortcut": "ctrl+y"
 }
 ```
 
-Use both changes together, then `/reload`: **Ctrl+T becomes the personal todo key; Ctrl+Shift+T becomes native thinking, not the todo default.** Applying only the keybindings profile would conflict with pi-todo's default Ctrl+Shift+T. Neither file is installed by the suite, and neither is necessary when you keep stock Pi plus suite defaults.
+Shift+Tab keeps tool-gate's default workflow cycle, since the profile moves native effort cycling off it. pi-todo keeps its Ctrl+Shift+T default. Use both changes together, then `/reload`; neither file is installed by the suite, and neither is necessary when you keep stock Pi plus suite defaults.
 
-During transcript search, Ctrl+G still advances matches rather than jumping to the tail; close search first. The profile disables both model-cycle actions, including Windows/WSL's Alt+P conflict, and disables the direct `app.exit` binding. Stock Pi otherwise binds Ctrl+D to exit an empty main editor; pi-vim owns main Ctrl+D instead. Ctrl+O remains native tool expansion. Ctrl+U/D remain **unbound** as native fullscreen half-page actions; Vim supplies the mode-sensitive route. Alt+T cycles Pi effort, not a guarantee of identical Claude thinking semantics.
+During transcript search, Ctrl+G still advances matches rather than jumping to the tail; close search first. The profile disables both model-cycle actions, including Windows/WSL's Alt+P conflict, and disables the direct `app.exit` binding. Stock Pi otherwise binds Ctrl+D to exit an empty main editor; pi-vim owns main Ctrl+D instead. Ctrl+O remains native tool expansion. Ctrl+U/D remain **unbound** as native fullscreen half-page actions; Vim supplies the mode-sensitive route. Ctrl+T cycles Pi effort, not a guarantee of identical opencode or Claude thinking semantics.
 
 Herdr/tmux prefixes are separate and can intercept keys before Pi. A multiplexer shortcut is not an application action ID, and no complete cross-tool keymap mirroring is implied.
 
