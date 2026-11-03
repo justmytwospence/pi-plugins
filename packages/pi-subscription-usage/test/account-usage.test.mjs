@@ -5,7 +5,7 @@ import { createHash } from "node:crypto";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import {
-  parseClaudeQuota, parseClaudeHeaders, parseCodexUsage, parseCodexHeaders,
+  parseClaudeQuota, parseClaudeHeaders, parseCodexUsage, parseCodexHeaders, claudeCodeUserAgent,
   codexAccountId, codexRateLimitsEvent, codexWindowLabel, mergeQuota, readPiAnthropicUsage, readCodexUsage,
 } from "../src/account-usage.ts";
 
@@ -57,7 +57,7 @@ test("Claude rejects each malformed present applicable quota rather than retaini
   const valid = { utilization: 25, resets_at: "2026-09-30T12:00:00Z" };
   const scoped = { kind: "weekly_scoped", percent: 25, resets_at: valid.resets_at, scope: { model: { display_name: "Fable" } } };
   const generic = { five_hour: { utilization: 10 }, seven_day: { utilization: 20 } };
-  for (const opus of [null, {}, { ...valid, utilization: undefined }, { ...valid, utilization: "25" },
+  for (const opus of [{}, { ...valid, utilization: undefined }, { ...valid, utilization: "25" },
     { ...valid, utilization: 101 }, { ...valid, resets_at: undefined }, { ...valid, resets_at: "invalid" }]) {
     assert.deepEqual(parseClaudeQuota({ ...generic, seven_day_opus: opus }, now).windows, []);
   }
@@ -67,6 +67,8 @@ test("Claude rejects each malformed present applicable quota rather than retaini
     assert.deepEqual(parseClaudeQuota({ ...generic, limits: [limit] }, now).windows, []);
   }
   assert.deepEqual(parseClaudeQuota({ ...generic, seven_day_opus: valid, limits: [scoped] }, now).windows.map(w => w.label), ["5h", "week", "Opus", "Fable"]);
+  // The live endpoint reports windows a plan does not have as null.
+  assert.deepEqual(parseClaudeQuota({ ...generic, five_hour: null, seven_day_opus: null }, now).windows.map(w => w.label), ["week"]);
 });
 
 test("Claude headers use fractions and epoch seconds, not endpoint units", () => {
@@ -367,4 +369,22 @@ test("Codex account ID comes only from the OAuth JWT auth claim", () => {
   assert.equal(codexAccountId(jwt({ "https://api.openai.com/auth": { chatgpt_account_id: "acct-1" } })), "acct-1");
   for (const token of ["not-a-jwt", jwt({}), jwt({ "https://api.openai.com/auth": { chatgpt_account_id: "" } }),
     jwt({ "https://api.openai.com/auth": { chatgpt_account_id: 123 } })]) assert.equal(codexAccountId(token), undefined);
+});
+
+test("the Claude usage request reports a current Claude Code release", () => {
+  assert.equal(claudeCodeUserAgent({}), "claude-code/2.1.284");
+  assert.equal(claudeCodeUserAgent({ PI_ANTHROPIC_AUTH_CLAUDE_CODE_VERSION: " 2.1.300 " }), "claude-code/2.1.300");
+  assert.equal(claudeCodeUserAgent({ PI_ANTHROPIC_AUTH_CLAUDE_CODE_VERSION: "latest" }), "claude-code/2.1.284");
+});
+
+test("a rejected Anthropic read reports its HTTP status and error code, never the body", async () => {
+  await isolatedCache();
+  vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({ type: "error", error: { type: "invalid_request_error",
+    message: "secret detail sk-ant-oat-test-account-z", details: { error_code: "claude_code_version_too_old" } } }), { status: 400 })));
+  const reading = await readPiAnthropicUsage(context("sk-ant-oat-test-account-z"));
+  assert.equal(reading.state, "unavailable");
+  assert.equal(reading.reason, "The usage endpoint answered HTTP 400 (claude_code_version_too_old).");
+  vi.stubGlobal("fetch", vi.fn(async () => new Response("<html>", { status: 429 })));
+  const throttled = await readPiAnthropicUsage(context("sk-ant-oat-test-account-y"));
+  assert.equal(throttled.reason, "The usage endpoint answered HTTP 429.");
 });

@@ -44,7 +44,8 @@ export function parseClaudeQuota(raw: unknown, updated: number): Quota & { [inva
     add(label, flat.utilization ?? limit?.percent, flat.resets_at ?? limit?.resets_at);
   }
   let malformedApplicable = Object.hasOwn(data, "limits") && !Array.isArray(data.limits);
-  if (Object.hasOwn(data, "seven_day_opus")) {
+  // A null field means the plan has no such window (or it has not started), not a malformed one.
+  if (data.seven_day_opus !== undefined && data.seven_day_opus !== null) {
     const opus = record(data.seven_day_opus);
     if (number(opus.utilization) === undefined || number(opus.utilization)! > 100 || timestamp(opus.resets_at) === undefined)
       malformedApplicable = true;
@@ -373,17 +374,45 @@ async function lock(file: string, signal: AbortSignal): Promise<(() => Promise<v
   }
 }
 
+/**
+ * The usage endpoint rejects or heavily throttles clients reporting an old Claude Code
+ * release. Follow pi-anthropic-auth's override, else a recent release.
+ */
+export function claudeCodeUserAgent(env: NodeJS.ProcessEnv = process.env): string {
+  const configured = env.PI_ANTHROPIC_AUTH_CLAUDE_CODE_VERSION?.trim();
+  return `claude-code/${configured && /^\d+\.\d+\.\d+$/.test(configured) ? configured : "2.1.284"}`;
+}
+
+/** Why the last fetch failed: status and Anthropic's error code only, never a body or credential. */
+const failures = new Map<string, string>();
+async function describeFailure(response: Response): Promise<string> {
+  let code = "";
+  try {
+    const text = await response.clone().text();
+    if (text.length <= MAX_BYTES) {
+      const error = record(record(JSON.parse(text)).error);
+      const detail = record(error.details).error_code ?? error.type;
+      if (typeof detail === "string" && /^[a-z0-9_]{1,64}$/.test(detail)) code = ` (${detail})`;
+    }
+  } catch { /* Status alone. */ }
+  return `The usage endpoint answered HTTP ${response.status}${code}.`;
+}
+
 async function fetchQuota(id: Identity, signal: AbortSignal): Promise<ProviderUsage | typeof invalidApplicable | undefined> {
   const anthropic = id.provider === "anthropic";
+  failures.delete(id.digest);
   const response = await bounded(fetch(anthropic ? "https://api.anthropic.com/api/oauth/usage" : "https://chatgpt.com/backend-api/wham/usage", {
     method: "GET", redirect: "error", credentials: "omit", signal,
     headers: anthropic
-      ? { Authorization: "Bearer " + id.token, "anthropic-beta": "oauth-2025-04-20", "Content-Type": "application/json", "User-Agent": "claude-code/2.1.0" }
+      ? { Authorization: "Bearer " + id.token, "anthropic-beta": "oauth-2025-04-20", "Content-Type": "application/json", "User-Agent": claudeCodeUserAgent() }
       : { Authorization: "Bearer " + id.token, "chatgpt-account-id": codexAccountId(id.token)!, originator: "pi", accept: "application/json" },
   }), signal);
   let reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
   try {
-    if (!response.ok || !response.body) return undefined;
+    if (!response.ok || !response.body) {
+      failures.set(id.digest, response.ok ? "The usage endpoint returned no body." : await bounded(describeFailure(response), signal));
+      return undefined;
+    }
     const contentLength = response.headers.get("content-length");
     if (contentLength && (!/^\d+$/.test(contentLength) || Number(contentLength) > MAX_BYTES)) return undefined;
     reader = response.body.getReader();
@@ -453,7 +482,8 @@ async function collect(id: Identity, key: string, signal: AbortSignal): Promise<
     }
   } catch { /* Errors, HTTP bodies, account IDs and credential values never escape. */ }
   finally { await release?.(); }
-  return cached && fresh(cached, MAX_AGE_MS) ? cached : unavailable(id.provider, "Account quota is unknown, expired or unavailable.");
+  return cached && fresh(cached, MAX_AGE_MS) ? cached
+    : unavailable(id.provider, failures.get(id.digest) ?? "Account quota is unknown, expired or unavailable.");
 }
 
 async function readUsage(context: AccountUsageContext, provider: Provider, options: AccountUsageOptions): Promise<ProviderUsage> {
@@ -487,7 +517,9 @@ async function readUsage(context: AccountUsageContext, provider: Provider, optio
     const current = await identity(context, provider, controller.signal);
     if (!current || current.digest !== id.digest) return unavailable(provider, "The subscription account changed during the quota read.");
     check(controller.signal);
-    return fresh(result, MAX_AGE_MS) ? structuredClone(result) : unavailable(provider, "Account quota is unknown, expired or unavailable.");
+    return fresh(result, MAX_AGE_MS) ? structuredClone(result)
+      : result.state === "unavailable" && result.reason ? structuredClone(result)
+      : unavailable(provider, "Account quota is unknown, expired or unavailable.");
   } catch {
     return unavailable(provider, options.signal?.aborted ? "Account quota read was cancelled." : "Account quota is unavailable.");
   } finally {
