@@ -175,7 +175,8 @@ describe("startup context attribution", () => {
 		expect(readStartupContext(mode).thinkingLevel).toBe("xhigh");
 		session.model.contextWindow = 2000;
 		expect(readStartupContext(mode).contextWindow).toBe(2000);
-		expect(projection).toHaveBeenCalledTimes(5);
+		// Unchanged reads reuse the snapshot without rebuilding the projected history.
+		expect(projection).toHaveBeenCalledTimes(3);
 	});
 	it("replaces session lookup without leaking a previous mode snapshot", () => {
 		let id = "first";

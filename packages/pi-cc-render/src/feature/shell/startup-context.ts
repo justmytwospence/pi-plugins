@@ -198,9 +198,7 @@ export function readStartupContext(mode: any): StartupContextSnapshot {
 		// The base command-context options can lag behind prepareLoadout's current hidden set.
 		const hidden = session._hiddenDeclarations instanceof Set ? session._hiddenDeclarations : options?.hiddenTools;
 		let registry: StartupContextInput["registry"];
-		let messages: StartupContextInput["messages"];
 		try { registry = session.getAllTools?.(); } catch { /* Unknown origin: keep visible declarations as Tools. */ }
-		try { messages = session.sessionManager?.buildSessionProjection?.()?.messages; } catch { /* Mark history unavailable. */ }
 		const model = session.model;
 		const input: StartupContextInput = {
 			systemPrompt: session.systemPrompt,
@@ -209,15 +207,17 @@ export function readStartupContext(mode: any): StartupContextSnapshot {
 			declarations: Array.isArray(declarations) ? declarations : undefined,
 			hiddenDeclarations: Array.isArray(hidden) || hidden instanceof Set ? hidden : undefined,
 			registry,
-			messages,
 			model,
 			thinkingLevel: session.thinkingLevel ?? session.agent?.state?.thinkingLevel,
 		};
 		const leaf = session.sessionManager?.getLeafId?.();
 		const id = session.sessionManager?.getSessionId?.();
+		// The projected history is a function of the session and its leaf. Never serialize it (or
+		// rebuild it) just to find out nothing changed: the splash polls this every second.
 		const digest = JSON.stringify({ id, leaf, input }, (_key, value: unknown) => value instanceof Set ? [...value].sort() : value);
 		const previous = cache.get(session);
 		if (previous?.digest === digest) return previous.snapshot;
+		try { input.messages = session.sessionManager?.buildSessionProjection?.()?.messages; } catch { /* Mark history unavailable. */ }
 		const snapshot = collectStartupContext(input);
 		cache.set(session, { digest, snapshot });
 		return snapshot;
