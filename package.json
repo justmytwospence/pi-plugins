@@ -91,6 +91,7 @@
     "test": "node scripts/test-suite.mjs",
     "check": "npm test && node scripts/check-components.mjs",
     "eval": "node scripts/eval.mjs",
+  "version:set": "node scripts/set-version.mjs",
     "eval:dry": "node scripts/eval-dry.mjs",
     "eval:last": "node scripts/eval-last.mjs",
     "check:clients": "node scripts/test-remote-clients.mjs",
