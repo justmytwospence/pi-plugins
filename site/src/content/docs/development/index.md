@@ -79,6 +79,34 @@ The provider calls `offer_prompt` with `/prompt-offer-test one  two`, then retur
 
 This tests bounded component-render acknowledgement and the exercised input path, not whether a human saw the suggestion or whether a real model always uses the tool correctly. It complements the unit and loader checks; it does not replace manual checks of other terminals or extension combinations.
 
+## Work on a change in a worktree
+
+Each change gets its own checkout under `.worktrees/<branch>`, and a Pi session there runs that checkout's suite, so you test a change in the session that is making it.
+
+1. Once per clone, enable the repository's hooks: `git config core.hooksPath .githooks`. The [post-checkout hook](https://github.com/justmytwospence/pi-plugins/blob/main/.githooks/post-checkout) runs root `npm ci` when a new worktree is checked out. Component checks still need their own `npm ci`, as described above.
+2. Create the worktree with `/worktree new <branch>` ([pi-worktree](/plugins/pi-worktree/)), which also moves the conversation there, or with `git worktree add --no-track -b <branch> .worktrees/<branch> origin/main`.
+3. The committed [.pi/settings.json](https://github.com/justmytwospence/pi-plugins/blob/main/.pi/settings.json) does the loading:
+
+```json
+{
+  "packages": [
+    {
+      "source": "git:github.com/justmytwospence/pi-plugins",
+      "autoload": false,
+      "extensions": ["!**"],
+      "skills": ["!**"],
+      "prompts": ["!**"],
+      "themes": ["!**"]
+    },
+    ".."
+  ]
+}
+```
+
+Pi identifies a git package by its URL without the ref, so the first entry refers to your installed suite. With `autoload: false` it is a filter over that installed copy instead of a project package (which Pi would clone into `.pi/git`), and `!**` disables every one of its resources; an empty list would change nothing. `".."` resolves from `.pi/` to the checkout itself, which loads its whole manifest, whatever your `pi config` selection. `/reload` picks up edits. Project settings load only in a trusted folder; `pi --no-approve` ignores them and starts on the installed suite. The [dev-settings test](https://github.com/justmytwospence/pi-plugins/blob/main/scripts/test-dev-settings.mjs) checks this resolution offline against a fake installed copy.
+
+`main` changes only through squash-merged pull requests.
+
 ## Independent static site
 
 The site has its own [package manifest](https://github.com/justmytwospence/pi-plugins/blob/main/site/package.json) and lockfile. Use Node.js 22.12 or newer. From the repository root:
