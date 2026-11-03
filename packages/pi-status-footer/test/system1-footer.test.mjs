@@ -21,15 +21,17 @@ const status = (state = "ready", waterfall = ["jev", "openai-decisions"], actual
     model: actual === "jev" ? "jev-latest" : "gpt-6-luna", at: 1900, fallback: true } } : {}),
 });
 const cases = () => [
-  { state: status(), expected: "S1 Jev→OpenAI" },
-  { state: status("ready", ["openai-decisions", "jev"]), expected: "S1 OpenAI→Jev" },
+  { state: status(), expected: "S1 Jev" },
+  { state: status("ready", ["openai-decisions", "jev"]), expected: "S1 OpenAI" },
   { state: status("ready", ["jev"]), expected: "S1 Jev" },
   { state: status("ready", ["openai-decisions"]), expected: "S1 OpenAI" },
-  { state: status("fallback", ["jev", "openai-decisions"], "openai-decisions"), expected: "S1 OpenAI*" },
-  { state: status("fallback", ["openai-decisions", "jev"], "jev"), expected: "S1 Jev*" },
-  { state: status("unknown"), expected: "S1 Jev→OpenAI?" },
+  { state: status("fallback", ["jev", "openai-decisions"], "openai-decisions"), expected: "S1 OpenAI" },
+  { state: status("fallback", ["openai-decisions", "jev"], "jev"), expected: "S1 Jev" },
+  { state: { ...status(), candidates: status().candidates.map(c => c.backend === "jev" ? { ...c, cooldownUntil: 5000 } : c) }, expected: "S1 OpenAI" },
+  { state: { ...status(), candidates: status().candidates.map(c => c.backend === "jev" ? { ...c, local: "missing" } : c) }, expected: "S1 OpenAI" },
+  { state: status("unknown"), expected: "S1 Jev" },
   { state: status("unavailable"), expected: "S1 unavailable" },
-  { state: { ...status("unavailable"), nextRetryAt: 1999 }, expected: "S1 Jev→OpenAI?" },
+  { state: { ...status("unavailable"), nextRetryAt: 1999 }, expected: "S1 Jev" },
   { state: { ...status("unavailable"), nextRetryAt: 2001 }, expected: "S1 unavailable" },
 ];
 const snapshot = () => ({
@@ -84,7 +86,7 @@ test("fallback and exhausted badges warn without rewriting the configured order"
     layoutFooter({ ...snapshot(), system1: state }, 180, { ...theme, fg(color, text) { calls.push({ color, text }); return text; } });
     const badge = calls.find(call => call.text === expected);
     assert.ok(badge, expected);
-    assert.equal(badge.color, expected.endsWith("*") || expected === "S1 unavailable" ? "warning" : "muted");
+    assert.equal(badge.color, expected === "S1 unavailable" ? "warning" : "muted");
     assert.deepEqual(state, before, "rendering does not mutate preference or runtime evidence");
   }
 });

@@ -86,7 +86,7 @@ With the actual main editor focused in fullscreen Pi, a plain single left click 
 | Exec badge or `/plan-exec` hint | Inspect execution status/recovery, never launch, stop or silently complete it. |
 | Approval value (`auto`, `yolo`, etc.) or its trailing hint | Open the approvals picker; do not silently enable Yolo. |
 | Context percentage | Open the context breakdown. |
-| `S1 Jev→OpenAI`, a singleton, a fallback `*` or an unknown `?` | Open the System 1 waterfall picker when its provider offers the action. |
+| `S1 Jev`, `S1 OpenAI` or `S1 unavailable` | Open the System 1 waterfall picker when its provider offers the action. |
 | Skills | Open the skills preview. |
 | Cache | Read-only cache status; no warming, compaction or spending. |
 | MCP | Open Pi's native MCP manager when pi-cc-render supplies the bridge. |
@@ -145,7 +145,7 @@ Both features are ported from [pi-cc-extensions](https://github.com/minuque/pi-c
 
 ## Understand the measurements
 
-The optional [System 1](/plugins/pi-system1/) chip shows the configured native-classifier order on the existing Context row: `S1 Jev→OpenAI`, the reverse order, or a singleton. After a completed main-registry request uses a fallback it shows the actual winner with `*`, such as `S1 OpenAI*`; this is recent provenance, not a rewritten preference or a universally active physical model. `?` marks unknown health, including a cooldown that is eligible to retry but has not proved recovery, and `S1 unavailable` marks an exhausted/unavailable chain. A child's notice does not assert a main-registry route. Click the value or use `/system1 status` for order, default targets, actual requests and cooldown details.
+The optional [System 1](/plugins/pi-system1/) chip shows only the classifier in use on the existing Context row, `S1 Jev` or `S1 OpenAI`: the backend that answered the last main-registry request unless it is cooling down, otherwise the first configured backend that is not. It shows neither the configured order nor a fallback marker; this is recent provenance, not a rewritten preference. `S1 unavailable` marks an exhausted/unavailable chain. A child's notice does not assert a main-registry route. Click the value or use `/system1 status` for order, default targets, actual requests and cooldown details.
 
 System 1 owns failure/fallback notifications and bounded retries; the footer neither classifies nor probes providers to display the chip. Local configuration does not verify entitlement, API credits or the funding source. Compact, blocked and other-session read-only views do not offer the control. This API-classifier waterfall is independent of the chat-model `/waterfall` and its subscription quota readings.
 

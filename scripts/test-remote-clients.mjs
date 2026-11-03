@@ -788,9 +788,9 @@ for (const width of [46, 120, 180]) {
         if (fixture.providerUsageMore && width >= 120) assert.match(rendered, /OpenAI.*\+3 more/u, 'additional sources are counted on the second account row');
       }
       if (fixture.system1) {
-        const expected = fixture.name.includes('cooldown expired') || fixture.system1.status === 'unknown' ? 'S1 Jev→OpenAI?'
-          : fixture.system1.status === 'fallback' ? 'S1 OpenAI*'
-          : fixture.system1.status === 'unavailable' ? 'S1 unavailable' : 'S1 Jev→OpenAI';
+        const expected = fixture.name.includes('cooldown expired') || fixture.system1.status === 'unknown' ? 'S1 Jev'
+          : fixture.system1.status === 'fallback' ? 'S1 OpenAI'
+          : fixture.system1.status === 'unavailable' ? 'S1 unavailable' : 'S1 Jev';
         assert.ok(rendered.includes(expected), `actual System 1 badge ${expected} fits ${width}`);
       }
       const baseline = screens.length;

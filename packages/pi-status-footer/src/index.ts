@@ -30,7 +30,7 @@ import { settingsCycles, SETTINGS_REASONING_COMMITTED, type SettingCycleSnapshot
 import { createFooterActionController, createFooterComponent, type FooterEditor, type FooterTui, type FooterHit, type FooterLayout } from "./interactions.ts";
 import { createProviderUsageCollector, dispatchProviderUsage, isUsageStale, selectGooglePool, type ProviderUsage, type UsageSource } from "./provider-usage.ts";
 import { queryWaterfall } from "./waterfall-contract.ts";
-import { parseClaudeQuota, codexRateLimitsEvent, mergeQuota, parseClaudeHeaders, readCodexUsage, readPiAnthropicUsage, type Quota } from "@justmytwospence/pi-subscription-usage";
+import { parseClaudeQuota, codexRateLimitsEvent, mergeQuota, parseClaudeHeaders, readCodexUsage, readPiAnthropicUsage, claudeCodeUserAgent, type Quota } from "@justmytwospence/pi-subscription-usage";
 export { parseClaudeQuota, parseCodexUsage, codexRateLimitsEvent, codexAccountId, mergeQuota, parseCodexHeaders, parseClaudeHeaders, codexWindowLabel } from "@justmytwospence/pi-subscription-usage";
 export type { Quota, QuotaWindow } from "@justmytwospence/pi-subscription-usage";
 
@@ -368,6 +368,22 @@ export const duration = (ms: number): string => {
   return `${mins}m`;
 };
 // Fable is selective: show high usage, or an over-trajectory pool near reset.
+/**
+ * The System 1 backend in use, without the configured order or a fallback marker: the
+ * last backend that answered, unless it is cooling down, else the first configured rung
+ * that is not. Rendering these detached fields never probes a provider.
+ */
+export function system1Current(state: System1Status, now: number): string {
+  const name = (backend: "jev" | "openai-decisions") => backend === "jev" ? "Jev" : "OpenAI";
+  // A retry becoming eligible is not evidence of recovery, but it is no longer unavailable.
+  if (state.status === "unavailable" && !(state.nextRetryAt !== undefined && state.nextRetryAt <= now)) return "unavailable";
+  const cooling = (backend: string) => state.candidates.some((c) => c.backend === backend && c.cooldownUntil !== undefined && c.cooldownUntil > now);
+  if (state.lastUsed && state.waterfall.includes(state.lastUsed.backend) && !cooling(state.lastUsed.backend)) return name(state.lastUsed.backend);
+  const ready = state.waterfall.find((backend) => !cooling(backend) && state.candidates.find((c) => c.backend === backend)?.local !== "missing");
+  const first = ready ?? state.waterfall[0];
+  return first ? name(first) : "unavailable";
+}
+
 function showQuotaWindow(window: { label: string; used?: number; reset?: number }, now: number): boolean {
   if (!/^fable$/i.test(window.label)) return true;
   if (window.used === undefined || !Number.isFinite(window.used) || window.reset === undefined || !Number.isFinite(window.reset) || window.reset <= now) return false;
@@ -955,20 +971,11 @@ export function layoutFooter(snapshot: Snapshot, width: number, theme: Paint): F
   const mcpText = mcpStatus ? inline(ICONS.mcp, mcpStatus.replace(`${ICONS.mcp} `, "")) : s.mcp ? inline(ICONS.mcp, mcpChip(s.mcp, theme)) : "";
   const skillsText = s.skills ? inline(ICONS.skills, `${theme.fg("muted", "Skills")} ${s.skills}`) : "";
   const system1 = s.system1;
-  const system1Name = (backend: "jev" | "openai-decisions") => backend === "jev" ? "Jev" : "OpenAI";
-  // A retry becoming eligible is not evidence of recovery. Only a completed request
-  // changes lastUsed; rendering these detached fields never probes a provider.
-  const system1State = system1?.status === "unavailable" && system1.nextRetryAt !== undefined && system1.nextRetryAt <= s.now
-    ? "unknown" : system1?.status;
-  const system1Order = system1?.waterfall.map(system1Name).join("→") ?? "";
-  const system1Value = system1State === "unavailable" ? "unavailable"
-    : system1State === "fallback" && system1?.lastUsed?.fallback && system1.waterfall.includes(system1.lastUsed.backend)
-      ? `${system1Name(system1.lastUsed.backend)}*`
-      : `${system1Order}${system1State === "unknown" ? "?" : ""}`;
+  const system1Value = system1 ? system1Current(system1, s.now) : "";
   controlRow(ICONS.context, [
     partsSegment([...ctxParts, { text: `${context === null ? "" : theme.fg("dim", " used")}${context === null || s.borderGauge ? "" : ` ${gauge(theme, context)}`}` }], 100, ctxParts),
     partsSegment(system1 ? [
-      { text: theme.fg(system1State === "unavailable" || system1State === "fallback" ? "warning" : "muted", `S1 ${system1Value}`), action: action("system1.open") },
+      { text: theme.fg(system1Value === "unavailable" ? "warning" : "muted", `S1 ${system1Value}`), action: action("system1.open") },
     ] : [], 35),
     { text: s.lean ? theme.fg("muted", `Lean ${clean(s.lean)}`) : "", priority: 20 },
     partsSegment([{ text: cache ? `${theme.fg("muted", "Cache")} ${theme.fg(cacheValue === "unknown" ? "muted" : cacheValue === "cold" ? "warning" : "success", cacheValue)}` : "", action: action("cache.status") }], 30),
@@ -1186,6 +1193,8 @@ export default function statusFooter(pi: ExtensionAPI): void {
   let claude: Quota | undefined, claudeHeaders: Quota | undefined;
   let codex: ProviderUsage | undefined;
   let claudePiAccount = false;
+  /** Why the last Pi-account read failed, for /status details. */
+  let claudeReason: string | undefined;
   let claudeCredentialHash: string | undefined;
   let usageCollector = createProviderUsageCollector();
   const providerReadings = new Map<string, ProviderUsage>();
@@ -1271,7 +1280,7 @@ export default function statusFooter(pi: ExtensionAPI): void {
         headers: {
           Authorization: `Bearer ${token}`, "anthropic-beta": "oauth-2025-04-20", "Content-Type": "application/json",
           // Without a claude-code User-Agent this endpoint is heavily rate limited.
-          "User-Agent": "claude-code/2.1.0",
+          "User-Agent": claudeCodeUserAgent(),
         },
         signal: AbortSignal.timeout(5_000),
       });
@@ -1338,13 +1347,14 @@ export default function statusFooter(pi: ExtensionAPI): void {
       if (!active || epoch !== generation) return;
       const credentialHash = piToken ? createHash("sha256").update(piToken).digest("hex") : undefined;
       if (claudeCredentialHash !== credentialHash) {
-        claude = undefined; claudeHeaders = undefined; claudePiAccount = false;
+        claude = undefined; claudeHeaders = undefined; claudePiAccount = false; claudeReason = undefined;
         claudeCredentialHash = credentialHash;
       }
       if (piToken) {
         // The router and footer share the same account-bound reader. No Claude
         // Code fallback can supply Pi's OAuth allowance for a different account.
         const reading = await readPiAnthropicUsage(context);
+        if (active && epoch === generation) claudeReason = reading.state === "ready" ? undefined : reading.reason;
         if (active && epoch === generation && reading.state === "ready" && reading.observedAt !== undefined) {
           const parsed: Quota = { source: "Claude acct", updated: reading.observedAt,
             windows: reading.windows.map((window) => ({ label: window.label, used: window.used!, reset: window.reset, observedAt: window.observedAt })) };
@@ -1517,7 +1527,7 @@ export default function statusFooter(pi: ExtensionAPI): void {
     if (provider === "anthropic") return claude ? {
       provider, source: claudePiAccount ? "Claude subscription" : "Claude Code account", state: "ready", observedAt: claude.updated,
       windows: claude.windows.map((window) => ({ ...window })),
-    } : { provider, source: "Claude", state: "unavailable", windows: [], reason: "Anthropic subscription usage has not been observed." };
+    } : { provider, source: "Claude", state: "unavailable", windows: [], reason: claudeReason ?? "Anthropic subscription usage has not been observed." };
     if (provider === "openai-codex") return codex ??
       { provider, source: "Codex account", state: "unavailable", windows: [], reason: "Codex subscription usage has not been observed." };
     const cached = providerReadings.get(provider);
@@ -1834,7 +1844,7 @@ export default function statusFooter(pi: ExtensionAPI): void {
     try { stop(); } catch { /* Shutdown still reports teardown errors. */ }
     if (context.mode !== "tui") return;
     ctx = context; active = true;
-    git = { ...emptyGit(), unavailable: true }; claude = undefined; claudeHeaders = undefined; codex = undefined; claudePiAccount = false; claudeCredentialHash = undefined;
+    git = { ...emptyGit(), unavailable: true }; claude = undefined; claudeHeaders = undefined; codex = undefined; claudePiAccount = false; claudeCredentialHash = undefined; claudeReason = undefined;
     gitBusy = quotaBusy = codexBusy = false; gitChecked = quotaChecked = 0;
     phase = undefined;
     restorePreferences(context);
