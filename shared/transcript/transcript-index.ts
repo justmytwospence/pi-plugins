@@ -128,20 +128,65 @@ function append(to: TranscriptIndex, from: TranscriptIndex): void {
   to.blocks.push(...from.blocks.map(block => ({ ...block, start: block.start + offset, end: block.end + offset })));
   to.horizons.push(...from.horizons.map(row => row + offset));
 }
+/*
+ * Indexing runs on every frame for some consumers, so unchanged subtrees are reused. Memoized
+ * results are shared and must never be mutated: row hooks receive fresh, unmemoized indexes, and
+ * indexTranscript returns copies. A leaf is reused only when it renders the same rows and gets the
+ * same description; a container only when it has the same children with the same reused results.
+ */
+type LeafMemo = { lines: readonly string[]; description: TranscriptDescription | undefined; result: TranscriptIndex };
+type ContainerMemo = { children: readonly unknown[]; results: readonly TranscriptIndex[]; result: TranscriptIndex };
+const MEMO_WIDTHS = 4;
+const leafMemos = new WeakMap<object, Map<number, LeafMemo>>();
+const containerMemos = new WeakMap<object, Map<number, ContainerMemo>>();
+const finalIndexes = new WeakMap<TranscriptIndex, TranscriptIndex>();
+/** Container prototypes whose render was observed to concatenate their children, by that render function. */
+const concatenatingRenders = new WeakMap<object, unknown>();
+function memoFor<T>(memos: WeakMap<object, Map<number, T>>, node: object, width: number): T | undefined {
+  return memos.get(node)?.get(width);
+}
+function remember<T>(memos: WeakMap<object, Map<number, T>>, node: object, width: number, value: T): void {
+  let byWidth = memos.get(node);
+  if (!byWidth) memos.set(node, byWidth = new Map());
+  byWidth.delete(width);
+  byWidth.set(width, value);
+  if (byWidth.size > MEMO_WIDTHS) byWidth.delete(byWidth.keys().next().value!);
+}
+const sameDescription = (a: TranscriptDescription | undefined, b: TranscriptDescription | undefined) => a === b || !!a && !!b
+  && a.kind === b.kind && a.error === b.error && a.userText === b.userText
+  && a.checkpoint?.id === b.checkpoint?.id && a.checkpoint?.kind === b.checkpoint?.kind;
+const plainContainer = (node: Record<PropertyKey, any>) => node.constructor?.name === "Container" && Array.isArray(node.children)
+  && !Object.hasOwn(node, "render") && typeof node[TRANSCRIPT_BLOCK] !== "function" && typeof node[TRANSCRIPT_ROWS] !== "function";
+/** Pi's Container renders exactly its children's rows; once a prototype has shown that, skip its own render. */
+const concatenates = (node: Record<PropertyKey, any>, options: TranscriptOptions) => !options.describe && plainContainer(node)
+  && concatenatingRenders.get(Object.getPrototypeOf(node)) === node.render;
+
 export function indexTranscript(root: unknown, width: number, context: TranscriptContext = EMPTY_TRANSCRIPT_CONTEXT, options: TranscriptOptions = {}): TranscriptIndex {
   const active = new Set<object>();
   let visited = 0;
-  const children = (nodes: readonly unknown[], w: number, depth: number): TranscriptIndex => {
+  const children = (nodes: readonly unknown[], w: number, depth: number, memo = false): TranscriptIndex => {
     const out: TranscriptIndex = { lines: [], blocks: [], horizons: [] };
-    for (const child of nodes) append(out, visit(child, w, depth + 1));
+    for (const child of nodes) append(out, visit(child, w, depth + 1, memo));
     return out;
   };
-  const visit = (value: unknown, w: number, depth: number): TranscriptIndex => {
+  const visit = (value: unknown, w: number, depth: number, memo: boolean): TranscriptIndex => {
     const node = record(value);
     if (!node || typeof node.render !== "function") throw new TypeError("Unrenderable transcript node");
     if (active.has(node) || depth > 32 || ++visited > 10_000) throw new TypeError("Transcript tree limit");
     active.add(node);
     try {
+      if (concatenates(node, options)) {
+        const nodes: readonly unknown[] = [...node.children];
+        if (!memo) return children(nodes, w, depth);
+        const results = nodes.map(child => visit(child, w, depth + 1, true));
+        const previous = memoFor(containerMemos, node, w);
+        if (previous && previous.children.length === nodes.length
+          && nodes.every((child, i) => child === previous.children[i] && results[i] === previous.results[i])) return previous.result;
+        const result: TranscriptIndex = { lines: [], blocks: [], horizons: [] };
+        for (const part of results) append(result, part);
+        remember(containerMemos, node, w, { children: nodes, results, result });
+        return result;
+      }
       const rendered = node.render(w);
       if (!Array.isArray(rendered) || !rendered.every(line => typeof line === "string")) throw new TypeError("Invalid transcript render");
       const lines = [...rendered];
@@ -162,34 +207,46 @@ export function indexTranscript(root: unknown, width: number, context: Transcrip
         if (own) allowed.set(node, new Set([signature(own)]));
         try {
           const mapped = (node as TranscriptHooks)[TRANSCRIPT_ROWS]?.({ width: w, lines,
-            index: (nodes, childWidth) => permit(children(nodes, childWidth, depth)), splice: spliceTranscriptRows });
+            index: (nodes, childWidth) => permit(children(nodes, childWidth, depth, false)), splice: spliceTranscriptRows });
           if (mapped && validIndex(mapped, lines) && mapped.blocks.every(block => allowed.get(block.source)?.has(signature(block)))) return mapped;
         } catch { /* An unsupported transform stays opaque. */ }
         return { lines, blocks: [], horizons: [] };
       }
       const description = describeTranscriptComponent(node, { ...context, width: w, lines }, options);
       if (!description && node.constructor?.name === "Container" && Array.isArray(node.children)) {
+        // Unmemoized: the first render of a container decides whether its prototype can be trusted.
         const composed = children(node.children, w, depth);
-        if (equalLines(composed.lines, lines)) return composed;
-        return { lines, blocks: [], horizons: [] };
+        if (!equalLines(composed.lines, lines)) return { lines, blocks: [], horizons: [] };
+        if (plainContainer(node)) concatenatingRenders.set(Object.getPrototypeOf(node), node.render);
+        return composed;
       }
+      const previous = memo ? memoFor(leafMemos, node, w) : undefined;
+      if (previous && equalLines(previous.lines, lines) && sameDescription(previous.description, description)) return previous.result;
       const hasContent = visible(lines);
-      return { lines, horizons: [], blocks: lines.length ? [{ start: 0, end: lines.length, source: node,
+      const result: TranscriptIndex = { lines, horizons: [], blocks: lines.length ? [{ start: 0, end: lines.length, source: node,
         kind: description?.kind ?? "other", error: description?.error === true,
         ...(description?.userText && hasContent ? { userText: description.userText } : {}),
         ...(description?.checkpoint && hasContent ? { checkpoint: description.checkpoint } : {}) }] : [] };
+      if (memo) remember(leafMemos, node, w, { lines, description, result });
+      return result;
     } finally { active.delete(node); }
   };
   if (!Number.isFinite(width) || width < 1) throw new TypeError("Invalid transcript width");
-  const index = visit(root, Math.floor(width), 0);
-  let previous: string | undefined;
-  for (const block of index.blocks) {
-    if (!visible(index.lines.slice(block.start, block.end))) { delete block.checkpoint; delete block.userText; }
-    const id = block.checkpoint?.id;
-    if (id && id === previous) delete block.checkpoint;
-    if (visible(index.lines.slice(block.start, block.end))) previous = id;
+  const index = visit(root, Math.floor(width), 0, true);
+  let final = finalIndexes.get(index);
+  if (!final) {
+    final = { lines: index.lines, blocks: index.blocks.map(block => ({ ...block })), horizons: index.horizons };
+    let previous: string | undefined;
+    for (const block of final.blocks) {
+      const shown = visible(final.lines.slice(block.start, block.end));
+      if (!shown) { delete block.checkpoint; delete block.userText; }
+      const id = block.checkpoint?.id;
+      if (id && id === previous) delete block.checkpoint;
+      if (shown) previous = id;
+    }
+    finalIndexes.set(index, final);
   }
-  return index;
+  return { lines: [...final.lines], blocks: final.blocks.map(block => ({ ...block })), horizons: [...final.horizons] };
 }
 export function indexTranscriptChildren(children: readonly unknown[], width: number, context: TranscriptContext = EMPTY_TRANSCRIPT_CONTEXT, options: TranscriptOptions = {}): TranscriptIndex {
   // This synthetic plain Container has exactly concatenating render semantics.

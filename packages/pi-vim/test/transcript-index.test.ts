@@ -161,3 +161,34 @@ test("row transforms recheck final visibility and cannot invent or alter checkpo
   const altered = new Altered(); altered.children.push(new Artifact() as never);
   assert.deepEqual(indexTranscript(altered, 80).blocks, []);
 });
+test("plain containers are indexed from their children without re-rendering every level", () => {
+  let renders = 0;
+  class Leaf { invalidate() {} constructor(public text: string) {} render() { renders++; return [this.text]; } }
+  const root = new Container(), middle = new Container();
+  middle.addChild(new Leaf("a")); middle.addChild(new Leaf("b"));
+  root.addChild(middle); root.addChild(new Leaf("c"));
+  const first = indexTranscript(root, 80);
+  renders = 0;
+  const second = indexTranscript(root, 80);
+  assert.equal(renders, 3);
+  assert.deepEqual(second, first);
+  assert.deepEqual(second.lines, ["a", "b", "c"]);
+  assert.deepEqual(second.blocks.map(b => [b.start, b.end]), [[0, 1], [1, 2], [2, 3]]);
+});
+test("reused indexes follow changed rows, children and descriptions, and copies stay isolated", () => {
+  const root = new Container();
+  const tool = new ToolExecutionComponent(transcriptCheckpoint({ details: {} }, checkpoint), "same rows");
+  root.addChild(tool);
+  indexTranscript(root, 80);
+  const reused = indexTranscript(root, 80);
+  assert.equal(reused.blocks[0]?.checkpoint?.id, "event1");
+  reused.lines.push("mutated"); reused.blocks[0]!.start = 9; delete reused.blocks[0]!.checkpoint;
+  assert.deepEqual(indexTranscript(root, 80).blocks.map(b => [b.start, b.checkpoint?.id]), [[0, "event1"]]);
+  tool.isPartial = true;
+  assert.equal(indexTranscript(root, 80).blocks[0]?.checkpoint, undefined);
+  tool.isPartial = false; tool.text = "changed rows";
+  assert.deepEqual(indexTranscript(root, 80).lines, ["changed rows"]);
+  root.addChild(new ToolExecutionComponent({}, "appended"));
+  assert.deepEqual(indexTranscript(root, 80).lines, ["changed rows", "appended"]);
+  assert.deepEqual(indexTranscript(root, 40).lines, ["changed rows", "appended"]);
+});
