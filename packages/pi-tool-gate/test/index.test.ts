@@ -282,7 +282,7 @@ describe("settings cycle safety", () => {
     return request.result!;
   };
 
-  test.each(["workflow", "approval"] as const)("%s preview preserves a finishing classifier until the 1000ms commit", async key => {
+  test.each(["workflow", "approval"] as const)("%s preview preserves a finishing classifier until the idle commit", async key => {
     vi.useFakeTimers();
     const s = setup(safe);
     await s.h.emit("session_start", {}, s.ctx);
@@ -293,7 +293,7 @@ describe("settings cycle safety", () => {
     await entered.promise;
     const settled = cycle(s, key);
     expect(settingsCycles(s.h.pi).snapshot()?.phase).toBe("pending");
-    await vi.advanceTimersByTimeAsync(999);
+    await vi.advanceTimersByTimeAsync(399);
     expect(s.h.entries.filter(e => e.customType === WORKFLOW_ENTRY || e.customType === APPROVAL_ENTRY)).toHaveLength(0);
     result.resolve({ model: "jev-latest", stopReason: "stop", answers: safe, usage: usage(300) });
     expect(await pending).toBeUndefined();
@@ -313,7 +313,7 @@ describe("settings cycle safety", () => {
     const pending = s.h.emit("tool_call", call("bash", { command: "npm test" }), s.ctx);
     await entered.promise;
     const settled = cycle(s, key);
-    await vi.advanceTimersByTimeAsync(999);
+    await vi.advanceTimersByTimeAsync(399);
     result.resolve("Allow once");
     expect(await pending).toBeUndefined();
     expect(settingsCycles(s.h.pi).snapshot()?.phase).toBe("pending");
@@ -349,7 +349,7 @@ describe("settings cycle safety", () => {
     const pending = s.h.emit("tool_call", call("bash", { command: "npm test" }), s.ctx);
     await entered.promise;
     const settled = cycle(s, key);
-    await vi.advanceTimersByTimeAsync(999);
+    await vi.advanceTimersByTimeAsync(399);
     expect(settingsCycles(s.h.pi).snapshot()?.phase).toBe("pending");
     await vi.advanceTimersByTimeAsync(1);
     expect(await settled).toBe(true);
@@ -823,7 +823,7 @@ describe("awaited Linked gate transitions", () => {
     s.ctx.isIdle = () => true;
     const pending: { userInitiated: boolean; result?: Promise<boolean> } = { userInitiated: true };
     s.h.pi.events.emit(WORKFLOW_CYCLE, pending);
-    await vi.advanceTimersByTimeAsync(999);
+    await vi.advanceTimersByTimeAsync(399);
     expect(queryFlow(s.h.pi.events)?.workflow).toBe("work");
     s.ctx.isIdle = () => false;
     await vi.advanceTimersByTimeAsync(1);

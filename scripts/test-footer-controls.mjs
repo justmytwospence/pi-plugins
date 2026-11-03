@@ -413,8 +413,8 @@ async function terminalCycles() {
       f.terminal.send('\x1b[116;5:3;116u');
       assert.equal(api.cycles.inputStatus().mode, 'modifier-release');
       assert.deepEqual(api.cycles.inputStatus().modifiers, ['ctrl']);
-      await pause(3100);
-      assert.equal(api.cycles.snapshot()?.phase, 'pending', 'a negotiated multi-second hold has no watchdog');
+      await pause(150);
+      assert.equal(api.cycles.snapshot()?.phase, 'pending', 'a hold shorter than the idle deadline stays pending');
       assert.equal(f.runtime.session.thinkingLevel, original.thinking);
       assert.equal(reasoningRecords(f).length, before, 'ordinary-key release and long hold invoke no setter');
       assert.equal(cycleAnchors(f).length, 1);
@@ -512,13 +512,13 @@ async function terminalCycles() {
       f.terminal.send(transport === 'legacy' ? '\x14' : '\x1b[116;5u');
       await tick();
       assert.ok(['timer', 'negotiating'].includes(api.cycles.inputStatus().mode));
-      await pause(700);
-      assert.equal(api.cycles.snapshot()?.phase, 'pending', `${transport} does not retain the old 400 ms deadline`);
+      await pause(250);
+      assert.equal(api.cycles.snapshot()?.phase, 'pending', `${transport} waits for the idle deadline`);
       // Unrelated input and a late capability reply must not restart the deadline.
       f.terminal.send(packet(35, { x: 0, y: 0 }, 'M'));
-      await until(() => api.cycles.snapshot()?.phase === 'applied', `${transport} 1000 ms fallback`);
-      assert.ok(Date.now() - started >= 990, `${transport} waits for the cycle fallback`);
-      assert.ok(Date.now() - started < 1600, `${transport} noise does not extend the cycle fallback`);
+      await until(() => api.cycles.snapshot()?.phase === 'applied', `${transport} idle fallback`);
+      assert.ok(Date.now() - started >= 390, `${transport} waits for the cycle fallback`);
+      assert.ok(Date.now() - started < 1000, `${transport} noise does not extend the cycle fallback`);
       assert.equal(reasoningRecords(f).length, before + 1);
       assert.equal(f.terminal.frames.length, 0, `${transport} leaves no keyboard lease`);
       if (['legacy', 'unsupported', 'unknown'].includes(transport)) assert.equal(f.terminal.pushes, 0);
@@ -600,9 +600,9 @@ async function journalCheckpoint() {
     assert.match(anchor.render(120).map(plain).join('\n'), /Workflow plan · Auto on/u,
       'an already-created native component renders the latest hidden snapshot');
     await pause(250);
-    assert.deepEqual(api.applied, [], 'no effective changes before the 1000 ms quiet period');
+    assert.deepEqual(api.applied, [], 'no effective changes before the idle quiet period');
     assert.equal(await first, true);
-    assert.ok(Date.now() - lastStaged >= 990, 'settlement waits for the quiet period after the latest mixed-control input');
+    assert.ok(Date.now() - lastStaged >= 390, 'settlement waits for the quiet period after the latest mixed-control input');
     assert.deepEqual(api.applied, [{ key: 'workflow', value: 'plan' }, { key: 'auto-effort', value: true }]);
     assert.equal(historyLines(f).length, 1);
     assert.match(historyLines(f)[0], /Settings · Workflow plan · Auto on/u);

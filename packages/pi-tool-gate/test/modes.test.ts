@@ -362,7 +362,7 @@ describe("settings cycle previews", () => {
     await vi.advanceTimersByTimeAsync(300);
     await h.shortcuts.get("shift+tab").handler(ctx);
     await h.shortcuts.get("alt+a").handler(ctx);
-    await vi.advanceTimersByTimeAsync(999);
+    await vi.advanceTimersByTimeAsync(399);
     expect(queryFlow(h.pi.events)?.workflow).toBe("work");
     expect(ctx.ui.status.get(MODE_STATUS_KEY)).toContain("auto");
     expect(h.entries.filter(e => [WORKFLOW_ENTRY, APPROVAL_ENTRY].includes(e.customType))).toEqual([]);
@@ -393,7 +393,7 @@ describe("settings cycle previews", () => {
     for (const request of approvals) h.pi.events.emit(MODE_CYCLE, request);
     expect(first.result).toBeInstanceOf(Promise);
     expect(approvals[0].result).toBeInstanceOf(Promise);
-    await vi.advanceTimersByTimeAsync(999);
+    await vi.advanceTimersByTimeAsync(399);
     expect(settled).toBe(false);
     expect(queryFlow(h.pi.events)?.workflow).toBe("work");
     await vi.advanceTimersByTimeAsync(1);

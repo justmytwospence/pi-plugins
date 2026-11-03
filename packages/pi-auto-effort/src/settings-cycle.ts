@@ -10,7 +10,12 @@ import {
 } from "./settings-cycle-input.js";
 
 export type { SettingCycleTrigger, SettingsCycleInputPorts, SettingsCycleInputStatus } from "./settings-cycle-input.js";
-export const SETTINGS_CYCLE_IDLE_MS = 1000;
+/**
+ * Commit after this long without another press. Modifier release commits sooner;
+ * the timer stays armed during a hold so a terminal that misreports or omits the
+ * release (multiplexers re-encoding Kitty events) can never stall a change.
+ */
+export const SETTINGS_CYCLE_IDLE_MS = 400;
 export interface SettingsCycleOptions {
   inputPorts?: Partial<SettingsCycleInputPorts>;
 }
@@ -39,6 +44,8 @@ export interface SettingCycleSnapshot {
     label: string;
   }>;
   reason?: string;
+  /** What started the commit: modifier release, the idle timer, or a submitted prompt. */
+  launchedBy?: "release" | "timer" | "flush";
 }
 export interface SettingCycleChange<T extends SettingValue> {
   key: SettingKey;
@@ -105,6 +112,7 @@ type Burst = {
   promise: Promise<boolean>;
   resolve: (value: boolean) => void;
   timer?: ReturnType<typeof setTimeout>;
+  launchedBy?: "release" | "timer" | "flush";
   stopped: boolean;
   settled: boolean;
   active?: SettingKey;
@@ -193,12 +201,11 @@ export function settingsCycles(pi: ExtensionAPI, options: SettingsCycleOptions =
     if (b.timer) clearTimeout(b.timer);
     b.timer = undefined;
     if (burst !== b || b.stopped || b.launched || b.phase !== "pending") return;
-    if (input.status().mode === "modifier-release") return;
-    b.timer = setTimeout(() => launch(b), Math.max(0, b.activatedAt + SETTINGS_CYCLE_IDLE_MS - Date.now()));
+    b.timer = setTimeout(() => launch(b, "timer"), Math.max(0, b.activatedAt + SETTINGS_CYCLE_IDLE_MS - Date.now()));
   };
   const input = createSettingsCycleInput(options.inputPorts ?? {}, {
     release: () => {
-      if (burst) launch(burst);
+      if (burst) launch(burst, "release");
     },
     mode: () => {
       if (burst) reconcileDeadline(burst);
@@ -234,7 +241,13 @@ export function settingsCycles(pi: ExtensionAPI, options: SettingsCycleOptions =
       }
       settings.push({ key, baseline: item.baseline, target: item.target, actual, label });
     }
-    return { id: b.rowId, phase, settings, ...(reason ? { reason } : {}) };
+    return {
+      id: b.rowId,
+      phase,
+      settings,
+      ...(reason ? { reason } : {}),
+      ...(b.launchedBy && phase !== "pending" ? { launchedBy: b.launchedBy } : {}),
+    };
   };
   const publish = (b: Burst, phase: SettingCyclePhase, reason?: string, anchor = false) => {
     const snapshot = makeSnapshot(b, phase, reason);
@@ -384,9 +397,10 @@ export function settingsCycles(pi: ExtensionAPI, options: SettingsCycleOptions =
       inFlight = false;
     }
   };
-  const launch = (b: Burst) => {
+  const launch = (b: Burst, by: "release" | "timer" | "flush") => {
     if (burst !== b || b.phase !== "pending" || b.stopped || b.launched || b.settled) return;
     b.launched = true;
+    b.launchedBy = by;
     input.close();
     let finish!: () => void;
     const done = new Promise<void>((resolve) => {
@@ -521,7 +535,7 @@ export function settingsCycles(pi: ExtensionAPI, options: SettingsCycleOptions =
     flush: () => {
       const b = burst;
       if (!b) return running ? running.done.then(() => false) : Promise.resolve(true);
-      if (b.phase === "pending") launch(b);
+      if (b.phase === "pending") launch(b, "flush");
       return b.promise;
     },
     cancel,

@@ -2,6 +2,7 @@ import { EventEmitter } from "node:events";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { visibleWidth } from "@earendil-works/pi-tui";
 import { SETTINGS_CYCLE_IDLE_MS, settingsCycles } from "../src/settings-cycle.ts";
+const I = SETTINGS_CYCLE_IDLE_MS;
 import { settingsCycles as otherCopy } from "../../pi-tool-gate/src/settings-cycle.ts";
 
 function host(mode = "tui") {
@@ -69,31 +70,31 @@ describe("settings cycle coordinator", () => {
   it("shares a trailing deadline, pending targets and a single visible anchor", async () => {
     const h = host(), cycles = settingsCycles(h.pi), workflow = control("workflow", "work", ["work", "plan", "linked"]), auto = control("auto-effort", false, [false, true]);
     const a = cycles.stage(h.ctx, workflow.change);
-    await vi.advanceTimersByTimeAsync(999);
+    await vi.advanceTimersByTimeAsync(I - 1);
     expect(workflow.value).toBe("work");
     const b = cycles.stage(h.ctx, workflow.change), c = cycles.stage(h.ctx, auto.change);
     expect(anchors(h)).toHaveLength(1); expect(states(h).length).toBeGreaterThanOrEqual(2);
     expect(cycles.snapshot().settings.find(s => s.key === "workflow").target).toBe("linked");
-    await vi.advanceTimersByTimeAsync(999); expect(workflow.value).toBe("work");
+    await vi.advanceTimersByTimeAsync(I - 1); expect(workflow.value).toBe("work");
     await vi.advanceTimersByTimeAsync(1);
     expect(await Promise.all([a, b, c])).toEqual([true, true, true]);
     expect(workflow.value).toBe("linked"); expect(auto.value).toBe(true); expect(last(h).phase).toBe("applied");
   });
-  it("resets the 1000 ms deadline only for accepted stages", async () => {
-    expect(SETTINGS_CYCLE_IDLE_MS).toBe(1000);
+  it("resets the idle deadline only for accepted stages", async () => {
+    expect(SETTINGS_CYCLE_IDLE_MS).toBe(400);
     const h = host(), cycles = settingsCycles(h.pi), workflow = control("workflow", "work", ["work", "plan"]), approvals = control("approvals", "ask", ["ask", "auto"]);
     const first = cycles.stage(h.ctx, workflow.change);
-    await vi.advanceTimersByTimeAsync(999);
+    await vi.advanceTimersByTimeAsync(I - 1);
     expect(cycles.snapshot().phase).toBe("pending");
     approvals.valid = false;
     expect(await cycles.stage(h.ctx, approvals.change)).toBe(false);
     await vi.advanceTimersByTimeAsync(1);
     expect(await first).toBe(true);
     const second = cycles.stage(h.ctx, workflow.change);
-    await vi.advanceTimersByTimeAsync(999);
+    await vi.advanceTimersByTimeAsync(I - 1);
     approvals.valid = true;
     expect(cycles.stage(h.ctx, approvals.change)).toBe(second);
-    await vi.advanceTimersByTimeAsync(999);
+    await vi.advanceTimersByTimeAsync(I - 1);
     expect(workflow.value).toBe("plan");
     await vi.advanceTimersByTimeAsync(1);
     expect(await second).toBe(true);
@@ -102,16 +103,16 @@ describe("settings cycle coordinator", () => {
   it("round trips without setters and settles every caller", async () => {
     const h = host(), cycles = settingsCycles(h.pi), calls = [], c = control("workflow", "work", ["work", "plan"], calls);
     const a = cycles.stage(h.ctx, c.change), b = cycles.stage(h.ctx, c.change);
-    await vi.advanceTimersByTimeAsync(1000);
+    await vi.advanceTimersByTimeAsync(I);
     expect(await Promise.all([a, b])).toEqual([true, true]); expect(calls).toEqual([]); expect(last(h).phase).toBe("unchanged");
   });
   it("validates all settings before applying, and applies in safety order", async () => {
     const h = host(), cycles = settingsCycles(h.pi), calls = [];
     const controls = [control("approvals", "ask", ["ask", "auto"], calls), control("reasoning", "low", ["low", "high"], calls), control("auto-effort", false, [false, true], calls), control("workflow", "work", ["work", "plan"], calls)];
-    const first = controls.map(c => cycles.stage(h.ctx, c.change)); controls[0].valid = false; await vi.advanceTimersByTimeAsync(1000);
+    const first = controls.map(c => cycles.stage(h.ctx, c.change)); controls[0].valid = false; await vi.advanceTimersByTimeAsync(I);
     expect(await Promise.all(first)).toEqual([false, false, false, false]); expect(calls).toEqual([]);
     controls[0].valid = true;
-    const second = controls.map(c => cycles.stage(h.ctx, c.change)); await vi.advanceTimersByTimeAsync(1000);
+    const second = controls.map(c => cycles.stage(h.ctx, c.change)); await vi.advanceTimersByTimeAsync(I);
     expect(await Promise.all(second)).toEqual([true, true, true, true]); expect(calls).toEqual(["workflow", "auto-effort", "reasoning", "approvals"]);
   });
   it("reports partial application and refuses staging during an async commit", async () => {
@@ -120,7 +121,7 @@ describe("settings cycle coordinator", () => {
     let release; workflow.apply = async v => { await new Promise(resolve => { release = resolve; }); workflow.value = v; return true; };
     approvals.failure = "failed";
     const a = cycles.stage(h.ctx, workflow.change), b = cycles.stage(h.ctx, approvals.change);
-    await vi.advanceTimersByTimeAsync(1000);
+    await vi.advanceTimersByTimeAsync(I);
     expect(cycles.snapshot().phase).toBe("applying");
     expect(await cycles.stage(h.ctx, workflow.change)).toBe(false);
     release(); expect(await Promise.all([a, b])).toEqual([false, false]);
@@ -136,60 +137,60 @@ describe("settings cycle coordinator", () => {
   });
   it.each(["session_before_switch", "session_before_fork", "session_before_tree", "session_before_compact", "ui_prompt_start", "before_agent_start"])("cancels pending work on %s", async event => {
     const h = host(), cycles = settingsCycles(h.pi), c = control("workflow", "work", ["work", "plan"]);
-    const p = cycles.stage(h.ctx, c.change); await h.emit(event); await vi.advanceTimersByTimeAsync(1000);
+    const p = cycles.stage(h.ctx, c.change); await h.emit(event); await vi.advanceTimersByTimeAsync(I);
     expect(await p).toBe(false); expect(c.value).toBe("work");
   });
   it("fences completion after shutdown and never appends into the next session", async () => {
     const h = host(), cycles = settingsCycles(h.pi), c = control("workflow", "work", ["work", "plan"]); let release;
     c.apply = async () => { await new Promise(resolve => { release = resolve; }); return true; };
-    const p = cycles.stage(h.ctx, c.change); await vi.advanceTimersByTimeAsync(1000); await h.emit("session_shutdown");
+    const p = cycles.stage(h.ctx, c.change); await vi.advanceTimersByTimeAsync(I); await h.emit("session_shutdown");
     const count = h.entries.length; h.session = "next"; release(); expect(await p).toBe(false); expect(h.entries).toHaveLength(count);
   });
   it("cancels stale baselines and guard failures", async () => {
     const h = host(), cycles = settingsCycles(h.pi), c = control("reasoning", "low", ["low", "high"]);
     let p = cycles.stage(h.ctx, c.change); c.value = "external"; await h.emit("thinking_level_select", { level: "external" }); expect(await p).toBe(false);
-    c.value = "low"; const remove = cycles.addGuard(() => "not focused"); p = cycles.stage(h.ctx, c.change); await vi.advanceTimersByTimeAsync(1000); expect(await p).toBe(false); remove();
+    c.value = "low"; const remove = cycles.addGuard(() => "not focused"); p = cycles.stage(h.ctx, c.change); await vi.advanceTimersByTimeAsync(I); expect(await p).toBe(false); remove();
   });
   it("settles a conflicting owner before starting its replacement", async () => {
     const h = host(), cycles = settingsCycles(h.pi), a = control("workflow", "work", ["work", "plan"]), b = control("workflow", "work", ["work", "linked"]);
     const first = cycles.stage(h.ctx, a.change), second = cycles.stage(h.ctx, b.change);
-    expect(await first).toBe(false); await vi.advanceTimersByTimeAsync(1000);
+    expect(await first).toBe(false); await vi.advanceTimersByTimeAsync(I);
     expect(await second).toBe(true); expect(a.value).toBe("work"); expect(b.value).toBe("linked"); expect(anchors(h)).toHaveLength(2);
   });
   it("provides only net-changed targets to setters", async () => {
     const h = host(), cycles = settingsCycles(h.pi), auto = control("auto-effort", true, [true, false]), reasoning = control("reasoning", "low", ["low", "high"]); let targets;
     auto.apply = async (value, finalTargets) => { targets = finalTargets; auto.value = value; return true; };
     const requests = [cycles.stage(h.ctx, auto.change), cycles.stage(h.ctx, reasoning.change), cycles.stage(h.ctx, reasoning.change)];
-    await vi.advanceTimersByTimeAsync(1000); expect(await Promise.all(requests)).toEqual([true, true, true]); expect(targets).toEqual({ "auto-effort": false });
+    await vi.advanceTimersByTimeAsync(I); expect(await Promise.all(requests)).toEqual([true, true, true]); expect(targets).toEqual({ "auto-effort": false });
   });
   it("finishes a cancelled in-flight setter before blocking a later input", async () => {
     const h = host(), cycles = settingsCycles(h.pi), c = control("workflow", "work", ["work", "plan"]); let release;
     c.apply = async () => { await new Promise(resolve => { release = resolve; }); return true; };
-    const p = cycles.stage(h.ctx, c.change); await vi.advanceTimersByTimeAsync(1000); cycles.cancel("dialog");
+    const p = cycles.stage(h.ctx, c.change); await vi.advanceTimersByTimeAsync(I); cycles.cancel("dialog");
     let finished = false; const input = h.emit("input", { source: "interactive", text: "hello" }).then(result => { finished = true; return result; });
     await Promise.resolve(); expect(finished).toBe(false); release(); expect(await input).toEqual({ action: "handled" }); expect(await p).toBe(false);
   });
   it("publishes cancellation when an owner becomes stale in the same branch", async () => {
     const h = host(), cycles = settingsCycles(h.pi), c = control("workflow", "work", ["work", "plan"]);
-    const p = cycles.stage(h.ctx, c.change); c.current = false; await vi.advanceTimersByTimeAsync(1000);
+    const p = cycles.stage(h.ctx, c.change); c.current = false; await vi.advanceTimersByTimeAsync(I);
     expect(await p).toBe(false); expect(last(h).phase).toBe("cancelled");
   });
   it("does not resume a commit cancelled reentrantly by a guard", async () => {
     const h = host(), cycles = settingsCycles(h.pi), calls = [], c = control("workflow", "work", ["work", "plan"], calls);
-    cycles.addGuard(() => { cycles.cancel("guard cancelled"); }); const p = cycles.stage(h.ctx, c.change); await vi.advanceTimersByTimeAsync(1000);
+    cycles.addGuard(() => { cycles.cancel("guard cancelled"); }); const p = cycles.stage(h.ctx, c.change); await vi.advanceTimersByTimeAsync(I);
     expect(await p).toBe(false); expect(calls).toEqual([]); expect(last(h).phase).toBe("cancelled");
   });
   it("settles cancellation and fences later applications while a setter is running", async () => {
     const h = host(), cycles = settingsCycles(h.pi), calls = [], a = control("workflow", "work", ["work", "plan"], calls), b = control("approvals", "ask", ["ask", "auto"], calls); let release;
     a.apply = async () => { await new Promise(resolve => { release = resolve; }); return true; };
     const first = cycles.stage(h.ctx, a.change), second = cycles.stage(h.ctx, b.change);
-    await vi.advanceTimersByTimeAsync(1000); cycles.cancel("navigation"); release();
+    await vi.advanceTimersByTimeAsync(I); cycles.cancel("navigation"); release();
     expect(await Promise.all([first, second])).toEqual([false, false]); expect(calls).toEqual(["workflow"]);
   });
   it("handles reentrant staging from a synchronous preview listener", async () => {
     const h = host(), cycles = settingsCycles(h.pi), a = control("workflow", "work", ["work", "plan"]), b = control("approvals", "ask", ["ask", "auto"]); let other;
     h.pi.events.on("pi-plugins.settings-cycle.v1", event => { if (event.type === "changed" && !other) { other = true; other = cycles.stage(h.ctx, b.change); } });
-    const first = cycles.stage(h.ctx, a.change); await vi.advanceTimersByTimeAsync(1000);
+    const first = cycles.stage(h.ctx, a.change); await vi.advanceTimersByTimeAsync(I);
     expect(await Promise.all([first, other])).toEqual([true, true]); expect(anchors(h)).toHaveLength(1); expect(a.value).toBe("plan"); expect(b.value).toBe("auto");
   });
   it("cancels a changed model but ignores delayed same-model events", async () => {
@@ -200,7 +201,7 @@ describe("settings cycle coordinator", () => {
   it("settles asynchronous setter rejection without applying later settings", async () => {
     const h = host(), cycles = settingsCycles(h.pi), calls = [], a = control("workflow", "work", ["work", "plan"], calls), b = control("approvals", "ask", ["ask", "auto"], calls);
     a.apply = async () => { throw Error("activation failed"); };
-    const first = cycles.stage(h.ctx, a.change), second = cycles.stage(h.ctx, b.change); await vi.advanceTimersByTimeAsync(1000);
+    const first = cycles.stage(h.ctx, a.change), second = cycles.stage(h.ctx, b.change); await vi.advanceTimersByTimeAsync(I);
     expect(await Promise.all([first, second])).toEqual([false, false]); expect(calls).toEqual(["workflow"]); expect(last(h).phase).toBe("failed"); expect(last(h).reason).toMatch(/activation failed/);
   });
   it("does not expose mutable journal state through snapshots or notifications", async () => {
@@ -208,7 +209,7 @@ describe("settings cycle coordinator", () => {
     h.pi.events.on("pi-plugins.settings-cycle.v1", event => { if (event.type === "changed") event.snapshot.settings[0].target = "corrupt"; });
     const p = cycles.stage(h.ctx, c.change); const snapshot = cycles.snapshot(); snapshot.settings[0].target = "corrupt again";
     expect(cycles.snapshot().settings[0].target).toBe("plan"); expect(anchors(h)[0].data.settings[0].target).toBe("plan");
-    await vi.advanceTimersByTimeAsync(1000); expect(await p).toBe(true); expect(c.value).toBe("plan");
+    await vi.advanceTimersByTimeAsync(I); expect(await p).toBe(true); expect(c.value).toBe("plan");
   });
   it("cancels shortcut-context previews on the current model from a later event context", async () => {
     const h = host(), cycles = settingsCycles(h.pi), calls = [], c = control("approvals", "auto", ["auto", "yolo"], calls);
@@ -217,7 +218,7 @@ describe("settings cycle coordinator", () => {
     h.ctx.model = { ...h.ctx.model, id: "different-model" };
     expect(shortcut.model.id).toBe("model", "native shortcut contexts retain their old model snapshot");
     await h.emit("model_select");
-    await vi.advanceTimersByTimeAsync(1000);
+    await vi.advanceTimersByTimeAsync(I);
     expect(await p).toBe(false);
     expect(calls).toEqual([]);
     expect(c.value).toBe("auto");
@@ -232,7 +233,7 @@ describe("settings cycle coordinator", () => {
     const component = h.renderers.get("settings:cycle")(anchors(h)[0], {}, { fg: (_color, text) => text });
     expect(component.render(120)).toHaveLength(1);
     expect(component.render(120)[0]).not.toMatch(/[\n\t\x1b]/);
-    await vi.advanceTimersByTimeAsync(1000); expect(await p).toBe(false);
+    await vi.advanceTimersByTimeAsync(I); expect(await p).toBe(false);
     expect(component.render(120)[0]).not.toMatch(/[\n\t\x1b]/);
   });
   it("settles safely when the journal fails during staging, committing or failed input diagnostics", async () => {
@@ -241,7 +242,7 @@ describe("settings cycle coordinator", () => {
       if (phase === "stage") h.pi.appendEntry = () => { throw Error("journal unavailable"); };
       const p = cycles.stage(h.ctx, c.change);
       if (phase !== "stage") h.pi.appendEntry = () => { throw Error("journal unavailable"); };
-      if (phase === "commit") await vi.advanceTimersByTimeAsync(1000);
+      if (phase === "commit") await vi.advanceTimersByTimeAsync(I);
       if (phase === "input") expect(await h.emit("input", { source: "interactive" })).toEqual({ action: "handled" });
       expect(await p).toBe(false);
       expect(c.value).toBe("work");
@@ -268,21 +269,31 @@ describe("settings cycle coordinator", () => {
     expect(cycles.inputStatus()).toMatchObject({ mode: "negotiating", reason: "unconfirmed" });
     h.raw("\x1b[112;5:3u"); // Ordinary-key release proves Ctrl is still held.
     expect(cycles.inputStatus()).toEqual({ mode: "modifier-release", modifiers: ["ctrl"] });
-    expect(vi.getTimerCount()).toBe(0);
-    await vi.advanceTimersByTimeAsync(3000); expect(c.value).toBe("work");
+    await vi.advanceTimersByTimeAsync(I - 1); expect(c.value).toBe("work");
     c.change.validate = () => { expect(h.writes.at(-1)).toBe("\x1b[<u"); };
     h.raw("\x1b[57442;1:3u");
-    expect(await p).toBe(true); expect(c.value).toBe("plan"); expect(calls).toEqual(["workflow"]);
+    expect(await p).toBe(true); expect(c.value).toBe("plan"); expect(calls).toEqual(["workflow"]); expect(last(h).launchedBy).toBe("release");
     h.raw("\x1b[57442;1:3u"); await cycles.flush();
     expect(calls).toEqual(["workflow"]); expect(vi.getTimerCount()).toBe(0);
     expect(h.writes.filter(value => value === "\x1b[<u")).toHaveLength(1);
     expect(cycles.inputStatus()).toEqual({ mode: "idle", modifiers: [] });
   });
+  it("commits a proven hold at the idle deadline when the terminal never reports its release", async () => {
+    const h = transportHost(), cycles = settingsCycles(h.pi, { inputPorts: h.inputPorts }), c = control("workflow", "work", ["work", "plan"]);
+    await h.emit("session_start");
+    const p = h.raw("\x1b[112;5:1u", () => cycles.stage(h.ctx, c.change));
+    h.reply(7); h.reply(31); h.raw("\x1b[112;5:3u");
+    expect(cycles.inputStatus().mode).toBe("modifier-release");
+    await vi.advanceTimersByTimeAsync(I - 1); expect(c.value).toBe("work");
+    await vi.advanceTimersByTimeAsync(1); expect(await p).toBe(true); expect(c.value).toBe("plan");
+    expect(last(h).launchedBy).toBe("timer");
+    expect(h.writes.at(-1)).toBe("\x1b[<u");
+  });
   it.each(["full", "partial", "missing"])("keeps the original activation deadline on %s capability replies and unrelated traffic", async kind => {
     const h = transportHost(), cycles = settingsCycles(h.pi, { inputPorts: h.inputPorts }), c = control("workflow", "work", ["work", "plan"]);
     await h.emit("session_start");
     const p = h.raw("\x1b[112;5:1u", () => cycles.stage(h.ctx, c.change));
-    await vi.advanceTimersByTimeAsync(900);
+    await vi.advanceTimersByTimeAsync(I - 100);
     if (kind !== "missing") { h.reply(7); h.reply(kind === "full" ? 31 : 7); }
     await vi.advanceTimersByTimeAsync(99);
     h.raw("\x1b[<35;4;4M"); h.raw("\x1b]0;title\x07");
@@ -299,7 +310,7 @@ describe("settings cycle coordinator", () => {
     const anchor = structuredClone(anchors(h)[0]);
     const second = cycles.stage(h.ctx, c.change, { kind: "pointer" });
     expect(second).not.toBe(first); expect(cycles.snapshot().settings[0].baseline).toBe("plan");
-    await vi.advanceTimersByTimeAsync(1000); expect(await second).toBe(true);
+    await vi.advanceTimersByTimeAsync(I); expect(await second).toBe(true);
     const third = h.raw("\x1b[112;5:1u", () => cycles.stage(h.ctx, c.change));
     h.reply(7); h.reply(31);
     h.raw("\x1b[112;5:2u", () => expect(cycles.stage(h.ctx, c.change)).toBe(third));
@@ -312,9 +323,9 @@ describe("settings cycle coordinator", () => {
     const h = transportHost(), cycles = settingsCycles(h.pi, { inputPorts: h.inputPorts }), workflow = control("workflow", "work", ["work", "plan"]), approvals = control("approvals", "ask", ["ask", "auto"]);
     await h.emit("session_start");
     const p = h.raw("\x1b[112;5:1u", () => cycles.stage(h.ctx, workflow.change));
-    await vi.advanceTimersByTimeAsync(400);
+    await vi.advanceTimersByTimeAsync(I / 2);
     h.raw("\x1b[97;5:1u", () => expect(cycles.stage(h.ctx, approvals.change)).toBe(p));
-    await vi.advanceTimersByTimeAsync(800); h.reply(7); h.reply(7);
+    await vi.advanceTimersByTimeAsync(I / 2); h.reply(7); h.reply(7);
     await vi.advanceTimersByTimeAsync(199); expect(workflow.value).toBe("work");
     await vi.advanceTimersByTimeAsync(1); expect(await p).toBe(true); expect(approvals.value).toBe("auto");
   });
@@ -323,13 +334,13 @@ describe("settings cycle coordinator", () => {
     await h.emit("session_start");
     const p = h.raw("\x1b[112;5:1u", () => cycles.stage(h.ctx, c.change));
     h.reply(7); h.reply(31); h.raw("\x1b[112;5:3u");
-    await vi.advanceTimersByTimeAsync(3000); expect(c.value).toBe("work");
+    expect(c.value).toBe("work");
     expect(cycles.withTrigger({ kind }, () => cycles.stage(h.ctx, c.change))).toBe(p);
     expect(cycles.captureTrigger()).toBeUndefined();
     expect(cycles.inputStatus()).toEqual({ mode: "timer", modifiers: [], reason: kind });
     expect(h.writes.at(-1)).toBe("\x1b[<u");
     h.raw("\x1b[57442;1:3u");
-    await vi.advanceTimersByTimeAsync(999); expect(c.value).toBe("work");
+    await vi.advanceTimersByTimeAsync(I - 1); expect(c.value).toBe("work");
     await vi.advanceTimersByTimeAsync(1); expect(await p).toBe(true); expect(c.value).toBe("linked");
   });
   it("keeps a newer reentrant pointer activation instead of restoring its outer keyboard trigger", async () => {
@@ -341,7 +352,7 @@ describe("settings cycle coordinator", () => {
     const p = h.raw("\x1b[112;5:1u", () => cycles.stage(h.ctx, workflow.change));
     expect(nested).toBe(p); expect(cycles.inputStatus()).toEqual({ mode: "timer", modifiers: [], reason: "pointer" });
     expect(h.writes).toEqual([]);
-    await vi.advanceTimersByTimeAsync(1000); expect(await p).toBe(true); expect(approvals.value).toBe("auto");
+    await vi.advanceTimersByTimeAsync(I); expect(await p).toBe(true); expect(approvals.value).toBe("auto");
   });
   it("disposes the live input binding and deadline on shutdown, then binds a fresh session once", async () => {
     const h = transportHost(), cycles = settingsCycles(h.pi, { inputPorts: h.inputPorts }), c = control("workflow", "work", ["work", "plan"]);
@@ -355,7 +366,7 @@ describe("settings cycle coordinator", () => {
     await h.emit("session_start"); expect(h.hooks.size).toBe(1);
     const next = cycles.stage(h.ctx, c.change, { kind: "pointer" });
     h.raw("\x1b[57442;1:3u");
-    await vi.advanceTimersByTimeAsync(999); expect(c.value).toBe("work");
+    await vi.advanceTimersByTimeAsync(I - 1); expect(c.value).toBe("work");
     await vi.advanceTimersByTimeAsync(1); expect(await next).toBe(true); expect(anchors(h)).toHaveLength(2);
     await h.emit("session_shutdown");
   });
@@ -363,11 +374,11 @@ describe("settings cycle coordinator", () => {
     const h = transportHost(), cycles = settingsCycles(h.pi, { inputPorts: h.inputPorts }), c = control("workflow", "work", ["work", "plan", "linked"]);
     await h.emit("session_start");
     const p = cycles.stage(h.ctx, c.change, { kind: "pointer" });
-    await vi.advanceTimersByTimeAsync(500);
+    await vi.advanceTimersByTimeAsync(I / 2);
     h.raw("\x1b[112;5:1u", () => expect(cycles.stage(h.ctx, c.change)).toBe(p));
     h.reply(7); h.reply(31); h.raw("\x1b[112;5:3u");
     expect(cycles.inputStatus().mode).toBe("modifier-release");
-    await vi.advanceTimersByTimeAsync(3000); expect(c.value).toBe("work");
+    await vi.advanceTimersByTimeAsync(I - 1); expect(c.value).toBe("work");
     h.raw("\x1b[57442;1:3u"); expect(await p).toBe(true); expect(c.value).toBe("linked");
   });
   it("finishes release before the handshake and ignores late acknowledgements", async () => {
@@ -389,7 +400,7 @@ describe("settings cycle coordinator", () => {
     await h.emit("session_shutdown"); await h.emit("session_start");
     const p = cycles.stage(h.ctx, c.change, trigger);
     expect(cycles.inputStatus()).toMatchObject({ mode: "timer", reason: "unavailable" });
-    await vi.advanceTimersByTimeAsync(999); expect(c.value).toBe("plan");
+    await vi.advanceTimersByTimeAsync(I - 1); expect(c.value).toBe("plan");
     await vi.advanceTimersByTimeAsync(1); expect(await p).toBe(true); expect(h.writes).toEqual([]);
   });
   it("closes a leased frame before cancellation publications and fences simultaneous submit/release", async () => {
@@ -420,7 +431,7 @@ describe("settings cycle coordinator", () => {
       }
       expect(cycles.snapshot()).toMatchObject({ id: rowId, phase: "pending", settings: [{ baseline, target }] });
       expect(component.render(120)[0]).toMatch(new RegExp(`pending.*${target}`));
-      await vi.advanceTimersByTimeAsync(1000);
+      await vi.advanceTimersByTimeAsync(I);
       expect(await p).toBe(true);
       expect(c.value).toBe(target);
       expect(component.render(120)[0]).toBe(`Settings · Workflow ${target}`);
@@ -433,11 +444,11 @@ describe("settings cycle coordinator", () => {
   it("shows only the latest batch, including unchanged round trips, without reusing an old baseline", async () => {
     const h = host(), cycles = settingsCycles(h.pi), calls = [], workflow = control("workflow", "work", ["work", "plan"], calls), reasoning = control("reasoning", "low", ["low", "high"], calls);
     const first = cycles.stage(h.ctx, workflow.change);
-    await vi.advanceTimersByTimeAsync(1000); expect(await first).toBe(true);
+    await vi.advanceTimersByTimeAsync(I); expect(await first).toBe(true);
     const rowId = last(h).id;
     const p = cycles.stage(h.ctx, reasoning.change);
     expect(cycles.stage(h.ctx, reasoning.change)).toBe(p);
-    await vi.advanceTimersByTimeAsync(1000); expect(await p).toBe(true);
+    await vi.advanceTimersByTimeAsync(I); expect(await p).toBe(true);
     expect(last(h)).toMatchObject({ id: rowId, phase: "unchanged", settings: [{ key: "reasoning", baseline: "low", actual: "low", target: "low" }] });
     expect(last(h).settings).toHaveLength(1); expect(calls).toEqual(["workflow"]); expect(workflow.value).toBe("plan");
     expect(anchors(h)).toHaveLength(1);
@@ -445,16 +456,16 @@ describe("settings cycle coordinator", () => {
     expect(component.render(120)).toEqual(["Settings unchanged"]);
     const next = cycles.stage(h.ctx, workflow.change);
     expect(cycles.snapshot().settings[0].baseline).toBe("plan");
-    await vi.advanceTimersByTimeAsync(1000); expect(await next).toBe(true);
+    await vi.advanceTimersByTimeAsync(I); expect(await next).toBe(true);
     expect(workflow.value).toBe("work"); expect(anchors(h)).toHaveLength(1);
   });
   it.each(["input", "ui_prompt_start", "session_before_switch", "session_before_fork", "session_before_tree", "session_before_compact", "before_agent_start", "message_start", "session_tree"])("seals an already settled row on %s", async event => {
     const h = host(), cycles = settingsCycles(h.pi), c = control("workflow", "work", ["work", "plan"]);
-    const first = cycles.stage(h.ctx, c.change); await vi.advanceTimersByTimeAsync(1000); expect(await first).toBe(true);
+    const first = cycles.stage(h.ctx, c.change); await vi.advanceTimersByTimeAsync(I); expect(await first).toBe(true);
     const oldId = last(h).id;
     const component = h.renderers.get("settings:cycle")(anchors(h)[0], {}, { fg: (_color, text) => text });
     await h.emit(event, { source: "interactive" });
-    const next = cycles.stage(h.ctx, c.change); await vi.advanceTimersByTimeAsync(1000); expect(await next).toBe(true);
+    const next = cycles.stage(h.ctx, c.change); await vi.advanceTimersByTimeAsync(I); expect(await next).toBe(true);
     expect(anchors(h)).toHaveLength(2); expect(last(h).id).not.toBe(oldId);
     expect(component.render(120)).toEqual(["Settings · Workflow plan"]);
   });
@@ -462,27 +473,27 @@ describe("settings cycle coordinator", () => {
     const h = host(), cycles = settingsCycles(h.pi), calls = [], c = control("workflow", "work", ["work", "plan"], calls);
     const p = cycles.stage(h.ctx, c.change);
     h.entries.splice(0);
-    await vi.advanceTimersByTimeAsync(1000);
+    await vi.advanceTimersByTimeAsync(I);
     expect(await p).toBe(false); expect(calls).toEqual([]); expect(h.entries).toEqual([]);
   });
   it("seals explicit cancellation even with no pending transaction", async () => {
     const h = host(), cycles = settingsCycles(h.pi), c = control("workflow", "work", ["work", "plan"]);
-    const p = cycles.stage(h.ctx, c.change); await vi.advanceTimersByTimeAsync(1000); expect(await p).toBe(true);
+    const p = cycles.stage(h.ctx, c.change); await vi.advanceTimersByTimeAsync(I); expect(await p).toBe(true);
     cycles.cancel("explicit selection");
-    const next = cycles.stage(h.ctx, c.change); await vi.advanceTimersByTimeAsync(1000); expect(await next).toBe(true);
+    const next = cycles.stage(h.ctx, c.change); await vi.advanceTimersByTimeAsync(I); expect(await next).toBe(true);
     expect(anchors(h)).toHaveLength(2);
   });
   it("starts a new row for a conflicting owner after successful settlement", async () => {
     const h = host(), cycles = settingsCycles(h.pi), a = control("workflow", "work", ["work", "plan"]), b = control("workflow", "plan", ["plan", "linked"]);
-    const first = cycles.stage(h.ctx, a.change); await vi.advanceTimersByTimeAsync(1000); expect(await first).toBe(true);
-    const second = cycles.stage(h.ctx, b.change); await vi.advanceTimersByTimeAsync(1000); expect(await second).toBe(true);
+    const first = cycles.stage(h.ctx, a.change); await vi.advanceTimersByTimeAsync(I); expect(await first).toBe(true);
+    const second = cycles.stage(h.ctx, b.change); await vi.advanceTimersByTimeAsync(I); expect(await second).toBe(true);
     expect(anchors(h)).toHaveLength(2);
   });
   it.each(["tool-gate:workflow", "tool-gate:approvals", "tool-gate:flow", "tool-gate:chat-notice", "plan-mode:inline", "auto-effort:state", "auto-effort:manual-level"])("allows own setting persistence during a setter: %s", async customType => {
     const h = host(), cycles = settingsCycles(h.pi), c = control("workflow", "work", ["work", "plan"]);
     c.apply = async value => { h.pi.appendEntry(customType, {}); c.value = value; return true; };
-    const first = cycles.stage(h.ctx, c.change); await vi.advanceTimersByTimeAsync(1000); expect(await first).toBe(true);
-    const second = cycles.stage(h.ctx, c.change); await vi.advanceTimersByTimeAsync(1000); expect(await second).toBe(true);
+    const first = cycles.stage(h.ctx, c.change); await vi.advanceTimersByTimeAsync(I); expect(await first).toBe(true);
+    const second = cycles.stage(h.ctx, c.change); await vi.advanceTimersByTimeAsync(I); expect(await second).toBe(true);
     expect(anchors(h)).toHaveLength(1);
   });
   it.each(["model_change", "thinking_level_change"])("allows native %s records inside a setter only", async type => {
@@ -492,87 +503,87 @@ describe("settings cycle coordinator", () => {
       await h.emit(type === "model_change" ? "model_select" : "thinking_level_select");
       c.value = value; return true;
     };
-    let p = cycles.stage(h.ctx, c.change); await vi.advanceTimersByTimeAsync(1000); expect(await p).toBe(true);
-    p = cycles.stage(h.ctx, c.change); await vi.advanceTimersByTimeAsync(1000); expect(await p).toBe(true);
+    let p = cycles.stage(h.ctx, c.change); await vi.advanceTimersByTimeAsync(I); expect(await p).toBe(true);
+    p = cycles.stage(h.ctx, c.change); await vi.advanceTimersByTimeAsync(I); expect(await p).toBe(true);
     expect(anchors(h)).toHaveLength(1);
     c.apply = undefined;
     const remove = cycles.addGuard(() => { h.entries.push({ type, id: String(h.entries.length + 1) }); });
-    p = cycles.stage(h.ctx, c.change); await vi.advanceTimersByTimeAsync(1000); expect(await p).toBe(true); remove();
-    p = cycles.stage(h.ctx, c.change); await vi.advanceTimersByTimeAsync(1000); expect(await p).toBe(true);
+    p = cycles.stage(h.ctx, c.change); await vi.advanceTimersByTimeAsync(I); expect(await p).toBe(true); remove();
+    p = cycles.stage(h.ctx, c.change); await vi.advanceTimersByTimeAsync(I); expect(await p).toBe(true);
     expect(anchors(h)).toHaveLength(2);
   });
   it.each(["custom", "message", "custom_message", "compaction"])("seals on unrelated %s records inside asynchronous application", async type => {
     const h = host(), cycles = settingsCycles(h.pi), c = control("workflow", "work", ["work", "plan"]);
     c.apply = async value => { await Promise.resolve(); h.entries.push({ type, customType: "other:output", id: String(h.entries.length + 1) }); c.value = value; return true; };
-    const first = cycles.stage(h.ctx, c.change); await vi.advanceTimersByTimeAsync(1000); expect(await first).toBe(true);
+    const first = cycles.stage(h.ctx, c.change); await vi.advanceTimersByTimeAsync(I); expect(await first).toBe(true);
     c.apply = undefined;
-    const next = cycles.stage(h.ctx, c.change); await vi.advanceTimersByTimeAsync(1000); expect(await next).toBe(true);
+    const next = cycles.stage(h.ctx, c.change); await vi.advanceTimersByTimeAsync(I); expect(await next).toBe(true);
     expect(anchors(h)).toHaveLength(2);
   });
   it.each([true, false])("checks records appended by final publication listeners (setting-owned: %s)", async owned => {
     const h = host(), cycles = settingsCycles(h.pi), c = control("workflow", "work", ["work", "plan"]);
     h.pi.events.on("pi-plugins.settings-cycle.v1", event => { if (event.snapshot?.phase === "applied") h.pi.appendEntry(owned ? "auto-effort:state" : "unrelated:output", {}); });
-    const first = cycles.stage(h.ctx, c.change); await vi.advanceTimersByTimeAsync(1000); expect(await first).toBe(true);
-    const second = cycles.stage(h.ctx, c.change); await vi.advanceTimersByTimeAsync(1000); expect(await second).toBe(true);
+    const first = cycles.stage(h.ctx, c.change); await vi.advanceTimersByTimeAsync(I); expect(await first).toBe(true);
+    const second = cycles.stage(h.ctx, c.change); await vi.advanceTimersByTimeAsync(I); expect(await second).toBe(true);
     expect(anchors(h)).toHaveLength(owned ? 1 : 2);
   });
   it("does not allow an external cycle-state record to impersonate a coordinator publication", async () => {
     const h = host(), cycles = settingsCycles(h.pi), c = control("workflow", "work", ["work", "plan"]);
     c.apply = async value => { h.pi.appendEntry("settings:cycle-state", cycles.snapshot()); c.value = value; return true; };
-    const first = cycles.stage(h.ctx, c.change); await vi.advanceTimersByTimeAsync(1000); expect(await first).toBe(true);
-    const next = cycles.stage(h.ctx, c.change); await vi.advanceTimersByTimeAsync(1000); expect(await next).toBe(true);
+    const first = cycles.stage(h.ctx, c.change); await vi.advanceTimersByTimeAsync(I); expect(await first).toBe(true);
+    const next = cycles.stage(h.ctx, c.change); await vi.advanceTimersByTimeAsync(I); expect(await next).toBe(true);
     expect(anchors(h)).toHaveLength(2);
   });
   it("seals on message_start while an asynchronous setter has not persisted its output", async () => {
     const h = host(), cycles = settingsCycles(h.pi), c = control("workflow", "work", ["work", "plan"]); let release;
     c.apply = async value => { await new Promise(resolve => { release = resolve; }); c.value = value; return true; };
-    const first = cycles.stage(h.ctx, c.change); await vi.advanceTimersByTimeAsync(1000);
+    const first = cycles.stage(h.ctx, c.change); await vi.advanceTimersByTimeAsync(I);
     await h.emit("message_start"); release(); expect(await first).toBe(true);
     c.apply = undefined;
-    const next = cycles.stage(h.ctx, c.change); await vi.advanceTimersByTimeAsync(1000); expect(await next).toBe(true);
+    const next = cycles.stage(h.ctx, c.change); await vi.advanceTimersByTimeAsync(I); expect(await next).toBe(true);
     expect(anchors(h)).toHaveLength(2);
   });
   it.each(["custom", "message", "model_change", "thinking_level_change"])("requires the exact checkpoint when an external %s arrives between batches", async type => {
     const h = host(), cycles = settingsCycles(h.pi), c = control("workflow", "work", ["work", "plan"]);
-    const first = cycles.stage(h.ctx, c.change); await vi.advanceTimersByTimeAsync(1000); expect(await first).toBe(true);
+    const first = cycles.stage(h.ctx, c.change); await vi.advanceTimersByTimeAsync(I); expect(await first).toBe(true);
     h.entries.push({ type, customType: "tool-gate:workflow", id: String(h.entries.length + 1) });
-    const next = cycles.stage(h.ctx, c.change); await vi.advanceTimersByTimeAsync(1000); expect(await next).toBe(true);
+    const next = cycles.stage(h.ctx, c.change); await vi.advanceTimersByTimeAsync(I); expect(await next).toBe(true);
     expect(anchors(h)).toHaveLength(2);
   });
   it("seals a failed reused row before a successful retry", async () => {
     const h = host(), cycles = settingsCycles(h.pi), c = control("workflow", "work", ["work", "plan"]);
-    const first = cycles.stage(h.ctx, c.change); await vi.advanceTimersByTimeAsync(1000); expect(await first).toBe(true);
+    const first = cycles.stage(h.ctx, c.change); await vi.advanceTimersByTimeAsync(I); expect(await first).toBe(true);
     c.failure = "failed";
-    const failed = cycles.stage(h.ctx, c.change); await vi.advanceTimersByTimeAsync(1000); expect(await failed).toBe(false);
+    const failed = cycles.stage(h.ctx, c.change); await vi.advanceTimersByTimeAsync(I); expect(await failed).toBe(false);
     expect(anchors(h)).toHaveLength(1); expect(last(h).phase).toBe("failed");
     const component = h.renderers.get("settings:cycle")(anchors(h)[0], {}, { fg: (_color, text) => text });
     c.failure = undefined;
-    const retry = cycles.stage(h.ctx, c.change); await vi.advanceTimersByTimeAsync(1000); expect(await retry).toBe(true);
+    const retry = cycles.stage(h.ctx, c.change); await vi.advanceTimersByTimeAsync(I); expect(await retry).toBe(true);
     expect(anchors(h)).toHaveLength(2); expect(component.render(120)[0]).toMatch(/not applied.*failed/);
   });
   it("never reopens restored successful history for live editing", async () => {
     const h = host(), cycles = settingsCycles(h.pi), c = control("workflow", "work", ["work", "plan"]);
-    const first = cycles.stage(h.ctx, c.change); await vi.advanceTimersByTimeAsync(1000); expect(await first).toBe(true);
+    const first = cycles.stage(h.ctx, c.change); await vi.advanceTimersByTimeAsync(I); expect(await first).toBe(true);
     const recorded = structuredClone(h.entries);
     await h.emit("session_shutdown"); await h.emit("session_start");
     expect(h.entries).toEqual(recorded); expect(vi.getTimerCount()).toBe(0);
-    const next = cycles.stage(h.ctx, c.change); await vi.advanceTimersByTimeAsync(1000); expect(await next).toBe(true);
+    const next = cycles.stage(h.ctx, c.change); await vi.advanceTimersByTimeAsync(I); expect(await next).toBe(true);
     expect(anchors(h)).toHaveLength(2); expect(h.entries.slice(0, recorded.length)).toEqual(recorded);
   });
   it("seals a row when final journal persistence fails even after the setter succeeded", async () => {
     const h = host(), cycles = settingsCycles(h.pi), c = control("workflow", "work", ["work", "plan"]), append = h.pi.appendEntry;
-    const first = cycles.stage(h.ctx, c.change); await vi.advanceTimersByTimeAsync(1000); expect(await first).toBe(true);
+    const first = cycles.stage(h.ctx, c.change); await vi.advanceTimersByTimeAsync(I); expect(await first).toBe(true);
     h.pi.appendEntry = (type, data) => { if (data.phase === "applied") throw Error("disk full"); append(type, data); };
-    const failed = cycles.stage(h.ctx, c.change); await vi.advanceTimersByTimeAsync(1000); expect(await failed).toBe(false);
+    const failed = cycles.stage(h.ctx, c.change); await vi.advanceTimersByTimeAsync(I); expect(await failed).toBe(false);
     expect(c.value).toBe("work"); expect(vi.getTimerCount()).toBe(0);
     h.pi.appendEntry = append;
-    const retry = cycles.stage(h.ctx, c.change); await vi.advanceTimersByTimeAsync(1000); expect(await retry).toBe(true);
+    const retry = cycles.stage(h.ctx, c.change); await vi.advanceTimersByTimeAsync(I); expect(await retry).toBe(true);
     expect(anchors(h)).toHaveLength(2);
   });
   it("reconstructs an unconfirmed applying snapshot as interrupted without changing records", async () => {
     const h = host(), cycles = settingsCycles(h.pi), c = control("workflow", "work", ["work", "plan"]); let release;
     c.apply = async () => { await new Promise(resolve => { release = resolve; }); return true; };
-    const p = cycles.stage(h.ctx, c.change); await vi.advanceTimersByTimeAsync(1000); const recorded = structuredClone(h.entries);
+    const p = cycles.stage(h.ctx, c.change); await vi.advanceTimersByTimeAsync(I); const recorded = structuredClone(h.entries);
     await h.emit("session_shutdown"); release(); expect(await p).toBe(false);
     h.entries.splice(0, h.entries.length, ...recorded); await h.emit("session_start");
     const component = h.renderers.get("settings:cycle")(anchors(h)[0], {}, { fg: (_color, text) => text });

@@ -798,7 +798,7 @@ test("standalone toggles preview without allocation and apply only the final loc
     assert.equal(h.mock.entries.filter((entry) => entry.customType === INLINE_ENTRY).length, 0);
     assert.deepEqual(workflowTransitions(h.mock), []);
     assert.equal(settingsCycles(h.mock.pi).snapshot()?.phase, "pending");
-    await vi.advanceTimersByTimeAsync(999);
+    await vi.advanceTimersByTimeAsync(399);
     assert.equal(h.inline.active, false);
     await vi.advanceTimersByTimeAsync(1);
     assert.equal(await pending, true);
@@ -832,7 +832,7 @@ test("standalone Plan round trips are true no-ops with one journal anchor and no
     const first = h.inline.toggle(h.ctx);
     await vi.advanceTimersByTimeAsync(300);
     const second = h.inline.toggle(h.ctx);
-    await vi.advanceTimersByTimeAsync(999);
+    await vi.advanceTimersByTimeAsync(399);
     assert.equal(h.inline.active, false);
     assert.equal(h.plansDirectory.mock.calls.length, 0);
     await vi.advanceTimersByTimeAsync(1);
