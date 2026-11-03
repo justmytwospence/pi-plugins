@@ -11,7 +11,8 @@ export type FooterActionId =
   | "context.skills"
   | "cache.status"
   | "mcp.open"
-  | "system1.open";
+  | "system1.open"
+  | "headsup.open";
 export interface FooterAction {
   label: string;
   key?: string;

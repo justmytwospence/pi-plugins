@@ -95,6 +95,8 @@ export interface Snapshot {
   autoEffort?: boolean; autoEffortDetail?: string; lean?: string; cache?: string; extraBilled?: number;
   /** A prompt stashed by @saadjs/pi-stash; text is its content when readable. */
   stash?: { text?: string };
+  /** pi-sidebar's latest waiting heads-up note (Sidebar closed); more counts the earlier ones. */
+  headsUp?: { kind: string; text: string; more: number };
   /** pi-marimo's notebooks, one row each (keys `marimo`, `marimo-2`, ...). */
   marimo?: MarimoStatus[];
   /** pi-marimo's open marimo-lens selections, shown on their own row under the marimo row. */
@@ -267,7 +269,7 @@ export function parseModeStatus(text: string): PermissionModeStatus | undefined 
   return { kind: MODE_KINDS[match[2]], label: `${glyph} ${match[2]} on`, ...(match[3] ? { key: match[3] } : {}) };
 }
 
-export interface AbsorbedStatuses { workflow?: WorkflowStatus; mode?: PermissionModeStatus; exec?: string; autoEffort: boolean; autoEffortDetail?: string; lean?: string; cache?: string; extraBilled?: number; stashed?: boolean; marimo?: MarimoStatus[]; lens?: LensStatus; bg?: BgItem[]; pressure?: PressureItem[]; /** Another extension owns the `mcp` status. */ mcp?: boolean; rest: string[] }
+export interface AbsorbedStatuses { workflow?: WorkflowStatus; mode?: PermissionModeStatus; exec?: string; autoEffort: boolean; autoEffortDetail?: string; lean?: string; cache?: string; extraBilled?: number; stashed?: boolean; headsUp?: { kind: string; text: string; more: number }; marimo?: MarimoStatus[]; lens?: LensStatus; bg?: BgItem[]; pressure?: PressureItem[]; /** Another extension owns the `mcp` status. */ mcp?: boolean; rest: string[] }
 // Statuses from our own companion extensions that read better inside the footer
 // rows they describe. Each is optional: absent extensions publish nothing, and a
 // status whose text no longer matches the expected shape falls through to the
@@ -278,6 +280,7 @@ export interface AbsorbedStatuses { workflow?: WorkflowStatus; mode?: Permission
 //   cache-guard       (pi-cache-guard)          "cache 4:12"           -> context row
 //   anthropic-billing (anthropic-billing-guard) "extra usage x3"       -> Claude limits row
 //   prompt-stash      (@saadjs/pi-stash)        "prompt stashed"       -> its own row under the editor
+//   sidebar-headsup   (pi-sidebar)              "✦ heads up (2) · tradeoff: text" -> its own row under the editor
 //   marimo, marimo-N  (pi-marimo)               "marimo: nb.py · ..."  -> a row per notebook under the context row
 //   marimo-lens       (pi-marimo)               "lens: nb.py · S1 ..." -> its own row under the marimo row
 //   bg                (pi-bg)                   "bg: tests 2:14 · ..." -> its own row under that
@@ -304,6 +307,8 @@ export function absorbStatuses(statuses: ReadonlyMap<string, string>, options: {
     const billed = key === "anthropic-billing" ? /^extra usage x(\d+)$/.exec(plainText) : null;
     if (billed && options.claudeRow) { result.extraBilled = +billed[1]; continue; }
     if (key === "prompt-stash" && plainText === "prompt stashed") { result.stashed = true; continue; }
+    const headsUp = key === "sidebar-headsup" ? /^✦ heads up(?: \((\d+)\))? · ([a-z][a-z ]*): (.+)$/u.exec(plainText) : null;
+    if (headsUp) { result.headsUp = { kind: headsUp[2], text: headsUp[3], more: headsUp[1] ? +headsUp[1] - 1 : 0 }; continue; }
     // One status per notebook: `marimo`, then `marimo-2`, `marimo-3`, ... in that order.
     const slot = key === "marimo" ? 1 : /^marimo-(\d+)$/.exec(key)?.[1];
     const marimo = slot !== undefined ? parseMarimoStatus(plainText) : undefined;
@@ -678,6 +683,20 @@ function stashRow(text: string | undefined, width: number, theme: Paint): string
   ], width, theme);
 }
 
+// pi-sidebar's waiting heads-up note: label, kind, then the note's text filling the row.
+function headsUpSegments(h: { kind: string; text: string; more: number }, width: number, theme: Paint, action?: string): Segment[] {
+  const labelText = theme.fg("accent", "Heads up") + (h.more ? theme.fg("dim", ` +${h.more}`) : "");
+  const kind = theme.fg("muted", h.kind);
+  const text = clean(h.text);
+  const room = width - visibleWidth(labelText) - visibleWidth(kind) - 2 * 3 - 2;
+  const first = room >= 8 ? (visibleWidth(text) > room ? `${stripVTControlCharacters(truncateToWidth(text, room - 1, ""))}\u2026` : text) : "";
+  return [
+    partsSegment([{ text: labelText, action }], 100),
+    { text: kind, priority: 50 },
+    first ? partsSegment([{ text: `"${first}"`, action }], 30) : { text: "", priority: 30 },
+  ];
+}
+
 // A notebook pi-marimo follows, one row each: its name and what its kernel is
 // doing (the markdown section the running cell sits under, its deepest heading
 // when narrow). An older pi-marimo sent one row naming the others after `also`.
@@ -770,6 +789,7 @@ function pressureRow(items: PressureItem[], width: number, theme: Paint): string
 // placeholders; the row text stays readable.
 export const ICONS = {
   stash: "\uf187", // archive
+  headsUp: "\u2726", // ✦, pi-sidebar's heads-up mark
   project: "\uf07b", // folder
   branch: "\ue725", // git branch
   model: "\u{f06a9}", // robot (Material Design; the Font Awesome robot draws wider than its neighbors)
@@ -827,14 +847,14 @@ export function layoutFooter(snapshot: Snapshot, width: number, theme: Paint): F
   const sep = theme.fg("dim", " · ");
   const action = (id: FooterControlId) => !s.readOnly && s.actions?.[id] ? id : undefined;
   const row = (icon: string, render: (width: number) => string) => iconRow(icon, width, theme, render);
-  const controlRow = (icon: string, segments: Segment[], key?: string, control?: string) => {
+  const controlRow = (icon: string, segments: Segment[] | ((width: number) => Segment[]), key?: string, control?: string) => {
     const prefix = `${theme.fg("dim", icon)}${ICON_GAP}`, prefixWidth = visibleWidth(prefix);
     const contentWidth = Math.max(0, width - prefixWidth);
     const hint = !s.readOnly && key ? clean(key) : "";
     // Keep the primary hint adjacent to content, yielding before state at narrow widths.
     const suffixWidth = visibleWidth(` · ${hint}`);
     const reserve = hint && contentWidth - suffixWidth >= 18 ? suffixWidth : 0;
-    const fitted = fitSegmentLayout(segments, contentWidth - reserve, theme);
+    const fitted = fitSegmentLayout(typeof segments === "function" ? segments(contentWidth - reserve) : segments, contentWidth - reserve, theme);
     const offset = inset + prefixWidth;
     const rowIndex = rows.length;
     for (const hit of fitted.hits) hits.push({ ...hit, row: rowIndex, startCol: offset + hit.startCol, endCol: offset + hit.endCol });
@@ -847,6 +867,11 @@ export function layoutFooter(snapshot: Snapshot, width: number, theme: Paint): F
     rows.push(text);
   };
   if (s.stash) rows.push(row(ICONS.stash, (w) => stashRow(s.stash?.text, w, theme)));
+  if (s.headsUp) {
+    const h = s.headsUp, act = action("headsup.open");
+    const key = act ? s.actions?.["headsup.open"]?.key : undefined;
+    controlRow(ICONS.headsUp, (w) => headsUpSegments(h, w, theme, act), key ? `${key} to read` : undefined, act);
+  }
   // Minimal suffix; path, staging and tracking details stay in /status.
   const outsideGit = g.notRepository && !g.unavailable;
   const available = !g.unavailable && !outsideGit && Boolean(g.branch);
@@ -1651,6 +1676,7 @@ export default function statusFooter(pi: ExtensionAPI): void {
       quotas, unavailableQuota, providerUsage: usage.rows, providerUsageMore: usage.more,
       statuses: absorbed.rest, workflow: absorbed.workflow, mode: absorbed.mode, exec: absorbed.exec, autoEffort: absorbed.autoEffort, autoEffortDetail: absorbed.autoEffortDetail, lean: absorbed.lean, cache: absorbed.cache, extraBilled: absorbed.extraBilled,
       stash: absorbed.stashed ? { text: stashedPrompt() } : undefined,
+      headsUp: absorbed.headsUp,
       marimo: absorbed.marimo, lens: absorbed.lens, bg: absorbed.bg, pressure: absorbed.pressure, borderGauge, compact: blockedHolds > 0,
       // Yield to an extension that publishes its own mcp status (pi-mcp-adapter).
       mcp: showMcp && !absorbed.mcp ? mcp : undefined,

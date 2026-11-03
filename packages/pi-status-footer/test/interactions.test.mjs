@@ -130,6 +130,7 @@ function fixture({ width = 120, sidebar = false, vim = false, regular = false, b
     "context.open": { label: "Context", run() { calls.push("context"); } },
     "context.skills": { label: "Skills", run() { calls.push("skills"); } },
     "mcp.open": { label: "MCP", run() { calls.push("mcp"); } },
+    "headsup.open": { label: "Heads-up", run() { calls.push("headsup"); } },
     "workflow.open": { label: "Workflow", run() { calls.push("workflow picker"); } },
     "workflow.cycle": { label: "Workflow", run() { calls.push("workflow cycle"); } },
   };
@@ -550,11 +551,11 @@ test("busy controls explain why pickers wait; reversible settings and inspection
     assert.match(f.notify.mock.calls.at(-1)[0], /Wait for the current turn/);
   }
   assert.deepEqual(f.calls, []);
-  for (const action of ["reasoning.cycle", "effort.toggle", "cache.status", "execution.status"]) {
+  for (const action of ["reasoning.cycle", "effort.toggle", "cache.status", "execution.status", "headsup.open"]) {
     assert.equal(f.controller.available(action), true, action);
     await f.controller.activate(action);
   }
-  assert.deepEqual(f.calls, ["native.reasoning", "effort", "cache", "execution"]);
+  assert.deepEqual(f.calls, ["native.reasoning", "effort", "cache", "execution", "headsup"]);
 });
 
 test("serialization, errors, stale completion and recaptured generation are session-owned", async () => {

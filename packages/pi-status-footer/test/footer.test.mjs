@@ -477,6 +477,35 @@ test("a stashed prompt gets its own row under the editor, with a preview when re
   assert.deepEqual(mod.absorbStatuses(new Map([["prompt-stash", "2 prompts stashed"]]), { claudeRow: true }).rest, ["2 prompts stashed"]);
 });
 
+test("a waiting heads-up note gets its own row under the editor, filling the width", () => {
+  const text = "Chose SQLite over Postgres without saying why";
+  const absorbed = mod.absorbStatuses(new Map([["sidebar-headsup", `\u2726 heads up (3) \u00b7 tradeoff: ${text}`]]), { claudeRow: true });
+  assert.deepEqual(absorbed, { autoEffort: false, headsUp: { kind: "tradeoff", text, more: 2 }, rest: [] });
+  const actions = { "headsup.open": { key: "ctrl+'" } };
+  const s = { ...fixture(), statuses: [], headsUp: absorbed.headsUp, actions };
+  const rows = mod.renderFooter(s, 120, theme).map(plain);
+  assert.match(rows[0], /^ \u2726  Heads up \+2 \u00b7 tradeoff \u00b7 "Chose SQLite over Postgres without saying why" \u00b7 ctrl\+' to read$/);
+  assert.match(rows[1], /^ \uf07b  dotfiles/);
+  const long = { ...s, headsUp: { ...absorbed.headsUp, text: "x".repeat(300) } };
+  for (const width of [120, 180]) {
+    const row = mod.renderFooter(long, width, theme)[0];
+    assert.equal(visibleWidth(row), width - 1);
+    assert.match(plain(row), /\u2026" \u00b7 ctrl\+' to read$/);
+  }
+  assert.match(plain(mod.renderFooter(long, 46, theme)[0]), /Heads up \+2/);
+  for (let width = 1; width <= 200; width++) assert.ok(mod.renderFooter(long, width, theme).every((row) => visibleWidth(row) <= width));
+  const both = mod.renderFooter({ ...s, stash: { text: "x" } }, 120, theme).map(plain);
+  assert.match(both[0], /Stashed/);
+  assert.match(both[1], /Heads up/);
+  const noAction = mod.layoutFooter({ ...s, actions: undefined }, 120, theme);
+  assert.doesNotMatch(plain(noAction.lines[0]), /to read/);
+  assert.deepEqual(noAction.hits.filter((h) => h.action === "headsup.open"), []);
+  const hits = mod.layoutFooter(s, 120, theme).hits.filter((h) => h.action === "headsup.open" && h.row === 0);
+  assert.ok(hits.length >= 3);
+  assert.doesNotMatch(mod.renderFooter({ ...s, compact: true }, 120, theme).map(plain).join("\n"), /Heads up/);
+  assert.deepEqual(mod.absorbStatuses(new Map([["sidebar-headsup", "something else"]]), { claudeRow: true }).rest, ["something else"]);
+});
+
 test("optional companions share label style and preserve meaningful qualifiers", () => {
   const absorbed = mod.absorbStatuses(new Map([
     ["plan", "plan: A working · B cut off (resume in /plan) (/plan)"],

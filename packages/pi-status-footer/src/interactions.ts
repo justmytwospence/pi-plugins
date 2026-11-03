@@ -125,11 +125,11 @@ const commands: Record<FooterActionId | "model.open" | "reasoning.cycle", string
   "model.open": "/model", "reasoning.cycle": "/thinking", "workflow.cycle": "/mode",
   "workflow.open": "/mode", "flow.open": "/flow", "execution.status": "/plan-exec",
   "approvals.open": "/approvals", "effort.toggle": "/auto-effort", "context.open": "/context",
-  "context.skills": "/context", "cache.status": "/cache-guard", "mcp.open": "/mcp", "system1.open": "/system1",
+  "context.skills": "/context", "cache.status": "/cache-guard", "mcp.open": "/mcp", "system1.open": "/system1", "headsup.open": "/sidebar",
 };
 const isAction = (action: string): action is keyof typeof commands => Object.hasOwn(commands, action);
 // Status-only inspections may run during a turn; pickers and all mutations wait for idle.
-const needsIdle = (action: string) => !["cache.status", "execution.status", "reasoning.cycle", "effort.toggle"].includes(action);
+const needsIdle = (action: string) => !["cache.status", "execution.status", "reasoning.cycle", "effort.toggle", "headsup.open"].includes(action);
 
 export function createFooterActionController(options: FooterActionControllerOptions): FooterActionController {
   let disposed = false;
