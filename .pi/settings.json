@@ -1,0 +1,13 @@
+{
+  "packages": [
+    {
+      "source": "git:github.com/justmytwospence/pi-plugins",
+      "autoload": false,
+      "extensions": ["!**"],
+      "skills": ["!**"],
+      "prompts": ["!**"],
+      "themes": ["!**"]
+    },
+    ".."
+  ]
+}

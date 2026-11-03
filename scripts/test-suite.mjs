@@ -11,6 +11,7 @@ const scripts = [
   ['scripts/test-loader.mjs'],
   ['scripts/test-shortcuts.mjs'],
   ['scripts/test-contracts.mjs'],
+  ['scripts/test-dev-settings.mjs'],
   ['scripts/test-question-flow.mjs'],
   ['scripts/test-dialog-focus.mjs'],
   ['--test', 'scripts/remote-clients/client-paths.test.mjs'],
