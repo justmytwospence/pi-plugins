@@ -47,3 +47,9 @@ jobs:
           cache-dependency-path: packages/${{ matrix.plugin }}/package-lock.json
       - run: npm ci && npm run check
         working-directory: packages/${{ matrix.plugin }}
+  checks:
+    if: always()
+    needs: [catalog, loader-and-docs, component]
+    runs-on: ubuntu-latest
+    steps:
+      - run: test "${{ contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled') }}" = false
