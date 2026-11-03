@@ -663,6 +663,9 @@ function stale(config: ClassifierConfig, key: string, signal?: AbortSignal): Sys
   if (signal?.aborted) return "cancelled";
   return resolveSystem1Route(config).key !== key ? "selection_changed" : undefined;
 }
+/** Time each later runnable rung keeps from the request deadline. */
+const FALLBACK_RESERVE_MS = 700;
+
 async function askTarget(
   registry: unknown,
   target: ClassifierProvenance,
@@ -942,7 +945,11 @@ export async function askSystem1(
       const c = active.circuits.get(system1TargetKey(t));
       return !c?.probing && (!c?.cooldownUntil || c.cooldownUntil <= Date.now());
     }).length;
-    const budget = runnable === 1 ? remaining : Math.max(1, Math.floor(remaining / runnable));
+    // Later rungs keep a fixed reserve (an even share when the deadline is short), so a
+    // generous caller deadline is not halved for the preferred rung just because a
+    // fallback is configured.
+    const reserve = Math.min(FALLBACK_RESERVE_MS, remaining / runnable);
+    const budget = runnable === 1 ? remaining : Math.max(1, Math.floor(remaining - reserve * (runnable - 1)));
     const recovering = circuit.recovering === true;
     if (recovering) circuit.probing = true;
     const rungStarted = Date.now();

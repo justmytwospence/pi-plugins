@@ -904,6 +904,16 @@ describe("total deadline and retry budgets", () => {
       expect(calls.every((c) => c[2]?.retries === 0 && c[2]?.maxRetries === 0 && c[2]?.signal?.aborted)).toBe(true);
       expect(vi.getTimerCount()).toBe(0);
     });
+  it("gives the preferred rung all but a fixed fallback reserve under a generous deadline", async () => {
+    order(["jev", "openai-decisions"]);
+    const { registry, calls } = fake(async () => new Promise(() => {}));
+    const pending = askSystem1(registry, { ...config, timeoutMs: 5_000 }, {}, questions);
+    expect(calls[0]?.[2]?.timeoutMs).toBe(4_300);
+    await vi.advanceTimersByTimeAsync(4_300);
+    expect(calls[1]?.[2]?.timeoutMs).toBe(700);
+    await vi.advanceTimersByTimeAsync(700);
+    expect(await pending).toMatchObject({ ok: false, code: "exhausted", attempts: [{ code: "timeout" }, { code: "timeout" }] });
+  });
   it("gives the final rung all unspent request time rather than a fixed fresh timeout", async () => {
     order(["jev", "openai-decisions"]);
     let n = 0;
