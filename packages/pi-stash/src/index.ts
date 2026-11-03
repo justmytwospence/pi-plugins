@@ -28,6 +28,7 @@ import {
   isClearedAfterAction,
   isImportAction,
   isNavigationAction,
+  isNewSessionAction,
   isShellAction,
   isTemporaryAction,
   PromptStash,
@@ -363,6 +364,8 @@ export default function promptStash(pi: ExtensionAPI): void {
         const command = main && !navigation && (held || isTemporaryAction(text));
         // Pi clears the editor after these finish; restoring earlier would lose the draft.
         const late = command && isClearedAfterAction(text);
+        // /new and /clear carry the stash into the fresh session; restore only if they fail or cancel.
+        const replacing = command && isNewSessionAction(text);
         if (navigation) stash!.held = true;
         if (late && isImportAction(text)) stash!.awaitText = true;
         const revision = changes;
@@ -373,7 +376,7 @@ export default function promptStash(pi: ExtensionAPI): void {
           // Only a real submit schedules restoration; accepting autocomplete does not.
           if (state && navigation && text.trim() === "/tree") {
             whenEditorBack(state, editor, tui, entry, { idle: true, delay: 50 }, () => settle(state, entry));
-          } else if (state && command && !late) {
+          } else if (state && command && !late && !replacing) {
             whenEditorBack(state, editor, tui, entry, { idle: false, delay: 0 }, () => restore(state, true));
           }
           await result;
@@ -502,6 +505,15 @@ export default function promptStash(pi: ExtensionAPI): void {
       if (stash.hasPrompt) {
         stash.held = true;
         awaitingForkText = true; // Protect Pi's selected-message prefill after session_start.
+      }
+    } else if (outgoingIdentity !== undefined && outgoingIdentity !== identity
+      && (event as { reason?: string } | undefined)?.reason === "new") {
+      // /new and /clear carry the outgoing stash, still stashed; the outgoing session keeps its copy.
+      const carried = serializeStash(outgoingEntry).prompt;
+      stash.take();
+      if (carried) {
+        stash.stash(carried);
+        persist(state);
       }
     } else if (saved.status === "missing" && owned && outgoingIdentity === undefined && outgoingEntry) {
       // One-time migration of an unbound suite stash, never an unknown upstream object.

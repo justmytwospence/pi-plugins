@@ -202,8 +202,10 @@ test("session A -> fresh B -> A isolates slots even in the same cwd", async () =
   const b = h.session();
   Object.assign(b.ctx, { cwd: "/same/cwd" });
   await h.emit("session_start", { reason: "new" }, b.ctx);
-  expect(stash().hasPrompt).toBe(false);
-  expect(b.writes).toEqual([]);
+  expect(stash().value).toBe("A draft"); // /new and /clear carry a copy
+  expect(b.writes).toHaveLength(1);
+  b.state.main.handleInput(CTRL_S);
+  expect(b.state.main.getText()).toBe("A draft");
   b.state.main.setText("B draft");
   b.state.main.handleInput(CTRL_S);
   const resumedA = h.session({ manager: a.manager });
@@ -466,7 +468,7 @@ test("a throwing stale context cannot escape shutdown; a dirty outgoing session 
   s.state.main.handleInput(CTRL_S);
   h.failWrites = false;
   const destination = h.session();
-  await h.emit("session_start", { reason: "new" }, destination.ctx);
+  await h.emit("session_start", { reason: "resume" }, destination.ctx);
   expect(destination.writes).toEqual([]);
   expect(stash().hasPrompt).toBe(false);
   destination.state.main.setText("dirty destination");

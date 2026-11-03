@@ -20,7 +20,7 @@ The optional version-1 editor snapshot protocol restores text, cursor, modal mod
 
 The main editor has one slot per saved Pi session. Reopening the session, restarting Pi or reloading the extension leaves its prompt **stashed**, with the existing indicator/preview, rather than filling the editor. Press **Ctrl+S** to restore it into an empty editor or swap it with a new draft.
 
-- A fresh `/new` session starts empty. `/resume` and a session-replacing `/import` load only the destination session's stash, not the outgoing one. Sessions in the same cwd and imported copies with the same session ID but different file paths remain separate.
+- `/new` (and pi-clear-screen's `/clear`) carries the stash into the fresh session, still stashed and not restored when the command starts; the cleared session keeps its own copy. If the command is cancelled, the draft returns as after any slash command. `/resume` and a session-replacing `/import` load only the destination session's stash, not the outgoing one. Sessions in the same cwd and imported copies with the same session ID but different file paths remain separate.
 - Interactive forks/clones copy the live parent's stash, including an empty slot, and then evolve independently. A CLI fork starts from the latest snapshot in its copied session entries. Restoring in the child does not consume the parent's stash; selected-message prefill remains protected.
 - The latest session-wide snapshot wins, not the active tree branch's state. Restoring or clearing the stash records an empty slot, so tree navigation or reopening cannot resurrect a consumed prompt.
 

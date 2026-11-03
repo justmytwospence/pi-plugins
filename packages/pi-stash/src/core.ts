@@ -141,6 +141,16 @@ export function isImportAction(input: string): boolean {
   return command === "/import" || command.startsWith("/import ");
 }
 
+/**
+ * Commands that start a fresh session: Pi's /new and pi-clear-screen's /clear. The stash
+ * carries into the new session (its start reason is "new"), so it is not restored when the
+ * command starts.
+ */
+export function isNewSessionAction(input: string): boolean {
+  const command = input.trim();
+  return command === "/new" || command === "/clear";
+}
+
 /** A `!` or `!!` shell command: Pi awaits it inside the submit callback. */
 export function isShellAction(input: string): boolean {
   return input.trimStart().startsWith("!");

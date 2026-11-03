@@ -226,6 +226,47 @@ test("a fresh session starts empty without consuming the previous session's save
   expect(resumed.state.main.getText()).toBe("saved in the original session");
 });
 
+test.each(["/clear", "/new"])("%s carries the stash into the fresh session, still stashed", async (command) => {
+  const { h, s } = await start({ late: [command] });
+  s.state.main.setText("keep me");
+  s.state.main.handleInput(CTRL_S);
+  const saved = s.manager.getEntries();
+  await flush();
+  submit(s, command);
+  await settled();
+  expect(s.state.main.getText()).toBe(command); // not restored when the command starts
+  await h.emit("session_shutdown", { reason: "new" }, s.ctx);
+  const next = h.session();
+  await h.emit("session_start", { reason: "new" }, next.ctx);
+  s.late.resolve?.();
+  await settled();
+  expect(next.state.main.getText()).toBe("");
+  expect(next.status.get(STATUS_ID)).toBe(STATUS_TEXT);
+  expect(next.writes).toEqual([{ customType: "pi-stash.state", data: { version: 1, prompt: { text: "keep me" } } }]);
+  expect(s.manager.getEntries()).toEqual(saved); // the cleared session keeps its own copy
+  next.state.main.handleInput(CTRL_S);
+  expect(next.state.main.getText()).toBe("keep me");
+});
+
+test("a fresh session after an empty stash records nothing", async () => {
+  const { h, s } = await start();
+  await h.emit("session_shutdown", { reason: "new" }, s.ctx);
+  const next = h.session();
+  await h.emit("session_start", { reason: "new" }, next.ctx);
+  expect((globals[STASH_KEY] as PromptStash).hasPrompt).toBe(false);
+  expect(next.writes).toEqual([]);
+});
+
+test("a cancelled /clear restores the draft in the same session", async () => {
+  const { s } = await start();
+  s.state.main.setText("draft");
+  s.state.main.handleInput(CTRL_S);
+  await flush();
+  submit(s, "/clear");
+  await settled();
+  expect(s.state.main.getText()).toBe("draft");
+});
+
 // ─── main only, never embedded ───
 
 test("an editor marked embedded by the contract passes Ctrl+S through", async () => {

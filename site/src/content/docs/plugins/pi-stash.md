@@ -59,7 +59,7 @@ Automatic restoration happens after a submitted slash command starts (once no se
 
 ## Sessions and navigation
 
-Each saved session owns its main-editor slot, even when sessions share a cwd. `/new` starts empty. `/resume` and a session-replacing `/import` load only the destination session's saved stash. Imported copies with the same session ID but a different file path have separate state. If `/import` completes without replacing the session, its usual empty-editor restoration still applies.
+Each saved session owns its main-editor slot, even when sessions share a cwd. `/new` and pi-clear-screen's `/clear` carry the stash into the fresh session, still stashed, and the cleared session keeps its own copy. `/resume` and a session-replacing `/import` load only the destination session's saved stash. Imported copies with the same session ID but a different file path have separate state. If `/import` completes without replacing the session, its usual empty-editor restoration still applies.
 
 Interactive forks/clones copy the live parent's current slot, **including an empty slot**, rather than reviving an older inherited stash. A CLI fork starts with the latest snapshot in its copied session entries. Parent and child then evolve independently: restoring the child's stash does not consume the parent's, and selected-message prefill remains protected.
 
