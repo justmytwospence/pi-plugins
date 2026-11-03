@@ -62,7 +62,7 @@ Sidebar remains observational: it cannot steer or stop agents or exercise planni
 | `/sidebar new` (or `/new` in Sidebar) | Starts a fresh thread. |
 | Enter | Asks. |
 | Ctrl+S | With pi-stash enabled, stashes Sidebar's draft in a stash of its own, apart from main's: the hint row shows `stashed`. Ctrl+S in an empty composer restores it, with text in both it swaps them, and it comes back on its own after a `/` command such as `/new`. It is kept while Sidebar is closed. |
-| `/sidebar headsup [on\|off]` | Heads-up mode's state and cost, or switches it on or off for the session. |
+| `/sidebar headsup [on\|sidebar\|main\|off]` | Heads-up mode's state and cost, or switches it on or off for the session, with notes in Sidebar (`sidebar`, the default) or above main's editor (`main`). |
 | `/sidebar model` (or `/model` in Sidebar) | Picks Sidebar's model: `Same as main` (the default, sharing main's cache) or one of your favorites. While Sidebar is open the picker shows in Sidebar, in the composer's place (Enter picks, Esc cancels); with Sidebar closed it is a dialog in main. `/model sol`, `/model opus` or `/model provider/id` switch directly, `/model same` goes back. See [Another model](#another-model). |
 | Main's model keys in Sidebar | The model picker key (`app.model.select`, Ctrl+L by default) picks Sidebar's model; the cycling keys (`app.model.cycleForward`/`cycleBackward`, Ctrl+P and Shift+Ctrl+P by default) step through `same` and your favorites. |
 
@@ -132,7 +132,7 @@ Settings, read from the environment Pi starts with:
 - `PI_SIDEBAR_PREFS`: where the dragged size is kept (default `~/.pi/agent/pi-sidebar.json`).
 - `PI_SIDEBAR_MIN_COLUMNS`: the narrowest half for a side-by-side split (default 80).
 - `PI_SIDEBAR_KNOWLEDGE`: where quiz mode and heads-up mode keep their knowledge profiles (default `~/.pi/agent/pi-sidebar/knowledge`).
-- `PI_SIDEBAR_HEADSUP`: `0` starts sessions with heads-up mode off. `PI_SIDEBAR_HEADSUP_DEBUG=1` logs its checks.
+- `PI_SIDEBAR_HEADSUP`: `0` starts sessions with heads-up mode off, and `main` with notes above main's editor (default: notes go to Sidebar). `PI_SIDEBAR_HEADSUP_DEBUG=1` logs its checks.
 - `PI_SIDEBAR_BLUESKY_HANDLE`, `PI_SIDEBAR_BLUESKY_APP_PASSWORD`, `PI_SIDEBAR_DRAFTS_DIR`, `PI_SIDEBAR_DRAFTS_COMMAND`: where [share notes](#share-notes) can go; any one turns them on.
 - `PI_SIDEBAR_MODELS`: your favorite models for Sidebar, comma-separated (default: Pi's own favorites, `enabledModels`). Each is `provider/id`, a bare id, or a glob whose newest match counts, so `anthropic/claude-opus-*` is always the latest Opus; `:level` sets the thinking level, as in `openai-codex/gpt-*-sol:high`.
 - `PI_SIDEBAR_MODEL`: the model new sessions start with: `same` (default) or a favorite.
@@ -160,28 +160,35 @@ Quiz mode turns Sidebar into a tutor for main's work. You switch it on when you 
 
 ## Heads-up mode
 
-Heads-up mode watches main's longer runs for one thing you should know but might have missed. Examples are a tradeoff main chose without saying so, a result that looks off, or a risk in what it did. When a check finds one, the note shows above main's editor, and if Sidebar has been started in this session it also arrives in Sidebar's thread in full. If Sidebar is answering at that moment, the note waits until the answer ends. Ask about it by typing in Sidebar, which knows what it raised, or type `/known` if you already knew it. A short note always appears above main's editor too. Heads-up never starts Sidebar: until you have opened it in a session (or its thread already has messages), notes only show above main's editor, and opening Sidebar then adds the note showing to its thread.
+Heads-up mode watches main's longer runs for one thing you should know but might have missed. Examples are a tradeoff main chose without saying so, a result that looks off, or a risk in what it did. When a check finds one, the note goes into Sidebar's thread in full, even if you have never opened Sidebar in this session. If Sidebar is answering at that moment, the note waits until the answer ends. While Sidebar is closed, main's footer shows one row with the latest note and how many more wait; the Sidebar key or a click on the row opens Sidebar, which clears it. Checks keep going, so later notes pile up in the thread. Ask about a note by typing in Sidebar, which knows what it raised, or type `/known` if you already knew it. Without Pi's fullscreen mode Sidebar cannot open, so notes show above main's editor instead.
 
 ```
-✦ heads up · check this result: sum.py's "total" covers only north; it excludes every
-  south row.
-  1: Learn more   2: Knew this already   0: Dismiss
+ ✦  Heads up +1 · tradeoff · "Chose SQLite over Postgres without saying why" · ctrl+' to read
 ```
 *Illustration, not a screenshot.*
 
-The note is laid out like pi-recap's `※ recap:` line (mark, lowercase label, text hanging under it, same wrap), so the two read as a pair when both show; the note keeps the accent color because it asks for an answer.
+To see notes above main's editor instead, use `/sidebar headsup main` or `PI_SIDEBAR_HEADSUP=main`:
 
-It is on by default. `/sidebar headsup off` switches it off for the session, `/sidebar headsup on` switches it back on. The setting is stored in main's session, so it follows `/tree` and comes back after resume and `/reload`. Set `PI_SIDEBAR_HEADSUP=0` to start every session with it off.
+```
+ ✦ Heads up · check this result
+   sum.py's "total" covers only north; it excludes every south row.
+   1 learn more · 2 knew this · 0 dismiss
+```
+*Illustration, not a screenshot.*
 
-**When it checks.** Checks happen at main's turn boundaries, once a run is long (5 replies or 2 minutes). They are at most 3 minutes apart, and a long run gets one more check when it ends. There is never a check while one is running or while a note is showing. On main's model, a check is skipped, with nothing sent, when main's prompt cache has probably expired, when Sidebar cannot share main's API, or when no copy of main's last request is in memory (after `/reload`, until main sends again).
+In that mode a newer note replaces the one showing unless you are in it (learn more, a post under review, a draft being written), and a note goes into Sidebar's thread only once Sidebar has been started.
+
+It is on by default. `/sidebar headsup off` switches it off for the session, `/sidebar headsup on` switches it back on, and `sidebar` or `main` choose where notes go. The setting is stored in main's session, so it follows `/tree` and comes back after resume and `/reload`. Set `PI_SIDEBAR_HEADSUP=0` to start every session with it off.
+
+**When it checks.** Checks happen at main's turn boundaries, once a run is long (5 replies or 2 minutes). They are at most 3 minutes apart, and a long run gets one more check when it ends. There is never a check while one is running, or while you are answering a note above main's editor. On main's model, a check is skipped, with nothing sent, when main's prompt cache has probably expired, when Sidebar cannot share main's API, or when no copy of main's last request is in memory (after `/reload`, until main sends again).
 
 **On another model.** Checks run on Sidebar's model. With [another model](#another-model) chosen, a check reads main's session as a transcript, with a cache of its own apart from Sidebar's questions': one breakpoint where the transcript ends, so the next check reads it back and pays only for what main did since. Checks within a run are at most 3 minutes apart, so that cache stays warm through a run. The first check of a run after a longer pause reads the whole transcript uncached. It needs no copy of main's request, so it also runs after `/reload`.
 
 **In Sidebar.** The note is part of Sidebar's conversation: an answer that carries the note and its explanation, preceded by a hidden marker that tells the model it raised the note unasked. `/known` marks the last note as known. `/headsup` in Sidebar works like `/sidebar headsup`.
 
-**Answering a note above the editor.** Type a digit on its own into main's empty editor. Digits typed anywhere else, or while a dialog is open, go where they always go.
+**Answering a note above the editor** (with `main`). Type a digit on its own into main's empty editor. Digits typed anywhere else, or while a dialog is open, go where they always go.
 - **Learn more** shows the short explanation the same check wrote, with no further request. It then offers:
-  - **Understood**: closes the note and marks the topic as known.
+  - **understood**: closes the note and marks the topic as known.
   - **Ask main**: puts the note, quoted, in main's editor, so you can add a question and send it.
   - **Ask Sidebar**: opens Sidebar and asks it about the note. Outside fullscreen mode it falls back to Ask main.
   - **Dismiss**
@@ -207,8 +214,9 @@ Main never sees a note unless you send it to main.
 Heads-up checks can also suggest something worth sharing publicly, drafted as a short social post, a blog post, or both. The default bar is high: an idea is raised only when the session yields a specific claim someone could disagree with, a measurement that explains something, a named pattern that would be recognizable beyond your setup, or a reversal learned the hard way, and it must matter to people who use none of your tools. How something was wired, configured, migrated or fixed, release notes and tool announcements never count, and when the check is unsure it stays quiet. Share notes are off until you configure a destination, and a real heads-up always takes priority. The check never sees a destination's credentials, and its instructions forbid secrets, private names, client or employer details and internal paths.
 
 ```
-✦ heads up · worth sharing: Splicing a side request onto the agent's prompt cache.
-  1: Review post   2: Blog draft   3: Blog outline   4: Not interested   0: Dismiss
+✦ Heads up · worth sharing
+  Splicing a side request onto the agent's prompt cache.
+  1 review post · 2 blog draft · 3 blog outline · 4 not interested · 0 dismiss
 ```
 *Illustration, not a screenshot.*
 

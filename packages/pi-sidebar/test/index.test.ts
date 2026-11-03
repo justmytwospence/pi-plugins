@@ -45,9 +45,9 @@ function setup(entries: unknown[] = []) {
   const pi = new FakePi();
   const controller = new SidebarController(pi as never, ["ctrl+t"]);
   const { tui, mainEditor } = fakeTui();
-  const { ctx, notes } = fakeCtx({ entries });
+  const { ctx, notes, statuses } = fakeCtx({ entries });
   (ctx.ui as { setWidget: unknown }).setWidget = (_key: string, factory?: (t: unknown, theme: unknown) => unknown) => factory?.(tui, ctx.ui.theme);
-  return { pi, controller, tui, mainEditor, ctx, notes };
+  return { pi, controller, tui, mainEditor, ctx, notes, statuses };
 }
 
 // Main answered long ago: its cache has expired, so a send asks first.
@@ -789,7 +789,7 @@ describe("quiz mode", () => {
 describe("heads-up notes and Sidebar", () => {
   const NOTE = { topic: "t", kind: "risk" as const, text: "Careful.", detail: "Because." };
   const deliver = (controller: SidebarController) =>
-    (controller as unknown as { deliverNote(note: unknown): void }).deliverNote(NOTE);
+    (controller as unknown as { deliverNote(note: unknown, placement: string): void }).deliverNote(NOTE, "main");
 
   it("keep a note showing above main's editor when Sidebar opens, and add it to the thread once", () => {
     const { controller, ctx } = setup();
@@ -824,6 +824,54 @@ describe("heads-up notes and Sidebar", () => {
     expect(JSON.stringify(controller.agent.messages)).toContain("Careful.");
     controller.toggle(ctx as never);
     expect(panelOf(controller).chat.empty).toBe(false);
+  });
+});
+
+describe("heads-up notes in Sidebar placement", () => {
+  const NOTE = { topic: "t", kind: "risk" as const, text: "Careful.", detail: "Because." };
+  const deliver = (controller: SidebarController, placement: string) =>
+    (controller as unknown as { deliverNote(note: unknown, placement: string): void }).deliverNote(NOTE, placement);
+  const actionsOf = (pi: FakePi) => {
+    const request = { version: 1, actions: {} as Record<string, any> };
+    pi.events.emit("pi-plugins.footer-actions.v1", request);
+    return request.actions;
+  };
+
+  it("goes into the thread while Sidebar is closed, and the footer status shows the latest", () => {
+    const { pi, controller, ctx, statuses } = setup();
+    controller.main.bind(ctx as never);
+    deliver(controller, "sidebar");
+    deliver(controller, "sidebar");
+    expect(JSON.stringify(controller.agent.messages)).toContain("Careful.");
+    expect(statuses.get("sidebar-headsup")).toBe("✦ heads up (2) · risk: Careful.");
+    expect(actionsOf(pi)["headsup.open"]).toMatchObject({ key: "ctrl+t" });
+    controller.toggle(ctx as never);
+    expect(statuses.has("sidebar-headsup")).toBe(false);
+    expect(actionsOf(pi)["headsup.open"]).toBeUndefined();
+  });
+
+  it("does not touch the footer while Sidebar is open", () => {
+    const { controller, ctx, statuses } = setup();
+    controller.main.bind(ctx as never);
+    controller.toggle(ctx as never);
+    deliver(controller, "sidebar");
+    expect(statuses.has("sidebar-headsup")).toBe(false);
+  });
+
+  it("clears a waiting status when heads-up is switched off", () => {
+    const { controller, ctx, statuses } = setup();
+    controller.main.bind(ctx as never);
+    deliver(controller, "sidebar");
+    expect(statuses.has("sidebar-headsup")).toBe(true);
+    controller.setHeadsUp({ on: false });
+    expect(statuses.has("sidebar-headsup")).toBe(false);
+  });
+
+  it("clears a stale status on session start", async () => {
+    const { pi, ctx, statuses } = setup();
+    statuses.set("sidebar-headsup", "✦ heads up · risk: old");
+    await pi.emit("session_start", { reason: "startup" }, ctx);
+    expect(statuses.has("sidebar-headsup")).toBe(false);
   });
 });
 

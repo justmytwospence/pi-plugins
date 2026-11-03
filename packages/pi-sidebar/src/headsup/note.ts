@@ -1,4 +1,4 @@
-// The heads-up note above main's editor, and its choices. A digit typed on its own into main's empty
+// The heads-up note above main's editor (the `main` placement), and its choices. A digit typed on its own into main's empty
 // editor answers it; nothing else is taken from the editor.
 import type { Theme } from "@earendil-works/pi-coding-agent";
 import { Markdown, truncateToWidth, visibleWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
@@ -21,16 +21,15 @@ export type NoteAction =
   | { type: "back" }
   | { type: "draft"; kind: "full" | "outline" };
 
-const KEYS: Record<"note" | "detail" | "dismissed", Record<string, NoteAction>> = {
-  note: { "1": { type: "expand" }, "2": { type: "known", via: "knew" }, "0": { type: "dismiss" } },
-  detail: { "1": { type: "known", via: "understood" }, "2": { type: "ask-main" }, "3": { type: "ask-sidebar" }, "0": { type: "dismiss" } },
-  dismissed: { "9": { type: "turn-off" } },
-};
-
-const CHOICES: Record<"note" | "detail" | "dismissed", string> = {
-  note: "1: Learn more   2: Knew this already   0: Dismiss",
-  detail: "1: Understood   2: Ask main   3: Ask Sidebar   0: Dismiss",
-  dismissed: "9: Turn off heads-up for this session",
+const CHOICES: Record<"note" | "detail" | "dismissed", Array<[string, NoteAction, string]>> = {
+  note: [["1", { type: "expand" }, "learn more"], ["2", { type: "known", via: "knew" }, "knew this"], ["0", { type: "dismiss" }, "dismiss"]],
+  detail: [
+    ["1", { type: "known", via: "understood" }, "understood"],
+    ["2", { type: "ask-main" }, "ask main"],
+    ["3", { type: "ask-sidebar" }, "ask Sidebar"],
+    ["0", { type: "dismiss" }, "dismiss"],
+  ],
+  dismissed: [["9", { type: "turn-off" }, "turn off heads-up for this session"]],
 };
 
 /** Which share destinations are configured (choices for unconfigured ones are not offered). */
@@ -43,17 +42,17 @@ export interface ShareTargets {
 function shareChoices(note: HeadsUpNote, phase: NotePhase, targets: ShareTargets): Array<[string, NoteAction, string]> {
   if (phase === "post") {
     return [
-      ["1", { type: "publish" }, "Post to Bluesky"],
-      ["2", { type: "edit-post" }, "Edit"],
-      ["3", { type: "back" }, "Back"],
-      ["0", { type: "known", via: "declined" }, "Discard"],
+      ["1", { type: "publish" }, "post to Bluesky"],
+      ["2", { type: "edit-post" }, "edit"],
+      ["3", { type: "back" }, "back"],
+      ["0", { type: "known", via: "declined" }, "discard"],
     ];
   }
   if (phase !== "note") return [];
   const out: Array<[string, NoteAction, string]> = [];
-  if (targets.bluesky && note.post) out.push(["1", { type: "review-post" }, "Review post"]);
-  if (targets.drafts) out.push(["2", { type: "draft", kind: "full" }, "Blog draft"], ["3", { type: "draft", kind: "outline" }, "Blog outline"]);
-  out.push(["4", { type: "known", via: "declined" }, "Not interested"], ["0", { type: "dismiss" }, "Dismiss"]);
+  if (targets.bluesky && note.post) out.push(["1", { type: "review-post" }, "review post"]);
+  if (targets.drafts) out.push(["2", { type: "draft", kind: "full" }, "blog draft"], ["3", { type: "draft", kind: "outline" }, "blog outline"]);
+  out.push(["4", { type: "known", via: "declined" }, "not interested"], ["0", { type: "dismiss" }, "dismiss"]);
   return out;
 }
 
@@ -84,9 +83,9 @@ export class NoteState {
     return !!this.note;
   }
 
-  /** Whether a fresh note may replace this one (nothing showing, or only the dismissed line). */
-  get free(): boolean {
-    return !this.note || this.phase === "dismissed";
+  /** Whether a fresh note may replace this one (nothing showing, or not yet answered, or only the dismissed line). */
+  get replaceable(): boolean {
+    return !this.note || this.phase === "note" || this.phase === "dismissed";
   }
 
   show(note: HeadsUpNote, targets: ShareTargets = this.targets): void {
@@ -112,7 +111,7 @@ export class NoteState {
     if (!note || this.phase === "busy") return undefined;
     if (note.kind === "share" && this.phase !== "dismissed") return shareChoices(note, this.phase, this.targets).find(([key]) => key === data)?.[1];
     if (this.phase === "post") return undefined;
-    return KEYS[this.phase][data];
+    return CHOICES[this.phase].find(([key]) => key === data)?.[1];
   }
 
   /** Show the note as working on something (no keys answer until it is done). */
@@ -140,26 +139,23 @@ export class NoteState {
   }
 
   /**
-   * The note's lines, laid out like pi-recap's ` ※ recap: text` line so the two read as one family
-   * when both show: one column in, a mark, a lowercase label ending in a colon, the text hanging under
-   * the label, and the same wrap (the prose measure, or the width less the indent and one column).
-   * The note keeps the accent: it asks for an answer, the recap does not.
+   * The note's lines: a title line (mark, "Heads up", the kind), the text under it at the prose
+   * measure, then the choices as accented digits with dim labels, wrapped to the width.
    */
   lines(width: number, theme: Theme, measure = 0): string[] {
     const note = this.note;
     if (!note || width < 4) return [];
-    const hang = " ".repeat(1 + visibleWidth(MARK));
+    const hang = "   ";
     let room = Math.max(1, width - hang.length - 1);
     if (measure > 0 && room > measure) room = measure;
     const fit = (line: string) => truncateToWidth(line, width);
-    const mark = theme.fg("accent", theme.bold(MARK));
+    const sep = theme.fg("dim", " · ");
+    const chip = (key: string, text: string) => `${theme.fg("accent", theme.bold(key))} ${theme.fg("dim", text)}`;
     if (this.phase === "dismissed") {
-      return [fit(` ${theme.fg("dim", `${theme.bold(MARK)}${theme.bold(`heads up dismissed: `)}${CHOICES.dismissed}`)}`)];
+      return [fit(` ${theme.fg("dim", theme.bold(MARK))}${theme.fg("dim", "Heads up dismissed")}${sep}${chip("9", "turn off heads-up for this session")}`)];
     }
-    const label = `${theme.fg("accent", theme.bold("heads up"))}${theme.fg("dim", ` · ${KIND_LABEL[note.kind]}: `)}`;
-    // The label never wraps; the text wraps in a block to its right, to the same right edge.
-    const indent = " ".repeat(visibleWidth(label));
-    const out = wrapTextWithAnsi(note.text, Math.max(1, room - indent.length)).map((line, i) => (i === 0 ? ` ${mark}${label}${line}` : `${hang}${indent}${line}`));
+    const out = [` ${theme.fg("accent", theme.bold(MARK))}${theme.fg("accent", theme.bold("Heads up"))}${sep}${theme.fg("muted", KIND_LABEL[note.kind])}`];
+    for (const line of wrapTextWithAnsi(note.text, room)) out.push(`${hang}${line}`);
     if (this.phase === "detail" && note.detail) {
       for (const line of wrapTextWithAnsi(note.detail, room)) out.push(`${hang}${theme.fg("muted", line)}`);
     }
@@ -171,10 +167,34 @@ export class NoteState {
       out.push(`${hang}${theme.fg(count > MAX_POST_GRAPHEMES ? "error" : "dim", `${count}/${MAX_POST_GRAPHEMES}`)}`);
     }
     if (this.phase === "busy") out.push(`${hang}${theme.fg("dim", this.busy)}`);
-    else if (note.kind === "share") out.push(`${hang}${theme.fg("dim", shareChoices(note, this.phase, this.targets).map(([key, , text]) => `${key}: ${text}`).join("   "))}`);
-    else if (this.phase !== "post") out.push(`${hang}${theme.fg("dim", CHOICES[this.phase])}`);
+    else {
+      const choices = note.kind === "share" ? shareChoices(note, this.phase, this.targets) : this.phase === "post" ? [] : CHOICES[this.phase as "note" | "detail"];
+      for (const line of chipLines(choices.map(([key, , text]) => chip(key, text)), room, sep)) out.push(`${hang}${line}`);
+    }
     return out.map(fit);
   }
+}
+
+/** Chips joined by `sep`, packed greedily into lines of at most `room` columns. */
+function chipLines(chips: string[], room: number, sep: string): string[] {
+  const lines: string[] = [];
+  let line = "";
+  for (const chip of chips) {
+    const joined = line ? `${line}${sep}${chip}` : chip;
+    if (line && visibleWidth(joined) > room) {
+      lines.push(line);
+      line = chip;
+    } else line = joined;
+  }
+  if (line) lines.push(line);
+  return lines.map((l) => (visibleWidth(l) > room ? truncateToWidth(l, room) : l));
+}
+
+export const HEADSUP_STATUS = "sidebar-headsup";
+
+/** Main's status while notes wait in a closed Sidebar (plain text: pi-status-footer parses it). */
+export function waitingStatus(note: HeadsUpNote, count: number): string {
+  return `${MARK.trim()} heads up${count > 1 ? ` (${count})` : ""} · ${KIND_LABEL[note.kind]}: ${note.text.replace(/\s+/g, " ").trim()}`;
 }
 
 /**

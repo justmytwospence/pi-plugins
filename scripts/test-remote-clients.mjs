@@ -102,6 +102,7 @@ function statusFooter(width, statuses, { compact = false, phase = 'idle', flow, 
     ...(absorbed.mode ? { 'approvals.open': {} } : {}),
     ...(autoEffort === undefined ? {} : { 'effort.toggle': { active: autoEffort } }),
     ...(system1 ? { 'system1.open': {} } : {}),
+    ...(absorbed.headsUp ? { 'headsup.open': { key: "ctrl+'" } } : {}),
   };
   const snapshot = {
     cwd: '/tmp/pi-plugins', model: 'claude-opus-5-5', provider: 'anthropic', thinking: 'high', oauth: true,
@@ -722,6 +723,7 @@ const FOOTERS = [
   // Notebook status slots plus the five core rows reach the deployed 13-row allowance
   // (including any activity pill/separator), rather than comparing unreadable baselines.
   { name: 'high status count', statuses: modeStatuses('plan', 'yolo'), highStatus: true },
+  { name: 'heads-up waiting', statuses: new Map([...modeStatuses('plan', 'auto'), ['sidebar-headsup', '\u2726 heads up (2) \u00b7 risk: Main skipped the failing integration tests and reported green']]) },
   { name: 'provider ready', statuses: modeStatuses('plan', 'auto'), providerUsage: [usageReady] },
   { name: 'Fable 71%', statuses: modeStatuses('plan', 'auto'), providerUsage: [fable71] },
   { name: 'Fable 100% high status', statuses: modeStatuses('plan', 'yolo'), providerUsage: [fable100], highStatus: true },

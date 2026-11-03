@@ -56,6 +56,7 @@ export interface FakeCtxOptions {
 
 export function fakeCtx(opts: FakeCtxOptions = {}) {
   const notes: Array<{ message: string; level?: string }> = [];
+  const statuses = new Map<string, string>();
   const ctx = {
     cwd: "/repo",
     mode: "tui",
@@ -77,7 +78,8 @@ export function fakeCtx(opts: FakeCtxOptions = {}) {
       theme: { fg: (_c: string, t: string) => t, bg: (_c: string, t: string) => `[bg]${t}`, bold: (t: string) => t },
       notify: (message: string, level?: string) => notes.push({ message, level }),
       setWidget: () => {},
+      setStatus: (key: string, text?: string) => { if (text === undefined) statuses.delete(key); else statuses.set(key, text); },
     },
   };
-  return { ctx, notes };
+  return { ctx, notes, statuses };
 }

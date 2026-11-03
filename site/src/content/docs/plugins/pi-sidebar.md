@@ -6,7 +6,7 @@ plugin: pi-sidebar
 
 ## Quick reference
 
-- **Use it for:** Ask what the main agent is doing, why, or how the code works, without interrupting it. Switch it to another model (`/model`) for a second opinion. Quiz mode (`/quiz`) also quizzes you on main's changes and tracks what you know. Heads-up mode, on by default, notes one thing worth knowing in Sidebar or above main's editor during longer runs (or only in Sidebar).
+- **Use it for:** Ask what the main agent is doing, why, or how the code works, without interrupting it. Switch it to another model (`/model`) for a second opinion. Quiz mode (`/quiz`) also quizzes you on main's changes and tracks what you know. Heads-up mode, on by default, notes one thing worth knowing in Sidebar's thread during longer runs, with a footer row in main while Sidebar is closed (or above main's editor with `/sidebar headsup main`).
 - **Enable:** Select `packages/pi-sidebar/src/index.ts` with [`pi config`](/guides/install/#enable-an-explicit-subset).
 - **Controls:** Ctrl+' opens or closes Sidebar. In Herdr, `prefix+h/l` moves between main and Sidebar as if Sidebar were a pane (with the bundled Herdr plugin). In Sidebar, your own keybindings apply: pi-vim's Ctrl+U/D and your transcript scroll keys (such as Ctrl+G) scroll it, Esc or Ctrl+C stops an answer, Ctrl+O expands tools and collapsed reasoning, and your thinking toggle shows or hides reasoning.
 - **Settings:** `PI_SIDEBAR_KEYS` replaces the key. `PI_SIDEBAR_RATIO` sets Sidebar's share (default 0.5) until you drag the divider, which is remembered. `PI_SIDEBAR_MIN_COLUMNS` is the narrowest half for a side-by-side split (default 80). `PI_SIDEBAR_MODELS` lists favorite models for Sidebar (default: Pi's `enabledModels`), and `PI_SIDEBAR_MODEL` sets the one new sessions start with (default `same`, main's).
@@ -101,14 +101,21 @@ Quiz mode is a voluntary tutor for main's work. It never blocks main or git.
 
 ## Heads-up mode
 
-During main's longer runs, heads-up mode occasionally checks for one thing you should know but might have missed: an unstated tradeoff, a result that looks off, or a risk. The note always appears above main's editor. Once Sidebar has been started in the session, the full note also becomes part of its thread, after any answer in progress; ask about it there, or type `/known` if you knew it. Heads-up never starts Sidebar by itself, and opening it adds the note showing to its thread. The example below is an illustration:
+During main's longer runs, heads-up mode occasionally checks for one thing you should know but might have missed: an unstated tradeoff, a result that looks off, or a risk. The note goes into Sidebar's thread, even if Sidebar was never opened, after any answer in progress; ask about it there, or type `/known` if you knew it. While Sidebar is closed, main's footer shows one row with the latest note, and its key or a click opens Sidebar. Checks keep going, so later notes pile up in the thread. The examples below are illustrations:
 
 ```
-✦ heads up · risk: Main skipped the failing integration tests.
-  1: Learn more   2: Knew this already   0: Dismiss
+ ✦  Heads up +1 · risk · "Main skipped the failing integration tests." · ctrl+' to read
 ```
 
-- **Switch:** on by default. `/sidebar headsup off` or `on` sets it per session (stored in main's session), `/sidebar headsup` shows its cost so far, and `PI_SIDEBAR_HEADSUP=0` starts sessions with it off.
+With `/sidebar headsup main` (or `PI_SIDEBAR_HEADSUP=main`) the note shows above main's editor instead, and goes into Sidebar's thread once Sidebar has been started:
+
+```
+ ✦ Heads up · risk
+   Main skipped the failing integration tests.
+   1 learn more · 2 knew this · 0 dismiss
+```
+
+- **Switch:** on by default. `/sidebar headsup off`, `on`, `sidebar` or `main` sets it per session (stored in main's session), `/sidebar headsup` shows its cost so far, and `PI_SIDEBAR_HEADSUP=0` starts sessions with it off, and `main` with notes above main's editor.
 - **When:** at main's turn boundaries, once a run has 5 replies or has gone on for 2 minutes. Checks are at most 3 minutes apart, with one more at the end of a long run. A check is skipped when main's cache has probably expired.
 - **Answering above the editor:** type the digit on its own into main's empty editor.
   - **Learn more** shows an explanation the check already wrote. From there you can mark it understood, quote it into main's editor (**Ask main**), or ask Sidebar about it.
@@ -125,8 +132,9 @@ During main's longer runs, heads-up mode occasionally checks for one thing you s
 Checks can also suggest something worth sharing, as a drafted short post, a blog post, or both. The default bar is high: a specific claim someone could disagree with, a measurement that explains something, a named pattern recognizable beyond your setup, or a reversal learned the hard way, and it must matter to people who use none of your tools. Plumbing (how something was wired, configured, migrated or fixed), release notes and tool announcements never qualify, and an unsure check stays quiet. They are off until a destination is configured, a real heads-up always wins, and the check is told never to include secrets, private names or internal details. The example below is an illustration:
 
 ```
-✦ heads up · worth sharing: Splicing a side request onto the agent's prompt cache.
-  1: Review post   2: Blog draft   3: Blog outline   4: Not interested   0: Dismiss
+✦ Heads up · worth sharing
+  Splicing a side request onto the agent's prompt cache.
+  1 review post · 2 blog draft · 3 blog outline · 4 not interested · 0 dismiss
 ```
 
 - **Review post:** shows the draft and its length, then **Post to Bluesky**, **Edit** (Pi's editor), **Back** or **Discard**. Nothing is published until you choose Post.

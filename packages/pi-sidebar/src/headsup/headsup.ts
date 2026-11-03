@@ -11,7 +11,7 @@ import { addRecent, knownTopics, markKnown, ProfileStore } from "../quiz/profile
 import { runCheck, type CheckResult, type ForeignCheck, type StreamFn } from "./check.ts";
 import { TranscriptParts } from "../foreign.ts";
 import { modelKey, type ModelChoice, type ModelLike } from "../models.ts";
-import { HEADSUP_DEBUG_ENV, HEADSUP_ENTRY, HEADSUP_ENV, headsUpDefault, headsUpFromBranch, HeadsUpStats, type HeadsUpEntry } from "./mode.ts";
+import { HEADSUP_DEBUG_ENV, HEADSUP_ENTRY, HEADSUP_ENV, headsUpDefault, headsUpFromBranch, headsUpWhereDefault, HeadsUpStats, type HeadsUpEntry, type HeadsUpWhere } from "./mode.ts";
 import { proseMeasure, NoteState, quoteForMain, askSidebar, DISMISSED_MS, type NoteAction } from "./note.ts";
 import type { HeadsUpNote } from "./protocol.ts";
 import { HeadsUpScheduler, type Trigger } from "./scheduler.ts";
@@ -26,27 +26,34 @@ const MAX_MISSES = 2;
 export const HEADSUP_HELP = [
   "/sidebar headsup       heads-up mode's state and what its checks cost",
   "/sidebar headsup off   stop heads-up checks in this session (on turns them back on)",
+  "/sidebar headsup main  show notes above main's editor (sidebar: only in Sidebar, the default)",
 ].join("\n");
 
-/** `on` or `off` as a change of setting. */
-export function headsUpChange(arg: string): { on: boolean } | undefined {
+/** `on`, `off`, `sidebar` or `main` as a change of setting. */
+export function headsUpChange(arg: string): { on: boolean; where?: HeadsUpWhere } | undefined {
   if (arg === "on") return { on: true };
   if (arg === "off") return { on: false };
+  if (arg === "sidebar") return { on: true, where: "sidebar" };
+  if (arg === "main") return { on: true, where: "main" };
   return undefined;
 }
 
-export function headsUpChanged(change: { on: boolean }): string {
-  return change.on
-    ? "Heads-up mode is on for this session; notes show above main's editor, and in Sidebar's thread once Sidebar has been started."
-    : "Heads-up mode is off for this session.";
+export function headsUpChanged(on: boolean, where: HeadsUpWhere): string {
+  if (!on) return "Heads-up mode is off for this session.";
+  return where === "sidebar"
+    ? "Heads-up mode is on for this session; notes go to Sidebar's thread, and main's footer shows the latest while Sidebar is closed."
+    : "Heads-up mode is on for this session; notes show above main's editor, and in Sidebar's thread once Sidebar has been started.";
 }
 
 export interface HeadsUpHost {
   /**
-   * Also put the note in Sidebar's thread, but only once Sidebar has been started in this session
-   * (never start it for a note: that would cost tokens nobody asked for).
+   * Put the note in Sidebar's thread. With placement `main` the note also shows above main's editor
+   * and goes into the thread only once Sidebar has been started; with `sidebar` it always goes in
+   * and main's footer shows the latest while Sidebar is closed.
    */
-  deliver(note: HeadsUpNote): void;
+  deliver(note: HeadsUpNote, placement: HeadsUpWhere): void;
+  /** Whether Sidebar can open in this session (fullscreen TUI); absent means yes. */
+  canShowSidebar?(): boolean;
   /** Open Sidebar and ask it this; false when Sidebar cannot open. */
   askSidebar(text: string, ctx: ExtensionContext): boolean;
   /** Sidebar's model: checks run on it too (main's, sharing main's cache, unless another is chosen). */
@@ -90,6 +97,8 @@ export interface HeadsUpOptions {
 
 export class HeadsUp {
   on: boolean;
+  /** Where notes go. */
+  where: HeadsUpWhere;
   /** Paused after repeated cache misses, until switched on again. */
   paused: string | undefined;
   readonly stats = new HeadsUpStats();
@@ -121,15 +130,16 @@ export class HeadsUp {
     this.now = options.now ?? (() => Date.now());
     this.env = options.env ?? process.env;
     this.on = headsUpDefault(this.env);
+    this.where = headsUpWhereDefault(this.env);
     this.share = options.share ?? shareConfig(this.env);
 
     pi.on("agent_start", () => this.scheduler.runStarted(this.now()));
     pi.on("message_end", (event) => {
       if ((event.message as { role?: string }).role !== "assistant") return;
-      if (this.active && this.scheduler.replied(this.now(), !this.note.free)) void this.check("turn");
+      if (this.active && this.scheduler.replied(this.now(), this.blocked)) void this.check("turn");
     });
     pi.on("agent_end", () => {
-      if (this.scheduler.ended(this.now(), !this.note.free) && this.active) void this.check("end");
+      if (this.scheduler.ended(this.now(), this.blocked) && this.active) void this.check("end");
     });
     // Pi stacks widgets above the editor in the order they were set, so one a tool adds while the
     // note shows (pi-todo's task list) lands below it. Mount the note again afterwards to stay last.
@@ -140,6 +150,16 @@ export class HeadsUp {
     });
   }
 
+  /** Where notes go now: Sidebar, unless main is chosen or Sidebar cannot open. */
+  get placement(): HeadsUpWhere {
+    return this.where === "main" || this.host.canShowSidebar?.() === false ? "main" : "sidebar";
+  }
+
+  /** A note above main's editor is being answered: no check meanwhile. */
+  private get blocked(): boolean {
+    return this.placement === "main" && !this.note.replaceable;
+  }
+
   get active(): boolean {
     return this.on && !this.paused;
   }
@@ -148,6 +168,7 @@ export class HeadsUp {
   restore(branch: readonly unknown[], newSession: boolean): void {
     const entry = headsUpFromBranch(branch);
     this.on = entry ? entry.on : headsUpDefault(this.env);
+    this.where = entry?.where ?? headsUpWhereDefault(this.env);
     this.paused = undefined;
     this.misses = 0;
     this.lastNote = undefined;
@@ -156,15 +177,14 @@ export class HeadsUp {
     this.hide();
   }
 
-  setOn(on: boolean): HeadsUpEntry {
+  setOn(on: boolean, where: HeadsUpWhere = this.where): HeadsUpEntry {
     this.on = on;
+    this.where = where;
     this.paused = undefined;
     this.misses = 0;
-    if (!on) {
-      this.abort?.abort();
-      this.hide();
-    }
-    const entry: HeadsUpEntry = { version: 1, on, at: this.now() };
+    if (!on) this.abort?.abort();
+    if (!on || where === "sidebar") this.hide();
+    const entry: HeadsUpEntry = { version: 1, on, where, at: this.now() };
     this.pi.appendEntry(HEADSUP_ENTRY, entry);
     return entry;
   }
@@ -179,7 +199,7 @@ export class HeadsUp {
   /** `/sidebar headsup`: whether it is on, and what its checks cost this session. */
   summary(): string {
     const s = this.stats;
-    const state = this.paused ? `paused (${this.paused})` : this.on ? "on" : "off";
+    const state = this.paused ? `paused (${this.paused})` : !this.on ? "off" : this.placement === "sidebar" ? "on, notes go to Sidebar," : this.where === "sidebar" ? "on, notes show above main's editor (Sidebar needs Pi's fullscreen mode)," : "on, notes show above main's editor,";
     const lines = [`Heads-up mode is ${state} in this session.`];
     const choice = this.host.model?.();
     if (choice?.kind === "other") lines.push(`Checks run on ${choice.label}, which reads main's session as a transcript and keeps its own cache.`);
@@ -192,7 +212,7 @@ export class HeadsUp {
       if (s.lastSkip) lines.push(`Last skip: ${s.lastSkip}.`);
     }
     lines.push(shareSummary(this.share));
-    lines.push(`Turn off for this session with /sidebar headsup off; set ${HEADSUP_ENV}=0 to start sessions with it off.`);
+    lines.push(`Turn off for this session with /sidebar headsup off; /sidebar headsup main shows notes above main's editor, /sidebar headsup sidebar keeps them in Sidebar. ${HEADSUP_ENV}=0 starts sessions with it off, ${HEADSUP_ENV}=main with notes above main's editor.`);
     return lines.join("\n");
   }
 
@@ -260,12 +280,13 @@ export class HeadsUp {
         ctx.ui.notify(`Heads-up checks paused: the last ones missed ${which}. /sidebar headsup on resumes them.`, "warning");
       }
     }
-    if (result.outcome === "note" && result.note && this.on && this.note.free) {
+    if (result.outcome === "note" && result.note && this.on) {
       const note = result.note;
       try { (await this.profile(ctx.cwd)).update((p) => addRecent(p, { id: note.topic, text: note.text, at: now })); } catch { /* not remembered */ }
       this.lastNote = note;
-      this.show(note, ctx);
-      this.host.deliver(note);
+      const placement = this.placement;
+      if (placement === "main" && this.note.replaceable) this.show(note, ctx);
+      this.host.deliver(note, placement);
     }
     return result;
   }

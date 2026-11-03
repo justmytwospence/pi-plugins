@@ -13,6 +13,9 @@ import { herdrFocus, navDirection, navTarget } from "./nav.ts";
 import { SidebarPanel, type StatusPart } from "./panel.ts";
 import { requestPinService, requestStash, type PromptPinService, type StashController } from "./contract.ts";
 import { HeadsUp, headsUpChange, headsUpChanged } from "./headsup/headsup.ts";
+import { HEADSUP_STATUS, waitingStatus } from "./headsup/note.ts";
+import type { HeadsUpWhere } from "./headsup/mode.ts";
+import { FOOTER_ACTIONS_CHANNEL, type FooterActionsRequest } from "./footer-actions.ts";
 import type { HeadsUpNote } from "./headsup/protocol.ts";
 import { draftMessages, hiddenPrompt, isNoteMarker, noteMessages, turnReply, type NoteModel } from "./headsup/thread.ts";
 import { QUIZ_ENTRY, QuizMode, quizFromBranch } from "./quiz/mode.ts";
@@ -63,7 +66,7 @@ export const DRAFT_TIMEOUT_MS = 10 * 60_000;
 
 export const SIDEBAR_HEADSUP_HELP = [
   "/known          the last heads-up note was something you knew: it is not raised again",
-  "/headsup        heads-up mode's state and cost (on | off)",
+  "/headsup        heads-up mode's state and cost (on | sidebar | main | off)",
   "/post           publish the last share note's post on Bluesky (after a confirm); /post edit to change it first, /post <text> to publish that",
   "/draft          write a blog draft from the last share note (/draft outline for a section outline)",
 ].join("\n");
@@ -102,6 +105,8 @@ export class SidebarController {
   private resolvedChoice: { id: string; at: number; choice: ModelChoice } | undefined;
   /** Heads-up notes waiting for Sidebar to finish its answer. */
   private pendingNotes: HeadsUpNote[] = [];
+  /** Notes that arrived while Sidebar was closed, newest last; main's footer shows the latest. */
+  private waiting: HeadsUpNote[] = [];
   private pendingQuestion: { text: string; capture: QuestionCapture } | undefined;
   /** Notes already put in Sidebar's thread, so opening Sidebar does not add one twice. */
   private readonly delivered = new WeakSet<HeadsUpNote>();
@@ -143,8 +148,23 @@ export class SidebarController {
       if (recorded.invalid > 0) this.panel?.notice({ kind: "warning", text: `Quiz mode could not read ${recorded.invalid} grade${recorded.invalid === 1 ? "" : "s"} from that answer; it was not counted.` });
     });
     this.main.onChange(() => this.render());
+    pi.events?.on?.(FOOTER_ACTIONS_CHANNEL, (data: unknown) => {
+      const request = data as Partial<FooterActionsRequest> | undefined;
+      const ctx = this.main.ctx;
+      if (request?.version !== 1 || !request.actions || typeof request.actions !== "object" || this.waiting.length === 0 || !ctx?.hasUI || this.isOpen) return;
+      request.actions["headsup.open"] = {
+        label: "Read the heads-up note in Sidebar",
+        ...(this.keys[0] ? { key: this.keys[0] } : {}),
+        run: () => { if (this.main.ctx === ctx && this.waiting.length > 0) this.openOrFocus(ctx); },
+      };
+    });
     this.headsUp = new HeadsUp(pi, this.main, {
-      deliver: (note) => this.deliverNote(note),
+      deliver: (note, placement) => this.deliverNote(note, placement),
+      canShowSidebar: () => {
+        const ctx = this.main.ctx;
+        if (!ctx || ctx.mode !== "tui" || !ctx.hasUI) return false;
+        return canSplit(this.tui ?? this.probe(ctx));
+      },
       dialogOpen: () => {
         if (!this.mainEditor || this.panel?.focused) return false;
         const focused = this.hostTui?.getFocusedComponent?.() ?? null;
@@ -284,6 +304,7 @@ export class SidebarController {
       ctx.ui.notify('Sidebar needs Pi\'s fullscreen mode (set "tuiMode": "fullscreen" in settings).', "warning");
       return false;
     }
+    const fresh = tui !== this.tui || !this.panel;
     if (tui !== this.tui || !this.panel) {
       if (tui !== this.tui) {
       }
@@ -358,6 +379,12 @@ export class SidebarController {
       this.pendingNotes.push(shown);
     }
     this.flushNotes();
+    const latest = this.waiting.at(-1);
+    if (latest && fresh && this.panel) {
+      this.panel.chat.note(this.noteHint(latest));
+      this.panel.scrollToEnd();
+    }
+    this.clearWaiting();
     return true;
   }
 
@@ -487,6 +514,7 @@ export class SidebarController {
     await this.agent.abort();
     if (this.family.kernel) await this.family.reset();
     else this.pi.appendEntry(RESET_ENTRY, { timestamp: Date.now() });
+    this.clearWaiting();
     await this.agent.setThread([]);
     this.rebuild();
   }
@@ -502,6 +530,8 @@ export class SidebarController {
     this.modelSetting = this.family.kernel?.model ?? modelFromBranch(branch)?.model ?? modelDefault();
     this.resolvedChoice = undefined;
     this.pendingNotes = [];
+    this.waiting = [];
+    try { ctx.ui.setStatus?.(HEADSUP_STATUS, undefined); } catch { /* no status line */ }
     if (newSession || !this.family.kernel) await this.agent.setThread(this.family.kernel?.messages ?? threadFromBranch(branch));
     await this.quiz.restore(quizFromBranch(branch), ctx.cwd).catch(() => {});
     const reopen = newSession && this.family.kernel?.open;
@@ -696,14 +726,40 @@ export class SidebarController {
   }
 
   /**
-   * A heads-up note into Sidebar's thread, only once Sidebar has been started (a note never starts
-   * it). While it answers, the note waits for the answer to end. Main shows the note either way.
+   * A heads-up note into Sidebar's thread. With placement `main` only once Sidebar has been started
+   * (the note shows above main's editor either way). With `sidebar` always (an append, no request),
+   * and while Sidebar is closed main's footer shows the latest. While Sidebar answers, the note
+   * waits for the answer to end.
    */
-  private deliverNote(note: HeadsUpNote): void {
-    if (!this.started) return;
+  private deliverNote(note: HeadsUpNote, placement: HeadsUpWhere = "main"): void {
+    if (placement === "main" && !this.started) return;
     this.delivered.add(note);
     this.pendingNotes.push(note);
     this.flushNotes();
+    if (placement === "sidebar" && !this.isOpen) {
+      this.waiting.push(note);
+      this.publishWaiting();
+    }
+  }
+
+  private publishWaiting(): void {
+    const ctx = this.main.ctx;
+    if (!ctx?.hasUI) return;
+    const latest = this.waiting.at(-1);
+    try { ctx.ui.setStatus(HEADSUP_STATUS, latest ? waitingStatus(latest, this.waiting.length) : undefined); } catch { /* main's session went away */ }
+  }
+
+  private clearWaiting(): void {
+    if (this.waiting.length === 0) return;
+    this.waiting = [];
+    this.publishWaiting();
+  }
+
+  /** `/sidebar headsup on|sidebar|main|off`: the setting, and what to tell the user. */
+  setHeadsUp(change: { on: boolean; where?: HeadsUpWhere }): string {
+    this.headsUp.setOn(change.on, change.where ?? this.headsUp.where);
+    if (!change.on || this.headsUp.where === "main") this.clearWaiting();
+    return headsUpChanged(this.headsUp.on, this.headsUp.where);
   }
 
   private flushNotes(): void {
@@ -868,10 +924,9 @@ export class SidebarController {
     const sub = arg.trim().toLowerCase();
     const change = headsUpChange(sub);
     if (change) {
-      this.headsUp.setOn(change.on);
-      this.panel?.notice({ kind: "info", text: headsUpChanged(change) });
+      this.panel?.notice({ kind: "info", text: this.setHeadsUp(change) });
     } else if (sub === "") this.noteLines(this.headsUp.summary().split("\n"));
-    else this.panel?.notice({ kind: "warning", text: `Unknown /headsup argument "${sub}": /headsup, /headsup on, /headsup off.` });
+    else this.panel?.notice({ kind: "warning", text: `Unknown /headsup argument "${sub}": /headsup, /headsup on, /headsup sidebar, /headsup main, /headsup off.` });
   }
 
   private async known(): Promise<void> {

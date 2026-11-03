@@ -419,9 +419,9 @@ describe("a share note above main's editor", () => {
     state.show(note, { bluesky: false, drafts: false });
     expect(state.action("1")).toBeUndefined();
     expect(state.action("4")).toEqual({ type: "known", via: "declined" });
-    expect(state.lines(120, theme).at(-1)).toBe("   4: Not interested   0: Dismiss");
+    expect(state.lines(120, theme).at(-1)).toBe("   4 not interested · 0 dismiss");
     state.show(note, { bluesky: true, drafts: true });
-    expect(state.lines(120, theme).at(-1)).toBe("   1: Review post   2: Blog draft   3: Blog outline   4: Not interested   0: Dismiss");
+    expect(state.lines(120, theme).at(-1)).toBe("   1 review post · 2 blog draft · 3 blog outline · 4 not interested · 0 dismiss");
     expect(state.action("3")).toEqual({ type: "draft", kind: "outline" });
     state.show({ ...note, post: undefined }, { bluesky: true, drafts: false });
     expect(state.action("1")).toBeUndefined();
@@ -435,7 +435,7 @@ describe("a share note above main's editor", () => {
     const lines = state.lines(60, theme);
     expect(lines.some((l) => l.includes("│ TIL you can splice"))).toBe(true);
     expect(lines.at(-2)).toBe(`   ${graphemes(note.post!).length}/300`);
-    expect(lines.at(-1)).toBe("   1: Post to Bluesky   2: Edit   3: Back   0: Discard");
+    expect(lines.at(-1)).toBe("   1 post to Bluesky · 2 edit · 3 back · 0 discard");
     for (const width of [20, 40]) for (const line of state.lines(width, theme)) expect(visibleWidth(line)).toBeLessThanOrEqual(width);
     expect(state.action("1")).toEqual({ type: "publish" });
     state.apply({ type: "back" }, 0);
@@ -499,7 +499,7 @@ describe("HeadsUp with sharing", () => {
     };
     const written: unknown[] = [];
     const headsUp = new HeadsUp(pi as never, main, { deliver: () => {}, askSidebar: () => true, draftWritten: (...args) => written.push(args), ...host }, {
-      knowledgeDir: path.join(dir, "k"), logFile: path.join(dir, "log"), run: async () => undefined, stream, now: () => now, env: { ...env, PI_SIDEBAR_DRAFTS_DIR: env.PI_SIDEBAR_DRAFTS_DIR ? path.join(dir, "drafts") : "" }, fetch,
+      knowledgeDir: path.join(dir, "k"), logFile: path.join(dir, "log"), run: async () => undefined, stream, now: () => now, env: { PI_SIDEBAR_HEADSUP: "main", ...env, PI_SIDEBAR_DRAFTS_DIR: env.PI_SIDEBAR_DRAFTS_DIR ? path.join(dir, "drafts") : "" }, fetch,
       ...(share ? { share } : {}),
     });
     const known = () => new ProfileStore(path.join(dir, "k"), "/repo").load().headsUp?.known.map((t) => t.id) ?? [];

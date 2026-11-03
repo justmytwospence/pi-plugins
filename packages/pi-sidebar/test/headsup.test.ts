@@ -5,9 +5,9 @@ import { visibleWidth } from "@earendil-works/pi-tui";
 import { describe, expect, it } from "vitest";
 import { MainState } from "../src/main-state.ts";
 import { runCheck } from "../src/headsup/check.ts";
-import { HeadsUp, headsUpChange } from "../src/headsup/headsup.ts";
-import { HEADSUP_ENTRY, headsUpDefault, headsUpFromBranch, HeadsUpStats } from "../src/headsup/mode.ts";
-import { proseMeasure, NoteState, quoteForMain } from "../src/headsup/note.ts";
+import { HeadsUp, headsUpChange, type HeadsUpHost } from "../src/headsup/headsup.ts";
+import { HEADSUP_ENTRY, headsUpDefault, headsUpFromBranch, headsUpWhereDefault, HeadsUpStats } from "../src/headsup/mode.ts";
+import { proseMeasure, NoteState, quoteForMain, waitingStatus } from "../src/headsup/note.ts";
 import { parseHeadsUp } from "../src/headsup/protocol.ts";
 import { isNoteMarker, noteMessages } from "../src/headsup/thread.ts";
 import { HeadsUpScheduler } from "../src/headsup/scheduler.ts";
@@ -145,27 +145,35 @@ describe("heads-up note", () => {
     const theme = { fg: (_c: string, t: string) => t, bold: (t: string) => t } as never;
     for (const width of [30, 46, 120]) {
       const lines = state.lines(width, theme);
-      expect(lines[0]).toMatch(/^ ✦ heads up · risk: word/);
-      expect(lines[lines.length - 1]).toMatch(/^ {3}1: Learn more/);
+      expect(lines[0]).toMatch(/^ ✦ Heads up · risk$/);
+      expect(lines[1]).toMatch(/^ {3}word/);
+      expect(lines.slice(-(width === 30 ? 2 : 1)).map((l) => l.trim()).join(" · ")).toMatch(width === 30 ? /1 learn more.*0 dismiss/ : /^1 learn more · 2 knew this · 0 dismiss$/);
       for (const line of lines) expect(visibleWidth(line)).toBeLessThanOrEqual(width);
     }
+    state.apply({ type: "expand" }, 0);
+    const narrow = state.lines(30, theme);
+    expect(narrow.length).toBeGreaterThan(state.lines(120, theme).length - 20);
+    expect(narrow.at(-1)).not.toMatch(/1 understood · 2 ask main/);
+    for (const line of narrow) expect(visibleWidth(line)).toBeLessThanOrEqual(30);
   });
 
-  it("lays out like pi-recap's line: text wraps in a block right of the label", () => {
+  it("puts the text under a title and the choices as chips", () => {
     const state = new NoteState();
     state.show({ ...note, text: "word ".repeat(40).trim() });
     const theme = { fg: (_c: string, t: string) => t, bold: (t: string) => t } as never;
     const lines = state.lines(70, theme, 40);
-    const textCol = lines[0].indexOf("word");
-    expect(textCol).toBeGreaterThan(3);
-    expect(lines.slice(1, -1).every((line) => line.startsWith(" ".repeat(textCol) + "word"))).toBe(true);
     expect(Math.max(...lines.slice(0, -1).map(visibleWidth))).toBeLessThanOrEqual(3 + 40);
     state.apply({ type: "expand" }, 0);
     expect(state.lines(70, theme).at(-2)).toBe("   Why it matters.");
     state.apply({ type: "dismiss" }, 0);
     state.show(note);
     state.apply({ type: "dismiss" }, 0);
-    expect(state.lines(120, theme)).toEqual([" ✦ heads up dismissed: 9: Turn off heads-up for this session"]);
+    expect(state.lines(120, theme)).toEqual([" ✦ Heads up dismissed · 9 turn off heads-up for this session"]);
+  });
+
+  it("describes a waiting note for the footer", () => {
+    expect(waitingStatus(note, 1)).toBe("✦ heads up · risk: Something");
+    expect(waitingStatus({ ...note, text: "a\n  b" }, 3)).toBe("✦ heads up (3) · risk: a b");
   });
 
   it("quotes the note for main", () => {
@@ -315,7 +323,7 @@ describe("a heads-up check on another model", () => {
 });
 
 describe("HeadsUp in main", () => {
-  async function setup(reply = NOTE, deliver = false) {
+  async function setup(reply = NOTE, deliver = false, env: NodeJS.ProcessEnv = { PI_SIDEBAR_HEADSUP: "main" }, host: Partial<HeadsUpHost> = {}) {
     const now = 1000;
     const { pi, main, ctx } = await primedMain(now);
     const widgets: unknown[] = [];
@@ -325,17 +333,18 @@ describe("HeadsUp in main", () => {
     (ctx as any).ui.getEditorText = () => editor;
     const asked: string[] = [];
     const delivered: unknown[] = [];
+    const placements: string[] = [];
     const dir = mkdtempSync(path.join(tmpdir(), "headsup-"));
     const { stream } = stubStream(reply);
-    const headsUp = new HeadsUp(pi as never, main, { deliver: (note) => { if (deliver) delivered.push(note); }, askSidebar: (text) => { asked.push(text); return true; } }, {
+    const headsUp = new HeadsUp(pi as never, main, { deliver: (note, placement) => { if (deliver) delivered.push(note); placements.push(placement); }, askSidebar: (text) => { asked.push(text); return true; }, ...host }, {
       knowledgeDir: dir,
       logFile: path.join(dir, "log"),
       run: async () => undefined,
       stream,
       now: () => now,
-      env: {},
+      env,
     });
-    return { pi, ctx, headsUp, widgets, asked, delivered, dir, editor: () => editor };
+    return { pi, ctx, headsUp, widgets, asked, delivered, placements, dir, editor: () => editor };
   }
 
   it("mounts the note again after a tool runs, so a widget the tool added sits above it", async () => {
@@ -386,14 +395,53 @@ describe("HeadsUp in main", () => {
   });
 
   it("is switched off and on through main's session", async () => {
-    const { pi, headsUp } = await setup();
+    const { pi, headsUp } = await setup(NOTE, false, {});
     expect(headsUp.on).toBe(true);
+    expect(headsUp.where).toBe("sidebar");
     headsUp.setOn(false);
     expect(pi.entries.at(-1)).toMatchObject({ customType: HEADSUP_ENTRY, data: { on: false } });
     headsUp.restore([{ type: "custom", customType: HEADSUP_ENTRY, data: { version: 1, on: false, at: 1 } }], false);
     expect(headsUp.on).toBe(false);
+    headsUp.setOn(true, "main");
+    expect(pi.entries.at(-1)).toMatchObject({ data: { on: true, where: "main" } });
+    headsUp.restore([{ type: "custom", customType: HEADSUP_ENTRY, data: { version: 1, on: true, where: "main", at: 1 } }], false);
+    expect(headsUp.where).toBe("main");
     headsUp.restore([], true);
     expect(headsUp.on).toBe(true);
+    expect(headsUp.where).toBe("sidebar");
+  });
+
+  it("defaults to Sidebar: no widget, and the host gets the note for Sidebar", async () => {
+    const { headsUp, widgets, placements } = await setup(NOTE, false, {});
+    await headsUp.check("turn");
+    expect(widgets).toHaveLength(0);
+    expect(placements).toEqual(["sidebar"]);
+    expect(headsUp.note.showing).toBe(false);
+  });
+
+  it("falls back to main when Sidebar cannot show", async () => {
+    const { headsUp, widgets, placements } = await setup(NOTE, false, {}, { canShowSidebar: () => false });
+    await headsUp.check("turn");
+    expect(widgets).toHaveLength(1);
+    expect(placements).toEqual(["main"]);
+  });
+
+  it("keeps checking while a note waits, and in main replaces a note unless you are in it", async () => {
+    const side = await setup(NOTE, false, {});
+    await side.headsUp.check("turn");
+    await side.headsUp.check("turn");
+    expect(side.placements).toEqual(["sidebar", "sidebar"]);
+    const main = await setup();
+    await main.headsUp.check("turn");
+    await main.headsUp.check("turn");
+    expect(main.widgets.length).toBeGreaterThan(1);
+    expect(main.headsUp.note.replaceable).toBe(true);
+    main.headsUp.handleKey("1", true);
+    expect(main.headsUp.note.replaceable).toBe(false);
+    const shown = main.headsUp.note.note;
+    await main.headsUp.check("turn");
+    expect(main.headsUp.note.note).toBe(shown);
+    expect(main.placements).toHaveLength(3);
   });
 
   it("shows the note in main and also hands it to Sidebar's host", async () => {
@@ -406,9 +454,12 @@ describe("HeadsUp in main", () => {
     expect(headsUp.note.showing).toBe(true);
   });
 
-  it("treats the old sidebar-only setting as on", () => {
-    expect(headsUpDefault({ PI_SIDEBAR_HEADSUP: "sidebar" })).toBe(true);
-    expect(headsUpChange("sidebar")).toBeUndefined();
+  it("reads where notes go from the env and the command", () => {
+    expect(headsUpDefault({ PI_SIDEBAR_HEADSUP: "main" })).toBe(true);
+    expect(headsUpWhereDefault({ PI_SIDEBAR_HEADSUP: "main" })).toBe("main");
+    expect(headsUpWhereDefault({})).toBe("sidebar");
+    expect(headsUpChange("sidebar")).toEqual({ on: true, where: "sidebar" });
+    expect(headsUpChange("main")).toEqual({ on: true, where: "main" });
     expect(headsUpChange("on")).toEqual({ on: true });
     expect(headsUpChange("off")).toEqual({ on: false });
   });

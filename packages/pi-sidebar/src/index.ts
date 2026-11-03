@@ -11,7 +11,7 @@ import { OBSERVER_ENV } from "./family/protocol.ts";
 import { FOCUS_KEYS_ENV, KEYS_ENV, parseFocusKeys, parseKeys } from "./config.ts";
 import { subagentsGuarded } from "./child.ts";
 import { MODEL_HELP, QUIZ_HELP, SIDEBAR_HEADSUP_HELP, SidebarController } from "./controller.ts";
-import { HEADSUP_HELP, headsUpChange, headsUpChanged } from "./headsup/headsup.ts";
+import { HEADSUP_HELP, headsUpChange } from "./headsup/headsup.ts";
 import { GUARD_ENV, judgeCall, SUBAGENT_ENV_CHANNEL, type SubagentEnvRequest } from "./guard.ts";
 import { installSystem1Notifications } from "./system1.ts";
 
@@ -40,7 +40,7 @@ const COMMAND_HELP = [
   "/sidebar        open Sidebar, or hide it (its thread is kept)",
   "/sidebar new    start a fresh Sidebar thread",
   "/sidebar quiz   quiz mode: Sidebar quizzes you on main's changes (next | progress | off)",
-  "/sidebar headsup  heads-up checks: one thing worth knowing, in Sidebar or above main's editor (on | sidebar | off)",
+  "/sidebar headsup  heads-up checks: one thing worth knowing, in Sidebar (main's footer shows the latest) or above main's editor (on | sidebar | main | off)",
   "/sidebar model  Sidebar's model: main's own (same, sharing its cache) or a favorite (model <name> | model same)",
   "Ctrl+'          open or close Sidebar (in Herdr, prefix+h/l moves between main and Sidebar)",
 ].join("\n");
@@ -67,7 +67,7 @@ export default function piSidebar(pi: ExtensionAPI) {
     description: "Open or hide Sidebar, a live read-only side chat beside this session (new | quiz | headsup | model | help)",
     getArgumentCompletions: (prefix: string) => {
       const models = sidebar.favorites().flatMap((f) => (f.model ? [`model ${f.model.id}`] : []));
-      return ["new", "quiz", "quiz next", "quiz progress", "quiz off", "headsup", "headsup on", "headsup off", "model", "model same", ...models, "help"]
+      return ["new", "quiz", "quiz next", "quiz progress", "quiz off", "headsup", "headsup on", "headsup sidebar", "headsup main", "headsup off", "model", "model same", ...models, "help"]
         .filter((a) => a.startsWith(prefix.trimStart()))
         .map((value) => ({ value, label: value }));
     },
@@ -78,8 +78,7 @@ export default function piSidebar(pi: ExtensionAPI) {
         const arg = sub.slice("headsup".length).trim();
         const change = headsUpChange(arg);
         if (change) {
-          sidebar.headsUp.setOn(change.on);
-          ctx.ui.notify(headsUpChanged(change), "info");
+          ctx.ui.notify(sidebar.setHeadsUp(change), "info");
         } else if (arg === "") ctx.ui.notify(sidebar.headsUp.summary(), "info");
         else ctx.ui.notify(`Unknown /sidebar headsup argument "${arg}".\n${HEADSUP_HELP}`, "warning");
       }
