@@ -282,18 +282,23 @@ export class McpStatusReader {
 export class McpState {
 	observations = new Map<string, McpObservation>();
 	mounted = false;
+	/** Bumped on every observation change, so renders can tell when cached MCP rows are stale. */
+	revision = 0;
 
 	mount(): void {
 		this.mounted = true;
 		this.observations.clear();
+		this.revision++;
 	}
 
 	record(report: McpReport): void {
 		for (const [name, problem] of report.problems) this.observations.set(name, problem);
+		this.revision++;
 	}
 
 	outcome(name: string, state: McpStatus): void {
 		this.observations.set(normalizeMcpName(name), { status: state });
+		this.revision++;
 	}
 
 	status(name: string): McpStatus | undefined {

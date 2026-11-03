@@ -1129,3 +1129,56 @@ describe("startup resources", () => {
     expect(groups).toEqual([{ label: "user", items: ["b", "a"], tokens: [2, 1] }]);
   });
 });
+
+describe("splash planning while the transcript grows", () => {
+  test("measures once per frame and stops replanning once the chat fills the screen", async () => {
+    const { replaceSections, setStartupResourcesTheme, stopStartupResources } = await import("../src/feature/shell/startup-resources.ts");
+    let styled = 0;
+    setStartupResourcesTheme(() => ({ fg: (_name, text) => { styled++; return text; }, bold: (text) => text }));
+    const git = (name: string) => ({
+      path: `/h/.pi/agent/git/github.com/me/repo/packages/pi-${name}/src`,
+      sourceInfo: { source: "git:github.com/me/repo", scope: "user", baseDir: "/h/.pi/agent/git/github.com/me/repo" },
+    });
+    let chat = Array.from({ length: 4 }, (_, i) => `chat ${i}`);
+    const chatContainer = { render: vi.fn(() => chat), invalidate() {} };
+    const extensions = { state: { expanded: false }, setExpanded() {}, invalidate() {}, render: (_width: number) => ["[Extensions]", "  many"] };
+    const mode = Object.create((InteractiveMode as any).prototype, Object.fromEntries(Object.entries({
+      sessionManager: { getCwd: () => "/work" },
+      session: { promptTemplates: [], resourceLoader: {
+        getSystemPromptSource: () => undefined, getAppendSystemPromptSources: () => [], agentDir: "/h/.pi/agent",
+        getAgentsFiles: () => ({ agentsFiles: [] }), getSkills: () => ({ skills: [] }),
+        getExtensions: () => ({ extensions: Array.from({ length: 40 }, (_, i) => git(`ext${i}`)) }),
+      } },
+      ui: { requestRender: vi.fn(), terminal: { rows: 12 } },
+      chatContainer,
+      loadedResourcesContainer: { children: [extensions] },
+      getStartupExpansionState: () => false,
+    }).map(([key, value]) => [key, { value, writable: true }])));
+    const frame = async () => {
+      await Promise.resolve();
+      chatContainer.render.mockClear();
+      styled = 0;
+      const first = extensions.render(80);
+      expect(extensions.render(80)).toEqual(first);
+      return { lines: first, chatRenders: chatContainer.render.mock.calls.length, styled };
+    };
+    try {
+      replaceSections(mode, { force: true });
+      const roomy = await frame();
+      expect(roomy.lines[0]).toContain("Extensions");
+      expect(roomy.chatRenders).toBe(1);
+      chat = Array.from({ length: 40 }, (_, i) => `chat ${i}`);
+      const full = await frame();
+      expect(full.lines.length).toBeLessThanOrEqual(roomy.lines.length);
+      const steady = await frame();
+      chat = [...chat, "one more line"];
+      const grown = await frame();
+      expect(grown.lines).toEqual(steady.lines);
+      // Replanning lays out many candidates; a reused plan only re-renders its cached sections.
+      expect(grown.styled).toBe(steady.styled);
+      expect(grown.styled).toBeLessThan(full.styled);
+    } finally {
+      stopStartupResources();
+    }
+  });
+});

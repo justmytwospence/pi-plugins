@@ -552,14 +552,30 @@ function countColumn(groups: ResourceGroup[], indent: number): number {
 	return names + 2 + counts;
 }
 
+/*
+ * Sections are immutable once built, and the splash renders the same ones on every frame for as long
+ * as it stays in the transcript, so their layouts are kept per width and theme. Shared results must
+ * not be mutated. The style probe catches a theme whose colors change in place.
+ */
+const sectionLayouts = new WeakMap<ResourceSection, Map<string, { theme: StartupTheme; layout: SectionLayout }>>();
+const themeProbe = (theme: StartupTheme) => ["accent", "dim", "mdHeading", "warning", "error"].map((color) => theme.fg(color, "·")).join("") + theme.bold("·");
+
 export function layoutSection(section: ResourceSection, width: number, theme: StartupTheme): SectionLayout {
 	const available = Math.max(0, Math.floor(width));
 	if (!available) return { lines: [], hits: [] };
+	const key = `${available}\0${themeProbe(theme)}`;
+	let layouts = sectionLayouts.get(section);
+	const cached = layouts?.get(key);
+	if (cached?.theme === theme) return cached.layout;
 	const content = layoutSectionContent(section, available - 1, theme);
-	return {
+	const layout = {
 		lines: content.lines.map((line) => ` ${line}`),
 		hits: content.hits.map((hit) => ({ ...hit, startCol: hit.startCol + 1, endCol: hit.endCol + 1 })),
 	};
+	if (!layouts) sectionLayouts.set(section, layouts = new Map());
+	if (layouts.size >= 4) layouts.clear();
+	layouts.set(key, { theme, layout });
+	return layout;
 }
 
 /** Reserve Pi's one-cell left inset before measuring columns and clickable regions. */
@@ -1335,14 +1351,12 @@ export function replaceSections(mode: any, options: unknown, pi?: ExtensionAPI):
 	host.refresh = refresh;
 	host.repaint = () => mode.ui?.requestRender?.();
 	refresh();
-	let planned: Record<string, ResourceSection> = {};
-	let planKey = "";
 	const native = new Map<any, (width: number) => string[]>();
 	// The first section (or an interactive section) plans from a render-time viewport width.
 	// Measure the other children through their original renderers, never through our wrappers:
 	// rendering loadedResourcesContainer here would recurse into the planner.
 	const selected = (name: string, width: number, expanded: boolean) => {
-		ensurePlan(width);
+		const planned = ensurePlan(width);
 		return expanded ? (name === "MCP" ? section() : host.resourceSections?.[name]) : planned[name];
 	};
 	const initialExpanded = !!mode.getStartupExpansionState?.();
@@ -1391,39 +1405,66 @@ export function replaceSections(mode: any, options: unknown, pi?: ExtensionAPI):
 	children.push(mapComponent, modelSpacer, modelComponent);
 	const dock = ["editorContainer", "footerContainer", "statusContainer", "pendingMessagesContainer", "widgetContainerAbove", "widgetContainerBelow"];
 	const height = (node: any, width: number) => typeof node?.render === "function" ? node.render(width).length : 0;
-	function ensurePlan(width: number): void {
+	// Every splash section asks for the plan while rendering, and the splash stays in the transcript
+	// for the whole session. Measure once per frame and width (a frame renders synchronously; the
+	// cheap inputs below catch state changed between two renders in one tick), and cache plans by
+	// their inputs: the row budget is clamped at zero, so once the chat fills the screen the plan
+	// stops changing as the chat grows.
+	const framePlans = new Map<number, { inputs: unknown[]; planned: Record<string, ResourceSection> }>();
+	const plans = new Map<string, Record<string, ResourceSection>>();
+	const frameInputs = (): unknown[] => [
+		mode.ui?.terminal?.rows, attachStartupHost(mode).generation, host.resourceSections, host.contextSnapshot, mcpEntries, statuses, mcpState.revision,
+		component.expanded, modelComponent.expanded, children.length, mode.chatContainer?.children?.length,
+		...titled.map(([child]) => !!child.state?.expanded),
+	];
+	function ensurePlan(width: number): Record<string, ResourceSection> {
+		const inputs = frameInputs();
+		const framed = framePlans.get(width);
+		if (framed && framed.inputs.length === inputs.length && framed.inputs.every((input, index) => input === inputs[index])) return framed.planned;
+		if (framePlans.size === 0) queueMicrotask(() => framePlans.clear());
+		const planned = measurePlan(width);
+		framePlans.set(width, { inputs, planned });
+		return planned;
+	}
+	function measurePlan(width: number): Record<string, ResourceSection> {
 		const current = attachStartupHost(mode);
-		if (generation !== current.generation) { generation = current.generation; planKey = ""; }
+		if (generation !== current.generation) { generation = current.generation; plans.clear(); }
 		const full = { ...host.resourceSections, MCP: section() } as Record<string, ResourceSection>;
 		if (!full.MCP) delete full.MCP;
 		const rows = mode.ui?.terminal?.rows;
-		if (!Number.isFinite(rows)) { planned = full; return; }
+		if (!Number.isFinite(rows)) return full;
 		const fixed = height(mode.headerContainer, width) + height(mode.chatContainer, width)
 			+ dock.reduce((sum, name) => sum + height(mode[name], width), 0);
-		let splashFixed = 0;
+		const splashFixed: Array<() => number> = [];
 		const flexible: Record<string, ResourceSection> = {};
 		for (const child of children) {
 			if (child === component || child === modelComponent) continue;
 			const title = titled.find(([original]) => original === child)?.[1];
 			if (title && full[title]) {
-				if (child.state?.expanded) splashFixed += renderSection(full[title], width, theme()).length;
+				if (child.state?.expanded) splashFixed.push(() => renderSection(full[title], width, theme()).length);
 				else flexible[title] = full[title];
-			} else splashFixed += height(native.get(child) ? { render: native.get(child) } : child, width);
+			} else splashFixed.push(() => height(native.get(child) ? { render: native.get(child) } : child, width));
 		}
 		if (full.MCP) {
-			if (component.expanded) splashFixed += renderSection(full.MCP, width, theme()).length;
+			if (component.expanded) splashFixed.push(() => renderSection(full.MCP!, width, theme()).length);
 			else flexible.MCP = full.MCP;
 		}
 		if (full.Models) {
-			if (modelComponent.expanded) splashFixed += renderSection(full.Models, width, theme()).length;
+			if (modelComponent.expanded) splashFixed.push(() => renderSection(full.Models!, width, theme()).length);
 			else flexible.Models = full.Models;
 		}
-		// All splash-owned spacers and the map are included exactly once above.
+		// All splash-owned spacers and the map are included exactly once above. Any budget at or
+		// below zero plans the same shortest listing, so a full screen skips measuring the splash.
+		const budget = fixed >= rows ? 0 : Math.max(0, rows - fixed - splashFixed.reduce((sum, measure) => sum + measure(), 0));
 		const expansions = [...titled.map(([child]) => !!child.state?.expanded), component.expanded, modelComponent.expanded];
-		const key = JSON.stringify([generation, width, rows, fixed, splashFixed, expansions, flexible]);
-		if (key === planKey) return;
-		planKey = key;
-		planned = { ...full, ...planSplashSections(flexible, width, theme(), rows - fixed - splashFixed) };
+		const key = JSON.stringify([width, budget, expansions, flexible]);
+		let plan = plans.get(key);
+		if (!plan) {
+			plan = planSplashSections(flexible, width, theme(), budget);
+			if (plans.size >= 8) plans.delete(plans.keys().next().value!);
+			plans.set(key, plan);
+		}
+		return { ...full, ...plan };
 	}
 	watchMcpState(mode, component, (entries, observed) => {
 		mcpEntries = entries;
@@ -1440,7 +1481,7 @@ export function replaceSections(mode: any, options: unknown, pi?: ExtensionAPI):
 	for (const [child, title] of titled) {
 		const expandedRender = native.get(child)!;
 		child.render = (width: number) => {
-			ensurePlan(width);
+			const planned = ensurePlan(width);
 			const section = host.resourceSections?.[title!];
 			return !section ? expandedRender(width)
 				: renderSection(child.state?.expanded ? section : planned[title!] ?? section, width, theme());
