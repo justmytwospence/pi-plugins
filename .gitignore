@@ -13,3 +13,4 @@ site/.astro/
 evals/results/
 .pi/tasks/
 **/.pi/tasks/
+.pi/git/

@@ -7,6 +7,30 @@ Runtime components live under `packages/<name>/`. Public documentation lives und
 
 Keep components independently usable, and keep sibling integrations optional. For cross-extension changes, read [activity ownership and lifecycle](/architecture/activity/) alongside the relevant source and tests.
 
+## Live local loading
+
+The repository commits a project `.pi/settings.json`:
+
+```json
+{
+  "packages": [
+    {
+      "source": "git:github.com/justmytwospence/pi-plugins",
+      "autoload": false,
+      "extensions": ["!**"],
+      "skills": ["!**"],
+      "prompts": ["!**"],
+      "themes": ["!**"]
+    },
+    ".."
+  ]
+}
+```
+
+In a trusted project, a Pi session started at the root of the checkout or of a worktree loads the suite from that checkout. The first entry is an `autoload: false` delta over a personal install of the suite from Git and disables all of its resources; `".."` resolves against `<cwd>/.pi` and loads the checkout itself. Other installed packages still load. Edit a component, then run `/reload` in such a session to try it; each worktree session runs its own branch. Sessions started elsewhere, including a subdirectory such as `packages/<name>`, keep the installed release.
+
+The checkout needs its dependencies installed (below). A change that fails to load disables that component in the session you are using to fix it; revert or fix it and `/reload`, or start Pi outside the checkout. Without a personal Git entry for the suite, the delta has nothing to narrow: Pi clones the Git package into the ignored `.pi/git/`, with all of its resources disabled, while the checkout still loads. Remove the first entry locally if you do not install the suite from Git.
+
 ## Root SDK checks
 
 From the repository root:
