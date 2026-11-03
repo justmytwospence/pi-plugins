@@ -28,7 +28,7 @@ import {
 } from "./bash.ts";
 import { isRecord } from "./config.ts";
 import { loadConfig, policyIssues, policyFiles } from "./policy-config.ts";
-import { type ProjectContext, projectFiles, projectSaveFile, resolveProject } from "./project.ts";
+import { type ProjectContext, ProjectResolutionError, projectFiles, projectSaveFile, resolveProject } from "./project.ts";
 import {
   DEFAULT_DIRECTORIES,
   type DirectoriesConfig,
@@ -502,6 +502,9 @@ export default function toolGate(pi: ExtensionAPI) {
   const classifierFailures = new Map<string, string>();
   let projectContext: ProjectContext | undefined;
   let projectLaunch: string | undefined;
+  /** Why the last refresh kept the checkout resolved earlier (Git did not answer); unset once it answers. */
+  let staleProject: string | undefined;
+  let warnedStale = false;
   let policyLoadErrors: string[] = [];
   let erroredPolicyFiles: string[] = [];
   let policyDiagnostics: string[] = [];
@@ -845,8 +848,24 @@ export default function toolGate(pi: ExtensionAPI) {
   };
 
   const contextFor = async (cwd: string, refresh = false) => {
-    if (!refresh && projectContext && projectLaunch === path.resolve(cwd)) return projectContext;
-    const next = await resolveProject(cwd, pi.exec.bind(pi));
+    const launch = path.resolve(cwd);
+    if (!refresh && projectContext && projectLaunch === launch) return projectContext;
+    let next: ProjectContext;
+    try {
+      next = await resolveProject(cwd, pi.exec.bind(pi));
+    } catch (error) {
+      // A lookup that never answered says nothing new about a checkout this session already resolved.
+      if (projectContext && projectLaunch === launch && error instanceof ProjectResolutionError && error.transient) {
+        staleProject = error.message;
+        return projectContext;
+      }
+      // Anything else is evidence: stop trusting the cached checkout, so later lookups resolve again
+      // and fail closed until Git answers. The old context stays only to detect a project change.
+      projectLaunch = undefined;
+      staleProject = undefined;
+      throw error;
+    }
+    staleProject = undefined;
     if (projectContext && (projectContext.root !== next.root || projectContext.main !== next.main)) {
       invalidate();
       gitInfo = undefined;
@@ -863,10 +882,10 @@ export default function toolGate(pi: ExtensionAPI) {
   const projectKey = async (cwd: string) => (await contextFor(cwd)).main;
   const destination = async (cwd: string) => projectSaveFile(await contextFor(cwd), config.persistence.project);
   /** Reload what is saved (this project's grants, the config files) and merge it with the session's rules. */
-  const refreshRules = async (cwd: string) => {
+  const refreshRules = async (cwd: string, resolve = true) => {
     let project: ProjectContext;
     try {
-      project = await contextFor(cwd, true);
+      project = await contextFor(cwd, resolve);
     } catch (error) {
       policyLoadErrors = [`Policy resolution error: ${error instanceof Error ? error.message : String(error)}`];
       erroredPolicyFiles = [];
@@ -902,16 +921,26 @@ export default function toolGate(pi: ExtensionAPI) {
         }
       } catch { /* policyErrors reports malformed files; missing files are normal. */ }
     }
-    policyDiagnostics = [
+    const stale = staleProject
+      ? `Policy resolution warning: ${staleProject}; using the checkout resolved earlier this session (${shown(project.root)}).`
+      : undefined;
+    if (!stale) warnedStale = false;
+    else if (!warnedStale && hostCtx?.hasUI) {
+      warnedStale = true;
+      hostCtx.ui.notify(`tool-gate: ${stale}\nSee /gate.`, "warning");
+    }
+    const fileDiagnostics = [
       ...policyLoadErrors,
       ...(loadGrants(project.main).length ? [`Legacy grants: ${shown(grantsFile())}; migrate explicitly before removing.`] : []),
       ...files.ignored.map((r) => `Invalid ${r.list} rule ${r.raw} in ${shown(r.origin.source)}: ${r.error}; it provides no protection.`),
       ...files.rules.flatMap((r) => { const warning = ruleWarning(r.list, r.rule); return warning ? [`${r.text} in ${shown(r.origin.source)}: ${warning}.`] : []; }),
     ];
-    if (policyDiagnostics.length && !warnedPolicy && hostCtx?.hasUI) {
+    // The stale-checkout warning has its own notice above; /gate lists everything.
+    if (fileDiagnostics.length && !warnedPolicy && hostCtx?.hasUI) {
       warnedPolicy = true;
-      hostCtx.ui.notify(`tool-gate policy diagnostics:\n${policyDiagnostics.join("\n")}\nSee /gate.`, "warning");
+      hostCtx.ui.notify(`tool-gate policy diagnostics:\n${fileDiagnostics.join("\n")}\nSee /gate.`, "warning");
     }
+    policyDiagnostics = [...(stale ? [stale] : []), ...fileDiagnostics];
     fileRules = files.rules;
     ignoredRules = [...local.ignored, ...files.ignored];
     allRules = [...sessionRules, ...localRules, ...fileRules];
@@ -1185,6 +1214,9 @@ export default function toolGate(pi: ExtensionAPI) {
     pendingUsage.clear();
     hostCtx = ctx;
     projectContext = undefined;
+    projectLaunch = undefined;
+    staleProject = undefined;
+    warnedStale = false;
     config = structuredClone(DEFAULT_CONFIG);
     rebuildDownloads(ctx);
     sessionRules = [];
@@ -1356,7 +1388,8 @@ export default function toolGate(pi: ExtensionAPI) {
       const tool = event.toolName;
       const input = event.input as Record<string, unknown>;
 
-      await refreshRules(ctx.cwd);
+      // The checkout was resolved at turn start; re-reading the policy files is enough per call.
+      await refreshRules(ctx.cwd, false);
       if (stale()) return staleResult();
       if (policyLoadErrors.length) {
         // Only direct diagnosis of the broken file is safe. Never enter retry/approval handling.

@@ -1108,6 +1108,97 @@ test("invalid Git main-checkout metadata blocks calls without writing local stat
   expect(() => readFileSync(path.join(root, ".pi/tool-gate.local.json"))).toThrow();
 });
 
+/** A real Git checkout whose lookups can be made to time out or fail on demand. */
+function gitCheckout() {
+  const root = realpathSync(path.join(configDir, "repo"));
+  const state = { mode: "ok" as "ok" | "timeout" | "dubious", lookups: 0 };
+  const h = harness({ exec: (cmd, args) => {
+    if (args.includes("rev-parse") || args.includes("worktree")) state.lookups++;
+    if (state.mode === "timeout") return { code: 1, stdout: "", stderr: "", killed: true };
+    if (state.mode === "dubious") return { code: 128, stdout: "", stderr: `fatal: detected dubious ownership in repository at '${root}'\n`, killed: false };
+    try {
+      return { code: 0, stdout: execFileSync(cmd, args, { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }), stderr: "", killed: false };
+    } catch (error) {
+      const out = error as { status?: number; stdout?: string; stderr?: string };
+      return { code: out.status ?? 1, stdout: out.stdout ?? "", stderr: out.stderr ?? "", killed: false };
+    }
+  } });
+  toolGate(h.pi);
+  const jev = fakeJev(() => safe);
+  const ctx = h.ctx({ cwd: root, modelRegistry: jev.registry });
+  return { root, state, h, ctx };
+}
+
+describe("Git checkout resolution", () => {
+  beforeEach(() => {
+    const root = path.join(configDir, "repo");
+    mkdirSync(root);
+    execFileSync("git", ["-C", root, "init", "-q"]);
+  });
+
+  test("tool calls reuse the checkout resolved at turn start", async () => {
+    const { state, h, ctx } = gitCheckout();
+    await h.emit("session_start", {}, ctx);
+    await h.emit("before_agent_start", { prompt: "x" }, ctx);
+    const resolved = state.lookups;
+    expect(resolved).toBeGreaterThan(0);
+    for (const id of ["t1", "t2", "t3"]) {
+      expect(await h.emit("tool_call", call("read", { path: "a.ts" }, id), ctx)).toBeUndefined();
+    }
+    expect(state.lookups).toBe(resolved);
+  });
+
+  test("a Git timeout at turn start keeps the checkout resolved earlier and says so", async () => {
+    const { state, h, ctx } = gitCheckout();
+    await h.emit("session_start", {}, ctx);
+    await h.emit("before_agent_start", { prompt: "x" }, ctx);
+    state.mode = "timeout";
+    await h.emit("before_agent_start", { prompt: "y" }, ctx);
+    expect(await h.emit("tool_call", call("read", { path: "a.ts" }), ctx)).toBeUndefined();
+    await h.emit("before_agent_start", { prompt: "z" }, ctx);
+    const warnings = ctx.ui.notes.filter((n: { message: string }) => n.message.includes("timed out after 2s"));
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0].message).toContain("using the checkout resolved earlier this session");
+    // Once Git answers again the warning clears, and a later stall warns again.
+    state.mode = "ok";
+    await h.emit("before_agent_start", { prompt: "w" }, ctx);
+    state.mode = "timeout";
+    await h.emit("before_agent_start", { prompt: "v" }, ctx);
+    expect(ctx.ui.notes.filter((n: { message: string }) => n.message.includes("timed out after 2s"))).toHaveLength(2);
+  });
+
+  test("a Git failure that answers blocks despite an earlier resolution, naming the cause", async () => {
+    const { state, h, ctx } = gitCheckout();
+    await h.emit("session_start", {}, ctx);
+    await h.emit("before_agent_start", { prompt: "x" }, ctx);
+    state.mode = "dubious";
+    await h.emit("before_agent_start", { prompt: "y" }, ctx);
+    // The per-call path must not revive the cached checkout.
+    for (const id of ["t1", "t2"]) {
+      expect(await h.emit("tool_call", call("bash", { command: "git status" }, id), ctx)).toMatchObject({
+        block: true, reason: expect.stringContaining("exited 128: fatal: detected dubious ownership"),
+      });
+    }
+    // Nor does a timeout afterwards: there is no trusted checkout to fall back to.
+    state.mode = "timeout";
+    expect(await h.emit("tool_call", call("bash", { command: "git status" }, "t3"), ctx)).toMatchObject({
+      block: true, reason: expect.stringContaining("timed out after 2s"),
+    });
+    state.mode = "ok";
+    expect(await h.emit("tool_call", call("read", { path: "a.ts" }, "t4"), ctx)).toBeUndefined();
+  });
+
+  test("a Git timeout before any resolution blocks", async () => {
+    const { state, h, ctx } = gitCheckout();
+    state.mode = "timeout";
+    await h.emit("session_start", {}, ctx);
+    await h.emit("before_agent_start", { prompt: "x" }, ctx);
+    expect(await h.emit("tool_call", call("read", { path: "a.ts" }), ctx)).toMatchObject({
+      block: true, reason: expect.stringContaining("git rev-parse --show-toplevel timed out after 2s"),
+    });
+  });
+});
+
 test("read-only calls pass without Jev", async () => {
   const { h, jev, ctx } = setup(safe);
   await h.emit("before_agent_start", { prompt: "x" }, ctx);

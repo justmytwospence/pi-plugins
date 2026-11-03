@@ -6,7 +6,7 @@ import path from "node:path";
 import { promisify } from "node:util";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { afterEach, expect, test, vi } from "vitest";
-import { projectFiles, projectSaveFile, resolveProject } from "../src/project.ts";
+import { ProjectResolutionError, projectFiles, projectSaveFile, resolveProject } from "../src/project.ts";
 
 vi.mock("node:fs", async importOriginal => {
   const original = await importOriginal<typeof import("node:fs")>();
@@ -137,6 +137,40 @@ test.each([
 
 test.each(["unavailable", "ETIMEDOUT"])("initial lookup exception (%s) is a resolution error", async message => {
   await expect(resolveProject(setup(), vi.fn().mockRejectedValue(new Error(message)))).rejects.toThrow("Policy resolution failed");
+});
+
+async function resolutionError(cwd: string, lookup: ExtensionAPI["exec"]): Promise<ProjectResolutionError> {
+  const error = await resolveProject(cwd, lookup).then(() => undefined, (e: unknown) => e);
+  expect(error).toBeInstanceOf(ProjectResolutionError);
+  return error as ProjectResolutionError;
+}
+
+test.each([
+  ["timeout", vi.fn().mockResolvedValue({ ...nonGit, killed: true }), "git rev-parse --show-toplevel timed out after 2s"],
+  ["exception", vi.fn().mockRejectedValue(new Error("spawn EAGAIN")), "git rev-parse --show-toplevel could not run: spawn EAGAIN"],
+])("a lookup that never answered (%s) is transient and named", async (_kind, lookup, detail) => {
+  const error = await resolutionError(setup(), lookup);
+  expect(error.transient).toBe(true);
+  expect(error.message).toBe(`Policy resolution failed: cannot resolve Git main checkout (${detail})`);
+});
+
+test("a lookup that answered with a failure is evidence and carries Git's diagnostic", async () => {
+  const error = await resolutionError(setup(), vi.fn().mockResolvedValue({
+    ...nonGit, stderr: "fatal: detected dubious ownership in repository at '/repo'\nhint: more\n",
+  }));
+  expect(error.transient).toBe(false);
+  expect(error.message).toContain("git rev-parse --show-toplevel exited 128: fatal: detected dubious ownership in repository at '/repo'");
+  expect(error.message).not.toContain("hint");
+});
+
+test("a later lookup timing out names that lookup", async () => {
+  const root = setup();
+  await git(root, "init");
+  const lookup: ExtensionAPI["exec"] = async (command, args, options) =>
+    args.includes("--absolute-git-dir") ? { stdout: "", stderr: "", code: 1, killed: true } : exec(command, args, options);
+  const error = await resolutionError(root, lookup);
+  expect(error.transient).toBe(true);
+  expect(error.message).toContain("(git rev-parse --absolute-git-dir timed out after 2s)");
 });
 
 test.each(["directory", "gitfile", "broken link"]) ("damaged ancestor .git %s blocks fallback", async kind => {

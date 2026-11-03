@@ -4,6 +4,49 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
 export type ProjectContext = { cwd: string; root: string; main: string; isGit: boolean };
 
+/** A Git lookup that never produced an answer (timed out or could not start): no evidence either way. */
+class GitUnavailable extends Error {}
+
+/**
+ * Why the checkout could not be resolved. The message names the failing step; `transient` is true
+ * only when a Git lookup never answered, so the failure carries no evidence about the checkout.
+ */
+export class ProjectResolutionError extends Error {
+  readonly transient: boolean;
+  constructor(cause: unknown) {
+    const detail = cause instanceof Error ? cause.message : String(cause);
+    super(`Policy resolution failed: cannot resolve Git main checkout (${detail})`, { cause });
+    this.name = "ProjectResolutionError";
+    this.transient = cause instanceof GitUnavailable;
+  }
+}
+
+const TIMEOUT_MS = 2_000;
+
+type ExecResult = Awaited<ReturnType<ExtensionAPI["exec"]>>;
+
+/** `git <subcommand...>` without the locale wrapper or `-C <dir>`/`--git-dir <dir>`, for diagnostics. */
+function label(command: string, args: string[]): string {
+  const rest = command === "env" ? args.slice(args.indexOf("git") + 1) : args;
+  const shown: string[] = [];
+  for (let i = 0; i < rest.length; i++) {
+    if (rest[i] === "-C" || rest[i] === "--git-dir") { i++; continue; }
+    shown.push(rest[i]!);
+  }
+  return ["git", ...shown].join(" ");
+}
+
+function firstLine(text: string): string {
+  const line = text.split("\n").find(l => l.trim())?.trim() ?? "";
+  return line.length > 200 ? `${line.slice(0, 199)}…` : line;
+}
+
+/** "exited 128: fatal: ..." for a lookup that answered with a failure. */
+function failure(name: string, out: ExecResult): string {
+  const stderr = firstLine(out.stderr ?? "");
+  return `${name} exited ${out.code}${stderr ? `: ${stderr}` : ""}`;
+}
+
 const discoveryOverrides = [
   "GIT_DIR", "GIT_COMMON_DIR", "GIT_WORK_TREE", "GIT_CEILING_DIRECTORIES", "GIT_DISCOVERY_ACROSS_FILESYSTEM",
 ];
@@ -68,20 +111,32 @@ function parseMainWorktreeLegacy(output: string): string {
 export async function resolveProject(cwd: string, exec: ExtensionAPI["exec"]): Promise<ProjectContext> {
   try {
     const launch = realpathSync(cwd);
+    // Every lookup goes through here: a timeout or a failure to start is unavailability, not an answer.
+    const run = async (command: string, args: string[]): Promise<ExecResult> => {
+      const name = label(command, args);
+      let out: ExecResult;
+      try {
+        out = await exec(command, args, { timeout: TIMEOUT_MS });
+      } catch (cause) {
+        throw new GitUnavailable(`${name} could not run: ${cause instanceof Error ? cause.message : String(cause)}`, { cause });
+      }
+      if (out.killed) throw new GitUnavailable(`${name} timed out after ${TIMEOUT_MS / 1000}s`);
+      return out;
+    };
     // Control the diagnostic locale, not the user's Git discovery configuration.
-    const identified = await exec("env", ["LC_ALL=C", "git", "-C", cwd, "rev-parse", "--show-toplevel"], { timeout: 2_000 });
-    if (identified.killed || identified.code !== 0) {
-      if (identified.killed || identified.code !== 128 || identified.stdout !== "" ||
+    const identified = await run("env", ["LC_ALL=C", "git", "-C", cwd, "rev-parse", "--show-toplevel"]);
+    if (identified.code !== 0) {
+      if (identified.code !== 128 || identified.stdout !== "" ||
           !/^fatal: not a git repository \(or any of the parent directories\): \.git\n?$/u.test(identified.stderr)) {
-        throw new Error("Git discovery failed");
+        throw new Error(`Git discovery failed: ${failure("git rev-parse --show-toplevel", identified)}`);
       }
       verifyNonGit(launch);
       return { cwd: launch, root: launch, main: launch, isGit: false };
     }
     // Query paths separately: line splitting or trimming corrupts valid Git path names.
     const git = async (dir: string, args: string[]) => {
-      const out = await exec("git", ["-C", dir, ...args], { timeout: 2_000 });
-      if (out.killed || out.code !== 0) throw new Error("Git metadata lookup failed");
+      const out = await run("git", ["-C", dir, ...args]);
+      if (out.code !== 0) throw new Error(`Git metadata lookup failed: ${failure(label("git", args), out)}`);
       return out.stdout;
     };
     const canonicalOutputPath = (output: string, dir: string, allowRelative = false) => {
@@ -100,12 +155,12 @@ export async function resolveProject(cwd: string, exec: ExtensionAPI["exec"]): P
 
     // Keep raw status/stderr: only Git's specific old-version diagnostic permits
     // a retry. A timeout, malformed successful output or any other error must deny.
-    const list = (nul: boolean) => exec("env", ["LC_ALL=C", "git", "-C", cwd, "worktree", "list", "--porcelain", ...(nul ? ["-z"] : [])], { timeout: 2_000 });
+    const list = (nul: boolean) => run("env", ["LC_ALL=C", "git", "-C", cwd, "worktree", "list", "--porcelain", ...(nul ? ["-z"] : [])]);
     let listing = await list(true);
-    const legacy = !listing.killed && listing.code === 129 &&
+    const legacy = listing.code === 129 &&
       /^error: unknown switch `z'\n(?:usage: [\s\S]*)?$/u.test(listing.stderr);
     if (legacy) listing = await list(false);
-    if (listing.killed || listing.code !== 0) throw new Error("Git metadata lookup failed");
+    if (listing.code !== 0) throw new Error(`Git metadata lookup failed: ${failure("git worktree list --porcelain", listing)}`);
     const mainPath = legacy ? parseMainWorktreeLegacy(listing.stdout) : parseMainWorktreeNul(listing.stdout);
     if (legacy) {
       // Raw newline injection can mimic even a complete valid listing. Only a
@@ -135,9 +190,9 @@ export async function resolveProject(cwd: string, exec: ExtensionAPI["exec"]): P
       // Only repository-owned configuration can map administrative metadata back
       // to its checkout. In particular, global core.worktree is not evidence.
       const config = async (scope: "local" | "worktree", key: string, boolean = false) => {
-        const out = await exec("git", ["--git-dir", commonDir, "config", `--${scope}`, ...(boolean ? ["--type=bool"] : []), "--null", "--get", key], { timeout: 2_000 });
+        const out = await run("git", ["--git-dir", commonDir, "config", `--${scope}`, ...(boolean ? ["--type=bool"] : []), "--null", "--get", key]);
         if (out.code === 1) return undefined;
-        if (out.code !== 0 || !out.stdout.endsWith("\0")) throw new Error("Invalid repository configuration");
+        if (out.code !== 0 || !out.stdout.endsWith("\0")) throw new Error(`Invalid repository configuration: ${out.code !== 0 ? failure(`git config --${scope} ${key}`, out) : "unterminated value"}`);
         return out.stdout.slice(0, -1);
       };
       const enabled = await config("local", "extensions.worktreeConfig", true);
@@ -149,7 +204,7 @@ export async function resolveProject(cwd: string, exec: ExtensionAPI["exec"]): P
     }
     return { cwd: launch, root, main, isGit: true };
   } catch (cause) {
-    throw new Error("Policy resolution failed: cannot resolve Git main checkout", { cause });
+    throw new ProjectResolutionError(cause);
   }
 }
 
