@@ -1,6 +1,6 @@
 {
   "name": "@justmytwospence/pi-model-waterfall",
-  "version": "0.1.5",
+  "version": "0.1.6",
   "description": "Fail-closed subscription-only virtual model routing for Pi.",
   "type": "module",
   "private": true,
