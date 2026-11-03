@@ -7,6 +7,7 @@ import { installFlushDockedBash } from "./feature/shell/flush-docked-bash.ts";
 import piStartupHeader, { installEarlyStartupHeader } from "./feature/shell/startup-header.ts";
 import { installStartupResources } from "./feature/shell/startup-resources.ts";
 import installNativeControls from "./feature/shell/native-controls.ts";
+import { installSplashCommand } from "./feature/shell/splash-command.ts";
 
 // features
 import agentSummary from "./feature/agent-summary/index.ts";
@@ -31,6 +32,7 @@ export default function (pi: ExtensionAPI): void {
 	installEarlyStartupHeader();
 	installNativeControls(pi);
 	installStartupResources(pi);
+	installSplashCommand(pi);
 	piStartupHeader(pi);
 
 	// render stack: the thinking controller is handed to the style layer as a query

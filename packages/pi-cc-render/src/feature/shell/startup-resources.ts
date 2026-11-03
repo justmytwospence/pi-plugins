@@ -22,6 +22,7 @@ import { categoryStyle, GLYPHS } from "./startup-style.ts";
 import { readStartupContext, type StartupContextSnapshot } from "./startup-context.ts";
 import { renderContextTreemap } from "./startup-treemap.ts";
 import { attachStartupHost, disposeStartupHost } from "./startup-state.ts";
+import { queryWaterfall, type WaterfallRung } from "../../waterfall-contract.ts";
 import { createInteractiveSection, createSplashActionController } from "./startup-interactions.ts";
 export { GLYPHS } from "./startup-style.ts";
 
@@ -77,6 +78,8 @@ export type ResourceGroup = {
 	tones?: Array<string | undefined>;
 	/** Mouse actions parallel to items, never inferred from display names. */
 	actions?: Array<SplashAction | undefined>;
+	/** A heading without its entry count (a single descriptive entry). */
+	uncounted?: boolean;
 };
 
 export type SplashAction =
@@ -345,7 +348,7 @@ type Block = { lines: string[]; hits: CellHit[]; width: number; height: number; 
 type Candidate = { columns: number; rows: number; width: number; lengths: number[]; widths: Array<{ name: number; count: number; total: number }> };
 
 function groupHeading(group: ResourceGroup, available: number, theme: StartupTheme): string {
-	const suffix = ` ${theme.fg("dim", String(groupCount(group)))}${group.foldedCount ? theme.fg("dim", ` · +${group.foldedCount} hidden`) : ""}`;
+	const suffix = `${group.uncounted && !group.foldedCount ? "" : ` ${theme.fg("dim", String(groupCount(group)))}`}${group.foldedCount ? theme.fg("dim", ` · +${group.foldedCount} hidden`) : ""}`;
 	const label = theme.fg("accent", group.label ?? "");
 	return `${group.foldedCount ? truncateToWidth(label, Math.max(0, available - visibleWidth(suffix)), "…") : label}${suffix}`;
 }
@@ -1005,7 +1008,17 @@ export function collectMcpSection(
 
 // ---- Models (pi only prints the scope as one line before the TUI starts) ----
 
-export type ModelEntry = { provider: string; id: string; contextWindow?: number; thinkingLevel?: string };
+export type ModelEntry = { provider: string; id: string; contextWindow?: number; thinkingLevel?: string; virtual?: boolean };
+
+/** The subscription vendor a provider bills: Muse SDK/Code and OpenAI/Codex share one rung. */
+const vendorOf = (provider: string) => provider.replace(/-(sdk|code|codex)$/, "");
+const hours = (ms: number) => ms >= 86_400_000 ? `${Math.round(ms / 86_400_000)}d` : ms >= 3_600_000 ? `${Math.round(ms / 3_600_000)}h` : `${Math.max(1, Math.round(ms / 60_000))}m`;
+/** A rung's heading suffix: why the waterfall would skip it now, or nothing when it would not. */
+function rungNote(rung: WaterfallRung, now: number): string | undefined {
+	if (rung.state === "available") return undefined;
+	if (rung.state === "exhausted") return rung.resetAt && rung.resetAt > now ? `resets ${hours(rung.resetAt - now)}` : "quota";
+	return rung.state === "disabled" ? "off" : "unverified";
+}
 
 const CURRENT_MARK: ResourceMark = { ...GLYPHS.live, highlight: true };
 const FAVORITE_MARK: ResourceMark = GLYPHS.favorite;
@@ -1130,8 +1143,13 @@ export function buildModelsSection(
 	available: ModelEntry[],
 	favorites: ModelEntry[] = [],
 	current?: { provider: string; id: string },
+	waterfall?: { rungs?: WaterfallRung[]; now?: number },
 ): ResourceSection | undefined {
 	const key = (model: { provider: string; id: string }) => `${model.provider}/${model.id}`;
+	// Routers are not providers: a virtual model is one line above the provider groups.
+	const virtual = available.filter((model) => model.virtual);
+	available = available.filter((model) => !model.virtual);
+	favorites = favorites.filter((model) => !virtual.some((entry) => key(entry) === key(model)));
 	// Only subscription-backed Antigravity Gemini/Gemma routes belong in this Google splash group.
 	// Native google/gemini-* entries may use an API key, so never substitute them for a missing route.
 	const shown = (model: ModelEntry) => model.provider !== "google" || /^antigravity-(gemini|gemma)-/.test(model.id);
@@ -1154,13 +1172,23 @@ export function buildModelsSection(
 		for (const model of rest.sort((a, b) => compareNames(a.id, b.id))) add(model);
 	}
 	if (current && byKey.has(key(current))) add(byKey.get(key(current))!);
-	const count = [...providers.values()].reduce((sum, list) => sum + list.length, 0);
+	const count = [...providers.values()].reduce((sum, list) => sum + list.length, 0) + virtual.length;
 	if (count === 0) return undefined;
-	const groups: ResourceGroup[] = [...providers].sort(([a], [b]) => compareNames(a, b)).map(([provider, list]) => {
+	// Providers follow the subscription waterfall's order when it is known, numbered, with
+	// rungs it would skip now dimmed and labeled why; the rest follow alphabetically.
+	const rungs = waterfall?.rungs ?? [];
+	const now = waterfall?.now ?? Date.now();
+	const rungOf = (provider: string) => rungs.findIndex((rung) => vendorOf(rung.provider) === vendorOf(provider));
+	const rank = (provider: string) => { const index = rungOf(provider); return index < 0 ? rungs.length : index; };
+	const ordered = [...providers].sort(([a], [b]) => rank(a) - rank(b) || compareNames(a, b));
+	const groups: ResourceGroup[] = ordered.map(([provider, list]) => {
 		const marks = list.map((model) => (current && key(model) === key(current) ? CURRENT_MARK : undefined));
 		const prefixes = list.map((model) => (favoriteKeys.has(key(model)) ? FAVORITE_MARK : undefined));
+		const index = rungOf(provider);
+		const note = index < 0 ? undefined : rungNote(rungs[index]!, now);
 		return {
-			label: provider,
+			label: index < 0 ? provider : `${index + 1} ${provider}${note ? ` · ${note}` : ""}`,
+			...(note ? { tones: list.map(() => "dim") } : {}),
 			items: list.map((model) => {
 				const label = provider === "google" ? model.id.replace(/^antigravity-/, "") : model.id;
 				return model.thinkingLevel ? `${label}:${model.thinkingLevel}` : label;
@@ -1171,6 +1199,18 @@ export function buildModelsSection(
 			...(prefixes.some(Boolean) ? { prefixes } : {}),
 		};
 	});
+	if (virtual.length) {
+		const order = rungs.length ? rungs.map((rung) => vendorOf(rung.provider)).join(" → ") : "";
+		groups.unshift({
+			label: "auto",
+			uncounted: true,
+			items: virtual.map((model) => model.provider),
+			actions: virtual.map((model) => ({ kind: "model", provider: model.provider, id: model.id })),
+			right: virtual.map(() => order || undefined),
+			...(virtual.some((model) => current && key(model) === key(current))
+				? { marks: virtual.map((model) => (current && key(model) === key(current) ? CURRENT_MARK : undefined)) } : {}),
+		});
+	}
 	return {
 		title: "Models",
 		count,
@@ -1180,7 +1220,7 @@ export function buildModelsSection(
 }
 
 /** The session's models as a section; undefined when there are none or pi's model API is missing. */
-export function collectModelsSection(mode: any, verifiedGoogle: ModelEntry[] = []): ResourceSection | undefined {
+export function collectModelsSection(mode: any, verifiedGoogle: ModelEntry[] = [], rungs?: WaterfallRung[]): ResourceSection | undefined {
 	try {
 		const session = mode?.session;
 		const scopedModels = (session?.scopedModels ?? []) as Array<{ model: any; thinkingLevel?: string }>;
@@ -1191,10 +1231,10 @@ export function collectModelsSection(mode: any, verifiedGoogle: ModelEntry[] = [
 			...(entry.thinkingLevel ? { thinkingLevel: entry.thinkingLevel } : {}),
 		}));
 		const available: ModelEntry[] = ([...(session?.modelRuntime?.getAvailableSnapshot?.() ?? []), ...verifiedGoogle] as any[]).map(
-			(model) => ({ provider: model.provider, id: model.id, contextWindow: model.contextWindow }),
+			(model) => ({ provider: model.provider, id: model.id, contextWindow: model.contextWindow, ...(model.api === "pi-virtual" ? { virtual: true } : {}) }),
 		);
 		const current = session?.model ? { provider: session.model.provider, id: session.model.id } : undefined;
-		return buildModelsSection(available, favorites, current);
+		return buildModelsSection(available, favorites, current, rungs ? { rungs } : undefined);
 	} catch {
 		return undefined;
 	}
@@ -1332,7 +1372,7 @@ export function replaceSections(mode: any, options: unknown, pi?: ExtensionAPI):
 		const snapshot = readStartupContext(mode);
 		try {
 			const sections = collectSections(mode, options as { extensions?: any[] } | undefined, snapshot);
-			const model = collectModelsSection(mode, verifiedGoogle);
+			const model = collectModelsSection(mode, verifiedGoogle, pi ? queryWaterfall(pi.events)?.rungs : undefined);
 			if (model) sections.Models = model;
 			refreshGoogle();
 			const now = JSON.stringify(sections);
@@ -1401,8 +1441,10 @@ export function replaceSections(mode: any, options: unknown, pi?: ExtensionAPI):
 	const spacer = { render: () => mcpEntries.length > 0 || statuses.size > 0 ? [""] : [], invalidate() {} };
 	children.push(component, spacer);
 	// Native sections (including diagnostics) end in a Spacer; when MCP is last its
-	// conditional spacer serves the same purpose. Neither leaves a blank after Models.
-	children.push(mapComponent, modelSpacer, modelComponent);
+	// conditional spacer serves the same purpose. Models gets one blank row of its own,
+	// once the conversation starts below it.
+	const tailSpacer = { render: () => mode.chatContainer?.children?.length ? [""] : [], invalidate() {} };
+	children.push(mapComponent, modelSpacer, modelComponent, tailSpacer);
 	const dock = ["editorContainer", "footerContainer", "statusContainer", "pendingMessagesContainer", "widgetContainerAbove", "widgetContainerBelow"];
 	const height = (node: any, width: number) => typeof node?.render === "function" ? node.render(width).length : 0;
 	// Every splash section asks for the plan while rendering, and the splash stays in the transcript

@@ -1182,3 +1182,55 @@ describe("splash planning while the transcript grows", () => {
     }
   });
 });
+
+describe("waterfall-ordered models", () => {
+	test("routers are a line above providers, which follow the waterfall with skipped rungs dimmed and labeled", async () => {
+		const { buildModelsSection } = await import("../src/feature/shell/startup-resources.ts");
+		const now = 1_000_000;
+		const section = buildModelsSection([
+			{ provider: "waterfall", id: "auto", virtual: true },
+			{ provider: "lmstudio", id: "qwen3.8-27b" },
+			{ provider: "muse-code", id: "muse-wonder-1.0" },
+			{ provider: "google", id: "antigravity-gemini-4-argon" },
+			{ provider: "openai", id: "gpt-6.1-sol" },
+			{ provider: "anthropic", id: "claude-opus-5-5" },
+		], [{ provider: "waterfall", id: "auto" }], { provider: "waterfall", id: "auto" }, { now, rungs: [
+			{ provider: "anthropic", model: "claude-opus-5-5", state: "exhausted", resetAt: now + 3 * 3_600_000 },
+			{ provider: "openai", model: "gpt-6.1-sol", state: "disabled" },
+			{ provider: "google", model: "antigravity-gemini-4-argon", state: "available" },
+			{ provider: "muse-sdk", model: "muse-wonder-1.0", state: "unknown" },
+		] })!;
+		expect(section.groups.map((group) => group.label)).toEqual([
+			"auto", "1 anthropic · resets 3h", "2 openai · off", "3 google", "4 muse-code · unverified", "lmstudio",
+		]);
+		expect(section.groups[0]).toMatchObject({ uncounted: true, items: ["waterfall"], actions: [{ kind: "model", provider: "waterfall", id: "auto" }],
+			right: ["anthropic → openai → google → muse"] });
+		expect(section.groups[0]!.marks![0]).toBeTruthy();
+		expect(section.groups[1]!.tones).toEqual(["dim"]);
+		expect(section.groups[3]!.tones).toBeUndefined();
+		expect(section.count).toBe(6);
+		// Without a waterfall, providers stay alphabetical and the router is still not a provider group.
+		const plain = buildModelsSection([{ provider: "waterfall", id: "auto", virtual: true }, { provider: "openai", id: "gpt-6.1-sol" }, { provider: "anthropic", id: "claude-opus-5-5" }])!;
+		expect(plain.groups.map((group) => group.label)).toEqual(["auto", "anthropic", "openai"]);
+	});
+});
+
+describe("/splash", () => {
+	test("freezes the live session once and renders every section, the map and models without polling", async () => {
+		const { freezeSplash, renderFrozenSplash } = await import("../src/feature/shell/splash-command.ts");
+		const mode = {
+			ui: { terminal: { rows: 60 } },
+			session: {
+				scopedModels: [], model: { provider: "p", id: "alpha" },
+				modelRuntime: { getAvailableSnapshot: () => [{ provider: "p", id: "alpha", contextWindow: 131_072 }] },
+			},
+		};
+		const frozen = freezeSplash(mode)!;
+		expect(frozen.sections.Models).toBeTruthy();
+		const lines = renderFrozenSplash(frozen, 80, plainTheme);
+		expect(lines[0]).toBe("");
+		expect(lines.at(-1)).toBe("");
+		expect(lines.join("\n")).toContain(" Models 1");
+		expect(freezeSplash({})).toBeUndefined();
+	});
+});

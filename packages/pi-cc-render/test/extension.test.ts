@@ -52,7 +52,7 @@ describe("extension factory", () => {
     const markdownRender = Markdown.prototype.render;
     const markdownRenderToken = (Markdown.prototype as any).renderToken;
     extension(pi as any);
-    expect([...commands.keys()]).toEqual(["ccstyle"]);
+    expect([...commands.keys()]).toEqual(["splash", "ccstyle"]);
     expect(tools).toEqual([]);
     for (const event of ["session_start", "session_shutdown", "session_compact", "session_tree", "message_start", "message_update", "tool_execution_start", "tool_execution_end", "agent_start", "agent_end", "input", "before_agent_start", "agent_settled"]) {
       expect(handlers.get(event), event).toBeGreaterThan(0);
@@ -540,7 +540,7 @@ describe("Pi 1.2.0 resource loader", () => {
     expect(result.errors).toEqual([]);
     expect(result.extensions.map((entry) => entry.path)).toEqual([resolve(isolated, "src/index.ts")]);
     const extension = result.extensions[0]!;
-    expect([...extension.commands.keys()]).toEqual(["ccstyle"]);
+    expect([...extension.commands.keys()]).toEqual(["splash", "ccstyle"]);
     expect(extension.tools.size).toBe(0);
     expect(extension.shortcuts.size).toBe(0);
     expect([...extension.handlers.keys()].sort()).toEqual([
