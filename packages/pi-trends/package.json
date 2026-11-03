@@ -1,6 +1,6 @@
 {
   "name": "@justmytwospence/pi-trends",
-  "version": "0.1.6",
+  "version": "0.1.7",
   "description": "Per-turn trends of context %, effort, tokens, cost, tool calls and duration: a toggleable sparkline widget and a /trends chart overlay.",
   "type": "module",
   "license": "MIT",
