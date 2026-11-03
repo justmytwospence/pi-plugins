@@ -367,7 +367,7 @@ The `agents` locations are shared with the opencode and Claude Code ports of thi
 - **pi-bg**: `bg_run` is judged like `bash`, in its own `cwd`; the read-only `bg_*` tools are on the default allow list.
 - **pi-subagents**: a subagent's approval dialogs reach you through pi-subagents' dialog forwarding.
 - **pi-plan-mode**: provides plan mode in the cycle (above). The classifier may receive the active branch's stored approved-plan snapshot (up to 12,000 characters), not the mutable plan file. The next user message expires that snapshot; a new approval can establish another. It is context subordinate to current instructions and permission rules, not blanket permission.
-- **pi-status-footer**: shows workflow as a bold `WORK`, `CHAT`, `PLAN` or `EXEC` landmark, separate from Approvals and the gate tally. Badge hues depend on the theme; explanations and key hints stay subdued. During a blocked dialog the compact row retains the badge when available, subject to terminal width.
+- **pi-status-footer**: shows workflow as a bold lowercase `work`, `chat`, `plan` or `exec` landmark, separate from Approvals and the gate tally. Badge hues depend on the theme; explanations and key hints stay subdued. During a blocked dialog the compact row retains the badge when available, subject to terminal width.
 
 ## Limitations
 

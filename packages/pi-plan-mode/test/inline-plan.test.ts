@@ -743,7 +743,7 @@ function transition(previous: string, mode: string, explanation: string) {
   return {
     message: {
       customType: "workflow:transition",
-      content: `${mode.toUpperCase()} · ${explanation}`,
+      content: `${mode} · ${explanation}`,
       display: true,
       details: { version: 1, previous, mode },
     },

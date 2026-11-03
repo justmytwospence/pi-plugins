@@ -951,8 +951,7 @@ export function layoutFooter(snapshot: Snapshot, width: number, theme: Paint): F
   }
   if (approval) controlRow(ICONS.gate, [
     { ...partsSegment([
-      { text: theme.fg("muted", "Approvals") }, { text: sep },
-      { text: theme.fg(modeColor, MODE_NAMES[approval.kind] + (approval.kind === "manual" || approval.kind === "acceptEdits" ? " (legacy)" : "")), action: action("approvals.open") },
+      { text: theme.bold(theme.fg(modeColor, MODE_NAMES[approval.kind])) + (approval.kind === "manual" || approval.kind === "acceptEdits" ? theme.fg("muted", " (legacy)") : ""), action: action("approvals.open") },
     ], 120), atomic: !!pending("approvals") },
     { text: gateStatus ? clean(gateStatus) : "", short: gateStatus?.replace(/^Gate (\d+) auto · (\d+) pushed back · (\d+) asked$/u, "Gate $1/$2/$3"), priority: 60 },
   ], s.primaryKeys?.approvals ?? approval.key, action("approvals.open"));

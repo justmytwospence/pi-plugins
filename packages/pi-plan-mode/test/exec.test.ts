@@ -1023,7 +1023,7 @@ test("inactive legacy pending return persists and can be explicitly retried afte
     {
       message: {
         customType: "workflow:transition",
-        content: "WORK · edits and actions",
+        content: "work · edits and actions",
         display: true,
         details: { version: 1, previous: "exec", mode: "work" },
       },
@@ -1077,7 +1077,7 @@ test("inactive legacy failed return after a real leaf switch does not restore th
     {
       message: {
         customType: "workflow:transition",
-        content: "WORK · edits and actions",
+        content: "work · edits and actions",
         display: true,
         details: { version: 1, previous: "exec", mode: "work" },
       },

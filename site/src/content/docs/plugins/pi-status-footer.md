@@ -38,7 +38,7 @@ The selections are stored in session metadata, excluded from model context, and 
 
 The first row shows project and Git state. **Independent**, the default, puts model/reasoning and workflow on separate rows. **Linked** combines workflow, provider, physical model and reasoning into one row; approvals always remain separate. [Tool gate](/plugins/pi-tool-gate/#independent-and-linked-operating-modes) owns that choice and its state, not the footer. At 60 columns and up, a one-cell inset gives every row breathing room without imposing aligned columns. Labels use natural single-space spacing. Project and model anchor the display with accent color; section labels, ordinary readings and reset countdowns stay subdued. A dim leading icon identifies every row, and a git-branch icon marks the branch. Bold readings and Pi's native thinking-level colors distinguish the model's reasoning setting. Warm caches and ready services are green; warnings and errors keep their semantic colors. Distinct pieces of information share a dim `·` separator; auto reasoning and reset countdowns have no parentheses. Quota windows use concise `Claude` or `Codex` labels, and stale readings are muted and explicitly labeled. Recognized companion notices use sentence-case labels without colons: `Gate`, `Plan`, `Marimo`, `Background` (`Bg` when narrow) and `Pressure`. The gate's tally joins Approvals. Exec appears on the workflow row (the combined row in Linked) with its phase, counts and costs, without replacing or dimming Approvals. Standalone plan mode supplies workflow but not approvals. Plan's `/planners` hint and cache qualifiers also use dot separators. Background rows preserve service states and prioritize failed tasks over routine work. Unfamiliar publisher formats and third-party notices remain unchanged. Narrow terminals omit the decorative padding. Context follows. Where supported, the editor's top and bottom borders become the usage gauge while retaining its mode colors and scroll markers. An editor without compatible border hooks keeps its borders and gets a footer gauge instead. A [pi-subagents](/plugins/pi-subagents/) session draws this footer and editor gauge for the child: its directory, model, reasoning level, context and cost, with main's account limits and notices. Other-session chrome is read-only: it does not inherit main's Linked selection, control hints or clickable actions.
 
-Workflow is a bold landmark: `WORK`, `CHAT`, `PLAN` or `EXEC`. Their theme roles are respectively `success`, `thinkingLow`, `customMessageLabel` and `warning`; actual hues depend on the theme. The badge also marks workflow transitions in the transcript, while explanations, key hints and other secondary details remain quiet. Approvals are a separate axis, not part of the badge.
+Workflow is a bold lowercase landmark: `work`, `chat`, `plan` or `exec`. Their theme roles are respectively `success`, `thinkingLow`, `customMessageLabel` and `warning`; actual hues depend on the theme. The badge also marks workflow transitions in the transcript, while explanations, key hints and other secondary details remain quiet. Approvals are a separate axis, not part of the badge; their row leads with the mode (`auto`, `yolo`) in the same bold lowercase style, without a label.
 
 While a dialog waits on you (an extension holds `herdr:blocked` on Pi's event bus, as the questionnaire, the tool gate and plan approval do), the footer shrinks to one row with no active controls or primary key hints: workflow badge when available, project, branch, model, reasoning and context percentage, plus any active phase. At narrow widths it prioritizes the badge and phase; other details can shorten or disappear. herdr-web-ui reads a Pi dialog off the screen only when no more than two lines follow its key hint, and an activity row (pi-bg's shells, subagents) may take the other. Everything else returns when the dialog closes. The event is the trigger; the footer does not require Herdr itself to be installed. A blocked Linked flow is a separate error state, not a healthy combined selection: use `/flow status`, a valid `/flow linked <provider>` or `/flow independent` for recovery.
 
@@ -54,19 +54,19 @@ Simplified examples, omitting icons and other rows, with the [optional personal 
 
 ```text
 gpt-6-sol · reasoning high · auto off · alt+p
-WORK · shift+tab
+work · shift+tab
 ```
 
 **Linked — one combined row:**
 
 ```text
-WORK · openai-codex · gpt-6-sol · reasoning auto → high · alt+p
+work · openai-codex · gpt-6-sol · reasoning auto → high · alt+p
 ```
 
 Both modes retain a separate Approvals row, for example:
 
 ```text
-Approvals · auto · alt+a
+auto · alt+a
 ```
 
 Linked uses one flow per available provider: Work/Chat use `general`, Plan uses `planner`, and approved Exec uses `worker`. Assignments are captured when selected; reselecting the same provider explicitly refreshes them. Reasoning stays independent: `reasoning auto → high` means auto effort is active; `reasoning high` is the manual form. When a toggle provider is available but off, `auto off` stays visible so it can be enabled again. A pinned or absent auto-effort provider supplies no toggle.

@@ -92,11 +92,12 @@ readings fresh; the working row is independent of the footer mode.
 4. Provider/account limits explicitly labeled as percent **used**, with reset
    countdowns when supported. Last, since they are usually the longest rows.
 
-The bold bracketed workflow badge is a landmark in the footer and on workflow
-transitions in the transcript: `WORK`, `CHAT`, `PLAN` or `EXEC`.
+The bold lowercase workflow badge is a landmark in the footer and on workflow
+transitions in the transcript: `work`, `chat`, `plan` or `exec`.
 Their theme roles are `success`, `thinkingLow`, `customMessageLabel` and
 `warning`, respectively; actual hues depend on the theme. Explanations, key hints
-and other secondary details stay subdued. Approvals remain a separate axis.
+and other secondary details stay subdued. Approvals remain a separate axis: their
+row leads with the mode itself (`auto`, `yolo`), bold in the same style, without a label.
 
 Terminal labels and rows in this document are examples, not screenshots.
 

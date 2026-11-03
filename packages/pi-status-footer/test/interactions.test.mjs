@@ -761,7 +761,7 @@ for (const width of [46, 120, 180]) for (const sidebar of [false, true]) {
     assert.equal(f.calls.at(-1), "flow");
     await flush();
     const linkedPaint = f.tui.getScreenLines().map(plain).join("\n");
-    assert.match(linkedPaint, /WORK/);
+    assert.match(linkedPaint, /work/);
     assert.equal((linkedPaint.match(/physical/g) ?? []).length, 1, "combined linked row has no duplicated model");
     const request = { version: 1 };
     bus.emit(footerModule.SESSION_CHROME_CHANNEL, request);
@@ -774,7 +774,7 @@ for (const width of [46, 120, 180]) for (const sidebar of [false, true]) {
         totals: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, compactions: 0, started: Date.now() } }, width, paint);
     } finally { renderDepth--; }
     assert.equal(discoveries, beforeChild);
-    assert.doesNotMatch(child.join("\n"), /alt\+p|alt\+w|alt\+a|WORK|physical/);
+    assert.doesNotMatch(child.join("\n"), /alt\+p|alt\+w|alt\+a|work|physical/);
     // Native prompts are nested, and only the final end permits activation again.
     handlers.get("ui_prompt_start")({}, ctx); handlers.get("ui_prompt_start")({}, ctx);
     handlers.get("ui_prompt_end")({}, ctx);

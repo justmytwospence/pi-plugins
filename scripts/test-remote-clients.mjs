@@ -125,20 +125,19 @@ function statusFooter(width, statuses, { compact = false, phase = 'idle', flow, 
   const preview = !compact && !readOnly && ['pending', 'applying'].includes(settingsCycle?.phase) ? settingsCycle : undefined;
   const kind = effectiveKind && effectiveKind !== 'exec'
     ? preview?.settings.find(item => item.key === 'workflow')?.target ?? effectiveKind : effectiveKind;
-  const badge = kind?.toUpperCase();
+  const badge = kind;
   assert.doesNotMatch(plain.join('\n'), /workflow: (work|chat|plan|exec)/iu, 'raw provider status must not leak into the footer');
   if (compact) {
     assert.equal(lines.length, 1, 'blocked footer must stay one row');
     assert.deepEqual(layout.hits, [], 'waiting dialogs must not leave live footer controls');
-    if (badge) assert.ok(plain[0].includes(badge), 'blocked footer keeps the uppercase workflow badge');
-    assert.ok(!plain[0].includes('Approvals'), 'blocked footer must not merge approvals into the workflow badge');
+    if (badge) assert.match(plain[0], new RegExp(`\\b${badge}\\b`, 'u'), 'blocked footer keeps the workflow badge');
+    assert.ok(!plain[0].includes('\uf510'), 'blocked footer must not merge approvals into the workflow badge');
   } else {
-    const workflow = plain.filter(line => /\b(WORK|CHAT|PLAN|EXEC)\b/u.test(line));
-    const approvals = plain.filter(line => line.includes('Approvals'));
+    const workflow = plain.filter(line => line.includes('\uf0e8'));
+    const approvals = plain.filter(line => line.includes('\uf510'));
     assert.equal(workflow.length, kind ? 1 : 0, 'workflow badge keeps its own row, including exec fallback');
     if (badge) {
-      assert.ok(workflow[0].includes(badge), 'workflow row uses the uppercase mode badge');
-      assert.ok(!workflow[0].includes('Approvals'), 'approvals stay separate from workflow');
+      assert.match(workflow[0], new RegExp(`\uf0e8\\s+${badge}\\b`, 'u'), 'workflow row leads with the mode badge');
       // Hints yield before critical state at narrow widths; Sidebar also probes smaller widths.
       if (!preview && !linked && !absorbed.exec && width >= (kind === 'exec' ? 120 : 46)) assert.ok(workflow[0].includes(WORKFLOW_EXPLANATIONS[kind]), `workflow row explains ${kind} when space permits: ${workflow[0]}`);
       if (preview && width >= 46) assert.ok(workflow[0].includes(badge), 'draft workflow retains the target badge in its existing semantic row');
