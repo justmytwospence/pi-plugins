@@ -1130,8 +1130,8 @@ describe("startup resources", () => {
   });
 });
 
-describe("splash planning while the transcript grows", () => {
-  test("measures once per frame and stops replanning once the chat fills the screen", async () => {
+describe("splash planning", () => {
+  async function setup(rows: number, chatLines: number) {
     const { replaceSections, setStartupResourcesTheme, stopStartupResources } = await import("../src/feature/shell/startup-resources.ts");
     let styled = 0;
     setStartupResourcesTheme(() => ({ fg: (_name, text) => { styled++; return text; }, bold: (text) => text }));
@@ -1139,9 +1139,9 @@ describe("splash planning while the transcript grows", () => {
       path: `/h/.pi/agent/git/github.com/me/repo/packages/pi-${name}/src`,
       sourceInfo: { source: "git:github.com/me/repo", scope: "user", baseDir: "/h/.pi/agent/git/github.com/me/repo" },
     });
-    let chat = Array.from({ length: 4 }, (_, i) => `chat ${i}`);
+    let chat = Array.from({ length: chatLines }, (_, i) => `chat ${i}`);
     const chatContainer = { render: vi.fn(() => chat), invalidate() {} };
-    const extensions = { state: { expanded: false }, setExpanded() {}, invalidate() {}, render: (_width: number) => ["[Extensions]", "  many"] };
+    const ui = { requestRender: vi.fn(), terminal: { rows } };
     const mode = Object.create((InteractiveMode as any).prototype, Object.fromEntries(Object.entries({
       sessionManager: { getCwd: () => "/work" },
       session: { promptTemplates: [], resourceLoader: {
@@ -1149,12 +1149,19 @@ describe("splash planning while the transcript grows", () => {
         getAgentsFiles: () => ({ agentsFiles: [] }), getSkills: () => ({ skills: [] }),
         getExtensions: () => ({ extensions: Array.from({ length: 40 }, (_, i) => git(`ext${i}`)) }),
       } },
-      ui: { requestRender: vi.fn(), terminal: { rows: 12 } },
+      ui,
       chatContainer,
-      loadedResourcesContainer: { children: [extensions] },
+      loadedResourcesContainer: { children: [] as any[] },
       getStartupExpansionState: () => false,
     }).map(([key, value]) => [key, { value, writable: true }])));
-    const frame = async () => {
+    // Pi builds fresh children on every show.
+    const show = () => {
+      const extensions = { state: { expanded: false }, setExpanded() {}, invalidate() {}, render: (_width: number) => ["[Extensions]", "  many"] };
+      mode.loadedResourcesContainer.children = [extensions];
+      replaceSections(mode, { force: true });
+      return extensions;
+    };
+    const frame = async (extensions: { render(width: number): string[] }) => {
       await Promise.resolve();
       chatContainer.render.mockClear();
       styled = 0;
@@ -1162,23 +1169,60 @@ describe("splash planning while the transcript grows", () => {
       expect(extensions.render(80)).toEqual(first);
       return { lines: first, chatRenders: chatContainer.render.mock.calls.length, styled };
     };
+    return { show, frame, ui, setChat: (lines: string[]) => { chat = lines; }, getChat: () => chat, stopStartupResources };
+  }
+
+  test("measures Pi's containers once per show, never as the chat grows", async () => {
+    const t = await setup(12, 4);
     try {
-      replaceSections(mode, { force: true });
-      const roomy = await frame();
-      expect(roomy.lines[0]).toContain("Extensions");
-      expect(roomy.chatRenders).toBe(1);
-      chat = Array.from({ length: 40 }, (_, i) => `chat ${i}`);
-      const full = await frame();
-      expect(full.lines.length).toBeLessThanOrEqual(roomy.lines.length);
-      const steady = await frame();
-      chat = [...chat, "one more line"];
-      const grown = await frame();
-      expect(grown.lines).toEqual(steady.lines);
-      // Replanning lays out many candidates; a reused plan only re-renders its cached sections.
-      expect(grown.styled).toBe(steady.styled);
-      expect(grown.styled).toBeLessThan(full.styled);
+      const ext = t.show();
+      const a = await t.frame(ext);
+      expect(a.chatRenders).toBe(1);
+      expect(a.lines[0]).toContain("Extensions");
+      t.setChat(Array.from({ length: 40 }, (_, i) => `chat ${i}`));
+      const b = await t.frame(ext);
+      expect(b.chatRenders).toBe(0);
+      expect(b.lines).toEqual(a.lines);
+      t.setChat([...t.getChat(), "one more line"]);
+      const c = await t.frame(ext);
+      expect(c.chatRenders).toBe(0);
+      expect(c.lines).toEqual(b.lines);
+      expect(c.styled).toBe(b.styled);
     } finally {
-      stopStartupResources();
+      t.stopStartupResources();
+    }
+  });
+
+  test("refits to a resized pane without measuring again", async () => {
+    const t = await setup(200, 4);
+    try {
+      const ext = t.show();
+      const tall = await t.frame(ext);
+      expect(tall.chatRenders).toBe(1);
+      expect(tall.lines.join("\n")).not.toContain("hidden");
+      t.ui.terminal.rows = 6;
+      const short = await t.frame(ext);
+      expect(short.chatRenders).toBe(0);
+      expect(short.lines.length).toBeLessThan(tall.lines.length);
+      expect(short.lines.join("\n")).toContain("hidden");
+      t.ui.terminal.rows = 200;
+      const back = await t.frame(ext);
+      expect(back.chatRenders).toBe(0);
+      expect(back.lines).toEqual(tall.lines);
+    } finally {
+      t.stopStartupResources();
+    }
+  });
+
+  test("measures again when the splash is shown again", async () => {
+    const t = await setup(12, 4);
+    try {
+      expect((await t.frame(t.show())).chatRenders).toBe(1);
+      const ext2 = t.show();
+      expect((await t.frame(ext2)).chatRenders).toBe(1);
+      expect((await t.frame(ext2)).chatRenders).toBe(0);
+    } finally {
+      t.stopStartupResources();
     }
   });
 });

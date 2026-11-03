@@ -1448,24 +1448,26 @@ export function replaceSections(mode: any, options: unknown, pi?: ExtensionAPI):
 	const dock = ["editorContainer", "footerContainer", "statusContainer", "pendingMessagesContainer", "widgetContainerAbove", "widgetContainerBelow"];
 	const height = (node: any, width: number) => typeof node?.render === "function" ? node.render(width).length : 0;
 	// Every splash section asks for the plan while rendering, and the splash stays in the transcript
-	// for the whole session. Measure once per frame and width (a frame renders synchronously; the
-	// cheap inputs below catch state changed between two renders in one tick), and cache plans by
-	// their inputs: the row budget is clamped at zero, so once the chat fills the screen the plan
-	// stops changing as the chat grows.
-	const framePlans = new Map<number, { inputs: unknown[]; planned: Record<string, ResourceSection> }>();
+	// for the whole session. Pi's own containers (header, chat, editor, footer, widgets) are measured
+	// once, on the first render after the splash is shown; later frames never render them again. The
+	// fold budget follows the terminal's current rows, so a resized pane refits without measuring Pi
+	// again. Plans are reused until the splash's own content, expansion, width or rows change.
+	let fixed: number | undefined;
+	const planCache = new Map<number, { inputs: unknown[]; planned: Record<string, ResourceSection> }>();
 	const plans = new Map<string, Record<string, ResourceSection>>();
-	const frameInputs = (): unknown[] => [
-		mode.ui?.terminal?.rows, attachStartupHost(mode).generation, host.resourceSections, host.contextSnapshot, mcpEntries, statuses, mcpState.revision,
-		component.expanded, modelComponent.expanded, children.length, mode.chatContainer?.children?.length,
+	const planInputs = (): unknown[] => [
+		mode.ui?.terminal?.rows, fixed, attachStartupHost(mode).generation, host.resourceSections, host.contextSnapshot, lastMcp, mcpState.revision,
+		component.expanded, modelComponent.expanded, children.length,
 		...titled.map(([child]) => !!child.state?.expanded),
 	];
 	function ensurePlan(width: number): Record<string, ResourceSection> {
-		const inputs = frameInputs();
-		const framed = framePlans.get(width);
-		if (framed && framed.inputs.length === inputs.length && framed.inputs.every((input, index) => input === inputs[index])) return framed.planned;
-		if (framePlans.size === 0) queueMicrotask(() => framePlans.clear());
+		const cached = planCache.get(width);
+		const inputs = planInputs();
+		if (cached && cached.inputs.length === inputs.length && cached.inputs.every((input, index) => input === inputs[index])) return cached.planned;
 		const planned = measurePlan(width);
-		framePlans.set(width, { inputs, planned });
+		if (planCache.size >= 4) planCache.clear();
+		// Recompute: the first plan sets `fixed`.
+		planCache.set(width, { inputs: planInputs(), planned });
 		return planned;
 	}
 	function measurePlan(width: number): Record<string, ResourceSection> {
@@ -1475,7 +1477,7 @@ export function replaceSections(mode: any, options: unknown, pi?: ExtensionAPI):
 		if (!full.MCP) delete full.MCP;
 		const rows = mode.ui?.terminal?.rows;
 		if (!Number.isFinite(rows)) return full;
-		const fixed = height(mode.headerContainer, width) + height(mode.chatContainer, width)
+		const outside = fixed ??= height(mode.headerContainer, width) + height(mode.chatContainer, width)
 			+ dock.reduce((sum, name) => sum + height(mode[name], width), 0);
 		const splashFixed: Array<() => number> = [];
 		const flexible: Record<string, ResourceSection> = {};
@@ -1497,7 +1499,7 @@ export function replaceSections(mode: any, options: unknown, pi?: ExtensionAPI):
 		}
 		// All splash-owned spacers and the map are included exactly once above. Any budget at or
 		// below zero plans the same shortest listing, so a full screen skips measuring the splash.
-		const budget = fixed >= rows ? 0 : Math.max(0, rows - fixed - splashFixed.reduce((sum, measure) => sum + measure(), 0));
+		const budget = outside >= rows ? 0 : Math.max(0, rows - outside - splashFixed.reduce((sum, measure) => sum + measure(), 0));
 		const expansions = [...titled.map(([child]) => !!child.state?.expanded), component.expanded, modelComponent.expanded];
 		const key = JSON.stringify([width, budget, expansions, flexible]);
 		let plan = plans.get(key);
