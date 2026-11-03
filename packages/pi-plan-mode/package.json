@@ -1,6 +1,6 @@
 {
   "name": "@justmytwospence/pi-plan-mode",
-  "version": "0.1.4",
+  "version": "0.1.5",
   "description": "Claude Code-style plan mode for Pi (/plan, Shift+Tab with pi-tool-gate), plus /planners: two in-process planners side by side you watch, answer and talk to, merge, then implement.",
   "type": "module",
   "license": "MIT",
