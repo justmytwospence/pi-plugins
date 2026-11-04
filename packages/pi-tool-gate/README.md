@@ -34,9 +34,9 @@ No `npm install` is needed to run it: the package.json has no `dependencies`; Pi
 
 ## Workflow and approvals
 
-Workflow and approvals are independent. Defaults are **work + auto**. `/mode` selects work, chat or plan; Shift+Tab cycles work → chat → plan → work (without pi-plan-mode, plan is omitted). Work permits ordinary requested actions. Chat blocks calls not recognized as reads; plan permits editing its plan file and judges shell commands using the existing plan policy, even under yolo. These guards are not a sandbox: configured orchestration bypasses, tool hints and shell classification have limits. Plan requires [pi-plan-mode](../pi-plan-mode/).
+Workflow and approvals are independent. Defaults are **work + auto**. `/mode` selects work, chat or plan; Shift+Tab cycles work → chat → plan → work (without pi-plan-mode, plan is omitted). The workflow decides what kind of call may run at all, the same under every approval setting, and its blocks never ask you. Work permits ordinary requested actions. Chat blocks calls not recognized as reads (Pi's reading tools, read-only shell commands as defined [below](#1-clear-cases-no-model-call), tools with a read-only hint, and `allowTools`). Plan permits editing its plan file, blocks every other `edit` and `write` and every shell command (`bash`, `bg_run`) not recognized as read-only, and leaves other tools to the approval setting. These guards are not a sandbox: configured orchestration bypasses, tool hints and shell classification have limits. Plan requires [pi-plan-mode](../pi-plan-mode/).
 
-`/approvals` selects **auto** or **yolo**; Alt+A toggles them without changing workflow. Auto uses the checks below. Yolo bypasses ordinary approval checks, but deny rules and critical-removal protections remain, as do chat and plan guards. Legacy `manual` asks about non-read calls; `accept-edits` also permits qualifying in-project edits and filesystem commands. Both remain explicit compatibility arguments and are retained when restoring old sessions; Alt+A selects auto from either. `/mode auto|yolo|manual|accept-edits` is a compatibility alias for changing approvals only.
+`/approvals` selects **auto** or **yolo**; Alt+A toggles them without changing workflow. Approvals decide only about calls the workflow permits, the same way in every workflow: in chat and plan they decide about reads outside the project, credential reads and ask rules, and in plan about tools other than edits and shell commands too. Auto uses the checks below. Yolo bypasses them (rules other than deny, the directory policy, always-held calls, the classifier); deny rules and the critical-removal protections remain. Legacy `manual` asks about non-read calls; `accept-edits` also permits qualifying in-project edits and filesystem commands. Both remain explicit compatibility arguments and are retained when restoring old sessions; Alt+A selects auto from either. `/mode auto|yolo|manual|accept-edits` is a compatibility alias for changing approvals only.
 
 In the interactive UI, workflow and approval shortcuts share a preview with supported Plan, reasoning and auto-effort cycles: one combined settings journal line updates immediately. Only final values apply; until then `pending` is not effective protection, and current guards and approvals remain in force. Returning every touched setting to its original value is a true no-op, with no intermediate changes or plan allocation. Submitting an ordinary prompt flushes the preview first; if applying fails, the message is not sent. Opening a dialog or selector, leaving main focus, session or branch navigation, compaction, reload/shutdown, or an external change to a touched setting cancels the pending preview. Explicit commands and picker selections, tool-owned transitions and Exec actions remain immediate; plan and tool approvals still require explicit confirmation.
 
@@ -111,7 +111,7 @@ Rules settle specific calls, in Claude Code's syntax and with its order: `deny` 
 | `ask` | Always asks you, in every mode but yolo, even in auto mode: no classifier call, no push-back. The dialog offers Allow once, Block and Block with a message. |
 | `allow` | Runs without a classifier call (and in manual mode without asking), when the rule covers it. |
 
-A deny rule applies in every mode, yolo and chat mode included. An allow rule never overrides a deny or an ask rule, the [always-held calls](#1-clear-cases-no-model-call) (below), or the [directory policy](#directories) for a shell command. In chat mode a rule does not make a command read-only, so it stays blocked; an ask rule asks only about calls that read there.
+A deny rule applies in every mode, yolo and chat mode included. An allow rule never overrides a deny or an ask rule, the [always-held calls](#1-clear-cases-no-model-call) (below), or the [directory policy](#directories) for a shell command. In chat and plan mode a rule does not make a command read-only, so the workflow still blocks it; an ask rule asks only about calls the workflow permits.
 
 ### Syntax
 
@@ -238,7 +238,7 @@ Different:
 
 ## Directories
 
-Pi has no directory boundary of its own, so the gate keeps one. In auto, manual and accept-edits modes (and for reads in chat and plan mode), a call is held when it touches a path outside its project's directories, before any the classifier call. Auto mode pushes it back once, as with any held call, and then asks you. The dialog's **Allow folder for this session** and **in this project** grant that folder (listed by `/gate rules` beside the rules): a folder under a private root (`~/Projects/other`), the private root itself for a file directly in it (`~/Downloads/shot.png` grants `~/Downloads`), else the file's directory, or the directory itself when the write is to an existing one (a writing command's working directory: `cd ~ && chezmoi apply` grants `~`, not `/Users`).
+Pi has no directory boundary of its own, so the gate keeps one. Under auto, manual and accept-edits approvals, in every workflow (in chat and plan only reads get this far), a call is held when it touches a path outside its project's directories, before any classifier call. Auto mode pushes it back once, as with any held call, and then asks you. The dialog's **Allow folder for this session** and **in this project** grant that folder (listed by `/gate rules` beside the rules): a folder under a private root (`~/Projects/other`), the private root itself for a file directly in it (`~/Downloads/shot.png` grants `~/Downloads`), else the file's directory, or the directory itself when the write is to an existing one (a writing command's working directory: `cd ~ && chezmoi apply` grants `~`, not `/Users`).
 
 - The project (the git checkout of the working directory, and the main checkout of a worktree) is always readable and writable.
 - Private roots (`directories.private`: `~/Projects`, `~/Documents`, `~/Desktop`, `~/Downloads`, iCloud Drive) are neither read nor written outside the project and its grants.
@@ -271,7 +271,7 @@ The gate finds paths in `read`, `grep`, `find` and `ls` arguments (reads) and `e
 - A command run in another directory reads that directory, or writes it when the command does more than read.
 - Commands inside `$(...)`, backticks, `<(...)`, `>(...)`, `sh -c` and `eval` count like any other, run where the command around them runs. Shell keywords (`for ... in`, `do`, `then`, `done`) are not commands: a loop or `if` counts by the commands in it.
 
-This is a heuristic over arguments. Paths a program builds at runtime are not seen. Yolo mode ignores the policy, as Claude Code's bypass mode ignores its directories. `/gate` shows the resolved policy, and `"directories": { "enabled": false }` turns it off.
+This is a heuristic over arguments. Paths a program builds at runtime are not seen. Yolo approvals ignore the policy in every workflow, as Claude Code's bypass mode ignores its directories. `/gate` shows the resolved policy, and `"directories": { "enabled": false }` turns it off.
 
 ## Commands
 
@@ -281,7 +281,7 @@ This is a heuristic over arguments. Paths a program builds at runtime are not se
 - `/gate rules [list | add | remove]`: [permission rules](#gate-rules) and folder grants: list them, pick one to remove it, or add one. `/gate grants` is the same.
 - `/gate on`, `/gate off`: auto mode, or yolo mode.
 
-Separate `workflow-mode` and `permission-mode` statuses show the axes and their keys; the gate also reports `gate: N auto · P pushed back · M asked`. Every call the classifier judges is recorded in the session as a `tool-gate:decision` custom entry (tool, clipped arguments, scores, failures, action, latency, input tokens), for tuning thresholds. The classifier's token usage is added to the gated tool's result.
+Separate `workflow-mode` and `permission-mode` statuses show the axes and their keys; under auto approvals the gate also reports `gate: N auto · P pushed back · M asked`. Every call the classifier judges is recorded in the session as a `tool-gate:decision` custom entry (tool, clipped arguments, scores, failures, action, latency, input tokens), for tuning thresholds. The classifier's token usage is added to the gated tool's result.
 
 ## Project rules
 
@@ -365,7 +365,7 @@ The `agents` locations are shared with the opencode and Claude Code ports of thi
 
 - **Herdr**: while an approval dialog is open, the gate emits `herdr:blocked` on Pi's event bus (`{ active: true, label: "Allow? bash: ..." }`, then `{ active: false }` when it closes), so Herdr's Pi integration shows the pane as blocked. Outside Herdr nothing listens.
 - **pi-bg**: `bg_run` is judged like `bash`, in its own `cwd`; the read-only `bg_*` tools are on the default allow list.
-- **pi-subagents**: a subagent's approval dialogs reach you through pi-subagents' dialog forwarding.
+- **pi-subagents**: a subagent starts with this session's approval setting, and in chat when this session is in chat or plan, through pi-subagents' optional `pi-plugins.subagent-env.v1` environment contract (`PI_TOOL_GATE_APPROVAL`, `PI_TOOL_GATE_WORKFLOW`, read only in a process marked `PI_SUBAGENT`). A subagent's branch records override them, so a forked subagent keeps the forked branch's modes. Subagents are headless: a dialog its gate opens is cancelled and reported to the parent as a blocker, never forwarded to you.
 - **pi-plan-mode**: provides plan mode in the cycle (above). The classifier may receive the active branch's stored approved-plan snapshot (up to 12,000 characters), not the mutable plan file. The next user message expires that snapshot; a new approval can establish another. It is context subordinate to current instructions and permission rules, not blanket permission.
 - **pi-status-footer**: shows workflow as a bold lowercase `work`, `chat`, `plan` or `exec` landmark, separate from Approvals and the gate tally. Badge hues depend on the theme; explanations and key hints stay subdued. During a blocked dialog the compact row retains the badge when available, subject to terminal width.
 

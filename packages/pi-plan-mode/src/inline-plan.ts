@@ -4,8 +4,9 @@
 // off to a cheaper model in this conversation (keeping its history and switching the model),
 // keep the planning model on it, save a snapshot for later, edit the plan first, or keep planning. The
 // workflow returns to work after approval, without changing approvals.
-// With pi-tool-gate installed, the gate owns workflow and judges planning commands. Without it,
-// this extension enforces a read-only shell and its configured shortcut toggles work/plan.
+// With pi-tool-gate installed, the gate owns workflow and enforces plan's read-only shell under
+// either approval setting. Without it, this extension enforces a read-only shell and its configured
+// shortcut toggles work/plan.
 // Event bus contract (shared with pi-tool-gate; no sibling imports):
 //   workflow-mode:set           any -> gate { mode: work|chat|plan } requests a base transition
 //   workflow-mode:cycle         any -> gate {} requests the next base workflow
@@ -154,9 +155,9 @@ export interface InlinePlanMode {
   toggle(ctx: ExtensionContext, trigger?: SettingCycleTrigger): Promise<boolean>;
 }
 
-export function enterPlanText(planFile: string, existing: boolean, gate: boolean) {
+export function enterPlanText(planFile: string, existing: boolean) {
   return `<system-reminder>
-Plan mode is active. The user wants you to research and plan before anything changes. You MUST NOT make any edits (except to the plan file below), run commands that change files or the system, commit, or otherwise make changes, even if asked to; this supersedes any other instructions. ${gate ? "Commands are judged before they run; stick to ones that only read." : "Only read-only shell commands run."}
+Plan mode is active. The user wants you to research and plan before anything changes. You MUST NOT make any edits (except to the plan file below), run commands that change files or the system, commit, or otherwise make changes, even if asked to; this supersedes any other instructions. Only read-only shell commands run.
 
 ## Plan file
 ${existing ? `A plan file from earlier planning exists at ${planFile}. Read it first, then decide: if the request is a different task, overwrite it; if it continues the same task, revise it.` : `No plan file exists yet. Create it at ${planFile} with write.`}
@@ -282,7 +283,7 @@ export function registerInlinePlanMode(pi: ExtensionAPI, host: InlineHost): Inli
 
   const noticeText = () =>
     state.active
-      ? enterPlanText(state.planFile as string, hasPlan(state.planFile), gate !== undefined)
+      ? enterPlanText(state.planFile as string, hasPlan(state.planFile))
       : exitPlanText(state.planFile, gate?.mode);
 
   const allocatePlanFile = () => {
@@ -483,7 +484,7 @@ export function registerInlinePlanMode(pi: ExtensionAPI, host: InlineHost): Inli
         reason: `Plan mode is on: nothing may be edited until the user approves a plan. The only file you may write is the plan file, ${state.planFile}.`,
       };
     }
-    // With the gate, commands are its to judge (as Claude Code's classifier does while planning).
+    // With the gate, its workflow guard lets only read-only commands run (its own analysis).
     if (gate || tool !== "bash") return undefined;
     const blocked = findBlockedCommandSegment(readCommand(input), host.safeSubcommands() ?? {}, ctx.cwd);
     if (blocked === undefined) return undefined;

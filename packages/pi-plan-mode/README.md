@@ -58,7 +58,7 @@ Keyboard cycles commit when all participating modifiers are released if release 
 While plan mode is on:
 
 - Your agent is told (once, with your next message, or right away mid-turn) to research, ask you what it cannot find out, and write its plan to a **plan file**, `~/.pi/agent/plans/draft-<timestamp>-<uuid>.md` (`plansDirectory` moves it). This unique temporary draft is allocated before its title is known and stays at that path while the agent writes; entering plan mode again continues it unless you saved it for later. The agent is asked to use a concise, descriptive first Markdown heading.
-- `edit` and `write` are blocked except for the plan file. Commands: with pi-tool-gate, the gate judges them as in auto mode (as Claude Code's classifier does while planning); without it, only read-only commands run (the [shell policy](./docs/settings.md)).
+- `edit` and `write` are blocked except for the plan file. Only read-only shell commands run: with pi-tool-gate, by the gate's read-only analysis under either approval setting (its `readOnlyCommands` extend it); without it, by this package's [shell policy](./docs/settings.md).
 - When the plan is ready, your agent calls `exit_plan_mode`. The plan shows in the chat (Mermaid diagrams drawn as terminal diagrams, top-down when a left-to-right chart is too wide) and you choose:
   - **Yes, implement here** (first and default): your current model implements it in this conversation, keeping the context.
   - **Yes, compact plan and implement here**: compact to the approved plan and implement with the same model in the same session, without creating a child session.
@@ -322,7 +322,7 @@ Planner sessions are stored under `~/.pi/agent/plan-mode/planners/`; runs are sa
 
 ## Optional integrations
 
-- **pi-tool-gate**: owns workflow and approvals independently. Plan joins the workflow cycle (Shift+Tab needs a stock `app.thinking.cycle` remap); the gate judges commands while planning under either approval setting. Ordinary approval returns to work without changing approvals. They communicate through `workflow-mode` events; see pi-tool-gate's `src/modes.ts`. Without the gate, plan mode has its own work/plan toggle and read-only shell policy, and does not enforce an approval policy.
+- **pi-tool-gate**: owns workflow and approvals independently. Plan joins the workflow cycle (Shift+Tab needs a stock `app.thinking.cycle` remap); the gate lets only read-only commands run while planning, under either approval setting, and its approval setting alone decides about other tools. Ordinary approval returns to work without changing approvals. They communicate through `workflow-mode` events; see pi-tool-gate's `src/modes.ts`. Without the gate, plan mode has its own work/plan toggle and read-only shell policy, and does not enforce an approval policy.
 - **pi-subagents**: optional scout-model integration through `subagents:role-model` (the `explorer` role when no `scoutModelMap` entry applies). Its worker model is not an implementation fallback.
 - **Herdr**: while any planner is working, the extension holds `herdr:working` on Pi's event bus (`{ active: true, label: "Planning" }`, then `{ active: false }`), so pi-herdr shows the pending run in Herdr's sidebar; while a planner waits for your answers it also holds `herdr:blocked` (`label: "Planner question"`). Outside Herdr, or without pi-herdr, nothing listens.
 - **pi-anthropic-auth** (or any extension named in `providerExtensions`): forwarded to planners and subagents on that provider.
@@ -336,7 +336,7 @@ Planner sessions are stored under `~/.pi/agent/plan-mode/planners/`; runs are sa
 - M (your main agent) is only asked to leave files alone while planning.
 - At most two planners per run.
 - `/planners` does nothing outside the interactive terminal UI. Plan mode works without a UI, but nobody can approve a plan there.
-- Plan mode blocks `edit` and `write` outside the plan file and (without pi-tool-gate) non-read-only shell commands. Other extension and MCP tools your agent has keep working; it is told not to change anything with them.
+- Plan mode blocks `edit` and `write` outside the plan file and non-read-only shell commands. Other extension and MCP tools your agent has keep working; it is told not to change anything with them. With pi-tool-gate, subagents started while planning start in chat, so they only read.
 
 ## Development
 

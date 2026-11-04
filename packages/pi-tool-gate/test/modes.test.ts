@@ -589,7 +589,7 @@ describe("configuration compatibility", () => {
 });
 
 describe("workflow guards precede approvals", () => {
-  test.each(["auto", "yolo"])("plan+%s only writes its plan file and still judges commands", async approval => {
+  test.each(["auto", "yolo"])("plan+%s only writes its plan file, runs only read-only commands and leaves other tools to approvals", async approval => {
     const { h, jev, ctx } = await start(setup());
     h.pi.events.emit(PLAN_PROVIDER, { planFile: "/tmp/plans/calm-river.md" });
     await h.commands.get("approvals").handler(approval, ctx);
@@ -597,8 +597,41 @@ describe("workflow guards precede approvals", () => {
     expect(await h.emit("tool_call", call("write", { path: "/tmp/plans/calm-river.md", content: "# Plan" }), ctx)).toBeUndefined();
     for (const tool of ["edit", "write"]) expect(await h.emit("tool_call", call(tool, { path: "src/a.ts", content: "x", edits: [] }), ctx)).toMatchObject({ block: true, reason: expect.stringMatching(/Plan mode is on:.*plan file/su) });
     await h.emit("before_agent_start", { prompt: "x" }, ctx);
-    expect(await h.emit("tool_call", call("bash", { command: "npm test" }), ctx)).toBeUndefined();
-    expect(jev.calls).toHaveLength(1);
+    for (const [tool, command] of [["bash", "npm test"], ["bash", "sed -i s/a/b/ x"], ["bg_run", "npm test"]]) {
+      expect(await h.emit("tool_call", call(tool, { command }), ctx)).toMatchObject({ block: true, reason: expect.stringMatching(/^Plan mode is on: only read-only commands run/u) });
+    }
+    expect(await h.emit("tool_call", call("bash", { command: "git status && rg -n x" }), ctx)).toBeUndefined();
+    expect(jev.calls).toHaveLength(0);
+    // Other tools are the approval setting's: auto judges them, yolo runs them.
+    expect(await h.emit("tool_call", call("subagent", { task: "explore" }), ctx)).toBeUndefined();
+    expect(jev.calls).toHaveLength(approval === "auto" ? 1 : 0);
+    expect(ctx.ui.selects).toHaveLength(0);
+  });
+  test.each(["chat", "plan"] as const)("%s: reads outside the project and of credentials follow the approval setting", async workflow => {
+    const { h, ctx } = await start(setup());
+    h.pi.events.emit(PLAN_PROVIDER, { planFile: "/tmp/plans/calm-river.md" });
+    h.pi.events.emit(WORKFLOW_SET, { mode: workflow });
+    await h.emit("before_agent_start", { prompt: "x" }, ctx);
+    const outside = call("read", { path: "~/Projects/gate-test-other/a.ts" }, "o1");
+    const secret = call("bash", { command: "cat .env" }, "s1");
+    expect(await h.emit("tool_call", outside, ctx)).toMatchObject({ block: true, reason: expect.stringMatching(/outside this project's directories/u) });
+    expect(await h.emit("tool_call", secret, ctx)).toMatchObject({ block: true, reason: expect.stringMatching(/touches credentials/u) });
+    await h.commands.get("approvals").handler("yolo", ctx);
+    expect(await h.emit("tool_call", { ...outside, toolCallId: "o2" }, ctx)).toBeUndefined();
+    expect(await h.emit("tool_call", { ...secret, toolCallId: "s2" }, ctx)).toBeUndefined();
+    expect(ctx.ui.selects).toHaveLength(0);
+  });
+  test.each(["work", "chat", "plan"] as const)("%s: deny rules apply under every approval setting", async workflow => {
+    configure({ permissions: { deny: ["Bash(git log:*)", "Read(notes/**)"] } });
+    const { h, ctx } = await start(setup());
+    h.pi.events.emit(PLAN_PROVIDER, { planFile: "/tmp/plans/calm-river.md" });
+    h.pi.events.emit(WORKFLOW_SET, { mode: workflow });
+    for (const approval of ["auto", "yolo", "manual"]) {
+      await h.commands.get("approvals").handler(approval, ctx);
+      expect(await h.emit("tool_call", call("bash", { command: "git log -1" }), ctx)).toMatchObject({ block: true, reason: expect.stringMatching(/deny rule Bash\(git log:\*\)/u) });
+      expect(await h.emit("tool_call", call("read", { path: "notes/a.md" }), ctx)).toMatchObject({ block: true, reason: expect.stringMatching(/deny rule Read/u) });
+    }
+    expect(ctx.ui.selects).toHaveLength(0);
   });
   test.each(["auto", "yolo"])("chat+%s blocks mutations, MCP and allow rules without judging", async approval => {
     configure({ permissions: { allow: ["Bash(npm test:*)", "mcp__notes__write"] } });
@@ -882,5 +915,49 @@ describe("workflow notices are independent of approvals", () => {
     expect(reminders).toHaveLength(1);
     expect(reminders[0]).toMatchObject({ opts: { deliverAs: "steer" }, message: { display: false, content: expect.stringMatching(/Chat mode is active/u) } });
     expect(await h.emit("before_agent_start", { prompt: "x" }, ctx)).toBeUndefined();
+  });
+});
+
+describe("subagents inherit approvals", () => {
+  const request = (h: ReturnType<typeof harness>, probe = false) => {
+    const req: any = { version: 1, env: {}, ...(probe ? { probe: true } : {}) };
+    h.pi.events.emit("pi-plugins.subagent-env.v1", req);
+    return req.env;
+  };
+  test("a parent passes its approval down, and chat to children of chat or plan", async () => {
+    const { h, ctx } = await start(setup());
+    h.pi.events.emit(PLAN_PROVIDER, { planFile: "/tmp/plan.md" });
+    expect(request(h)).toEqual({ PI_TOOL_GATE_APPROVAL: "auto" });
+    await h.commands.get("approvals").handler("yolo", ctx);
+    expect(request(h)).toEqual({ PI_TOOL_GATE_APPROVAL: "bypassPermissions" });
+    for (const mode of ["chat", "plan"]) {
+      await h.commands.get("mode").handler(mode, ctx);
+      expect(request(h)).toEqual({ PI_TOOL_GATE_APPROVAL: "bypassPermissions", PI_TOOL_GATE_WORKFLOW: "chat" });
+    }
+    expect(request(h, true)).toEqual({});
+  });
+  test("a subagent starts with what it inherited unless its branch records otherwise", async () => {
+    vi.stubEnv("PI_SUBAGENT", "1");
+    vi.stubEnv("PI_TOOL_GATE_APPROVAL", "bypassPermissions");
+    vi.stubEnv("PI_TOOL_GATE_WORKFLOW", "chat");
+    const child = await start(setup());
+    expect(child.ctx.ui.status.get(MODE_STATUS_KEY)).toContain("yolo");
+    expect(child.ctx.ui.status.get(WORKFLOW_STATUS_KEY)).toContain("chat");
+    const forked = await start(setup([entry(APPROVAL_ENTRY, { version: 1, mode: "auto" }), entry(WORKFLOW_ENTRY, { version: 1, mode: "work" })]));
+    expect(forked.ctx.ui.status.get(MODE_STATUS_KEY)).toContain("auto");
+    expect(forked.ctx.ui.status.get(WORKFLOW_STATUS_KEY)).toContain("work");
+  });
+  test("outside a subagent, or with an unknown value, the variables change nothing", async () => {
+    vi.stubEnv("PI_TOOL_GATE_APPROVAL", "bypassPermissions");
+    vi.stubEnv("PI_TOOL_GATE_WORKFLOW", "chat");
+    const plain = await start(setup());
+    expect(plain.ctx.ui.status.get(MODE_STATUS_KEY)).toContain("auto");
+    expect(plain.ctx.ui.status.get(WORKFLOW_STATUS_KEY)).toContain("work");
+    vi.stubEnv("PI_SUBAGENT", "1");
+    vi.stubEnv("PI_TOOL_GATE_APPROVAL", "yolo");
+    vi.stubEnv("PI_TOOL_GATE_WORKFLOW", "work");
+    const odd = await start(setup());
+    expect(odd.ctx.ui.status.get(MODE_STATUS_KEY)).toContain("auto");
+    expect(odd.ctx.ui.status.get(WORKFLOW_STATUS_KEY)).toContain("work");
   });
 });

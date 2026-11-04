@@ -6,9 +6,10 @@
 // call. Without Jev the gate falls back to Pi's tool hints.
 //
 // Workflow and approvals are independent (see modes.ts): Shift+Tab cycles work/chat/plan;
-// Alt+A toggles auto/yolo. Chat's read-only guard and plan's existing edit/command policy apply
-// under either approval setting. Plan commands still use the existing judge, not a shell sandbox.
-// Manual and accept-edits remain explicit legacy approval settings.
+// Alt+A toggles auto/yolo. The workflow decides what kind of call may run at all (chat: reads;
+// plan: reads, its plan file and tools other than edits and shell commands); the approval setting
+// alone decides whether a call that passes is judged, pushed back or put to you. Deny rules apply
+// in every combination. Manual and accept-edits remain explicit legacy approval settings.
 import path from "node:path";
 import { readFileSync, realpathSync } from "node:fs";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
@@ -114,6 +115,7 @@ import {
   modeStatus,
   PLAN_PROVIDER,
 } from "./modes.ts";
+import { answerSubagentEnv, inheritedModes, SUBAGENT_ENV_CHANNEL, subagentEnv } from "./subagent-env.ts";
 import { loadRules } from "./rules.ts";
 import { agentBeforeLatestUser, approvedPlanOf, callerText, clip, clipTail, recentTexts, recentUserMessages } from "./transcript.ts";
 import { offerUserWords, resultText } from "./user-words.ts";
@@ -236,8 +238,6 @@ export type Plan =
       args: string;
       /** What the dialog's allow choices add: the folders of a directory-policy hold. */
       offer?: Offer;
-      /** Held only by the directory policy; otherwise the call only reads. */
-      readOnly?: boolean;
       /** Configured advice for the agent (a derived path's hint), used instead of asking Jev for a workaround. */
       advice?: string;
       /** An ask rule: it asks you at once, in every mode, with no push-back and no judgment. */
@@ -306,9 +306,7 @@ export function planCall(tool: string, input: Record<string, unknown>, cwd: stri
   const planned = planWithHolds(tool, input, cwd, c, call);
   if (!hit) return planned;
   const reasons = [`matches the ask rule ${hit.text} (${describeOrigin(hit.origin, shown)})`, ...(planned.kind === "ask" ? planned.reasons : [])];
-  // Chat mode lets a call ask only when it reads.
-  const readOnly = planned.kind === "allow" ? planned.why !== ALLOWED_BY_RULE : planned.kind === "ask" && planned.readOnly === true;
-  return { kind: "ask", reasons, key: `rule:${hit.text}`, args, direct: true, readOnly, ...(planned.kind === "ask" && planned.advice ? { advice: planned.advice } : {}) };
+  return { kind: "ask", reasons, key: `rule:${hit.text}`, args, direct: true, ...(planned.kind === "ask" && planned.advice ? { advice: planned.advice } : {}) };
 }
 
 function planWithHolds(tool: string, input: Record<string, unknown>, cwd: string, c: PlanContext, call: Call): Plan {
@@ -331,8 +329,6 @@ function planWithHolds(tool: string, input: Record<string, unknown>, cwd: string
     key: `dirs:${offer.items.join("|")}`,
     args,
     offer,
-    // A rule that allows a command does not make it read-only: chat mode lets only reads ask.
-    readOnly: base.kind === "allow" && base.why !== ALLOWED_BY_RULE,
     advice,
   };
 }
@@ -405,6 +401,22 @@ function basePlan(tool: string, input: Record<string, unknown>, cwd: string, c: 
   if (c.annotations?.(tool)?.readOnlyHint === true) return { kind: "allow", why: "read-only hint" };
   if (allowing(rules, call)) return { kind: "allow", why: ALLOWED_BY_RULE };
   return { kind: "judge", args: clip(JSON.stringify(input), 6_000), key: `tool:${tool}`, offer: rulesOffer(suggest(call)) };
+}
+
+/**
+ * Whether a call only reads, as chat and plan workflows count it: the allow list, Pi's reading
+ * tools, read-only shell commands and tools with a read-only hint. Holds (credentials, the
+ * directory policy) and rules do not change it; they belong to the approval setting.
+ */
+export function onlyReads(
+  tool: string,
+  input: Record<string, unknown>,
+  config: Pick<GateConfig, "allowTools" | "readOnlyCommands">,
+  annotations?: (tool: string) => Annotations | undefined,
+): boolean {
+  if (config.allowTools.includes(tool) || BUILTIN_READ.has(tool)) return true;
+  if (SHELL_TOOLS.has(tool)) return isReadOnlyBash(String(input.command ?? ""), config.readOnlyCommands);
+  return annotations?.(tool)?.readOnlyHint === true;
 }
 
 /** The local script a shell call runs, for the judge to read (see `scriptFor`); undefined for other tools. */
@@ -531,10 +543,10 @@ export default function toolGate(pi: ExtensionAPI) {
       const flow = flows.snapshot();
       ctx.ui.setStatus("tool-gate:flow", !flowDisplayClaimed && flow.operatingMode === "linked"
         ? flow.blocked ? "Linked blocked · /flow" : `Linked ${flow.selectedFlow?.provider ?? "unavailable"}` : undefined);
-      // Jev's counts matter where Jev judges: auto mode, and commands while planning.
+      // Jev's counts matter where Jev judges: auto approvals, whatever the workflow.
       ctx.ui.setStatus(
         STATUS_KEY,
-        approval === "auto" || effectiveWorkflow() === "plan" ? `gate: ${auto} auto · ${pushedBack} pushed back · ${held} asked` : undefined,
+        approval === "auto" ? `gate: ${auto} auto · ${pushedBack} pushed back · ${held} asked` : undefined,
       );
     } catch {
       // A stale context after a session switch.
@@ -564,12 +576,15 @@ export default function toolGate(pi: ExtensionAPI) {
   const cycle = () => workflowCycle(planProvider);
   const defaults = (config: GateConfig) => {
     const legacy = parseLegacyCombinedMode(config.defaultMode);
+    // A subagent starts with what its parent passed down (subagent-env.ts), else the configured defaults.
+    const inherited = inheritedModes();
     return {
-      workflow: parseWorkflow(config.defaultWorkflow) ?? (legacy === "chat" || legacy === "plan" ? legacy : "work"),
-      approval: parseApproval(config.defaultApproval) ?? (!config.enabled ? "bypassPermissions" : parseApproval(legacy) ?? "auto"),
+      workflow: inherited.workflow ?? parseWorkflow(config.defaultWorkflow) ?? (legacy === "chat" || legacy === "plan" ? legacy : "work"),
+      approval: inherited.approval ?? parseApproval(config.defaultApproval) ?? (!config.enabled ? "bypassPermissions" : parseApproval(legacy) ?? "auto"),
       execActive: false,
     } as const;
   };
+  pi.events.on(SUBAGENT_ENV_CHANNEL, (data: unknown) => answerSubagentEnv(data, () => subagentEnv(approval, effectiveWorkflow())));
   const emit = (name: string, data: unknown) => {
     try { pi.events.emit(name, data); } catch { /* A listener's failure is its own. */ }
   };
@@ -1409,36 +1424,45 @@ export default function toolGate(pi: ExtensionAPI) {
         return { block: true, reason: `tool-gate blocked this call: policy-load error. Correct the policy before requesting permission.\n${policyLoadErrors.join("\n")}` };
       }
 
-      if (effectiveWorkflow() === "chat") {
-        // Talking, not acting: what the gate counts as read-only runs, nothing else does (an allow rule
-        // does not make a command read-only).
-        const p = await plan(tool, input, ctx.cwd);
-        if (stale()) return staleResult();
-        if (p.kind === "deny") return deniedBy(tool, p.rule);
-        if (p.kind === "allow" && p.why !== ALLOWED_BY_RULE) return allow(ctx);
-        // A read outside the project's directories: yours to allow, as in manual mode.
-        if (p.kind === "ask" && p.readOnly) return askUser(ctx, tool, input, p);
-        return {
-          block: true,
-          reason:
-            `Chat mode is on: only read-only tools run, and this ${tool} call is not one. Do not retry it or work around it. ` +
-            `Answer from what you can read, or tell the user what you would do; they can switch modes (${shortcut || "/mode"}) to let you act.`,
-        };
-      }
-
-      if (effectiveWorkflow() === "plan" && (tool === "edit" || tool === "write")) {
+      // Workflow first: what kind of call may run at all, whatever the approval setting. Its blocks
+      // never ask; only deny rules are checked before them.
+      const current = effectiveWorkflow();
+      if (current === "chat" || current === "plan") {
         const forbidden = blocking(allRules, { tool, input, cwd: (await contextFor(ctx.cwd)).cwd, root: (await projectOf(ctx.cwd))[0], readOnlyCommands: config.readOnlyCommands });
         if (stale()) return staleResult();
         if (forbidden?.list === "deny") return deniedBy(tool, forbidden);
-        const file = path.resolve(ctx.cwd, expandHome(String(input.path ?? "")));
-        if (planFile && file === planFile) return allow(ctx);
-        return {
-          block: true,
-          reason: `Plan mode is on: nothing may be edited until the user approves a plan.${planFile ? ` The only file you may write is the plan file, ${planFile}.` : ""}`,
-        };
+        if (current === "plan" && (tool === "edit" || tool === "write")) {
+          const file = path.resolve(ctx.cwd, expandHome(String(input.path ?? "")));
+          // The plan file is the workflow's own artifact: no approval applies to it.
+          if (planFile && file === planFile) return allow(ctx);
+          return {
+            block: true,
+            reason: `Plan mode is on: nothing may be edited until the user approves a plan.${planFile ? ` The only file you may write is the plan file, ${planFile}.` : ""}`,
+          };
+        }
+        // Chat lets only reads run (an allow rule does not make a command read-only); plan lets only
+        // read-only shell commands run, and leaves other tools to the approval setting.
+        const reads = onlyReads(tool, input, config, annotations);
+        if (current === "chat" && !reads) {
+          return {
+            block: true,
+            reason:
+              `Chat mode is on: only read-only tools run, and this ${tool} call is not one. Do not retry it or work around it. ` +
+              `Answer from what you can read, or tell the user what you would do; they can switch modes (${shortcut || "/mode"}) to let you act.`,
+          };
+        }
+        if (current === "plan" && SHELL_TOOLS.has(tool) && !reads) {
+          return {
+            block: true,
+            reason:
+              `Plan mode is on: only read-only commands run until the user approves a plan, and this ${tool} call is not one. ` +
+              "Do not retry it or work around it: research with read-only commands and put this step in the plan.",
+          };
+        }
       }
 
-      if (approval === "bypassPermissions" && effectiveWorkflow() !== "plan") {
+      // Then approvals, the same in every workflow.
+      if (approval === "bypassPermissions") {
         // Everything runs, except what a deny rule forbids, and removing /, home, the project or a
         // parent of them (as Claude Code). Exhausted analysis cannot rule out such a removal.
         const call: Call = { tool, input, cwd: (await contextFor(ctx.cwd)).cwd, root: (await projectOf(ctx.cwd))[0], readOnlyCommands: config.readOnlyCommands };
@@ -1447,9 +1471,11 @@ export default function toolGate(pi: ExtensionAPI) {
         if (forbidden?.list === "deny") return deniedBy(tool, forbidden);
         if (!SHELL_TOOLS.has(tool)) return undefined;
         const command = String(input.command ?? "");
-        const critical = alwaysAskBash(command, ctx.cwd).filter((reason) => reason.startsWith("deletes ") || reason === "shell analysis depth exhausted (opaque command)");
+        const critical = alwaysAskBash(command, shellDir(tool, input, ctx.cwd), undefined, undefined, 0, ctx.cwd)
+          .filter((reason) => reason.startsWith("deletes ") || reason === "shell analysis depth exhausted (opaque command)");
         if (!critical.length) return undefined;
         held++;
+        status(ctx);
         if (!ctx.hasUI) return { block: true, reason: `tool-gate held this call: it ${critical.join("; ")}. There is no user to approve it.` };
         return ask(ctx, { tool, input, held: critical.join("; ") }, undefined);
       }
@@ -1462,8 +1488,8 @@ export default function toolGate(pi: ExtensionAPI) {
       if (p.kind === "allow") return allow(ctx);
       if (p.kind === "deny") return undefined;
 
-      if (effectiveWorkflow() !== "plan" && approval === "default") return askUser(ctx, tool, input, p);
-      if (effectiveWorkflow() !== "plan" && approval === "acceptEdits") {
+      if (approval === "default") return askUser(ctx, tool, input, p);
+      if (approval === "acceptEdits") {
         const accepted = p.kind === "judge" && (await acceptsEdit(tool, input, ctx.cwd));
         if (stale()) return staleResult();
         if (accepted) return allow(ctx);

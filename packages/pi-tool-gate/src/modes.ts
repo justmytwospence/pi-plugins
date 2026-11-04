@@ -55,7 +55,7 @@ export const MODE_DESCRIPTIONS: Record<ApprovalMode, string> = {
   default: "Ask before every edit, write and command that does more than read.",
   acceptEdits: "Edits, writes and filesystem commands inside the project run; other commands ask.",
   auto: "The gate judges each call; you are asked only about risky ones the agent cannot work around.",
-  bypassPermissions: "Everything runs, except removing / , home, the project or a parent of them.",
+  bypassPermissions: "Everything the workflow permits runs, except deny rules and removing / , home, the project or a parent of them.",
 };
 export const MODE_LABELS: Record<ApprovalMode, string> = {
   default: "⏸ manual (legacy) mode on", acceptEdits: "⏵⏵ accept edits (legacy) on",

@@ -11,7 +11,7 @@ test("the self-contained plan standard is in every prompt that asks for a plan",
     PLAN_STANDARD,
     /make every implementation decision in the plan yourself, after checking it in the code/u,
   );
-  assert.ok(enterPlanText("/p/calm-river.md", false, false).includes(PLAN_STANDARD));
+  assert.ok(enterPlanText("/p/calm-river.md", false).includes(PLAN_STANDARD));
   const prompt = buildPlanModePrompt();
   assert.ok(prompt.includes(PLAN_STANDARD));
   assert.doesNotMatch(prompt, /behavior-level/u);

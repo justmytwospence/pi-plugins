@@ -452,14 +452,19 @@ EOF`;
     expect(await h.emit("tool_call", call("read", { path: "~/Projects/other/a.ts" }), ctx)).toBeUndefined();
   });
 
-  test("chat allows approved outside reads; yolo changes approvals without leaving chat", async () => {
+  test("chat holds outside reads as auto approvals do; yolo reads anywhere without leaving chat", async () => {
     const { h, ctx } = setup();
     await h.emit("session_start", {}, ctx);
+    await h.emit("before_agent_start", { prompt: "x" }, ctx);
     await h.commands.get("mode").handler("chat", ctx);
+    const first: any = await h.emit("tool_call", call("read", { path: "~/Projects/other/a.ts" }), ctx);
+    expect(first.reason).toMatch(/outside this project's directories/u);
     ctx.ui.selectAnswers.push("Allow once");
-    expect(await h.emit("tool_call", call("read", { path: "~/Projects/other/a.ts" }), ctx)).toBeUndefined();
+    expect(await h.emit("tool_call", call("read", { path: "~/Projects/other/a.ts" }, "t1b"), ctx)).toBeUndefined();
     expect(ctx.ui.selects).toHaveLength(1);
     await h.commands.get("mode").handler("yolo", ctx);
+    expect(await h.emit("tool_call", call("read", { path: "~/Projects/third/a.ts" }, "t1c"), ctx)).toBeUndefined();
+    expect(ctx.ui.selects).toHaveLength(1);
     const blocked: any = await h.emit("tool_call", call("write", { path: "~/Projects/other/a.ts", content: "" }, "t2"), ctx);
     expect(blocked?.block).toBe(true);
     expect(blocked.reason).toMatch(/^Chat mode is on:/u);
