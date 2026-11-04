@@ -264,9 +264,11 @@ function navigate(f) {
   for (const target of targets.filter(row => row > first)) {
     scrollToCheckpoint(f.reference, context, 1); f.frame(); assert.equal(index.view.scrollTop, target, 'next stop');
   }
-  const last = index.view.scrollTop;
-  scrollToCheckpoint(f.reference, context, 1); f.frame(); assert.equal(index.view.scrollTop, last, 'down never wraps');
-  assert.equal(index.view.isFollowingEnd, false, 'navigation never resumes follow');
+  assert.equal(index.view.isFollowingEnd, false, 'checkpoint stops never resume follow');
+  const end = Math.max(0, index.lines.length - index.view.viewportHeight);
+  scrollToCheckpoint(f.reference, context, 1); f.frame(); assert.equal(index.view.scrollTop, end, 'down past the last checkpoint goes to the end');
+  assert.equal(index.view.isFollowingEnd, true, 'and resumes follow');
+  scrollToCheckpoint(f.reference, context, 1); f.frame(); assert.equal(index.view.scrollTop, end, 'down never wraps');
   index = capture(f);
   const human = index.blocks.find(block => block.userText);
   assert.ok(human);

@@ -102,7 +102,7 @@ export function scrollToCheckpoint(tui: unknown, context: TranscriptContext, dir
   if (target === undefined) {
     // Past the last checkpoint, Ctrl+D goes to the end and resumes following new output.
     const end = Math.max(0, capture.lines.length - capture.viewportHeight);
-    if (direction < 0 || capture.scrollTop >= end) return;
+    if (direction < 0) return;
     capture.view.scrollTo(end);
   } else capture.view.scrollTo(target, { disableFollow: true });
   (tui as Host).requestRender?.();
