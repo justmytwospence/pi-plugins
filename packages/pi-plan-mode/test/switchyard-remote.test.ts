@@ -52,6 +52,14 @@ describe("switchyard remote ui", () => {
     expect(remoteUi({ events: { emit: () => {} } })).toBeUndefined();
     expect(remoteUi({})).toBeUndefined();
     const ui = {} as never;
-    expect(remoteUi({ events: { emit: (_c, d) => void ((d as { ui?: unknown }).ui = ui) } })).toBe(ui);
+    expect(
+      remoteUi({
+        events: {
+          emit: (_c, d) => {
+            (d as { ui?: unknown }).ui = ui;
+          },
+        },
+      }),
+    ).toBe(ui);
   });
 });
