@@ -1,5 +1,5 @@
 import { stripVTControlCharacters } from "node:util";
-import type { ExtensionContext, Theme } from "@earendil-works/pi-coding-agent";
+import type { ExtensionContext, ExtensionUIContext, Theme } from "@earendil-works/pi-coding-agent";
 import {
   type Component,
   type Focusable,
@@ -9,6 +9,7 @@ import {
   truncateToWidth,
   wrapTextWithAnsi,
 } from "@earendil-works/pi-tui";
+import { type RemoteUi, raceRemote } from "./switchyard-remote.js";
 
 interface PlanNameOptions {
   suggestion?: string;
@@ -105,33 +106,49 @@ export class PlanNameInput implements Component, Focusable {
   }
 }
 
-export async function promptPlanName(
-  ctx: ExtensionContext,
+async function askNameWithDialogs(
+  ui: Pick<ExtensionUIContext, "select" | "input">,
   options: PlanNameOptions,
   signal?: AbortSignal,
 ): Promise<string | undefined> {
-  if (!ctx.hasUI || signal?.aborted) return undefined;
-  if (ctx.mode === "tui") {
-    let component: PlanNameInput | undefined;
-    try {
-      return await ctx.ui.custom<string | undefined>((tui, theme, keybindings, done) => {
-        component = new PlanNameInput(options, theme, keybindings, () => tui.requestRender(), done, signal);
-        return component;
-      });
-    } finally {
-      component?.dispose();
-    }
-  }
   if (options.suggestion) {
-    const choice = await ctx.ui.select(
-      `${TITLE} ${display(options.suggestion)}.md`,
-      [USE_SUGGESTION, ENTER_NAME, CANCEL],
-      { signal },
-    );
+    const choice = await ui.select(`${TITLE} ${display(options.suggestion)}.md`, [USE_SUGGESTION, ENTER_NAME, CANCEL], {
+      signal,
+    });
     if (signal?.aborted) return undefined;
     if (choice === USE_SUGGESTION) return options.suggestion;
     if (choice !== ENTER_NAME) return undefined;
   }
-  const value = await ctx.ui.input(TITLE, undefined, { signal });
+  const value = await ui.input(TITLE, undefined, { signal });
   return signal?.aborted ? undefined : value;
+}
+
+export async function promptPlanName(
+  ctx: ExtensionContext,
+  options: PlanNameOptions,
+  signal?: AbortSignal,
+  remote?: RemoteUi,
+): Promise<string | undefined> {
+  if (!ctx.hasUI || signal?.aborted) return undefined;
+  if (ctx.mode === "tui") {
+    const components: PlanNameInput[] = [];
+    const terminal = (sig: AbortSignal | undefined) =>
+      ctx.ui.custom<string | undefined>((tui, theme, keybindings, done) => {
+        const component = new PlanNameInput(options, theme, keybindings, () => tui.requestRender(), done, sig);
+        components.push(component);
+        return component;
+      });
+    try {
+      if (!remote) return await terminal(signal);
+      const { value } = await raceRemote<string>(
+        (sig) => terminal(sig),
+        (sig) => askNameWithDialogs(remote, options, sig),
+        signal,
+      );
+      return value;
+    } finally {
+      for (const c of components) c.dispose();
+    }
+  }
+  return askNameWithDialogs(ctx.ui, options, signal);
 }

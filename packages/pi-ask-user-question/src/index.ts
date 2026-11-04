@@ -14,6 +14,7 @@ import { type Answer, type DialogResult, type Details, errorResult, toolResult, 
 import { askWithDialogs } from "./rpc.ts";
 import { NO_UI_MESSAGE, normalize, type Params, ParamsSchema, type Question, TOOL_NAME, validate } from "./schema.ts";
 import { offerUserWords } from "./user-words.ts";
+import { raceRemote, remoteUi } from "./switchyard-remote.ts";
 import { ASK_SERVICE_CHANNEL, type AskServiceFn, type AskServiceRequest } from "./service.ts";
 
 const LABEL_WIDTH = 60;
@@ -86,9 +87,14 @@ export default function askUserQuestion(pi: ExtensionAPI) {
 async function ask(pi: ExtensionAPI, ctx: ExtensionContext, questions: Question[], signal: AbortSignal | undefined): Promise<DialogResult> {
   if (ctx.mode === "tui") {
     try {
-      const result = await ctx.ui.custom<DialogResult | undefined>(
-        (tui, theme, keybindings, done) => new QuestionDialog(tui, theme, keybindings, questions, done, signal, embeddedEditorFactory(pi)),
-      );
+      const dialog = (sig: AbortSignal | undefined) =>
+        ctx.ui.custom<DialogResult | undefined>(
+          (tui, theme, keybindings, done) => new QuestionDialog(tui, theme, keybindings, questions, done, sig, embeddedEditorFactory(pi)),
+        );
+      const remote = remoteUi(pi);
+      const result = remote
+        ? (await raceRemote<DialogResult>((sig) => dialog(sig), (sig) => askWithDialogs(remote, questions, sig), signal)).value
+        : await dialog(signal);
       if (result) return result;
     } catch {
       // Fall through to the native dialogs rather than lose the questions.

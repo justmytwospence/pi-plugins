@@ -1,5 +1,5 @@
 import { stripVTControlCharacters } from "node:util";
-import type { ExtensionContext, Theme } from "@earendil-works/pi-coding-agent";
+import type { ExtensionContext, ExtensionUIContext, Theme } from "@earendil-works/pi-coding-agent";
 import {
   type Component,
   type KeybindingsManager,
@@ -11,6 +11,7 @@ import {
 import type { FlowState } from "./flow-contract.js";
 import { formatModelKey, type ModelSpec, type ModelSpecThinkingLevel } from "./implementation-models.js";
 import { modelCatalog, normalizeEffort } from "./model-catalog.js";
+import { type RemoteUi, raceRemote } from "./switchyard-remote.js";
 
 export const OPTION_MAX = 42;
 export const HERE = "Yes, implement here";
@@ -291,7 +292,7 @@ export class ApprovalPicker implements Component {
   }
 
   /** RPC selects by unique labels, never by a possibly colliding truncated model name. */
-  async selectRPC(ctx: ExtensionContext): Promise<ApprovalResult | undefined> {
+  async selectRPC(ui: Pick<ExtensionUIContext, "select">): Promise<ApprovalResult | undefined> {
     while (!this.signal?.aborted) {
       const currentLabels = this.rows.map((row) => this.label(row));
       const labels = currentLabels.map((label, index) =>
@@ -302,7 +303,7 @@ export class ApprovalPicker implements Component {
       // RPC has no initial-selection option; put the retained action first for Enter.
       const currentLabel = labels[this.rows.indexOf(this.selected)] as string;
       const actions = [currentLabel, ...labels.filter((label) => label !== currentLabel)];
-      const selected = await ctx.ui.select(this.question, actions, { signal: this.signal });
+      const selected = await ui.select(this.question, actions, { signal: this.signal });
       if (this.signal?.aborted || selected === undefined) return undefined;
       const row = this.rows[labels.indexOf(selected)];
       if (!row) return undefined;
@@ -311,7 +312,7 @@ export class ApprovalPicker implements Component {
       if (row.model && levels.length) {
         const current = this.effort(row);
         const options = [current ?? "Model default", ...levels.filter((level) => level !== current)];
-        const selectedEffort = await ctx.ui.select("Implementation effort", options, { signal: this.signal });
+        const selectedEffort = await ui.select("Implementation effort", options, { signal: this.signal });
         if (this.signal?.aborted) return undefined;
         if (selectedEffort === undefined) continue;
         if (!options.includes(selectedEffort)) return undefined;
@@ -333,7 +334,8 @@ export async function pickApproval(
   input: ApprovalInput,
   state: ApprovalState,
   signal?: AbortSignal,
-): Promise<ApprovalResult | undefined> {
+  remote?: RemoteUi,
+): Promise<(ApprovalResult & { remote?: boolean }) | undefined> {
   if (!ctx.hasUI || signal?.aborted) return undefined;
   const planning =
     input.planning ??
@@ -343,25 +345,48 @@ export async function pickApproval(
     planning: planning ? { ...planning, thinkingLevel: planning.thinkingLevel ?? ctx.thinkingLevel } : undefined,
   };
   const catalog = modelCatalog(ctx);
-  let component: ApprovalPicker | undefined;
+  const components: ApprovalPicker[] = [];
+  const terminal = (sig: AbortSignal | undefined) =>
+    ctx.ui.custom<ApprovalResult | undefined>((tui, theme, keybindings, done) => {
+      const component = new ApprovalPicker(
+        resolved,
+        state,
+        catalog,
+        theme,
+        keybindings,
+        () => tui.requestRender(),
+        done,
+        sig,
+      );
+      components.push(component);
+      return component;
+    });
   try {
     if (ctx.mode === "tui") {
-      return await ctx.ui.custom<ApprovalResult | undefined>((tui, theme, keybindings, done) => {
-        component = new ApprovalPicker(
-          resolved,
-          state,
-          catalog,
-          theme,
-          keybindings,
-          () => tui.requestRender(),
-          done,
-          signal,
-        );
-        return component;
-      });
+      if (!remote) return await terminal(signal);
+      const { value, from } = await raceRemote<ApprovalResult>(
+        (sig) => terminal(sig),
+        (sig) => {
+          // RPC-style dialogs for the web: rendering and keyboard dependencies are unused.
+          const component = new ApprovalPicker(
+            resolved,
+            state,
+            catalog,
+            ctx.ui.theme,
+            { matches: () => false },
+            () => {},
+            () => {},
+            sig,
+          );
+          components.push(component);
+          return component.selectRPC(remote);
+        },
+        signal,
+      );
+      return value ? { ...value, remote: from === "remote" } : undefined;
     }
     // RPC cannot render custom components. Rendering and keyboard dependencies are unused here.
-    component = new ApprovalPicker(
+    const component = new ApprovalPicker(
       resolved,
       state,
       catalog,
@@ -371,8 +396,9 @@ export async function pickApproval(
       () => {},
       signal,
     );
-    return await component.selectRPC(ctx);
+    components.push(component);
+    return await component.selectRPC(ctx.ui);
   } finally {
-    component?.dispose();
+    for (const c of components) c.dispose();
   }
 }

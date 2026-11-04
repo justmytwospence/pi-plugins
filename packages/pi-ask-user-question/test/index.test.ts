@@ -37,7 +37,7 @@ describe("herdr", () => {
     expect(result.content[0].text).toBe(
       `User has answered your questions: "Which date library?"="dayjs". You can now continue with the user's answers in mind.`,
     );
-    expect(h.events.filter((e) => e.channel !== "pi-plugins.editor-factory.v1")).toEqual([
+    expect(h.events.filter((e) => !["pi-plugins.editor-factory.v1", "switchyard.remote-ui.v1"].includes(e.channel))).toEqual([
       { channel: "herdr:blocked", data: { active: true, label: "Library" } },
       { channel: "ui.custom", data: undefined },
       { channel: "herdr:blocked", data: { active: false } },
@@ -49,7 +49,7 @@ describe("herdr", () => {
     const result = await run(h, params, tuiContext([KEYS.esc], { events: h.events }));
     expect(result.content[0].text).toBe(DECLINED);
     expect(result.details).toMatchObject({ cancelled: true, answers: [] });
-    expect(h.events.filter((e) => e.channel !== "pi-plugins.editor-factory.v1").map((e) => e.data?.active)).toEqual([true, undefined, false]);
+    expect(h.events.filter((e) => !["pi-plugins.editor-factory.v1", "switchyard.remote-ui.v1"].includes(e.channel)).map((e) => e.data?.active)).toEqual([true, undefined, false]);
   });
 
   test("released when the dialogs throw", async () => {
@@ -62,7 +62,7 @@ describe("herdr", () => {
       throw new Error("no dialog either");
     };
     await expect(run(h, params, ctx)).rejects.toThrow(/no dialog either/u);
-    expect(h.events.map((e) => e.data)).toEqual([{ active: true, label: "Library" }, { active: false }]);
+    expect(h.events.filter((e) => e.channel !== "switchyard.remote-ui.v1").map((e) => e.data)).toEqual([{ active: true, label: "Library" }, { active: false }]);
   });
 
   test("a throwing listener does not break the tool", async () => {

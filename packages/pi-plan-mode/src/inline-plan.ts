@@ -31,6 +31,7 @@ import { createApprovalState, pickApproval } from "./approval-picker.js";
 import { editInTerminal, externalEditorCommand } from "./external-editor.js";
 import { type FlowState, queryFlow, requestWorkflow } from "./flow-contract.js";
 import { PLAN_STANDARD } from "./handoff.js";
+import { remoteUi } from "./switchyard-remote.js";
 
 export { EDIT, HERE, handoffLabel, KEEP, OPTION_MAX, SAVE } from "./approval-picker.js";
 
@@ -655,6 +656,7 @@ export function registerInlinePlanMode(pi: ExtensionAPI, host: InlineHost): Inli
             },
             pickerState,
             signal,
+            remoteUi(pi),
           );
           if (!current() || readPlan(planFile) !== plan || (!signal?.aborted && request && !request.isCurrent()))
             return text(
@@ -664,7 +666,7 @@ export function registerInlinePlanMode(pi: ExtensionAPI, host: InlineHost): Inli
           if (choice?.kind === "edit") {
             // In your external editor when one is set (pi's externalEditor, or $VISUAL / $EDITOR),
             // else in pi's own.
-            const command = externalEditorCommand(ctx.cwd);
+            const command = picked?.remote ? undefined : externalEditorCommand(ctx.cwd);
             const revised = command
               ? await editInTerminal(ctx.ui as never, command, plan, "plan.md")
               : await ctx.ui.editor("Edit the plan", plan);
@@ -695,7 +697,7 @@ export function registerInlinePlanMode(pi: ExtensionAPI, host: InlineHost): Inli
             const restoreScrollKeys = reviewViewport.suspendScrollKeys();
             let name: string | undefined;
             try {
-              name = await promptPlanName(ctx, { suggestion, directory: plansDir() }, signal);
+              name = await promptPlanName(ctx, { suggestion, directory: plansDir() }, signal, remoteUi(pi));
             } finally {
               restoreScrollKeys();
             }
