@@ -1,6 +1,6 @@
 {
   "name": "@justmytwospence/pi-cc-render",
-  "version": "0.1.10",
+  "version": "0.1.11",
   "description": "Claude Code-style transcript rendering for Pi: tool cards, grouped tool calls, rich edit/write diffs, mouse interaction, compact thinking and a startup header.",
   "type": "module",
   "license": "MIT",
