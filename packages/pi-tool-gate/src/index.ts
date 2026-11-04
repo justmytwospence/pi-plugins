@@ -222,6 +222,12 @@ export function choiceLabels(kind: "rules" | "dirs", plural: boolean, userWritab
 const STATUS_KEY = "tool-gate";
 /** Records whether the agent was last told chat mode is on, so it hears each change once. */
 const CHAT_ENTRY = "tool-gate:chat-notice";
+
+/** How a workflow block tells the agent to get a read through that one part of its command stopped. */
+export const SPLIT_HINT =
+  "If you meant only to read, a part of the command was not recognized as read-only: run simpler read-only commands " +
+  "(rg, grep, find, cat, sed -n, git log/diff/show) or use the read tool. Expansions work when their commands only read; " +
+  "put `--` before words from `$(...)` or xargs given to rg, sed or sort.";
 const BUILTIN_READ = new Set(["read", "grep", "find", "ls"]);
 
 /** Why a plan allowed a call: an allow rule (never what chat mode means by read-only). */
@@ -415,7 +421,11 @@ export function onlyReads(
   annotations?: (tool: string) => Annotations | undefined,
 ): boolean {
   if (config.allowTools.includes(tool) || BUILTIN_READ.has(tool)) return true;
-  if (SHELL_TOOLS.has(tool)) return isReadOnlyBash(String(input.command ?? ""), config.readOnlyCommands);
+  if (SHELL_TOOLS.has(tool)) {
+    // Expansions whose commands only read count here; the approval checks after this still treat them as unparsed.
+    const command = String(input.command ?? "");
+    return isReadOnlyBash(command, config.readOnlyCommands) || isReadOnlyBash(command, config.readOnlyCommands, { expansions: true });
+  }
   return annotations?.(tool)?.readOnlyHint === true;
 }
 
@@ -1447,8 +1457,9 @@ export default function toolGate(pi: ExtensionAPI) {
           return {
             block: true,
             reason:
-              `Chat mode is on: only read-only tools run, and this ${tool} call is not one. Do not retry it or work around it. ` +
-              `Answer from what you can read, or tell the user what you would do; they can switch modes (${shortcut || "/mode"}) to let you act.`,
+              `Chat mode is on: only read-only tools run, and this ${tool} call is not one. ` +
+              (SHELL_TOOLS.has(tool) ? `${SPLIT_HINT} ` : "") +
+              `If it does more than read, do not retry it or work around it: answer from what you can read, or tell the user what you would do; they can switch modes (${shortcut || "/mode"}) to let you act.`,
           };
         }
         if (current === "plan" && SHELL_TOOLS.has(tool) && !reads) {
@@ -1456,7 +1467,7 @@ export default function toolGate(pi: ExtensionAPI) {
             block: true,
             reason:
               `Plan mode is on: only read-only commands run until the user approves a plan, and this ${tool} call is not one. ` +
-              "Do not retry it or work around it: research with read-only commands and put this step in the plan.",
+              `${SPLIT_HINT} If it does more than read, do not retry it or work around it: put this step in the plan.`,
           };
         }
       }

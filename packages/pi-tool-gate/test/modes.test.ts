@@ -643,6 +643,21 @@ describe("workflow guards precede approvals", () => {
     expect(ctx.ui.selects).toHaveLength(0);
     expect(jev.calls).toHaveLength(0);
   });
+  test.each(["auto", "yolo"])("chat+%s lets reads with expansions past the workflow, leaving them to the approval setting", async approval => {
+    const { h, jev, ctx } = await start(setup());
+    await h.commands.get("approvals").handler(approval, ctx);
+    await h.commands.get("mode").handler("chat", ctx);
+    await h.emit("before_agent_start", { prompt: "x" }, ctx);
+    const reads = ["for f in a.ts b.ts; do rg -n x \"$f\"; done", "wc -l $(rg -l x src)", "rg -l x | xargs grep -n y"];
+    for (const [i, command] of reads.entries()) {
+      const result = await h.emit("tool_call", call("bash", { command }, `r${i}`), ctx);
+      expect((result as { reason?: string } | undefined)?.reason ?? "").not.toMatch(/Chat mode is on/u);
+    }
+    // The workflow passes them; auto still judges what it cannot parse, yolo runs it.
+    expect(jev.calls.length > 0).toBe(approval === "auto");
+    const blocked = await h.emit("tool_call", call("bash", { command: "rg -l x | xargs rm" }, "w1"), ctx);
+    expect(blocked).toMatchObject({ block: true, reason: expect.stringMatching(/^Chat mode is on: .*run simpler read-only commands.*do not retry it/su) });
+  });
   test("manual asks for mutations without Jev; accept-edits allows only project edits", async () => {
     const { h, jev, ctx } = await start(setup());
     await h.commands.get("approvals").handler("manual", ctx);

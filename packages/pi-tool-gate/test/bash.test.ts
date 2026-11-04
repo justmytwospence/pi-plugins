@@ -126,6 +126,102 @@ describe("isReadOnlyBash", () => {
   });
 });
 
+describe("isReadOnlyBash with expansions (chat and plan workflows)", () => {
+  const reads = (command: string, extra: string[] = []) => isReadOnlyBash(command, extra, { expansions: true });
+  test.each([
+    // Substitutions whose commands only read, where any value is still a read.
+    "cat $(which pi)",
+    "wc -l $(find src -name '*.tsx' -o -name '*.css' | grep -v node_modules) | sort -n | tail -40",
+    "ls `dirname x`",
+    "diff <(ls a) <(ls b)",
+    "echo \"$(git rev-parse HEAD)\"",
+    // rg, sed and sort take unknown words after a literal `--`.
+    "rg -m3 x -- $(rg -l y | head -1)",
+    "sed -n 1,5p -- $(rg -l y)",
+    "sort -- $(ls)",
+    // Variables set to literals earlier in the command are substituted and checked.
+    "D=/opt/x; sed -n 1,30p $D/a.d.ts; rg -n x \"${D}\" | head -5",
+    "cat $HOME/.zshrc",
+    // Loops over literal words are checked once per word; compound bodies are followed.
+    "for f in a b; do cat \"$f\"; done",
+    "for f in a.json .pi/x.json; do echo \"== $f\"; cat \"$f\" 2>/dev/null | head -40; done",
+    "for s in 1p 2p; do sed -n \"$s\" file; done",
+    "for f in src/*.ts; do rg -c x \"$f\"; done | sort",
+    "if test -f a; then cat a; else echo no; fi",
+    "[ -f a ] && cat a",
+    "{ ls; pwd; }",
+    "rg -l x | while read -r f; do wc -l \"$f\"; done",
+    // xargs appends unknown words to the command it runs.
+    "rg -l x | xargs grep -n y",
+    "rg -l x | xargs -0 -n 1 wc -l",
+    "rg -l x | xargs rg -l y --",
+    "rg x -- $(cat list) --pre=sh",
+    "ls | xargs -I{} cat {}",
+    "ls | xargs",
+    // Plain commands stay read-only.
+    "git status && rg -n x src",
+  ])("%s reads", (command) => expect(reads(command)).toBe(true));
+
+  test.each([
+    // Commands inside expansions are checked too.
+    "ls $(rm -rf x)",
+    "echo `touch x`",
+    "cat <(git push)",
+    "for f in $(rm x); do echo $f; done",
+    // An unknown word could be an option that writes or runs something.
+    "find . $(echo -delete)",
+    "rg x $(cat list)",
+    "sort $(ls)",
+    "sed -n -- $(cat script) file",
+    "rg -l x | xargs rg -l y",
+    "uniq a $(echo b)",
+    "git $(echo push)",
+    // An unknown program, wrapper or environment.
+    "$(which rm) x",
+    "$X -rf y",
+    "X=rm; $X -rf y",
+    "env $(cat vars) ls",
+    "time $(echo rm) x",
+    "PATH=$(pwd); ls",
+    "for c in ls rm; do $c x; done",
+    "for c in $(ls); do $c; done",
+    "echo a | xargs -n1 env",
+    "ls | xargs -I{} {} x",
+    // Literal values are checked as written.
+    "D=--pre=sh; rg x $D",
+    "D=-delete; find . $D",
+    "for f in -i; do sed $f s/a/b/ x; done",
+    // Writes, xargs commands that write, and what this does not follow.
+    "rg -l x | xargs rm",
+    "rg -l x | xargs -I{} sh -c 'cat {}'",
+    "rg -l x | xargs --mystery cat",
+    "echo $(cat x) > out",
+    "cat x > $(echo out)",
+    "tee >(cat) < a",
+    "cat <<EOF\n$(rm x)\nEOF",
+    "(cd x && ls)",
+    "echo $'\\x41'",
+    "ls $(",
+    "case x in a) ls;; esac",
+    "cd ~/x && git fetch -q origin",
+  ])("%s does not read only", (command) => expect(reads(command)).toBe(false));
+
+  test("strict checks are unchanged", () => {
+    for (const command of ["cat $(which pi)", "for f in a; do cat $f; done", "rg -l x | xargs grep y", "D=/x; ls $D"]) expect(isReadOnlyBash(command)).toBe(false);
+  });
+
+  test("extra programs read only with literal arguments", () => {
+    expect(reads("for a in x y; do bd show \"$a\"; done", ["bd"])).toBe(true);
+    expect(reads("bd show $(ls)", ["bd"])).toBe(false);
+  });
+
+  test("many loop combinations count the loop variables as unknown", () => {
+    const words = Array.from({ length: 9 }, (_, i) => `w${i}`).join(" ");
+    expect(reads(`for a in ${words}; do for b in ${words}; do cat "$a/$b"; done; done`)).toBe(true);
+    expect(reads(`for a in ${words}; do for b in ${words}; do rg x "$a/$b"; done; done`)).toBe(false);
+  });
+});
+
 describe("conservative argument checks", () => {
   test.each([
     "git branch",

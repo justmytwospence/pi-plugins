@@ -370,13 +370,246 @@ function plainShell(command: string): boolean {
   return quote === undefined;
 }
 
-/** True when every simple command in `command` only reads. */
-export function isReadOnlyBash(command: string, extra: readonly string[] = []): boolean {
+/**
+ * True when every simple command in `command` only reads. Plain literal commands only, unless
+ * `expansions` (the chat and plan workflows' question, see `readsWithExpansions`).
+ */
+export function isReadOnlyBash(command: string, extra: readonly string[] = [], options: { expansions?: boolean } = {}): boolean {
+  if (options.expansions) return readsWithExpansions(command, extra, 0);
   if (!plainShell(command)) return false;
   if (writeRedirects(command).length) return false;
   const parts = splitParts(command);
   if (parts.length === 0) return false;
   return parts.every((part) => !part.opaque && isReadOnlyPart(part.tokens, extra));
+}
+
+/**
+ * A word whose value this cannot know: the output of `$(...)`, input `xargs` appends, a variable
+ * the command does not set to a literal. A control character, so no typed word is mistaken for it.
+ */
+const UNKNOWN = "\u0001?\u0001";
+
+/**
+ * Read-only programs that no argument can make write, delete or run anything, so an unknown
+ * word anywhere in their arguments is still a read (`wc -l $(rg -l x)`, `xargs grep -n y`).
+ */
+const READS_WITH_ANY_ARGS = new Set([
+  "ls", "cat", "head", "tail", "wc", "grep", "egrep", "fgrep", "echo", "printf", "pwd", "basename", "dirname",
+  "realpath", "readlink", "stat", "du", "df", "diff", "cmp", "cut", "tr", "column", "nl", "comm", "tac", "rev", "od",
+  "strings", "jq", "sha256sum", "sha1sum", "shasum", "md5", "md5sum", "cksum", "which", "type", "test", "true",
+  "false", "sleep",
+]);
+
+/** Read-only programs whose dangerous options (`rg --pre`, `sort -o`, a sed script) cannot come after a literal `--`. */
+const READS_WITH_ARGS_AFTER_DASHDASH = new Set(["rg", "sort", "sed"]);
+
+/** Literal values a variable or loop word may take and be substituted as is. */
+const LITERAL_VALUE = /^[\w./~:@%+,=-]*$/u;
+const LOOP_VALUE = /^[\w./~:@%+,=*?[\]-]+$/u;
+/** Combinations of loop values checked one by one before loop variables count as unknown. */
+const MAX_VARIANTS = 64;
+/** Keywords that lead a command in a compound statement (`do cat x`, `if test -f x`). */
+const COMPOUND_LEADS = new Set(["if", "elif", "while", "until", "then", "do", "else", "{", "!"]);
+/** Parts that only close a compound statement. */
+const COMPOUND_ENDS = new Set(["done", "fi", "}"]);
+/** `tokens` past the keywords that lead them (`do for f in ...`, `then cat x`). */
+function withoutLeads(tokens: readonly string[]): string[] {
+  let i = 0;
+  while (i < tokens.length && COMPOUND_LEADS.has(tokens[i] as string)) i++;
+  return tokens.slice(i);
+}
+
+/**
+ * Whether `command` only reads, following the shell the chat and plan workflows see agents write:
+ * `$(...)`, backticks and `<(...)` whose commands only read; variables set to literals earlier in
+ * the command (`D=/x; ls $D`); `for` loops over literal words, checked once per word; `if`, `while`
+ * and `{ }` bodies; and `xargs` running a read-only command. A word whose value is unknown is
+ * allowed only where no value can make the command write (`READS_WITH_ANY_ARGS`, or after `--`).
+ * Paths hidden in expansions are not seen here: the approval checks that follow treat the call
+ * as unparsed, so this is for the workflows' "does it only read" question, not auto-approval.
+ */
+function readsWithExpansions(command: string, extra: readonly string[], depth: number): boolean {
+  if (depth >= 8 || command.includes("\u0001")) return false;
+  // Here-documents and output process substitutions are not followed.
+  const masked = maskQuoted(command);
+  if (masked.includes("<<") || masked.includes(">(")) return false;
+  const { text, bodies, opaque } = extractSubstitutions(command);
+  if (opaque) return false;
+  if (!bodies.every(({ body }) => readsWithExpansions(body, extra, depth + 1))) return false;
+  let replaced = "";
+  let from = 0;
+  for (const { at } of bodies) {
+    if (at < from || !text.startsWith(SUBSTITUTED, at)) continue;
+    replaced += text.slice(from, at) + UNKNOWN;
+    from = at + SUBSTITUTED.length;
+  }
+  replaced += text.slice(from);
+  const parts = splitParts(replaced);
+  if (!parts.length) return false;
+  const loops = loopValues(parts);
+  if (!loops) return false;
+  const variants = loopVariants(loops);
+  return variants.every((bound) => {
+    const expanded = expandVariables(replaced, parts, bound);
+    return expanded !== undefined && readsExpanded(expanded, extra);
+  });
+}
+
+/** The words each `for` loop runs its variable over, or UNKNOWN; undefined for loops this does not follow. */
+function loopValues(parts: readonly Part[]): Map<string, string[] | typeof UNKNOWN> | undefined {
+  const loops = new Map<string, string[] | typeof UNKNOWN>();
+  for (const part of parts) {
+    const [head, name, keyword, ...words] = withoutLeads(part.tokens);
+    if (head !== "for") continue;
+    if (!name || !/^[A-Za-z_]\w*$/u.test(name) || keyword !== "in") return undefined;
+    // The raw words: a `$` in them is a variable this pass does not resolve.
+    const literal = words.length > 0 && words.every((w) => LOOP_VALUE.test(w)) && !/[$"'\\]/u.test(part.source);
+    loops.set(name, loops.has(name) || !literal ? UNKNOWN : words);
+  }
+  return loops;
+}
+
+/** Each combination of loop values to check, or one with every loop variable unknown when there are too many. */
+function loopVariants(loops: Map<string, string[] | typeof UNKNOWN>): Map<string, string>[] {
+  let variants: Map<string, string>[] = [new Map()];
+  for (const [name, values] of loops) {
+    const next: Map<string, string>[] = [];
+    for (const variant of variants) for (const value of values === UNKNOWN ? [UNKNOWN] : values) next.push(new Map(variant).set(name, value));
+    variants = next;
+    if (variants.length > MAX_VARIANTS) return [new Map([...loops.keys()].map((n) => [n, UNKNOWN]))];
+  }
+  return variants;
+}
+
+/**
+ * `text` with each variable expansion replaced by its literal value or UNKNOWN. Variables are
+ * set by earlier standalone assignments (`D=/x;`) and by `for` headers (from `bound`); undefined
+ * for `$'...'` and `$"..."`.
+ */
+function expandVariables(text: string, parts: readonly Part[], bound: Map<string, string>): string | undefined {
+  const vars = new Map<string, string>();
+  const value = (name: string) => vars.get(name) ?? UNKNOWN;
+  let out = "";
+  let from = 0;
+  for (const part of parts) {
+    out += text.slice(from, part.start);
+    let quote: "'" | '"' | undefined;
+    for (let i = part.start; i < part.end; i++) {
+      const c = text[i] as string;
+      if (quote === "'") { out += c; if (c === "'") quote = undefined; continue; }
+      if (c === "\\") { out += text.slice(i, i + 2); i++; continue; }
+      if (c === '"' || (c === "'" && !quote)) { quote = quote ? undefined : c; out += c; continue; }
+      if (c !== "$") { out += c; continue; }
+      const rest = text.slice(i + 1, part.end);
+      const name = /^[A-Za-z_]\w*/u.exec(rest)?.[0];
+      if (name) { out += value(name); i += name.length; continue; }
+      if (rest.startsWith("{")) {
+        const close = rest.indexOf("}");
+        if (close < 0) return undefined;
+        const inner = rest.slice(1, close);
+        out += /^[A-Za-z_]\w*$/u.test(inner) ? value(inner) : UNKNOWN;
+        i += close + 1;
+        continue;
+      }
+      if (/^[0-9@*#?$!-]/u.test(rest)) { out += UNKNOWN; i++; continue; }
+      if (/^["']/u.test(rest) && quote !== '"') return undefined;
+      out += c;
+    }
+    from = part.end;
+    const tokens = withoutLeads(part.tokens);
+    if (tokens[0] === "for" && tokens[1]) vars.set(tokens[1], bound.get(tokens[1]) ?? UNKNOWN);
+    else if (tokens.length && tokens.every((t) => /^[A-Za-z_]\w*=/u.test(t))) {
+      // Standalone assignments set shell variables; `FOO=1 cmd` only sets cmd's environment.
+      for (const t of tokens) {
+        const eq = t.indexOf("=");
+        const v = t.slice(eq + 1);
+        vars.set(t.slice(0, eq), LITERAL_VALUE.test(v) && !part.source.includes("$") && !part.source.includes(UNKNOWN) ? v : UNKNOWN);
+      }
+    }
+  }
+  return out + text.slice(from);
+}
+
+/** `isReadOnlyBash` for a command whose expansions are literal or UNKNOWN. */
+function readsExpanded(command: string, extra: readonly string[]): boolean {
+  if (writeRedirects(command).length) return false;
+  // Subshells and functions are not followed; quotes must close.
+  let quote: "'" | '"' | undefined;
+  for (let i = 0; i < command.length; i++) {
+    const c = command[i];
+    if (quote === "'") { if (c === "'") quote = undefined; continue; }
+    if (c === "\\") { i++; continue; }
+    if (c === quote) { quote = undefined; continue; }
+    if (!quote && (c === "'" || c === '"')) { quote = c; continue; }
+    if (!quote && (c === "(" || c === ")" || c === "`")) return false;
+  }
+  if (quote) return false;
+  const parts = splitParts(command);
+  if (!parts.length) return false;
+  return parts.every((part) => {
+    if (part.opaque) return false;
+    const tokens = withoutLeads(part.tokens);
+    if (tokens[0] === "for") return true;
+    if (!tokens.length || (tokens.length === 1 && COMPOUND_ENDS.has(tokens[0] as string))) return true;
+    return partReadsWithUnknowns(tokens, extra, 0);
+  });
+}
+
+/** `isReadOnlyPart`, where tokens may hold UNKNOWN words, and `xargs` runs a command of its own. */
+function partReadsWithUnknowns(tokens: string[], extra: readonly string[], depth: number): boolean {
+  const p = program(tokens);
+  if (p && p.name === "xargs" && !p.unsafe && depth < 4) {
+    const inner = xargsCommand(p.args);
+    if (!inner) return false;
+    return partReadsWithUnknowns(inner.length ? inner : ["echo", UNKNOWN], extra, depth + 1);
+  }
+  // `read` only sets shell variables, which count as unknown wherever they are used; `[` and `[[` only test.
+  if (p && ["read", "[", "[["].includes(p.name) && !p.unsafe && !tokens.slice(0, tokens.length - p.args.length).some((t) => t.includes(UNKNOWN))) return true;
+  if (!tokens.some((t) => t.includes(UNKNOWN))) return isReadOnlyPart(tokens, extra);
+  if (!p || p.unsafe) return false;
+  // The program itself, its assignments and wrappers must be literal.
+  const at = tokens.length - p.args.length;
+  if (tokens.slice(0, at).some((t) => t.includes(UNKNOWN))) return false;
+  if (READS_WITH_ANY_ARGS.has(p.name)) return isReadOnlyPart(tokens, extra);
+  if (READS_WITH_ARGS_AFTER_DASHDASH.has(p.name)) {
+    const dashdash = p.args.indexOf("--");
+    if (dashdash < 0 || p.args.slice(0, dashdash).some((a) => a.includes(UNKNOWN))) return false;
+    // sed's script must be literal, before `--`.
+    if (p.name === "sed" && !sedScripts(p.args.slice(0, dashdash)).scripts.length) return false;
+    return isReadOnlyPart(tokens.slice(0, at + dashdash), extra);
+  }
+  return false;
+}
+
+/**
+ * The command `xargs` runs with its input as UNKNOWN words (appended, or in place of `-I`'s
+ * replacement string), or [] for its default `echo`; undefined for options this does not know.
+ */
+function xargsCommand(args: readonly string[]): string[] | undefined {
+  const flags = new Set(["-0", "--null", "-r", "--no-run-if-empty", "-t", "--verbose", "-x", "--exit"]);
+  const values = new Set(["-n", "--max-args", "-L", "--max-lines", "-P", "--max-procs", "-s", "--max-chars", "-d", "--delimiter", "-E"]);
+  let replace: string | undefined;
+  let i = 0;
+  for (; i < args.length; i++) {
+    const a = args[i] as string;
+    if (a.includes(UNKNOWN)) return undefined;
+    if (a === "--") { i++; break; }
+    if (!a.startsWith("-")) break;
+    const eq = a.indexOf("=");
+    const option = a.startsWith("--") && eq > 0 ? a.slice(0, eq) : a;
+    if (flags.has(a)) continue;
+    if (values.has(option)) { if (option === a) i++; continue; }
+    if (/^-[nLPsd].+$/u.test(a)) continue;
+    if (a === "-I") { replace = args[++i]; if (!replace || replace.includes(UNKNOWN)) return undefined; continue; }
+    if (/^-I.+$/u.test(a)) { replace = a.slice(2); continue; }
+    return undefined;
+  }
+  const command = args.slice(i);
+  if (!command.length) return [];
+  if (replace === undefined) return [...command, UNKNOWN];
+  const r = replace;
+  // A replacement in the program's place leaves it unknown, which is never a read.
+  return command.map((t) => (t.includes(r) ? UNKNOWN : t));
 }
 
 /** The sed scripts in `args`: the `-e`/`--expression` values, else the first operand. */
