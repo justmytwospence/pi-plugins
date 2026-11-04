@@ -97,7 +97,7 @@ test("roleModel gives the role's profile on the parent's provider", () => {
 });
 
 test.each([
-  ["openai/gpt-6-astra", ["gpt-6-luna", "gpt-6.1-terra", "gpt-6.1-sol", "gpt-6-astra"], "gpt-6.1-terra", "gpt-6.1-sol", "gpt-6.1-sol"],
+  ["openai/gpt-6-astra", ["gpt-6-luna", "gpt-6.1-terra", "gpt-6.1-sol", "gpt-6-astra"], "gpt-6.1-terra", "gpt-6.1-terra", "gpt-6.1-sol"],
   ["google/gemini-4-argon", ["gemini-3.8-flash", "gemini-4-argon"], "gemini-3.8-flash", "gemini-3.8-flash", "gemini-4-argon"],
   ["google/antigravity-gemini-4-argon", ["antigravity-gemini-3.8-flash", "antigravity-gemini-4-argon"], "antigravity-gemini-3.8-flash", "antigravity-gemini-3.8-flash", "antigravity-gemini-4-argon"],
   ["google/antigravity-claude-opus-5-5", ["antigravity-claude-sonnet-5-5", "antigravity-claude-opus-5-5"], "antigravity-claude-sonnet-5-5", "antigravity-claude-sonnet-5-5", "antigravity-claude-opus-5-5"],

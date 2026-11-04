@@ -41,7 +41,7 @@ test("ships seven roles with per-provider fallback profiles and provider-indepen
   expect(profiles).toEqual({
     general: undefined,
     explorer: { ...baseline("claude-sonnet-5-5", "gpt-6-luna", "gemini-3.8-flash", "muse-spark-1.3", "low"), openai: "openai/gpt-6-luna:high", "openai-codex": "openai-codex/gpt-6-luna:high" },
-    worker: baseline("claude-sonnet-5-5", "gpt-6.1-sol", "gemini-3.8-flash", "muse-spark-1.3", "medium"),
+    worker: baseline("claude-sonnet-5-5", "gpt-6.1-terra", "gemini-3.8-flash", "muse-spark-1.3", "medium"),
     reviewer: baseline("claude-opus-5-5", "gpt-6.1-sol", "gemini-4-argon", "muse-wonder-1.0", "high"),
     researcher: baseline("claude-sonnet-5-5", "gpt-6.1-terra", "gemini-3.8-flash", "muse-spark-1.3", "medium"),
     writer: baseline("claude-sonnet-5-5", "gpt-6.1-terra", "gemini-3.8-flash", "muse-spark-1.3", "medium"),
@@ -55,7 +55,7 @@ test("ships seven roles with per-provider fallback profiles and provider-indepen
     expect(resolve({ agent: agent.name }, agents, undefined, tiers, parent)).toMatchObject({ model: parent.model, thinking: agent.thinking ?? "medium", source: { model: "default", thinking: agent.thinking ? "profile" : "default" }, note: "parent fallback: no usable role or tier mapping for provider" });
     if (agent.name !== "general") expect(agent.prompt).toMatch(/^You are an? /u);
   }
-  for (const name of ["general", "worker", "researcher", "writer"]) expect(agents.find((a) => a.name === name)?.tools).toBeUndefined();
+  expect(agents.find((a) => a.name === "researcher")?.tools).toBeUndefined();
   for (const name of ["explorer", "reviewer", "planner"]) {
     const agent = agents.find((a) => a.name === name)!;
     expect(agent.tools).toEqual(["read", "grep", "find", "ls", "bash"]);
@@ -82,4 +82,11 @@ test("user roles override built-ins and nearest project roles override user role
   expect(agents.find((agent) => agent.name === "explorer")?.model).toBeUndefined();
   // An override replaces the built-in whole, profile included.
   expect(agents.find((agent) => agent.name === "explorer")?.models).toBeUndefined();
+});
+
+test("edit roles get a fixed lean tool list; researcher keeps the defaults", () => {
+  const edit = ["read", "bash", "edit", "write", "grep", "find", "ls", "codemode", "bg_run", "bg_wait", "bg_logs", "bg_kill"];
+  const by = (name: string) => BUILTIN_AGENTS.find((agent) => agent.name === name);
+  for (const name of ["worker", "general", "writer"]) expect(by(name)?.tools).toEqual(edit);
+  expect(by("researcher")?.tools).toBeUndefined();
 });

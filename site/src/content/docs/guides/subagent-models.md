@@ -66,7 +66,7 @@ These are **suite policy families**, not equivalent capability ratings between v
 | Role | Anthropic | OpenAI / Codex | Google Gemini | Muse Code | Unknown/local effort |
 |---|---|---|---|---|---|
 | explorer | Sonnet 5.5 / low | Luna 6 / high | Flash 3.8 / low | Spark 1.3 / low | low |
-| worker | Sonnet 5.5 / medium | Sol 6.1 / medium | Flash 3.8 / medium | Spark 1.3 / medium | medium |
+| worker | Sonnet 5.5 / medium | Terra 6.1 / medium | Flash 3.8 / medium | Spark 1.3 / medium | medium |
 | researcher | Sonnet 5.5 / medium | Terra 6.1 / medium | Flash 3.8 / medium | Spark 1.3 / medium | medium |
 | writer | Sonnet 5.5 / medium | Terra 6.1 / medium | Flash 3.8 / medium | Spark 1.3 / medium | medium |
 | reviewer | Opus 5.5 / high | Sol 6.1 / high | Argon 4 / high | Wonder 1.0 / high | high |

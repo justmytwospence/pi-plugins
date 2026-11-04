@@ -72,7 +72,7 @@ test("only built-in profiles rebase the physical provider and route prefix, pres
   expect(routeBuiltinProfile(anthropic, "google/antigravity-claude-opus-5-5", providerPolicy("google/antigravity-claude-opus-5-5")!))
     .toEqual({ model: "google/antigravity-claude-sonnet-5-5", thinking: "medium" });
   expect(routeBuiltinProfile(worker.models!.openai!, "openai-codex/gpt-6-astra", providerPolicy("openai-codex/gpt-6-astra")!))
-    .toEqual({ model: "openai-codex/gpt-6.1-sol", thinking: "medium" });
+    .toEqual({ model: "openai-codex/gpt-6.1-terra", thinking: "medium" });
   expect(google).toEqual({ model: "google/gemini-3.8-flash", thinking: "medium" });
   expect(anthropic).toEqual({ model: "anthropic/claude-sonnet-5-5", thinking: "medium" });
 });

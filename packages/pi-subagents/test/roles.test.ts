@@ -95,7 +95,7 @@ test("five concurrent Astra-parent workers independently route mechanical throug
     expect(call.state.role).toBe("worker");
   }
   expect(result.details.runs.map((r: any) => [r.model, r.thinking])).toEqual([
-    ["openai/gpt-6-luna", "low"], ["openai/gpt-6.1-terra", "medium"], ["openai/gpt-6.1-sol", "high"], ["openai/gpt-6-astra", "xhigh"], ["openai/gpt-6.1-sol", "medium"],
+    ["openai/gpt-6-luna", "low"], ["openai/gpt-6.1-terra", "medium"], ["openai/gpt-6.1-sol", "high"], ["openai/gpt-6-astra", "xhigh"], ["openai/gpt-6.1-terra", "medium"],
   ]);
   for (const run of result.details.runs.slice(0, 4)) expect(run).toMatchObject({ source: { model: "tier", thinking: "jev" }, byJev: { model: true, thinking: true } });
   expect(result.details.runs[3]).not.toHaveProperty("note");

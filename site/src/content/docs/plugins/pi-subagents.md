@@ -77,13 +77,15 @@ Built-in roles work without agent files. They define scope and tools; their per-
 
 | Role | For | Anthropic fallback | OpenAI / legacy Codex fallback | Tools |
 |---|---|---|---|---|
-| `general` | anything no other role fits | balanced / medium | balanced / medium | default |
+| `general` | anything no other role fits | balanced / medium | balanced / medium | read, edit, bash, codemode, bg |
 | `explorer` | recon, search, tracing code | Sonnet 5.5 / low | Luna 6 / high | read-only |
-| `worker` | implementing a clear spec, running checks | Sonnet 5.5 / medium | Sol 6.1 / medium | default |
+| `worker` | implementing a clear spec, running checks | Sonnet 5.5 / medium | Terra 6.1 / medium | read, edit, bash, codemode, bg |
 | `reviewer` | independent review of changes | Opus 5.5 / high | Sol 6.1 / high | read-only |
 | `researcher` | web and documentation questions | Sonnet 5.5 / medium | Terra 6.1 / medium | default |
-| `writer` | docs, summaries, write-ups | Sonnet 5.5 / medium | Terra 6.1 / medium | default |
+| `writer` | docs, summaries, write-ups | Sonnet 5.5 / medium | Terra 6.1 / medium | read, edit, bash, codemode, bg |
 | `planner` | design and hard analysis without edits | Opus 5.5 / high | Sol 6.1 / high | read-only |
+
+`worker`, `general` and `writer` get a fixed tool list (`read`, `bash`, `edit`, `write`, `grep`, `find`, `ls`, `codemode`, `bg_*`); MCP tools stay reachable through codemode.
 
 Read-only roles get `read`, `grep`, `find`, `ls`, and `bash`; their no-edit policies are instructions, not filesystem sandboxes. A stale built-in model can use the newest registered model in its routed family. Astra and Fable are eligible automatic `premium` choices when registered and the delegated task justifies them; there is no role or parent-model cap. This is routing policy, not a measured claim that a higher tier improves every answer.
 

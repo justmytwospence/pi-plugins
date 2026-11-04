@@ -31,6 +31,7 @@ export interface AgentDef {
 }
 
 const READ_ONLY_TOOLS = ["read", "grep", "find", "ls", "bash"];
+const EDIT_TOOLS = ["read", "bash", "edit", "write", "grep", "find", "ls", "codemode", "bg_run", "bg_wait", "bg_logs", "bg_kill"];
 const NO_CHANGES = "Do not implement fixes or modify files. Use bash only for inspection, never for commands that change files or repository state. Your no-change policy is an instruction, not a filesystem sandbox.";
 type RoleProfile = Record<"anthropic" | "openai" | "google" | "muse-code", readonly [id: string, thinking: string]>;
 /** Built-in model/effort baselines, used only when task classification cannot choose. */
@@ -42,6 +43,7 @@ const profile = (values: RoleProfile): Record<string, ProfileModel> => ({
 export const GENERAL: AgentDef = {
   name: "general",
   description: "Anything no other role fits: open-ended or mixed work, quick questions and explanations, small tasks that combine reading, editing and running commands",
+  tools: [...EDIT_TOOLS],
   prompt: "",
   source: "builtin",
 };
@@ -59,7 +61,8 @@ export const EXPLORER: AgentDef = {
 export const WORKER: AgentDef = {
   name: "worker",
   description: "Implement a clearly specified change: edit code, apply a decided change across files, write tests to a given spec, run checks and fix what fails",
-  models: profile({ anthropic: ["claude-sonnet-5-5", "medium"], openai: ["gpt-6.1-sol", "medium"], google: ["gemini-3.8-flash", "medium"], "muse-code": ["muse-spark-1.3", "medium"] }),
+  tools: [...EDIT_TOOLS],
+  models: profile({ anthropic: ["claude-sonnet-5-5", "medium"], openai: ["gpt-6.1-terra", "medium"], google: ["gemini-3.8-flash", "medium"], "muse-code": ["muse-spark-1.3", "medium"] }),
   thinking: "medium",
   prompt: "You are an implementation worker. Carry out the specified change completely and within its scope: edit the files, follow the repository's conventions, and run the relevant checks and tests, fixing what fails. Do not widen the scope or redesign beyond the spec; when the spec is ambiguous or a decision is needed, stop and report the blocker instead of guessing. Report the files you changed with a brief summary, the checks you ran and their results, and anything left unresolved.",
   source: "builtin",
@@ -87,6 +90,7 @@ export const RESEARCHER: AgentDef = {
 export const WRITER: AgentDef = {
   name: "writer",
   description: "Produce or rewrite a written document: documentation, READMEs, changelogs, reports, summaries of documents or code and other write-ups (not for explaining a concept or answering a question)",
+  tools: [...EDIT_TOOLS],
   models: profile({ anthropic: ["claude-sonnet-5-5", "medium"], openai: ["gpt-6.1-terra", "medium"], google: ["gemini-3.8-flash", "medium"], "muse-code": ["muse-spark-1.3", "medium"] }),
   thinking: "medium",
   prompt: "You are a writer. Produce the requested text (documentation, a summary, a report or another write-up) for its stated audience: accurate, concise, and in the style of the surrounding documents. Check facts against the code or sources instead of inventing them, and mark anything you could not verify. Edit only the files the task names; return the text, or a summary of your changes when you edited files.",
