@@ -8,6 +8,8 @@ export interface SchedulerOptions {
   minRunMs: number;
   /** Checks during a run are at least this far apart. */
   intervalMs: number;
+  /** Also check during a run (every intervalMs); otherwise only when a long run ends. */
+  midRun: boolean;
   /** The check when a long run ends needs at least this long since the last one. */
   endIntervalMs: number;
 }
@@ -16,6 +18,7 @@ export const DEFAULT_SCHEDULE: SchedulerOptions = {
   minReplies: 5,
   minRunMs: 2 * 60_000,
   intervalMs: 3 * 60_000,
+  midRun: false,
   endIntervalMs: 60_000,
 };
 
@@ -46,7 +49,7 @@ export class HeadsUpScheduler {
     if (this.runStart === undefined) return false;
     this.replies++;
     this.repliesSinceCheck++;
-    return !blocked && !this.inFlight && this.long(now) && now - this.lastCheck >= this.options.intervalMs;
+    return this.options.midRun && !blocked && !this.inFlight && this.long(now) && now - this.lastCheck >= this.options.intervalMs;
   }
 
   /** Main's run ended: whether a long run gets a last check on what came since the previous one. */

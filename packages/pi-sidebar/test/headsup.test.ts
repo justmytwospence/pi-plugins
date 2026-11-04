@@ -10,7 +10,7 @@ import { HEADSUP_ENTRY, headsUpDefault, headsUpFromBranch, headsUpWhereDefault, 
 import { proseMeasure, NoteState, quoteForMain, waitingStatus } from "../src/headsup/note.ts";
 import { parseHeadsUp } from "../src/headsup/protocol.ts";
 import { isNoteMarker, noteMessages } from "../src/headsup/thread.ts";
-import { HeadsUpScheduler } from "../src/headsup/scheduler.ts";
+import { DEFAULT_SCHEDULE, HeadsUpScheduler } from "../src/headsup/scheduler.ts";
 import { addRecent, knownTopics, markKnown, ProfileStore, emptyProfile } from "../src/quiz/profile.ts";
 import { splicePayload } from "../src/splice.ts";
 import { derivedSessionId, TranscriptParts } from "../src/foreign.ts";
@@ -38,7 +38,7 @@ describe("heads-up reply protocol", () => {
 });
 
 describe("heads-up scheduler", () => {
-  const opts = { minReplies: 3, minRunMs: 60_000, intervalMs: 100_000, endIntervalMs: 10_000 };
+  const opts = { minReplies: 3, minRunMs: 60_000, intervalMs: 100_000, endIntervalMs: 10_000, midRun: true };
 
   it("waits for a long run, then throttles", () => {
     const s = new HeadsUpScheduler(opts);
@@ -73,6 +73,29 @@ describe("heads-up scheduler", () => {
     s.runStarted(30_000);
     s.replied(30_001, false);
     expect(s.ended(30_002, false)).toBe(false); // short run
+  });
+});
+
+describe("heads-up scheduler defaults", () => {
+  it("never checks mid-run, even after 10 replies over 10 minutes", () => {
+    const s = new HeadsUpScheduler(DEFAULT_SCHEDULE);
+    s.runStarted(0);
+    for (let i = 1; i <= 10; i++) expect(s.replied(i * 60_000, false)).toBe(false);
+  });
+
+  it("checks once when a long run ends", () => {
+    const s = new HeadsUpScheduler(DEFAULT_SCHEDULE);
+    s.runStarted(1_000_000);
+    for (let i = 1; i <= 5; i++) s.replied(1_000_000 + i, false);
+    expect(s.ended(1_000_010, false)).toBe(true);
+  });
+
+  it("does not check when a short run ends", () => {
+    const s = new HeadsUpScheduler(DEFAULT_SCHEDULE);
+    s.runStarted(1_000_000);
+    s.replied(1_000_001, false);
+    s.replied(1_000_002, false);
+    expect(s.ended(1_030_000, false)).toBe(false);
   });
 });
 
@@ -464,10 +487,13 @@ describe("HeadsUp in main", () => {
     expect(headsUpChange("off")).toEqual({ on: false });
   });
 
-  it("checks at main's turn boundaries once a run is long", async () => {
+  it("checks once, when a long run ends, and not mid-run", async () => {
     const { pi, ctx, headsUp } = await setup("<headsup-none/>");
     await pi.emit("agent_start", {}, ctx);
     for (let i = 0; i < 5; i++) await pi.emit("message_end", { message: { role: "assistant", usage: { input: 10, output: 5, cacheRead: 20_000, cacheWrite: 0 } } }, ctx);
+    await new Promise((r) => setTimeout(r, 0));
+    expect(headsUp.stats.checks).toBe(0);
+    await pi.emit("agent_end", {}, ctx);
     await new Promise((r) => setTimeout(r, 0));
     expect(headsUp.stats.checks).toBe(1);
   });

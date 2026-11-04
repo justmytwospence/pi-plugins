@@ -116,7 +116,7 @@ With `/sidebar headsup main` (or `PI_SIDEBAR_HEADSUP=main`) the note shows above
 ```
 
 - **Switch:** on by default. `/sidebar headsup off`, `on`, `sidebar` or `main` sets it per session (stored in main's session), `/sidebar headsup` shows its cost so far, and `PI_SIDEBAR_HEADSUP=0` starts sessions with it off, and `main` with notes above main's editor.
-- **When:** at main's turn boundaries, once a run has 5 replies or has gone on for 2 minutes. Checks are at most 3 minutes apart, with one more at the end of a long run. A check is skipped when main's cache has probably expired.
+- **When:** once, when a run that had 5 replies or went on for 2 minutes ends. A check is skipped when main's cache has probably expired.
 - **Answering above the editor:** type the digit on its own into main's empty editor.
   - **Learn more** shows an explanation the check already wrote. From there you can mark it understood, quote it into main's editor (**Ask main**), or ask Sidebar about it.
   - **Knew this already** marks the topic as known.
