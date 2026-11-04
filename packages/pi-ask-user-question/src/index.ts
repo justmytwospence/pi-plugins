@@ -19,6 +19,9 @@ import { ASK_SERVICE_CHANNEL, type AskServiceFn, type AskServiceRequest } from "
 
 const LABEL_WIDTH = 60;
 
+/** Pi 1.5's `blocked` option for inline `ctx.ui.custom()` (OSC 7501 program status). The 1.2.0 types here lack it, hence the cast; older Pi ignores it. */
+const blockedOn = (kind: "question" | "permission" | "auth", message: string) => ({ blocked: { kind, message } }) as never;
+
 export default function askUserQuestion(pi: ExtensionAPI) {
   let removed = false;
 
@@ -90,6 +93,7 @@ async function ask(pi: ExtensionAPI, ctx: ExtensionContext, questions: Question[
       const dialog = (sig: AbortSignal | undefined) =>
         ctx.ui.custom<DialogResult | undefined>(
           (tui, theme, keybindings, done) => new QuestionDialog(tui, theme, keybindings, questions, done, sig, embeddedEditorFactory(pi)),
+          blockedOn("question", blockedLabel(questions)),
         );
       const remote = remoteUi(pi);
       const result = remote

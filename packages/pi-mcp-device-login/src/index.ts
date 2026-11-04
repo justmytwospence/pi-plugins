@@ -15,6 +15,9 @@ import { DeviceLoginView } from "./ui.ts";
 const COMMAND = "mcp-code";
 const ALL = "\u0000all";
 
+/** Pi 1.5's `blocked` option for inline `ctx.ui.custom()` (OSC 7501 program status). The 1.2.0 types here lack it, hence the cast; older Pi ignores it. */
+const blockedOn = (kind: "question" | "permission" | "auth", message: string) => ({ blocked: { kind, message } }) as never;
+
 type Sign =
   | { state: "starting" }
   | { state: "waiting"; code: DeviceCode; expiresAt: number }
@@ -192,7 +195,7 @@ export default function mcpDeviceLogin(pi: ExtensionAPI) {
           done([]);
         });
         return view;
-      });
+      }, blockedOn("auth", "MCP device sign-in"));
 
       if (!signedIn?.length) return;
       // Pi reconnects a server waiting for sign-in when its tokens change, but not one that failed (on

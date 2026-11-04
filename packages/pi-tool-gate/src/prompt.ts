@@ -38,6 +38,9 @@ import {
 import { beginComposition, type EditorCreator, editorOwnsCancel, inline, type ProseEditor } from "./editor.ts";
 import type { CallView } from "./view.ts";
 
+/** Pi 1.5's `blocked` option for inline `ctx.ui.custom()` (OSC 7501 program status). The 1.2.0 types here lack it, hence the cast; older Pi ignores it. */
+const blockedOn = (kind: "question" | "permission" | "auth", message: string) => ({ blocked: { kind, message } }) as never;
+
 const EDITOR_SURFACE = Symbol.for("pi-plugins.editor-surface.v1");
 
 /** The extra row that refuses with a message; also `n` in the terminal dialog. */
@@ -81,6 +84,7 @@ export async function askApproval(
     try {
       const answer = await ctx.ui.custom<ApprovalAnswer | undefined>(
         (tui, theme, keybindings, done) => new ApprovalDialog(tui, theme, keybindings, approval, done, createEditor),
+        blockedOn("permission", fallbackTitle),
       );
       if (answer !== undefined) return answer;
     } catch {

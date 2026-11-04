@@ -13,6 +13,10 @@ import { formatModelKey, type ModelSpec, type ModelSpecThinkingLevel } from "./i
 import { modelCatalog, normalizeEffort } from "./model-catalog.js";
 import { type RemoteUi, raceRemote } from "./switchyard-remote.js";
 
+/** Pi 1.5's `blocked` option for inline `ctx.ui.custom()` (OSC 7501 program status). The 1.2.0 types here lack it, hence the cast; older Pi ignores it. */
+const blockedOn = (kind: "question" | "permission" | "auth", message: string) =>
+  ({ blocked: { kind, message } }) as never;
+
 export const OPTION_MAX = 42;
 export const HERE = "Yes, implement here";
 export const COMPACT_HERE = "Yes, compact plan and implement here";
@@ -347,20 +351,23 @@ export async function pickApproval(
   const catalog = modelCatalog(ctx);
   const components: ApprovalPicker[] = [];
   const terminal = (sig: AbortSignal | undefined) =>
-    ctx.ui.custom<ApprovalResult | undefined>((tui, theme, keybindings, done) => {
-      const component = new ApprovalPicker(
-        resolved,
-        state,
-        catalog,
-        theme,
-        keybindings,
-        () => tui.requestRender(),
-        done,
-        sig,
-      );
-      components.push(component);
-      return component;
-    });
+    ctx.ui.custom<ApprovalResult | undefined>(
+      (tui, theme, keybindings, done) => {
+        const component = new ApprovalPicker(
+          resolved,
+          state,
+          catalog,
+          theme,
+          keybindings,
+          () => tui.requestRender(),
+          done,
+          sig,
+        );
+        components.push(component);
+        return component;
+      },
+      blockedOn("question", "Approve the plan"),
+    );
   try {
     if (ctx.mode === "tui") {
       if (!remote) return await terminal(signal);
