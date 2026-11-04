@@ -10,6 +10,7 @@ import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext, Theme } f
 import { Key, matchesKey, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import { formatCost, formatDuration, formatTokens, METRICS, type Metric, normalize, plot, slots, sparkline, window } from "./chart.ts";
 import { collectTurns, type TurnStat } from "./turns.ts";
+import { onWebCommand, section, table as webTable, text as webText } from "./switchyard-web.ts";
 
 export const DEFAULT_SHORTCUT = "alt+g";
 const WIDGET_KEY = "pi-trends";
@@ -352,6 +353,37 @@ export default function trendsExtension(pi: ExtensionAPI): void {
       else lastCtx = ctx;
     });
   }
+
+  // Switchyard's web app shows the trends as a view instead of the TUI overlay.
+  onWebCommand(pi, ["trends"], (_n, args) => args === "", (_n, _args, ctx) => {
+    const turns = turnsFor(ctx, pi.getThinkingLevel());
+    const actions = [
+      { label: "Widget on", command: "/trends widget on" },
+      { label: "Widget off", command: "/trends widget off" },
+    ];
+    if (!turns.length) return { title: "Trends", body: webText("No model calls in this session yet."), actions };
+    const recent = [...turns].reverse().slice(0, 50);
+    return {
+      title: "Trends",
+      body: section(undefined, [
+        { t: "list", items: METRICS.map((m) => webText(`${m.label}: ${m.summary(turns)}`)) },
+        webTable(
+          ["#", "Prompt", "Context", "In", "Out", "Cost", "Tools", "Time"],
+          recent.map((t) => [
+            String(t.index),
+            String(t.prompt),
+            t.contextPercent === undefined ? "-" : `${Math.round(t.contextPercent)}%`,
+            formatTokens(t.input),
+            formatTokens(t.output),
+            formatCost(t.cost),
+            String(t.toolCalls),
+            formatDuration(t.durationMs),
+          ]),
+        ),
+      ]),
+      actions,
+    };
+  });
 
   pi.registerCommand("trends", {
     description: "Chart context %, effort, tokens, cost, tool calls and duration per model call (`/trends widget` toggles the sparkline)",

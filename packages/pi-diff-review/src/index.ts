@@ -14,7 +14,8 @@ import { type Config, loadConfig } from "./config.ts";
 import { embeddedEditorFactory } from "./editor.ts";
 import { diffTrees, repoRoot, snapshot } from "./git.ts";
 import { openInSplit, withZoom } from "./herdr.ts";
-import { parseDiff } from "./parse.ts";
+import { type FileDiff, parseDiff } from "./parse.ts";
+import { onWebCommand, section, text as webText } from "./switchyard-web.ts";
 import { defaultScope, parseScopeArgs, resolveScope, type ScopeRequest } from "./scopes.ts";
 import {
 	CHECKPOINT_ENTRY,
@@ -266,6 +267,52 @@ export default function (pi: ExtensionAPI) {
 			persist();
 		}
 	}
+
+	// Switchyard's web app shows the diff as a view instead of the full-screen overlay.
+	const filePatch = (f: FileDiff): string => {
+		const out = [`--- a/${f.oldPath}`, `+++ b/${f.newPath}`];
+		for (const h of f.hunks) {
+			out.push(`@@ -${h.oldStart},${h.oldCount} +${h.newStart},${h.newCount} @@ ${h.section}`.trimEnd());
+			for (const l of h.lines) out.push(`${l.kind === "add" ? "+" : l.kind === "del" ? "-" : " "}${l.text}`);
+		}
+		return out.join("\n");
+	};
+	onWebCommand(pi, ["diff"], () => true, async (_n, args, ctx) => {
+		config = loadConfig();
+		const r = await getRoot(ctx.cwd);
+		if (!r) throw new Error("Not a git repository");
+		const req = parseScopeArgs(args) ?? defaultScope(inputs(ctx, r));
+		const data = await load(ctx, r, req);
+		if (typeof data === "string") throw new Error(data);
+		const added = data.files.reduce((n, f) => n + f.additions, 0);
+		const removed = data.files.reduce((n, f) => n + f.deletions, 0);
+		const CAP = 300 * 1024;
+		let used = 0;
+		let more = false;
+		const children = [webText(`${data.files.length} file${data.files.length === 1 ? "" : "s"}, +${added} −${removed}`)];
+		for (const f of data.files) {
+			const name = f.oldPath !== f.newPath && f.status !== "added" && f.status !== "deleted" ? `${f.oldPath} → ${f.newPath}` : f.status === "deleted" ? f.oldPath : f.newPath;
+			const title = `${name} (+${f.additions} −${f.deletions})`;
+			if (f.binary) {
+				children.push(section(title, [webText("Binary file")], true));
+				continue;
+			}
+			const patch = filePatch(f);
+			if (used + patch.length > CAP) {
+				more = true;
+				break;
+			}
+			used += patch.length;
+			children.push(section(title, [{ t: "diff", patch }], true));
+		}
+		if (more) children.push(webText("… more files not shown"));
+		const kinds = ["unreviewed", "turn", "session", "head", "staged", "branch"] as const;
+		return {
+			title: `Diff: ${data.scope.label}`,
+			body: section(undefined, children),
+			actions: kinds.filter((k) => k !== req.kind).map((k) => ({ label: k[0]!.toUpperCase() + k.slice(1), command: `/diff ${k}` })),
+		};
+	});
 
 	pi.registerCommand("diff", {
 		description: "Review changes: unreviewed (default), turn [n], session, head, staged, branch [ref], or a ref",

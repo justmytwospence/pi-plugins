@@ -70,6 +70,7 @@ import {
   stoppable,
 } from "./activity.ts";
 import { type DialogResult, TasksDialog } from "./dialog.ts";
+import { onWebCommand, section as webSection, table as webTable, text as webText } from "./switchyard-web.ts";
 import { FULL_SCREEN } from "./frame.ts";
 import { PillView } from "./pill.ts";
 import { LogViewer } from "./viewer.ts";
@@ -1348,6 +1349,22 @@ export default function piBg(pi: ExtensionAPI) {
   };
   // Claude Code's /tasks and /bashes, Codex's /ps, and our own /bg.
   for (const name of ["tasks", "bashes", "ps", "bg"]) pi.registerCommand(name, tasksCommand);
+
+  // Switchyard's web app shows the task list as a view instead of the TUI dialog.
+  onWebCommand(pi, ["tasks", "bashes", "ps", "bg"], (_n, args) => args === "", () => {
+    const tasks = reg.list(sessionId);
+    const running = tasks.filter((t) => t.status === "running");
+    const ended = tasks.filter((t) => t.status !== "running");
+    const body = tasks.length
+      ? webSection(undefined, [
+        webText(`${running.length} running · ${ended.length} ended`),
+        webTable(["ID", "Name", "Status", "Runtime", "Command"], tasks.map((t) => [t.id, t.name ?? "", outcome(t), runtime(t), t.command.slice(0, 120)])),
+      ])
+      : webText("No background tasks.");
+    const actions = running.map((t) => ({ label: `Stop ${t.name || t.id}`, command: `/tasks kill ${t.id}`, tone: "danger" as const }));
+    if (ended.length) actions.push({ label: "Clear ended", command: "/tasks clear", tone: "danger" as const });
+    return { title: "Background tasks", body, actions };
+  });
 
   // Codex's /stop: stop every background task this pi started (kept services from earlier sessions
   // stay). Other sources' work (subagents, notebooks, herdr children) is stopped from its own

@@ -38,6 +38,7 @@ import type { ViewerActions } from "./ui/viewer.ts";
 import { elapsedMs, formatCount, formatElapsed, modelSourceMark, shortModel } from "./ui/format.ts";
 import { RunsWidget, WIDGET_MODES, type WidgetMode } from "./ui/widget.ts";
 import { transcriptCheckpoint } from "./transcript-contract.ts";
+import { onWebCommand, section, table as webTable, text as webText } from "./switchyard-web.ts";
 
 const finalReport = <T extends { details?: object }>(value: T, id: string) =>
   transcriptCheckpoint(value, { id, kind: "report" });
@@ -1706,6 +1707,37 @@ export default function subagents(pi: ExtensionAPI) {
     });
   };
   registerSubagentTool(delegationOf(config));
+
+  // Switchyard's web app shows the runs and stats as views instead of the TUI list.
+  onWebCommand(pi, ["subagents"], (_n, args) => args === "" || /^stats(\s+(all|--all))?$/u.test(args), (_n, args, ctx) => {
+    const usdText = (v: number | undefined) => (v === undefined ? "-" : `$${v.toFixed(2)}`);
+    if (args.startsWith("stats")) {
+      const all = /\b(all|--all)\b/u.test(args);
+      const records = all
+        ? readAllRuns(path.join(agentDir(), "sessions"))
+        : runRecords((ctx.sessionManager.getBranch() ?? []) as Array<{ type?: string; customType?: string; data?: unknown }>);
+      const stats = computeStats(latestPerRun(records));
+      return {
+        title: all ? "Subagent stats (all sessions)" : "Subagent stats",
+        body: section(undefined, [
+          webText(`Runs: ${stats.runs} · total ${usdText(stats.totalCost)} · failed ${stats.failed} · rate-limited ${stats.rateLimited}`),
+          webTable(["Role", "Runs", "Median cost", "Total cost"], stats.byRole.map((r) => [r.role, String(r.runs), usdText(r.medianCost), usdText(r.totalCost)])),
+          webTable(["Model", "Runs", "Median cost per turn"], stats.byModel.map((m) => [m.model, String(m.runs), usdText(m.medianCostPerTurn)])),
+          { t: "list", items: Object.entries(stats.bySource).map(([k, n]) => webText(`${k}: ${n}`)) },
+        ]),
+        actions: [{ label: "Back to runs", command: "/subagents" }],
+      };
+    }
+    const views = allRuns(ctx).map((e) => e.view);
+    const body = views.length
+      ? webTable(["Run", "Status", "Label", "Agent", "Model", "Turns", "Cost"], views.map((v) => [v.id.slice(0, 8), v.status, runLabel(v), v.agent, v.model, String(v.turns), usdText(v.cost)]))
+      : webText("No subagent runs in this session.");
+    const actions = views
+      .filter((v) => v.status === "running")
+      .map((v) => ({ label: `Stop ${v.id.slice(0, 8)}`, command: `/subagents stop ${v.id}`, tone: "danger" as const }));
+    actions.push({ label: "Stats", command: "/subagents stats" } as never, { label: "Stats (all sessions)", command: "/subagents stats all" } as never);
+    return { title: "Subagent runs", body, actions };
+  });
 
   pi.registerCommand("subagents", {
     description: "Browse this session's subagent runs and view their conversations (/subagents [id], /subagents stop [id|all], /subagents stats [all])",

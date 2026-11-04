@@ -22,6 +22,7 @@ import {
 } from "./breakdown.ts";
 
 import { queryContextMetadata } from "./context-metadata.ts";
+import { onWebCommand, section, table as webTable, text as webText } from "./switchyard-web.ts";
 import { FOOTER_ACTIONS_CHANNEL, type FooterActionsRequest } from "./footer-actions.ts";
 
 export * from "./breakdown.ts";
@@ -354,6 +355,40 @@ export default function contextExtension(pi: ExtensionAPI): void {
       }
     }
   }
+
+  // Switchyard's web app shows the breakdown as a view instead of the TUI overlay.
+  onWebCommand(pi, ["context"], () => true, (_n, _args, ctx) => {
+    const usage = ctx.getContextUsage();
+    const contextWindow = usage?.contextWindow ?? ctx.model?.contextWindow ?? 0;
+    const breakdown = collectContextBreakdown({
+      systemPrompt: ctx.getSystemPrompt(),
+      options: ctx.getSystemPromptOptions?.() ?? {},
+      tools: pi.getAllTools(),
+      entries: ctx.sessionManager.buildContextEntries(),
+    });
+    const report = assembleReport(breakdown, usage, contextWindow);
+    const pct = contextWindow ? ` (${((report.used / contextWindow) * 100).toFixed(1)}%)` : "";
+    const previews: Array<[PreviewKey, string]> = [
+      ["systemPrompt", "System prompt"],
+      ["memoryFiles", "Memory"],
+      ["skills", "Skills"],
+      ["tools", "Tools definition"],
+      ["toolResults", "Tool results"],
+      ["contextFiles", "Context"],
+    ];
+    const CAP = 20_000;
+    const children = [
+      webText(`${formatTokens(report.used)} of ${formatTokens(contextWindow)} tokens${pct}`),
+      webTable(["Part", "Tokens", "Share"], report.parts.map((p) => [p.label, formatTokens(p.tokens), contextWindow ? `${((p.tokens / contextWindow) * 100).toFixed(1)}%` : "-"])),
+      ...previews.flatMap(([key, label]) => {
+        const body = breakdown.previews[key];
+        if (!body) return [];
+        const cut = body.length > CAP ? `${body.slice(0, CAP)}\n… (truncated)` : body;
+        return [section(label, [{ t: "code", text: cut, lang: "markdown" }], true)];
+      }),
+    ];
+    return { title: "Context", body: section(undefined, children) };
+  });
 
   pi.registerCommand("context", {
     description: "Show how the context window is used, with previews of each part",
