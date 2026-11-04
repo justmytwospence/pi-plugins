@@ -1,6 +1,6 @@
 {
   "name": "@justmytwospence/pi-auto-effort",
-  "version": "0.1.9",
+  "version": "0.1.10",
   "description": "Sets Pi's thinking level per message you send: Jev rates how demanding it is, a threshold that tightens under quota pressure picks the level, capped at the level you chose.",
   "type": "module",
   "license": "MIT",
