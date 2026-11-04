@@ -7,6 +7,7 @@ import { afterEach, expect, test, vi } from "vitest";
 import { EDITOR_FACTORY_CHANNEL, EDITOR_MODE, EDITOR_SURFACE, INPUT_CONTEXT } from "../src/editor-contract.ts";
 import { FleetView } from "../src/ui/fleet.ts";
 import { SessionView } from "../src/ui/viewer.ts";
+import { Child } from "../src/child.ts";
 import subagents from "../src/index.ts";
 import { harness } from "./harness.ts";
 import { fakeRun, fakeTui, fakeUI, KEY, plain } from "./ui-helpers.ts";
@@ -221,4 +222,35 @@ test.each([true, false])("actual pi-bg and subagents negotiate hosts in both sta
   reg.tasks.delete(task.id);
   await h.emit("session_shutdown", { reason: "quit" }, ctx);
   expect(ui.inputHandlers.size).toBe(0);
+});
+
+test.each([true, false])("actual pi-bg waits at the turn's end for an async subagent call and delivers it once (bg first: %s)", async (bgFirst) => {
+  const { default: bg } = await import(sibling("pi-bg"));
+  const h = harness(); bus(h);
+  const cwd = mkdtempSync(path.join(tmpdir(), "subagents-bg-settle-"));
+  vi.stubEnv("PI_BG_DIR", cwd); vi.stubEnv("PI_CODING_AGENT_DIR", cwd);
+  const children: Child[] = [];
+  vi.spyOn(Child.prototype, "start").mockImplementation(function (this: Child) { children.push(this); return this; });
+  let tool: any;
+  h.pi.registerTool = (t: any) => { if (t.name === "subagent") tool = t; };
+  if (bgFirst) { await bg(h.pi); await subagents(h.pi); } else { await subagents(h.pi); await bg(h.pi); }
+  const ui = Object.assign(fakeUI(), { setWorkingMessage() {}, setWorkingVisible() {}, setStatus() {} });
+  const ctx = h.ctx({ cwd, ui, model: { provider: "p", id: "m" }, isIdle: () => false, hasPendingMessages: () => false });
+  await h.emit("session_start", { type: "session_start", reason: "startup" }, ctx);
+  await tool.execute("call", { agent: "general", model: "p/m", thinking: "low", task: "settle with bg", async: true }, undefined, undefined, ctx);
+  setTimeout(() => { (children[0] as any).finish("done"); }, 50);
+  let entries: any[] = [];
+  let cont = false;
+  for (const handler of h.handlers.get("agent_before_settle") ?? []) {
+    const r = (await handler({ type: "agent_before_settle", outcome: "completed", entries, continue: cont, context: { canContinue: false } }, ctx)) as any;
+    if (r?.entries !== undefined) entries = r.entries;
+    if (r?.continue !== undefined) cont = r.continue;
+  }
+  expect(cont).toBe(true);
+  expect(entries).toHaveLength(1);
+  expect(entries[0].customType).toBe("pi-bg");
+  expect(entries[0].content).toMatch(/^Subagent "settle with bg" finished after/u);
+  for (const handler of h.handlers.get("agent_settled") ?? []) await handler({ type: "agent_settled" }, ctx);
+  expect(h.messages).toEqual([]);
+  await h.emit("session_shutdown", { type: "session_shutdown", reason: "quit" }, ctx);
 });

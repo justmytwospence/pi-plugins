@@ -14,7 +14,7 @@
 import { randomUUID } from "node:crypto";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
-import { type ExtensionAPI, type ExtensionContext, getMarkdownTheme } from "@earendil-works/pi-coding-agent";
+import { type AgentBeforeSettleEvent, type BoundaryResult, type ExtensionAPI, type ExtensionContext, getMarkdownTheme } from "@earendil-works/pi-coding-agent";
 import { type Component, Markdown, Text, truncateToWidth, visibleWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import { ACTIVITY_CHANGED, ACTIVITY_GONE, ACTIVITY_HOST, ACTIVITY_SECTION, type ActivityEntry, type ActivitySection, FLEET_HOST_PRIORITY, hostOutranks, readHost } from "./activity.ts";
@@ -38,6 +38,7 @@ import type { ViewerActions } from "./ui/viewer.ts";
 import { elapsedMs, formatCount, formatElapsed, modelSourceMark, shortModel } from "./ui/format.ts";
 import { RunsWidget, WIDGET_MODES, type WidgetMode } from "./ui/widget.ts";
 import { transcriptCheckpoint } from "./transcript-contract.ts";
+import { WORKING_MESSAGE_EVENT } from "./working-message.ts";
 import { onWebCommand, section, table as webTable, text as webText } from "./switchyard-web.ts";
 
 const finalReport = <T extends { details?: object }>(value: T, id: string) =>
@@ -692,36 +693,153 @@ export default function subagents(pi: ExtensionAPI) {
    */
   const consumedResults = new Set<string>();
   const owedResults: OwedResult[] = [];
+  /** Async calls whose result is still owed (call id to label): what a turn's end waits for when pi-bg is absent. */
+  const pendingCalls = new Map<string, string>();
+  /** Calls whose result pi-bg's turn-end wait delivered (bg:external-consumed). */
+  const consumedCalls = new Set<string>();
+  let settleWaiting = false;
+  let indicatorRaised = false;
   /** Set while a session starts with adopted runs: their results wait until it has (pi-bg does the same). */
   let holdFlush = false;
-  const deliverResult = (content: string, details?: unknown, runs?: Run[], mode?: Details["mode"], note?: string) => {
-    if (!live) return;
-    owedResults.push({ content, details, runs, mode, ...(note ? { note } : {}) });
+  const callLabel = (mode: string, labels: string[]) => (labels.length === 1 ? `subagent "${clip(labels[0] as string, 40)}"` : `${labels.length || 1} subagents (${mode})`);
+  /** One async call as outside work pi-bg's turn-end wait takes (`settle`); nothing listens without pi-bg. */
+  const callExternal = (id: string, label: string, state: "running" | "done" | "failed", result?: string) =>
+    safely(() => pi.events.emit("bg:external", { id, label, state, settle: true, ...(result !== undefined ? { summary: state, result } : {}) }));
+  const deliverResult = (content: string, details?: unknown, runs?: Run[], mode?: Details["mode"], note?: string, callId?: string) => {
+    if (!live || (callId && consumedCalls.has(callId))) return;
+    owedResults.push({ content, details, runs, mode, ...(note ? { note } : {}), ...(callId ? { callId } : {}) });
     flushResults(sessionCtx);
   };
-  const flushResults = (c: Pick<ExtensionContext, "isIdle"> | undefined) => {
-    if (!live || holdFlush || !owedResults.length || c?.isIdle?.() === false) return;
+  /** Takes the unread owed results as one `subagent-result` message, marking their runs read. */
+  const takeOwed = () => {
     const items = owedResults.splice(0).flatMap((item) => {
       if (!item.runs) return [item];
       const unread = item.runs.filter((run) => !consumedResults.has(run.id));
       return unread.length ? [{ ...item, runs: unread, content: `${finishedHeadline(item.mode, unread)}\n\n${unread.map(resultText).join("\n\n---\n\n")}${item.note ? `\n\n${item.note}` : ""}`, details: { mode: item.mode, runs: unread.map((run) => view(run, true)) } }] : [];
     });
-    if (!items.length) return;
-    safely(() => {
-      pi.sendMessage(
-        finalReport({ customType: "subagent-result", content: items.map((i) => i.content).join("\n\n---\n\n"), display: true, details: (items.length === 1 ? items[0]?.details : { batches: items.map((i) => i.details) }) as object | undefined }, randomUUID()),
-        { triggerTurn: true, deliverAs: "followUp" },
-      );
-      for (const item of items) for (const run of item.runs ?? []) consumedResults.add(run.id);
-    });
+    if (!items.length) return undefined;
+    for (const item of items) for (const run of item.runs ?? []) consumedResults.add(run.id);
+    return finalReport({ customType: "subagent-result", content: items.map((i) => i.content).join("\n\n---\n\n"), display: true, details: (items.length === 1 ? items[0]?.details : { batches: items.map((i) => i.details) }) as object | undefined }, randomUUID());
   };
+  const flushResults = (c: Pick<ExtensionContext, "isIdle"> | undefined) => {
+    if (!live || holdFlush || !owedResults.length || c?.isIdle?.() === false) return;
+    const message = takeOwed();
+    if (message) safely(() => pi.sendMessage(message, { triggerTurn: true, deliverAs: "followUp" }));
+  };
+  const lowerIndicator = (c: ExtensionContext) => {
+    if (!indicatorRaised) return;
+    indicatorRaised = false;
+    try {
+      c.ui.setWorkingVisible?.(false);
+      c.ui.setWorkingVisible?.(true);
+    } catch {
+      // UI gone.
+    }
+  };
+  pi.on("turn_start", () => {
+    indicatorRaised = false;
+  });
+  /**
+   * The turn ends with results owed or async calls running. A result already due goes into this run.
+   * With nothing due and pi-bg absent, the turn stays open until a result arrives (so Herdr, tmux and
+   * Pi keep showing it working); pi-bg, when loaded, does that wait for `settle` outside work itself.
+   * Typing, a queued message or Esc ends the wait; the result then arrives as a message.
+   */
+  pi.on("agent_before_settle", async (event: AgentBeforeSettleEvent, c: ExtensionContext): Promise<BoundaryResult> => {
+    if (!live || settleWaiting || holdFlush || c.mode !== "tui" || !c.hasUI || event.outcome !== "completed" || c.hasPendingMessages()) return {};
+    const deliver = (): BoundaryResult => {
+      const ready = takeOwed();
+      return ready ? { entries: [...event.entries, { type: "custom_message" as const, ...ready }], continue: true } : {};
+    };
+    if (owedResults.length) {
+      const r = deliver();
+      if (r.continue) return r;
+    }
+    if (event.continue || hasBg() || !pendingCalls.size) return {};
+    const owner = lifetime.signal;
+    const id = `subagents-wait/${randomUUID()}`;
+    const labels = () => [...pendingCalls.values()].join(" · ");
+    let sentLabels: string | undefined;
+    let ticker: ReturnType<typeof setInterval> | undefined;
+    let off: (() => void) | undefined;
+    const set = () => {
+      const message = `Waiting on ${labels()}…`;
+      try {
+        c.ui.setWorkingMessage?.(message);
+      } catch {
+        // UI gone.
+      }
+      safely(() => pi.events.emit(WORKING_MESSAGE_EVENT, { owner: id, message }));
+      const names = labels();
+      if (names !== sentLabels) {
+        sentLabels = names;
+        safely(() => pi.events.emit("herdr:waiting", { active: true, label: names, id }));
+      }
+    };
+    let reason: "done" | "message" | "aborted";
+    settleWaiting = true;
+    try {
+      set();
+      try {
+        c.ui.setWorkingVisible?.(true);
+        indicatorRaised = true;
+      } catch {
+        // No indicator to raise: the message still reaches the footer's channel.
+      }
+      reason = await new Promise<"done" | "message" | "aborted">((resolve) => {
+        let ticks = 0;
+        ticker = setInterval(() => {
+          try {
+            if (owner.aborted) return resolve("aborted");
+            if (c.hasPendingMessages()) return resolve("message");
+            if (owedResults.length || !pendingCalls.size) return resolve("done");
+            if (++ticks % 4 === 0) set();
+          } catch {
+            resolve("aborted");
+          }
+        }, 250);
+        try {
+          off = c.ui.onTerminalInput?.((data) => {
+            if (data === "\x1b") resolve("aborted");
+            return undefined;
+          });
+        } catch {
+          // No terminal input hook: typing still interrupts.
+        }
+      });
+    } finally {
+      if (ticker) clearInterval(ticker);
+      off?.();
+      settleWaiting = false;
+      try {
+        c.ui.setWorkingMessage?.(undefined);
+      } catch {
+        // UI gone.
+      }
+      safely(() => pi.events.emit(WORKING_MESSAGE_EVENT, { owner: id }));
+      if (sentLabels !== undefined) safely(() => pi.events.emit("herdr:waiting", { active: false, id }));
+    }
+    if (reason !== "done" || owner.aborted) return {};
+    return deliver();
+  });
   pi.on("agent_settled", (_event, c) => {
     setMainRequestActive(false);
+    lowerIndicator(c);
     flushResults(c);
     scheduleAutoView();
   });
   pi.events.on("bg:external-consumed", (data) => {
     const id = (data as { id?: unknown } | undefined)?.id;
+    if (typeof id === "string" && id.startsWith("subagent-call:")) {
+      consumedCalls.add(id);
+      for (let i = owedResults.length - 1; i >= 0; i--) {
+        const item = owedResults[i] as OwedResult;
+        if (item.callId !== id) continue;
+        for (const run of item.runs ?? []) consumedResults.add(run.id);
+        owedResults.splice(i, 1);
+      }
+      return;
+    }
     if (typeof id !== "string" || !id.startsWith("subagent:")) return;
     const run = runs.get(id.slice("subagent:".length));
     if (run && run.state.status !== "running") consumedResults.add(run.id);
@@ -1141,6 +1259,10 @@ export default function subagents(pi: ExtensionAPI) {
     const active: ActiveCall = { mode: call.mode, runs: call.runs, notStarted: () => call.notStarted, park: () => undefined, release };
     activeCalls.add(active);
     safely(() => pi.events.emit("herdr:background", { active: true, label: `subagents (${call.runs.length || call.notStarted})`, id: hold }));
+    const callId = `subagent-call:${holdCount}`;
+    const callName = callLabel(call.mode, call.runs.map(runLabel));
+    pendingCalls.set(callId, callName);
+    callExternal(callId, callName, "running");
     for (const run of call.runs) {
       // A foreground call died with the old runtime: its runs go on as background ones.
       run.async = true;
@@ -1154,16 +1276,22 @@ export default function subagents(pi: ExtensionAPI) {
       if (owner.aborted) return;
       activeCalls.delete(active);
       release();
+      pendingCalls.delete(callId);
       // A chain that stopped at a step that did not succeed would not have gone on anyway.
       const stoppedChain = call.mode === "chain" && call.runs.at(-1)?.state.status !== "done";
       const n = stoppedChain ? 0 : call.notStarted;
       const note = n ? `[${n} queued task${n === 1 ? "" : "s"} never started: the session reloaded first.]` : undefined;
       if (!call.runs.length) {
-        if (note) deliverResult(`Subagent ${call.mode}: ${note.slice(1, -1)}`);
+        if (note) {
+          const text = `Subagent ${call.mode}: ${note.slice(1, -1)}`;
+          deliverResult(text, undefined, undefined, undefined, undefined, callId);
+          callExternal(callId, callName, "failed", text);
+        } else callExternal(callId, callName, "failed");
         return;
       }
       const text = `${finishedHeadline(call.mode, call.runs)}\n\n${call.runs.map(resultText).join("\n\n---\n\n")}${note ? `\n\n${note}` : ""}`;
-      deliverResult(text, { mode: call.mode, runs: call.runs.map((r) => view(r, true)) }, call.runs, call.mode, note);
+      deliverResult(text, { mode: call.mode, runs: call.runs.map((r) => view(r, true)) }, call.runs, call.mode, note, callId);
+      callExternal(callId, callName, call.runs.every((r) => r.state.status === "done") ? "done" : "failed", text);
     });
   };
 
@@ -1308,6 +1436,10 @@ export default function subagents(pi: ExtensionAPI) {
     live = false;
     owedResults.length = 0;
     consumedResults.clear();
+    pendingCalls.clear();
+    consumedCalls.clear();
+    settleWaiting = false;
+    indicatorRaised = false;
     sessionCtx = undefined;
     boundUI = undefined;
     // The UI may already be gone; each part still lets go of its timers and listeners.
@@ -1572,21 +1704,31 @@ export default function subagents(pi: ExtensionAPI) {
           const hold = `subagents:${++holdCount}`;
           safely(() => pi.events.emit("herdr:background", { active: true, label: `subagents (${items.length})`, id: hold }));
           active.release = () => safely(() => pi.events.emit("herdr:background", { active: false, id: hold }));
+          const callId = `subagent-call:${holdCount}`;
+          const callName = callLabel(mode, items.map((i) => taskLabel(i.task, i.label)));
+          pendingCalls.set(callId, callName);
+          callExternal(callId, callName, "running");
           void work
             .then((list) => {
               backgroundCount--;
               activeCalls.delete(active);
+              pendingCalls.delete(callId);
               safely(() => pi.events.emit("herdr:background", { active: false, id: hold }));
               const text = list.filter(Boolean).map(resultText).join("\n\n---\n\n");
               if (owner.signal.aborted) return;
-              deliverResult(`${finishedHeadline(mode, list.filter(Boolean))}\n\n${text}`, { mode, runs: list.filter(Boolean).map((r) => view(r, true)) }, list.filter(Boolean), mode);
+              const content = `${finishedHeadline(mode, list.filter(Boolean))}\n\n${text}`;
+              deliverResult(content, { mode, runs: list.filter(Boolean).map((r) => view(r, true)) }, list.filter(Boolean), mode, undefined, callId);
+              callExternal(callId, callName, list.filter(Boolean).every((r) => r.state.status === "done") ? "done" : "failed", content);
             })
             .catch((error: unknown) => {
               backgroundCount--;
               activeCalls.delete(active);
               safely(() => pi.events.emit("herdr:background", { active: false, id: hold }));
+              pendingCalls.delete(callId);
               if (owner.signal.aborted) return;
-              deliverResult(`Subagent ${mode} failed: ${error instanceof Error ? error.message : String(error)}`);
+              const content = `Subagent ${mode} failed: ${error instanceof Error ? error.message : String(error)}`;
+              deliverResult(content, undefined, undefined, undefined, undefined, callId);
+              callExternal(callId, callName, "failed", content);
             });
         };
 
@@ -1598,7 +1740,7 @@ export default function subagents(pi: ExtensionAPI) {
           // Let the runs start so their ids exist.
           await new Promise((r) => setTimeout(r, 50));
           return {
-            content: [{ type: "text", text: `Started ${mode} in the background${started.length ? `: ${ids()}` : ""}. Results arrive as messages; use action=status, steer, stop, or result with an id meanwhile.${hasBg() && started.length ? ` If nothing else is left to do, bg_wait ${started.map((r) => `subagent:${r.id}`).join(" or ")} waits inside your turn until it ends.` : ""}` }],
+            content: [{ type: "text", text: `Started ${mode} in the background${started.length ? `: ${ids()}` : ""}. Results arrive as messages; use action=status, steer, stop, or result with an id meanwhile.${ctx.mode === "tui" && ctx.hasUI ? " If nothing else is left to do, end your turn: it stays open until a result arrives (typing ends the wait)." : ""}${hasBg() && started.length ? ` bg_wait ${started.map((r) => `subagent:${r.id}`).join(" or ")} waits for a single run.` : ""}` }],
             details: details(),
           };
         }
@@ -1642,7 +1784,7 @@ export default function subagents(pi: ExtensionAPI) {
         if (done === "detached") {
           deliverLater(work);
           return {
-            content: [{ type: "text", text: `The user moved this ${mode} to the background: ${ids()}. Results arrive as messages; use action=status, steer, stop, or result with an id meanwhile.` }],
+            content: [{ type: "text", text: `The user moved this ${mode} to the background: ${ids()}. Results arrive as messages; use action=status, steer, stop, or result with an id meanwhile.${ctx.mode === "tui" && ctx.hasUI ? " If nothing else is left to do, end your turn: it stays open until a result arrives (typing ends the wait)." : ""}` }],
             details: details(),
           };
         }

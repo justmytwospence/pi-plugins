@@ -20,7 +20,7 @@ const identical = [
   ['pi-tool-gate','pi-plan-mode','pi-auto-effort','pi-status-footer'].map(p => `packages/${p}/src/settings-cycle.ts`),
   ['pi-tool-gate','pi-plan-mode','pi-auto-effort','pi-status-footer'].map(p => `packages/${p}/src/settings-cycle-input.ts`),
   ['pi-bg','pi-subagents','pi-plan-mode','pi-herdr'].map(p => `packages/${p}/src/activity.ts`),
-  ['pi-bg','pi-status-footer'].map(p => `packages/${p}/src/working-message.ts`),
+  ['pi-bg','pi-status-footer','pi-subagents'].map(p => `packages/${p}/src/working-message.ts`),
   ['packages/pi-plan-mode/src/app/pi-chat.ts','packages/pi-sidebar/src/pi-chat.ts','packages/pi-subagents/src/ui/pi-chat.ts'],
   ['pi-auto-effort','pi-copy','pi-next-prompt','pi-subagents','pi-tool-gate'].map(p => `packages/${p}/src/jev.ts`),
   ['pi-system1','pi-auto-effort','pi-copy','pi-next-prompt','pi-subagents','pi-tool-gate','pi-sidebar','pi-cache-guard','pi-plan-mode'].map(p => `packages/${p}/src/system1.ts`),

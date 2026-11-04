@@ -240,7 +240,12 @@ async function startBackground(x: Awaited<ReturnType<typeof setup>>) {
 test("an already-auto-open idle worker yields immediately on prompt startup, before latency or streamed thinking/text", async () => {
   const x = await setup();
   const firstPrompt = x.prompt("Delegate, then finish this request.");
-  (await startBackground(x)).finish();
+  const response0 = await startBackground(x);
+  const before = x.ui.inputHandlers.size;
+  response0.finish();
+  // The Esc stands in for the user interrupting the turn-end wait, which leaves the worker running.
+  await until("turn-end wait", () => x.ui.inputHandlers.size > before);
+  x.ui.press("\x1b");
   await firstPrompt;
   await until("idle auto-follow", () => x.ui.overlays.length === 1);
   expect(x.savedContext.isIdle()).toBe(true);
@@ -263,7 +268,11 @@ test("an already-auto-open idle worker yields immediately on prompt startup, bef
     await checkpoint();
     x.assertMain();
   }
+  const beforeResumed = x.ui.inputHandlers.size;
   response.finish();
+  // Esc again: the interrupted turn-end wait.
+  await until("turn-end wait", () => x.ui.inputHandlers.size > beforeResumed);
+  x.ui.press("\x1b");
   await resumed;
   await until("idle follow reopens only after main finishes", () => x.ui.overlays.length === 1);
   expect(x.children).toHaveLength(1);

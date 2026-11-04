@@ -35,6 +35,8 @@ export interface OwedResult {
   mode?: Mode;
   /** A line appended to the message, for example about tasks that never started. */
   note?: string;
+  /** The async call this result settles (its `subagent-call:<n>` outside work). */
+  callId?: string;
 }
 
 /** What a runtime leaves for the next one of its session. */
