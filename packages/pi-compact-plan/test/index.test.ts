@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import piCompactPlan, { APPROVE, CANCEL, CHANGE, COMMAND, CONTINUE, CONTINUE_PROMPT, EDIT, messagesSince, PROMPT_COMMAND, SKIP, WRITE_OWN } from "../src/index.ts";
+import piCompactPlan, { APPROVE, CANCEL, CHANGE, COMMAND, CONTINUE, CONTINUE_PROMPT, continuation, EDIT, messagesSince, PROMPT_COMMAND, SKIP, WRITE_OWN } from "../src/index.ts";
 import { ENTRY, OUTCOME_ENTRY } from "../src/view.ts";
 
 const SYSTEM = "You are pi, a coding agent.";
@@ -103,11 +103,17 @@ describe("/compact-prompt", () => {
     await t.run("  ship it\n\n  keep this indentation  \nnext  ", PROMPT_COMMAND);
     expect(t.requests).toHaveLength(1);
     expect(t.compacts[0].customInstructions).toBe("Focus");
-    expect(t.sent).toEqual(["ship it\n\n  keep this indentation  \nnext"]);
+    expect(t.sent).toEqual([continuation(PROMPT_COMMAND, "ship it\n\n  keep this indentation  \nnext")]);
     expect(t.getEditor()).toBe("");
     expect(t.entries.map((e) => e.customType)).toEqual([ENTRY, OUTCOME_ENTRY]);
-    expect(t.entries[0]!.data).toMatchObject({ goal: t.sent[0], draft: "Focus" });
+    expect(t.entries[0]!.data).toMatchObject({ goal: "ship it\n\n  keep this indentation  \nnext", draft: "Focus" });
     expect(t.entries[1]!.data).toMatchObject({ status: "compacted", continued: true, draft: "Focus", cached: 99, tokens: 10000 });
+  });
+
+  it("marks the continuation as sent after a finished compaction, so a prompt about compacting is not taken as a request to compact", () => {
+    const text = continuation(PROMPT_COMMAND, "Compact for Phase 4");
+    expect(text.startsWith("[/compact-prompt compacted this session; the summary above is the result. Do not compact again.")).toBe(true);
+    expect(text.endsWith("\n\nCompact for Phase 4")).toBe(true);
   });
 
   it("ignores returned questions without opening any dialogs or asking the service", async () => {
@@ -124,7 +130,7 @@ describe("/compact-prompt", () => {
     expect(dialog).not.toHaveBeenCalled();
     expect(service).not.toHaveBeenCalled();
     expect(t.requests).toHaveLength(1);
-    expect(t.sent).toEqual(["next"]);
+    expect(t.sent).toEqual([continuation(PROMPT_COMMAND, "next")]);
   });
 
   it("rejects blank input before waiting for idle or drafting", async () => {
@@ -149,7 +155,7 @@ describe("/compact-prompt", () => {
     expect(t.requests).toHaveLength(0);
     t.ctx.hasUI = true;
     await t.run("next", PROMPT_COMMAND);
-    expect(t.sent).toEqual(["next"]);
+    expect(t.sent).toEqual([continuation(PROMPT_COMMAND, "next")]);
   });
 
   it("reuses the captured request and falls back when the splice is refused", async () => {
@@ -164,7 +170,7 @@ describe("/compact-prompt", () => {
         expect(t.requests[0]!.payload.system[0].text).toBe(SYSTEM);
         expect(t.requests[0]!.payload.messages.at(-1).content[0].text).toContain('"questions": []');
       }
-      expect(t.sent).toEqual(["next"]);
+      expect(t.sent).toEqual([continuation(PROMPT_COMMAND, "next")]);
     }
   });
 
@@ -223,7 +229,7 @@ describe("/compact-prompt", () => {
     expect(t.entries.map((e) => e.customType)).toEqual([ENTRY]);
     callbacks.onComplete();
     callbacks.onComplete();
-    expect(t.sent).toEqual(["next"]);
+    expect(t.sent).toEqual([continuation(PROMPT_COMMAND, "next")]);
     expect(t.entries.map((e) => e.customType)).toEqual([ENTRY, OUTCOME_ENTRY]);
   });
 });
@@ -325,12 +331,12 @@ describe("/compact-plan", () => {
     const t = setup({ replies: [json("D")], ui: { select: review(CONTINUE) } });
     await t.run("ship it");
     expect(t.compacts[0].customInstructions).toBe("D");
-    expect(t.sent).toEqual(["ship it"]);
+    expect(t.sent).toEqual([continuation(COMMAND, "ship it")]);
     expect(t.getEditor()).toBe("");
     expect(t.entries.at(-1)!.data).toMatchObject({ status: "compacted", continued: true });
     const u = setup({ replies: [json("D")], ui: { select: review(CONTINUE), input: async () => "" } });
     await u.run("");
-    expect(u.sent).toEqual([CONTINUE_PROMPT]);
+    expect(u.sent).toEqual([continuation(COMMAND, CONTINUE_PROMPT)]);
   });
 
   it("does not send anything after a plain approve", async () => {

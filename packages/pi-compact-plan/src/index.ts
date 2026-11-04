@@ -29,6 +29,14 @@ export const APPROVE = "Yes, compact with it";
 export const CONTINUE = "Yes, compact and continue";
 /** Sent after compacting when the user chose to continue without stating a goal. */
 export const CONTINUE_PROMPT = "Continue with the next step.";
+
+/**
+ * The message sent after compacting. The note says compaction already ran, so the model does not
+ * mistake a prompt that mentions compacting for a request to compact (or think the command failed).
+ */
+export function continuation(command: string, prompt: string): string {
+  return `[/${command} compacted this session; the summary above is the result. Do not compact again. Continue with the following.]\n\n${prompt}`;
+}
 export const EDIT = "Edit the focus";
 export const CHANGE = "No, change it";
 export const CANCEL = "Cancel";
@@ -435,7 +443,7 @@ export default function piCompactPlan(pi: ExtensionAPI) {
         if (state.status !== "compacting") return;
         state.status = "compacted";
         record();
-        if (state.continued) pi.sendUserMessage(goal || CONTINUE_PROMPT);
+        if (state.continued) pi.sendUserMessage(continuation(command, goal || CONTINUE_PROMPT));
         else if (goal && !ctx.ui.getEditorText().trim()) ctx.ui.setEditorText(goal);
       },
       onError: (error) => {
@@ -453,7 +461,8 @@ export default function piCompactPlan(pi: ExtensionAPI) {
     handler: (args, ctx) => handle(args, ctx),
   });
   pi.registerCommand(PROMPT_COMMAND, {
-    description: "Draft a compaction focus, compact, then continue with the supplied prompt without dialogs",
+    description:
+      "Compact without dialogs, then send <prompt> as the next message. <prompt> is the task to do after compacting, not instructions for the summary",
     handler: (args, ctx) => handle(args, ctx, true),
   });
 }

@@ -48,7 +48,7 @@ The draft block is a session entry that is never sent to the model; the outcome 
 
 ## Compact and continue automatically
 
-Run `/compact-prompt wire the retry into the CLI` to draft the focus and compact without clarification or approval dialogs. The focus and outcome appear in the transcript. The command sends the prompt only after compaction succeeds; a drafting or compaction failure leaves it unsent. An empty prompt reports usage without compacting.
+Run `/compact-prompt wire the retry into the CLI` to draft the focus and compact without clarification or approval dialogs. The focus and outcome appear in the transcript. The prompt is the task to continue with, not instructions for the summary. The command sends it only after compaction succeeds, after a one-line note saying the session was just compacted, so the model does not compact again; a drafting or compaction failure leaves it unsent. An empty prompt reports usage without compacting.
 
 ## Cost and the prompt cache
 
