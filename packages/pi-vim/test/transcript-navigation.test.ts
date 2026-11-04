@@ -100,3 +100,22 @@ test("navigation refuses growth/shrink before the real ScrollView receives its n
   assert.equal(view.scrollTop, 10);
   frame(); assert.equal(view.isFollowingEnd, false, "fresh-layout end checkpoint keeps follow disabled");
 });
+test("Ctrl+D past the last checkpoint goes to the end and resumes follow", () => {
+  const document = new Container();
+  document.addChild(new Block("first", "first"));
+  document.addChild(new Block("last", "last"));
+  document.addChild({ render: () => Array<string>(40).fill("answer"), invalidate() {} });
+  const view = new ScrollView(document, { follow: "end", primary: true });
+  const box = { component: view, rect: { width: 80 }, scrollContentLines: document.render(80) };
+  const tui = { mode: "fullscreen", getPrimaryScrollView: () => view, currentLayout: { root: box }, requestRender() {} };
+  view.updateLayout(box.scrollContentLines.length, 10, () => {});
+  view.scrollTo(0, { disableFollow: true });
+  scrollToCheckpoint(tui, context, 1);
+  assert.equal(view.scrollTop, 4, "first stops at the last checkpoint");
+  assert.equal(view.isFollowingEnd, false);
+  scrollToCheckpoint(tui, context, 1);
+  assert.equal(view.scrollTop, 40, "then goes all the way to the end");
+  assert.equal(view.isFollowingEnd, true);
+  scrollToCheckpoint(tui, context, 1);
+  assert.equal(view.scrollTop, 40);
+});

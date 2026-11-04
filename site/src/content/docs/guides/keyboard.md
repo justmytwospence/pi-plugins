@@ -90,7 +90,7 @@ With this component enabled, configured `tui.editor.historyPrevious`/`tui.editor
 | --- | --- | --- |
 | Leave Insert/Visual or cancel pending input | Escape or Ctrl+[ is local first. | Same; the host dialog does not close on the first mode change. |
 | Escape in idle Normal | Reaches Pi's `app.interrupt`. | Cancels/returns to the host dialog. |
-| Ctrl+U/D in idle Normal | Previous/next fullscreen checkpoint; consumed/inert in regular mode. | Pages only the host's offered viewport, otherwise consumed. |
+| Ctrl+U/D in idle Normal | Previous/next fullscreen checkpoint (Ctrl+D past the last one goes to the end and resumes following); consumed/inert in regular mode. | Pages only the host's offered viewport, otherwise consumed. |
 | Ctrl+U/D in Insert | Previous/next fullscreen checkpoint without Escape; preserves draft and mode, never exits Pi. Consumed/inert in regular mode. | Local editing, never Pi process exit. |
 | Ctrl+U/D in Visual/EX/pending state | Visual stays local; edits EX text or cancels pending keys; does not scroll. | Same local behavior; never invokes `app.exit`. |
 | `:name args` / `:!cmd` / `:!!cmd` | Dispatches a known Pi command or shell action, preserving the draft. Reserved Vim EX names are not Pi commands. | Never dispatches to Pi, shell or the model. |
