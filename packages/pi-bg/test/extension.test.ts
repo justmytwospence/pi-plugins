@@ -204,6 +204,49 @@ describe("pi-bg", () => {
       await x.shutdown();
     });
 
+    it("waits for settle outside work and continues the run with its result", async () => {
+      const x = await load();
+      x.pi.events.emit("bg:external", { id: "subagent-call:1", label: 'subagent "audit"', state: "running", settle: true });
+      setTimeout(() => x.pi.events.emit("bg:external", { id: "subagent-call:1", label: 'subagent "audit"', state: "done", settle: true, result: 'Subagent "audit" finished after 3s:\n\nfindings' }), 300);
+      const r = await settle(x);
+      expect(r.continue).toBe(true);
+      expect(r.entries).toHaveLength(1);
+      expect(r.entries[0].type).toBe("custom_message");
+      expect(r.entries[0].content).toContain("findings");
+      expect(r.entries[0].details.tasks).toEqual([{ id: "subagent-call:1", kind: "end", status: "done" }]);
+      expect(x.emitted.some((e) => e.channel === "bg:external-consumed" && e.data.id === "subagent-call:1")).toBe(true);
+      const waits = x.emitted.filter((e) => e.channel === "herdr:waiting").map((e) => e.data);
+      expect(waits).toEqual([{ active: true, label: 'subagent "audit"', id: waits[0].id }, { active: false, id: waits[0].id }]);
+      await x.shutdown();
+    });
+
+    it("ignores outside work without settle", async () => {
+      const x = await load();
+      x.pi.events.emit("bg:external", { id: "marimo:fit.py", label: "fit.py", state: "running" });
+      expect(await settle(x)).toEqual({});
+      await x.shutdown();
+    });
+
+    it("does not wait when an earlier handler already continues the run", async () => {
+      const x = await load();
+      await x.call("bg_run", { command: "sleep 2", kind: "job", name: "job" });
+      const h = x.handlers.get("agent_before_settle")![0];
+      expect(await h({ type: "agent_before_settle", outcome: "completed", entries: [], continue: true, context: { canContinue: true } }, x.ctx)).toEqual({});
+      await x.shutdown();
+    });
+
+    it("keeps entries proposed by earlier handlers", async () => {
+      const x = await load();
+      await x.call("bg_run", { command: "sleep 2.5", kind: "job", name: "short" });
+      const prev = { type: "custom_message", customType: "other", content: "earlier", display: true };
+      const h = x.handlers.get("agent_before_settle")![0];
+      const r = (await h({ type: "agent_before_settle", outcome: "completed", entries: [prev], continue: false, context: { canContinue: false } }, x.ctx)) as any;
+      expect(r.entries).toHaveLength(2);
+      expect(r.entries[0]).toBe(prev);
+      expect(r.continue).toBe(true);
+      await x.shutdown();
+    });
+
     it("stops on Esc or a typed message; the job still wakes the agent later", async () => {
       const x = await load();
       await x.call("bg_run", { command: "sleep 4", kind: "job", name: "long" });

@@ -121,3 +121,19 @@ it.each(["timeout", "abort", "message", "reload"])("releases ownership on %s", a
   await vi.advanceTimersByTimeAsync(4_000);
   expect(h.working.at(-1)).toMatch(/^Working/);
 });
+
+it("the turn-end wait has no timeout", async () => {
+  const h = await setup();
+  h.pi.events.emit("bg:external", { id: "subagent-call:1", label: 'subagent "audit"', state: "running", settle: true });
+  const before = h.handlers.get("agent_before_settle")![0]!;
+  let result: any;
+  const pending = Promise.resolve(before({ type: "agent_before_settle", outcome: "completed", entries: [], continue: false, context: { canContinue: false } }, h.ctx)).then((r) => { result = r; });
+  await vi.advanceTimersByTimeAsync(61 * 60_000);
+  expect(result).toBeUndefined();
+  expect(h.working.filter((message) => message !== undefined).every((message) => message!.startsWith("Waiting on"))).toBe(true);
+  h.pi.events.emit("bg:external", { id: "subagent-call:1", label: 'subagent "audit"', state: "done", settle: true, result: "found it" });
+  await vi.advanceTimersByTimeAsync(500);
+  await pending;
+  expect(result.continue).toBe(true);
+  expect(result.entries[0].content).toContain("found it");
+});

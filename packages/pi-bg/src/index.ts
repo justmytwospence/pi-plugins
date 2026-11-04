@@ -6,7 +6,7 @@
 // - bg_wait keeps the turn going until a job ends, so the agent is visibly working (in pi, herdr,
 //   tmux) while it waits. It returns early when the user types, on Esc, or after its timeout.
 //   Ending the turn with an agent job running waits the same way (agent_before_settle), and the
-//   outcome continues the run.
+//   outcome continues the run. That wait has no timeout, and also covers outside work marked `settle`.
 // - bg_logs reads a log (or lists the tasks); bg_kill stops one.
 // - Progress (progress.ts): standard bars (tqdm, pytest, ...) are detected, the agent may declare a
 //   format or regex (bg_run's `progress`), and a task may write `done/total` to $PI_BG_PROGRESS. It
@@ -27,9 +27,12 @@
 //          herdr:split {command,cwd}           /bg's "follow in a herdr split" (when pi-herdr answers herdr:probe)
 //          bg:tasks {tasks}                    a snapshot after every change (with `progress` when known)
 //          bg:killed {id,command,cwd}          after bg_kill or /bg stops a task
-//   reads  bg:external {id,label,state,summary?,result?}  outside work bg_wait can wait on (state
+//   reads  bg:external {id,label,state,summary?,result?,settle?}  outside work bg_wait can wait on (state
 //                                              running|done|failed); `result` is Markdown and bg_wait
-//                                              renders it as such
+//                                              renders it as such. `settle`: the work will wake the agent
+//                                              with `result` when it ends; a turn that ends while it runs
+//                                              waits for it, as for an agent job, and delivers the result
+//                                              in its place (then emits bg:external-consumed)
 //          bg:annotate {task,by,detail?,wait?,represented?}  what another extension knows about a task
 //                                              (pi-marimo: the kernel state of the notebook a server serves or
 //                                              a job drives); `wait` names outside work that bg_wait on the task
@@ -106,6 +109,8 @@ export interface External {
   summary?: string;
   /** Optional completed output, in Markdown; acknowledging its return suppresses a duplicate wake-up. */
   result?: string;
+  /** The work will wake the agent with `result` when it ends: a turn that ends while it runs waits for it. */
+  settle?: boolean;
   updatedAt: number;
 }
 
@@ -117,6 +122,8 @@ interface Waiter {
   any: boolean;
   /** bg_run's short startup check: takes only its own task, never other tasks' news. */
   silent: boolean;
+  /** The turn-end wait: also takes settle outside work. */
+  settle?: boolean;
   finished: Task[];
   readied: Task[];
   externals: External[];
@@ -203,6 +210,8 @@ export default function piBg(pi: ExtensionAPI) {
   let herdrActive = false;
   /** The running jobs the agent started: what bg_wait without an id waits for. */
   const agentJobs = () => reg.running(sessionId).filter((t) => t.kind === "job" && t.origin === "agent");
+  /** Running outside work that will wake the agent (bg:external with `settle`): a turn's end waits for it too. */
+  const settleWork = () => [...externals.values()].filter((x) => x.settle && x.state === "running");
   /** The tasks a bg_wait is waiting on. */
   const waitingIds = (): Set<string> => {
     const ids = new Set<string>();
@@ -681,6 +690,7 @@ export default function piBg(pi: ExtensionAPI) {
    * run does not settle (pi, herdr and tmux keep showing it working) and the outcome continues the
    * run instead of waking an idle agent. Typing or Esc ends the wait; the job then wakes the agent
    * as usual. Pi exposes no abort signal at this boundary, so Esc is read from the terminal.
+   * Outside work marked `settle` (bg:external) is waited for the same way, and the wait has no timeout.
    * `event.context.canContinue` is not consulted: after an ordinary reply it is false (the context
    * ends with the assistant message), and the outcome entry this returns is what makes the
    * continuation valid; Pi re-checks it after committing the entries.
@@ -704,11 +714,11 @@ export default function piBg(pi: ExtensionAPI) {
     }
   };
   const waitAtSettle = async (event: AgentBeforeSettleEvent, c: ExtensionContext): Promise<BoundaryResult> => {
-    if (settleWaiting || !attached || !tui() || event.outcome !== "completed") return {};
-    if (c.hasPendingMessages() || !agentJobs().length || [...waiters].some((w) => !w.silent)) return {};
+    if (settleWaiting || !attached || !tui() || event.outcome !== "completed" || event.continue) return {};
+    if (c.hasPendingMessages() || (!agentJobs().length && !settleWork().length) || [...waiters].some((w) => !w.silent)) return {};
     const generation = sessionGeneration;
-    const label = () => agentJobs().map(waitLabel).join(" · ");
-    const working = holdWorking(c, generation, label, () => agentJobs().map((t) => t.name).join(" · "));
+    const label = () => [...agentJobs().map(waitLabel), ...settleWork().map((x) => x.label)].join(" · ");
+    const working = holdWorking(c, generation, label, () => [...agentJobs().map((t) => t.name), ...settleWork().map((x) => x.label)].join(" · "));
     let ticks = 0;
     let waiter: Waiter | undefined;
     let reason: Reason;
@@ -722,10 +732,10 @@ export default function piBg(pi: ExtensionAPI) {
       } catch {
         // No indicator to raise: the message still reaches the footer's channel.
       }
-      const waiting = waitFor({ targets: new Set(), any: true, silent: false }, WAIT_DEFAULT_S * 1000, () => {
+      const waiting = waitFor({ targets: new Set(), any: true, silent: false, settle: true }, undefined, () => {
         if (!attached || generation !== sessionGeneration) return "aborted";
         if (c.hasPendingMessages()) return "message";
-        if (!agentJobs().length) return "done";
+        if (!agentJobs().length && !settleWork().length) return "done";
         if (++ticks % 4 === 0) working.set();
         return undefined;
       });
@@ -747,7 +757,7 @@ export default function piBg(pi: ExtensionAPI) {
       working.release();
     }
     refresh();
-    if (reason !== "done" || !waiter?.finished.length) return {};
+    if (reason !== "done" || (!waiter?.finished.length && !waiter?.externals.length)) return {};
     const parts: string[] = [];
     const tasks: { id: string; kind: "end"; status: string }[] = [];
     for (const t of waiter.finished) {
@@ -755,9 +765,14 @@ export default function piBg(pi: ExtensionAPI) {
       parts.push(wakeText(t, "end"));
       tasks.push({ id: t.id, kind: "end", status: t.status });
     }
+    for (const x of waiter.externals) {
+      parts.push(typeof x.result === "string" ? x.result : externalLine(x));
+      if (typeof x.result === "string") pi.events.emit("bg:external-consumed", { id: x.id });
+      tasks.push({ id: x.id, kind: "end", status: x.state });
+    }
     if (waiter.extras.length) parts.push(`Also meanwhile:\n${waiter.extras.map((e) => `- ${e.text}`).join("\n")}`);
     return {
-      entries: [transcriptCheckpoint({ type: "custom_message" as const, customType: "pi-bg", content: parts.join("\n\n---\n\n"), display: true, details: { tasks } }, { id: randomUUID(), kind: "report" })],
+      entries: [...event.entries, transcriptCheckpoint({ type: "custom_message" as const, customType: "pi-bg", content: parts.join("\n\n---\n\n"), display: true, details: { tasks } }, { id: randomUUID(), kind: "report" })],
       continue: true,
     };
   };
@@ -765,7 +780,7 @@ export default function piBg(pi: ExtensionAPI) {
 
   const waitFor = (
     w: Omit<Waiter, "resolve" | "finished" | "readied" | "externals" | "extras">,
-    timeoutMs: number,
+    timeoutMs: number | undefined,
     tick: (() => Reason | undefined) | undefined,
   ): { waiter: Waiter; done: Promise<Reason> } => {
     let resolve!: (r: Reason) => void;
@@ -774,7 +789,7 @@ export default function piBg(pi: ExtensionAPI) {
     });
     let settled = false;
     const waiter: Waiter = { ...w, finished: [], readied: [], externals: [], extras: [], resolve: () => {} };
-    const timer = setTimeout(() => finish("timeout"), timeoutMs);
+    const timer = timeoutMs === undefined ? undefined : setTimeout(() => finish("timeout"), timeoutMs);
     const ticker = tick
       ? setInterval(() => {
           try {
@@ -788,7 +803,7 @@ export default function piBg(pi: ExtensionAPI) {
     function finish(r: Reason) {
       if (settled) return;
       settled = true;
-      clearTimeout(timer);
+      if (timer) clearTimeout(timer);
       if (ticker) clearInterval(ticker);
       waiters.delete(waiter);
       resolve(r);
@@ -823,13 +838,13 @@ export default function piBg(pi: ExtensionAPI) {
     const d = data as Partial<External> | undefined;
     if (!d?.id || typeof d.id !== "string") return;
     const state = d.state === "done" || d.state === "failed" ? d.state : "running";
-    const x: External = { id: d.id, label: d.label || d.id, state, summary: d.summary, ...(typeof d.result === "string" ? { result: d.result } : {}), updatedAt: Date.now() };
+    const x: External = { id: d.id, label: d.label || d.id, state, summary: d.summary, ...(typeof d.result === "string" ? { result: d.result } : {}), ...(d.settle === true ? { settle: true } : {}), updatedAt: Date.now() };
     // Ended outside work is kept a while for a late bg_wait, then forgotten.
     for (const [id, old] of externals) if (old.state !== "running" && x.updatedAt - old.updatedAt > EXTERNAL_KEEP_MS) externals.delete(id);
     externals.set(x.id, x);
     if (state !== "running") {
       for (const w of waiters) {
-        if (!w.targets.has(x.id)) continue;
+        if (!w.targets.has(x.id) && !(w.settle && x.settle)) continue;
         w.externals.push(x);
         w.resolve("done");
       }
