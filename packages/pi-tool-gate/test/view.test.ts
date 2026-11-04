@@ -151,6 +151,13 @@ describe("askApproval in the terminal UI", () => {
     expect(choice).toBe("Block");
   });
 
+  test("reports Pi as blocked on a permission question", async () => {
+    let seen: unknown;
+    const ctx: any = { mode: "tui", ui: { custom: async (_factory: unknown, options: unknown) => ((seen = options), undefined), select: async () => undefined } };
+    await askApproval(ctx, { view, options: ["Allow once", "Block"] }, "title");
+    expect(seen).toEqual({ blocked: { kind: "permission", message: "title" } });
+  });
+
   test("Esc blocks", async () => {
     const { choice } = await show({ view, options: ["Allow once", "Block"] }, ["\x1b"]);
     expect(choice).toBe("Block");

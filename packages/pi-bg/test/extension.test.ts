@@ -64,6 +64,14 @@ describe("pi-bg", () => {
     await x.shutdown();
   });
 
+  it("uses Pi's injected key hint in collapsed report rows", async () => {
+    const x = await load();
+    const plain = { fg: (_c: string, t: string) => t, bold: (t: string) => t } as any;
+    const view = x.tools.get("bg_wait").renderResult({ content: [{ type: "text", text: "one\ntwo" }] }, { expanded: false, isPartial: false }, plain, { keyHint: (id: string, d: string) => `<${id}> ${d}` });
+    expect(view.render(200)[0]).toContain("<app.tools.expand> to expand");
+    await x.shutdown();
+  });
+
   it("redraws a live row once per tick even though each redraw re-renders it with a fresh invalidate", async () => {
     const x = await load();
     const run = x.tools.get("bg_run");

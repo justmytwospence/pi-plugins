@@ -75,7 +75,7 @@ import { PillView } from "./pill.ts";
 import { LogViewer } from "./viewer.ts";
 import { MARIMO_READY, marimoName, marimoServer } from "./marimo.ts";
 import { type Block, blocks, blocksView } from "./result-view.ts";
-import { reportResultView, runResultView, type WakeDetails, wakeView } from "./rows.ts";
+import { type KeyHint, reportResultView, runResultView, type WakeDetails, wakeView } from "./rows.ts";
 import { transcriptCheckpoint } from "./transcript-contract.ts";
 
 const STARTUP_WAIT_MS = 1_500;
@@ -1065,7 +1065,8 @@ export default function piBg(pi: ExtensionAPI) {
     },
     renderResult(result, { expanded }, theme, context) {
       // Reports keep the look of Pi's own tool output; a subagent's answer reads as Markdown.
-      return reportResultView(result as never, expanded, theme, Boolean((context as { isError?: boolean } | undefined)?.isError));
+      const c = context as { isError?: boolean; keyHint?: KeyHint } | undefined;
+      return reportResultView(result as never, expanded, theme, Boolean(c?.isError), c?.keyHint);
     },
     async execute(id, params, signal, _onUpdate, c) {
       const generation = sessionGeneration;
@@ -1190,7 +1191,8 @@ export default function piBg(pi: ExtensionAPI) {
       return new Text(a.id ? `${theme.fg("toolTitle", theme.bold("Task log"))} ${reg.find(a.id, sessionId)?.name ?? a.id}` : theme.fg("toolTitle", theme.bold("Tasks")), 0, 0);
     },
     renderResult(result, { expanded }, theme, context) {
-      return reportResultView(result as never, expanded, theme, Boolean((context as { isError?: boolean } | undefined)?.isError));
+      const c = context as { isError?: boolean; keyHint?: KeyHint } | undefined;
+      return reportResultView(result as never, expanded, theme, Boolean(c?.isError), c?.keyHint);
     },
     async execute(_id, params) {
       if (!params.id) {
@@ -1235,7 +1237,8 @@ export default function piBg(pi: ExtensionAPI) {
       return new Text(`${theme.fg("toolTitle", theme.bold("Stop"))} ${a.id ? (reg.find(a.id, sessionId)?.name ?? a.id) : ""}`, 0, 0);
     },
     renderResult(result, { expanded }, theme, context) {
-      return reportResultView(result as never, expanded, theme, Boolean((context as { isError?: boolean } | undefined)?.isError));
+      const c = context as { isError?: boolean; keyHint?: KeyHint } | undefined;
+      return reportResultView(result as never, expanded, theme, Boolean(c?.isError), c?.keyHint);
     },
     async execute(_id, params) {
       const t = reg.find(params.id, sessionId);

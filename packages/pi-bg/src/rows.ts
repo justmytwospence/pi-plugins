@@ -20,10 +20,12 @@ export function taskState(t: Task, now = Date.now()): string {
 }
 
 /** ` · ctrl+o to expand`, in the user's key; plain when Pi's theme is not up (tests, headless). */
-const expandHint = (theme: Theme) => {
+export type KeyHint = (keybinding: string, description: string) => string;
+
+const expandHint = (theme: Theme, injected?: KeyHint) => {
   let hint = "to expand";
   try {
-    hint = keyHint("app.tools.expand", "to expand");
+    hint = (injected ?? (keyHint as KeyHint))("app.tools.expand", "to expand");
   } catch {
     // No theme yet.
   }
@@ -64,10 +66,10 @@ export function runResultView(result: Result, expanded: boolean, theme: Theme, t
 }
 
 /** bg_wait, bg_logs and bg_kill: their first line collapsed, the whole report expanded. */
-export function reportResultView(result: Result, expanded: boolean, theme: Theme, isError = false): Component {
+export function reportResultView(result: Result, expanded: boolean, theme: Theme, isError = false, injected?: KeyHint): Component {
   if (expanded) return blocksView(result, true, theme);
   const more = lineCount(result) > 1;
-  const hint = more ? expandHint(theme) : "";
+  const hint = more ? expandHint(theme, injected) : "";
   return new LineView(() => theme.fg(isError ? "error" : "muted", `↳ ${firstLine(result)}`) + hint);
 }
 
