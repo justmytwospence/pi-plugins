@@ -82,7 +82,7 @@ with `bg_wait`. For the async child, use the ID returned by `subagent`:
 
 Replace `RETURNED_ID` with the actual run ID. `bg_wait` returns the completed child's bounded output and consumes it, suppressing a duplicate completion message. Without a consuming wait or completed-result read, the child's normal result message still arrives. Inspect that returned result before concluding.
 
-Do not poll with `sleep` and repeated `bg_logs`. A user message, Esc or timeout can stop the wait without stopping the task. With pi-status-footer, the wait's message takes priority over token/time decoration until it releases; `Waiting on…` should not flicker back to `Working…` (example labels). Neither plugin requires the other.
+Do not poll with `sleep` and repeated `bg_logs`. A user message, Esc or timeout can stop the wait without stopping the task. Ending the turn waits too, without a timeout, for jobs and async subagents; typing or Esc ends that wait. With pi-status-footer, the wait's message takes priority over token/time decoration until it releases; `Waiting on…` should not flicker back to `Working…` (example labels). Neither plugin requires the other.
 
 ## Inspect or intervene
 

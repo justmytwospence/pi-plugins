@@ -67,8 +67,8 @@ The fallback aggregation and return to an independent pill are covered by [pi-bg
 | Event | Direction and purpose |
 | --- | --- |
 | `bg:probe` | A consumer sends `{ reply }`; pi-bg invokes `reply()` when loaded. |
-| `bg:external` | A producer reports `{ id, label, state, summary?, result? }`, with state `running`, `done` or `failed`. pi-bg records it for `bg_wait`, which renders a `result` as Markdown. |
-| `bg:external-consumed` | `{ id }` acknowledges a completed external result returned through `bg_wait`; the owner suppresses duplicate delivery. Summary-only waits do not acknowledge a result. |
+| `bg:external` | A producer reports `{ id, label, state, summary?, result?, settle? }`, with state `running`, `done` or `failed`. pi-bg records it for `bg_wait`, which renders a `result` as Markdown. |
+| `bg:external-consumed` | `{ id }` acknowledges a completed external result returned through `bg_wait` or pi-bg's turn-end wait (for `settle` work, which a turn that ends while it runs waits for); the owner suppresses duplicate delivery. Summary-only waits do not acknowledge a result. |
 | `bg:tasks` | pi-bg publishes `{ tasks }` snapshots, including readiness, origin and `willWake`. |
 | `bg:annotate` | A sibling supplies `{ task, by, detail?, wait? }` for a known pi-bg task. Missing detail clears the annotation. |
 | `bg:killed` | pi-bg reports `{ id, command, cwd }` after explicitly stopping a task. |
@@ -81,11 +81,11 @@ The same bridge uses `willWake` snapshots to suppress a second notebook-finished
 
 ## Wait messages take priority over footer statistics
 
-pi-bg and pi-status-footer each carry the same small [working-message contract](https://github.com/justmytwospence/pi-plugins/blob/main/packages/pi-bg/src/working-message.ts). The optional event `pi-plugins.working-message.v1` carries `{ owner, message? }`: a message claims priority; omitting it releases that owner.
+pi-bg, pi-subagents and pi-status-footer each carry the same small [working-message contract](https://github.com/justmytwospence/pi-plugins/blob/main/packages/pi-bg/src/working-message.ts). The optional event `pi-plugins.working-message.v1` carries `{ owner, message? }`: a message claims priority; omitting it releases that owner.
 
 The newest active claim wins. Updating an existing claim changes its text without moving it ahead of a newer owner, and releasing an older wait cannot clear a newer wait. The footer applies this override above its own token/time decoration, so its one-second refresh cannot alternate `Waiting on…` with `Working…` (example labels).
 
-pi-bg still paints the native working message directly when the footer is absent. Both plugins remain independently usable. Completion, timeout, interruption, pending user input, errors, shutdown and reload release wait ownership; when the final claim ends, normal footer decoration resumes if a turn remains active. The [fake-timer integration tests](https://github.com/justmytwospence/pi-plugins/blob/main/packages/pi-bg/test/working-message.test.ts) exercise both loaded plugins, overlaps and exit paths; this is not live-terminal proof.
+pi-bg (and pi-subagents' own turn-end wait) still paint the native working message directly when the footer is absent. Both plugins remain independently usable. Completion, timeout, interruption, pending user input, errors, shutdown and reload release wait ownership; when the final claim ends, normal footer decoration resumes if a turn remains active. The [fake-timer integration tests](https://github.com/justmytwospence/pi-plugins/blob/main/packages/pi-bg/test/working-message.test.ts) exercise both loaded plugins, overlaps and exit paths; this is not live-terminal proof.
 
 ## Herdr holds are not agent state
 
