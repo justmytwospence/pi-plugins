@@ -1,6 +1,6 @@
 {
   "name": "@justmytwospence/pi-copy",
-  "version": "0.1.18",
+  "version": "0.1.19",
   "description": "/yank: a scrollable picker of things to copy from the Pi session (turns, code blocks, commands, paths, URLs, tables), ranked by Jev.",
   "type": "module",
   "license": "MIT",
