@@ -1274,3 +1274,8 @@ test("focused ghost without a cursor remains suspended until output includes the
   expect(s.ctx.ui.editorWrites).toEqual([PROMPT]);
   expect(s.ctx.ui.press("\t")).toBe(false);
 });
+
+test("offer tools are marked read-only, so tool-gate's chat and plan workflows allow them", async () => {
+  const s = await setup();
+  for (const name of ["offer_prompt", "offer_terminal"]) expect(s.h.tools.get(name).annotations).toEqual({ readOnlyHint: true, destructiveHint: false });
+});

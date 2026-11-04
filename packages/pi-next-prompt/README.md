@@ -2,7 +2,7 @@
 
 A Pi extension that suggests the prompt you would most likely send next, like Claude Code's prompt suggestions. After a run, an ordinary suggestion appears as dim ghost text inside the empty editor, with no hint. `Tab` (or `Right`) fills it in; it is not sent. All offer types—automatic tags, external offers and explicit prompt/terminal handoffs—live underneath your draft: typing conceals the suggestion without discarding it, and a preexisting draft stays unchanged. Clearing or stashing the draft (pi-stash's `Ctrl+S`) reveals the retained suggestion without another key, until a submission or reset clears it. With pi-stash and nothing stashed, `Ctrl+S` stashes the suggestion instead (`prompt:take-next` on `pi.events`).
 
-Automatic suggestions only appear when there is one obvious next step. Most turns show nothing. Explicit requested handoffs instead use `offer_prompt` for ordinary text or Pi slash commands, or `offer_terminal` for shell commands.
+Automatic suggestions only appear when there is one obvious next step. Most turns show nothing. Explicit requested handoffs instead use `offer_prompt` for ordinary text or Pi slash commands, or `offer_terminal` for shell commands. Both only offer editable text, so they carry a read-only tool hint: pi-tool-gate's chat and plan workflows let them run.
 
 Example of the ghost text in an empty editor:
 

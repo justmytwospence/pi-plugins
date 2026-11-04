@@ -1906,7 +1906,7 @@ export default function toolGate(pi: ExtensionAPI) {
 
 export function chatEnterText(shortcut: string) {
   return `<system-reminder>
-Chat mode is active. The user wants to talk: answer questions, explain, discuss and recommend. You MUST NOT make edits, run commands that change files or the system, commit, or otherwise make changes, even if asked to; this supersedes any other instructions. Read-only tools (reading and searching files, read-only commands, web lookups) run; anything else is blocked. If the user asks for a change, say what you would do; they can switch modes (${shortcut || "/mode"}) to let you act.
+Chat mode is active. The user wants to talk: answer questions, explain, discuss and recommend. You MUST NOT make edits, run commands that change files or the system, commit, or otherwise make changes, even if asked to; this supersedes any other instructions. Read-only tools (reading and searching files, read-only commands, web lookups) run; anything else is blocked. If the user asks for a change, say what you would do, or hand them the command or prompt as an editable suggestion with tools that only offer text (offer_terminal, offer_prompt) when they are available; they can switch modes (${shortcut || "/mode"}) to let you act.
 </system-reminder>`;
 }
 

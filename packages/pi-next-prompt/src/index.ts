@@ -642,6 +642,8 @@ export default function nextPrompt(pi: ExtensionAPI) {
     exposure: "model-only",
     description: "Offer an editable prompt or Pi slash command, never submit it. Returns queued behind an existing draft; otherwise waits up to one second for render acknowledgement and returns displayed or a concrete blocker.",
     promptGuidelines: offerGuidelines("prompt"),
+    // It only fills an editable suggestion; the user decides whether to submit it. Read-only workflows (tool-gate chat and plan) allow it.
+    annotations: { readOnlyHint: true, destructiveHint: false },
     parameters: Type.Object({ text: Type.String({ minLength: 1 }) }),
     async execute(_id, { text }, signal, _update, ctx) {
       let reason: string | undefined;
@@ -670,6 +672,8 @@ export default function nextPrompt(pi: ExtensionAPI) {
     exposure: "model-only",
     description: "Offer an editable !i suggestion, never execute it. Returns queued behind an existing draft; otherwise waits up to one second for render acknowledgement and returns displayed or a concrete blocker.",
     promptGuidelines: offerGuidelines("terminal"),
+    // It only fills an editable suggestion; the user decides whether to submit it. Read-only workflows (tool-gate chat and plan) allow it.
+    annotations: { readOnlyHint: true, destructiveHint: false },
     parameters: Type.Object({ command: Type.String({ minLength: 1 }) }),
     async execute(_id, { command }, signal, _update, ctx) {
       const result = (details: OfferDetails) => {
