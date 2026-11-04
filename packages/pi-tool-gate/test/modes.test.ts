@@ -15,6 +15,7 @@ import { FLOW_ENTRY, queryFlow, requestWorkflow } from "../src/flow-contract.ts"
 import { queryFooterActions } from "../src/footer-actions.ts";
 import { SETTINGS_CYCLE_CHANNEL, settingsCycles } from "../src/settings-cycle.ts";
 import { ProviderFlowController } from "../src/provider-flows.ts";
+import { declareReadOnlyCalls } from "../src/read-only-call.ts";
 import { fakeJev, harness, userEntry } from "./harness.ts";
 
 let configDir: string;
@@ -642,6 +643,22 @@ describe("workflow guards precede approvals", () => {
     for (const [tool, input] of [["edit", { path: "src/a.ts", edits: [] }], ["write", { path: "src/a.ts", content: "x" }], ["bash", { command: "npm test" }], ["mcp__notes__write", { text: "x" }], ["subagent", { task: "x" }]] as const) expect(await h.emit("tool_call", call(tool, input), ctx)).toMatchObject({ block: true, reason: expect.stringMatching(/Chat mode is on:/u) });
     expect(ctx.ui.selects).toHaveLength(0);
     expect(jev.calls).toHaveLength(0);
+  });
+  test.each(["chat", "plan"] as const)("%s: calls their tool's owner says only read run without judging; its other calls do not", async workflow => {
+    const { h, jev, ctx } = await start(setup());
+    // As pi-herdr answers on the read-only-call contract.
+    declareReadOnlyCalls(h.pi.events, "herdr", input => input.action === "list" || input.action === "read");
+    h.pi.events.emit(PLAN_PROVIDER, { planFile: "/tmp/plans/calm-river.md" });
+    h.pi.events.emit(WORKFLOW_SET, { mode: workflow });
+    await h.emit("before_agent_start", { prompt: "x" }, ctx);
+    expect(await h.emit("tool_call", call("herdr", { action: "list" }, "l1"), ctx)).toBeUndefined();
+    expect(await h.emit("tool_call", call("herdr", { action: "read", name: "a" }, "r1"), ctx)).toBeUndefined();
+    expect(jev.calls).toHaveLength(0);
+    const send = await h.emit("tool_call", call("herdr", { action: "send", name: "a", message: "x" }, "s1"), ctx);
+    // Chat blocks it; plan leaves it to the approval setting, which judges it.
+    if (workflow === "chat") expect(send).toMatchObject({ block: true, reason: expect.stringMatching(/^Chat mode is on:/u) });
+    else expect(jev.calls).toHaveLength(1);
+    expect(ctx.ui.selects).toHaveLength(0);
   });
   test.each(["auto", "yolo"])("chat+%s lets reads with expansions past the workflow, leaving them to the approval setting", async approval => {
     const { h, jev, ctx } = await start(setup());

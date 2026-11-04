@@ -41,6 +41,7 @@ import { matchesKey } from "@earendil-works/pi-tui";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import { transcriptCheckpoint } from "./transcript-contract.ts";
+import { declareReadOnlyCalls } from "./read-only-call.ts";
 import { ACTIVITY_CHANGED, ACTIVITY_GONE, ACTIVITY_HOST, ACTIVITY_SECTION } from "./activity.ts";
 import { ACTIVITY_CHANNELS, type HoldEvent } from "./core/activity.ts";
 import { ActivityBadges } from "./activity-badges.ts";
@@ -64,6 +65,16 @@ import { registerTreeFork } from "./tree-fork.ts";
 import { blockedSummary, type SummaryRegistry, turnSummary } from "./summary.ts";
 
 const TOOL = "herdr";
+
+/**
+ * Whether a herdr call only reads: list, read and wait, and crew status (its default op). Answered on
+ * the read-only-call contract so chat and plan workflows let these run.
+ */
+export function herdrCallReadOnly(input: Record<string, unknown>): boolean {
+  const { action } = input;
+  if (action === "list" || action === "read" || action === "wait") return true;
+  return action === "crew" && (input.op === undefined || input.op === "status") && input.takeover !== true;
+}
 const CHILD_ENTRY = "pi-herdr:child";
 const DELIVERY_ENTRY = "pi-herdr:delivered";
 const BG_TTL_MS = 90_000;
@@ -1069,6 +1080,7 @@ export default function piHerdr(pi: ExtensionAPI, dependencies: HerdrDependencie
     },
   });
 
+  declareReadOnlyCalls(pi.events, TOOL, herdrCallReadOnly);
   pi.registerTool({
     name: TOOL,
     label: "Herdr",

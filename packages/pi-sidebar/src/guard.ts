@@ -64,6 +64,8 @@ export interface GuardHost {
   /** Pi's model registry (for Jev); undefined means no Jev. */
   registry: unknown;
   tool(name: string): Pick<ToolInfo, "name" | "description" | "annotations"> | undefined;
+  /** The tool owner's answer on the read-only-call contract (herdr list, subagent status); undefined when none answers. */
+  readOnlyCall?(name: string, input: unknown): boolean | undefined;
   /** Whether a subagent started now would run under this guard. */
   subagentsGuarded(): boolean;
   signal?: AbortSignal;
@@ -74,6 +76,8 @@ const PREFIX = "Sidebar is read-only";
 const refuse = (reason: string): Verdict => ({ allowed: false, reason: `${PREFIX}: ${reason} If the user wants a change, tell them to ask the main session.` });
 
 export async function judgeCall(toolName: string, input: unknown, host: GuardHost): Promise<Verdict> {
+  // An owner's per-call answer: only its yes opens a call; a no leaves the names and rules below to decide.
+  if (host.readOnlyCall?.(toolName, input) === true) return { allowed: true, why: "read-only call" };
   if (REFUSED_TOOLS.has(toolName)) return refuse(`the ${toolName} tool changes files or shared state, so it was not run.`);
   const info = host.tool(toolName);
   if (info?.annotations?.destructiveHint === true) return refuse(`${toolName} is marked destructive, so it was not run.`);

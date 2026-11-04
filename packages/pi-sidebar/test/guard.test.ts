@@ -54,6 +54,14 @@ describe("judgeCall", () => {
     expect(h.asked).toEqual([]);
   });
 
+  it("lets a tool's owner open its reads (herdr list), leaving its other calls refused", async () => {
+    const h = host();
+    h.host.readOnlyCall = (tool, input) => (tool === "herdr" ? (input as { action?: string }).action === "list" : undefined);
+    expect(await judgeCall("herdr", { action: "list" }, h.host)).toEqual({ allowed: true, why: "read-only call" });
+    expect((await judgeCall("herdr", { action: "send" }, h.host)).allowed).toBe(false);
+    expect(h.asked).toEqual([]);
+  });
+
   it("follows MCP-style hints", async () => {
     const h = host({ tools: { mcp__db__query: { annotations: { readOnlyHint: true } }, mcp__db__drop: { annotations: { destructiveHint: true } } } });
     expect((await judgeCall("mcp__db__query", {}, h.host)).allowed).toBe(true);

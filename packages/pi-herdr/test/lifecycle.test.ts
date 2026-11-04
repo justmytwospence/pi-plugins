@@ -6,7 +6,8 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { ACTIVITY_CHANGED, ACTIVITY_GONE, ACTIVITY_HOST, ACTIVITY_SECTION, type ActivitySection } from "../src/activity.ts";
 import { ChildrenActivity } from "../src/children-activity.ts";
 import { Children, type ChildRecord } from "../src/core/children.ts";
-import piHerdr from "../src/index.ts";
+import piHerdr, { herdrCallReadOnly } from "../src/index.ts";
+import { askReadOnlyCall } from "../src/read-only-call.ts";
 import { processInboxState } from "../src/inbox.ts";
 import { readTranscriptCheckpoint } from "../src/transcript-contract.ts";
 import { fakeCall } from "./core/fake.ts";
@@ -112,6 +113,17 @@ function inHerdr() {
   vi.stubEnv("HERDR_PANE_ID", "w1:p1");
   vi.stubEnv("PI_HERDR_PR", "0");
 }
+
+test("list, read, wait and crew status only read; the herdr tool says so on the read-only-call contract", () => {
+  for (const input of [{ action: "list" }, { action: "read", name: "a" }, { action: "wait", name: "a" }, { action: "crew" }, { action: "crew", op: "status" }, { action: "list", machine: "nuc" }]) expect(herdrCallReadOnly(input)).toBe(true);
+  for (const input of [{ action: "send", name: "a" }, { action: "spawn", task: "x" }, { action: "interrupt" }, { action: "close" }, { action: "crew", op: "claim" }, { action: "crew", op: "sync" }, { action: "crew", takeover: true }, {}]) expect(herdrCallReadOnly(input)).toBe(false);
+  inHerdr();
+  const { f } = herdr();
+  const p = fakePi();
+  piHerdr(p.pi, { call: f.call, exec: async () => ({ code: 0, stdout: "", stderr: "" }), pollMs: 60_000 });
+  expect(askReadOnlyCall(p.pi.events, "herdr", { action: "read", name: "a" })).toBe(true);
+  expect(askReadOnlyCall(p.pi.events, "herdr", { action: "send", name: "a", message: "x" })).toBe(false);
+});
 
 test("custom starts update identity without requiring a user prompt", async () => {
   const p = fakePi();

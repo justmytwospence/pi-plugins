@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import { RATE_LIMIT_ERROR, isRateLimit, setPiInvocation } from "../src/child.ts";
-import subagents, { promptGuidelines, recordedRun, resumable } from "../src/index.ts";
+import subagents, { promptGuidelines, recordedRun, resumable, subagentCallReadOnly } from "../src/index.ts";
 import { fakeJev, harness } from "./harness.ts";
 import { fakeUI, plain } from "./ui-helpers.ts";
 
@@ -215,4 +215,9 @@ test("both delegation settings list the roles; economical says when delegating p
     expect(list[1]).toMatch(/^Choosing a role/u);
     for (const role of ["explorer", "worker", "reviewer", "researcher", "writer", "planner", "general"]) expect(list[1]).toContain(`${role} `);
   }
+});
+
+test("only status and result calls read; run (the default), steer, stop and resume act", () => {
+  for (const action of ["status", "result"]) expect(subagentCallReadOnly({ action, id: "x" })).toBe(true);
+  for (const input of [{}, { action: "run", task: "x" }, { action: "steer" }, { action: "stop" }, { action: "resume" }]) expect(subagentCallReadOnly(input)).toBe(false);
 });

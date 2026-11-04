@@ -125,6 +125,7 @@ import { FLOW_CHANNEL, FLOW_ENTRY, type FlowRequest, type FlowTransitionResult }
 import { FLOW_BUSY, FLOW_RECOVERY, FLOW_TRANSITION, ROLE_MODEL_READY, ProviderFlowController } from "./provider-flows.ts";
 import { FOOTER_ACTIONS_CHANNEL, queryFooterActions, type FooterActionsRequest } from "./footer-actions.ts";
 import { installModelGuard } from "./model-guard.ts";
+import { askReadOnlyCall } from "./read-only-call.ts";
 import { settingsCycles, type SettingCycleTrigger } from "./settings-cycle.ts";
 
 /** A declined call's result (Block). */
@@ -286,6 +287,8 @@ export interface PlanContext {
   projects?: readonly string[];
   /** A tool's annotations, for its read-only hint. */
   annotations?: (tool: string) => Annotations | undefined;
+  /** The tool owner's answer on the read-only-call contract; undefined when no owner answers. */
+  readOnlyCall?: ReadOnlyCall;
   /** Whether a folder grant (`dir:read:/abs`) was made for the session or the project. */
   granted?: (key: string) => boolean;
   /** Every permission rule in force (permissions.ts): session, project and user. */
@@ -404,14 +407,21 @@ function basePlan(tool: string, input: Record<string, unknown>, cwd: string, c: 
     }
     return { kind: "allow", why: "read-only tool" };
   }
-  if (c.annotations?.(tool)?.readOnlyHint === true) return { kind: "allow", why: "read-only hint" };
+  if (declaredRead(tool, input, c.annotations, c.readOnlyCall)) return { kind: "allow", why: "read-only hint" };
   if (allowing(rules, call)) return { kind: "allow", why: ALLOWED_BY_RULE };
   return { kind: "judge", args: clip(JSON.stringify(input), 6_000), key: `tool:${tool}`, offer: rulesOffer(suggest(call)) };
 }
 
+/** Whether a call reads by its tool's own declaration: its owner's answer for this input, else its static hint. */
+export type ReadOnlyCall = (tool: string, input: Record<string, unknown>) => boolean | undefined;
+function declaredRead(tool: string, input: Record<string, unknown>, annotations?: (tool: string) => Annotations | undefined, readOnlyCall?: ReadOnlyCall): boolean {
+  return readOnlyCall?.(tool, input) ?? annotations?.(tool)?.readOnlyHint === true;
+}
+
 /**
  * Whether a call only reads, as chat and plan workflows count it: the allow list, Pi's reading
- * tools, read-only shell commands and tools with a read-only hint. Holds (credentials, the
+ * tools, read-only shell commands, calls whose tool's owner says they only read (herdr list,
+ * subagent status; see read-only-call.ts) and tools with a read-only hint. Holds (credentials, the
  * directory policy) and rules do not change it; they belong to the approval setting.
  */
 export function onlyReads(
@@ -419,6 +429,7 @@ export function onlyReads(
   input: Record<string, unknown>,
   config: Pick<GateConfig, "allowTools" | "readOnlyCommands">,
   annotations?: (tool: string) => Annotations | undefined,
+  readOnlyCall?: ReadOnlyCall,
 ): boolean {
   if (config.allowTools.includes(tool) || BUILTIN_READ.has(tool)) return true;
   if (SHELL_TOOLS.has(tool)) {
@@ -426,7 +437,7 @@ export function onlyReads(
     const command = String(input.command ?? "");
     return isReadOnlyBash(command, config.readOnlyCommands) || isReadOnlyBash(command, config.readOnlyCommands, { expansions: true });
   }
-  return annotations?.(tool)?.readOnlyHint === true;
+  return declaredRead(tool, input, annotations, readOnlyCall);
 }
 
 /** The local script a shell call runs, for the judge to read (see `scriptFor`); undefined for other tools. */
@@ -538,6 +549,7 @@ export default function toolGate(pi: ExtensionAPI) {
     const info = pi.getAllTools().find((t) => t.name === tool) as { annotations?: Annotations } | undefined;
     return info?.annotations;
   };
+  const readOnlyCall: ReadOnlyCall = (tool, input) => askReadOnlyCall(pi.events, tool, input);
 
   const keyConfig = loadConfig("tool-gate", DEFAULT_CONFIG, process.cwd());
   const shortcut = (typeof keyConfig.workflowShortcut === "string" ? keyConfig.workflowShortcut
@@ -1009,6 +1021,7 @@ export default function toolGate(pi: ExtensionAPI) {
       ignored: shell ? await ignoredByGit(secretGitAdds(command, dir)) : undefined,
       projects: checksPaths ? await projectOf(cwd) : undefined,
       annotations,
+      readOnlyCall,
       granted,
       rules: allRules,
       root: (await projectOf(cwd))[0],
@@ -1452,7 +1465,7 @@ export default function toolGate(pi: ExtensionAPI) {
         }
         // Chat lets only reads run (an allow rule does not make a command read-only); plan lets only
         // read-only shell commands run, and leaves other tools to the approval setting.
-        const reads = onlyReads(tool, input, config, annotations);
+        const reads = onlyReads(tool, input, config, annotations, readOnlyCall);
         if (current === "chat" && !reads) {
           return {
             block: true,

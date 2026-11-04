@@ -20,6 +20,7 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import type { MainSnapshot, MainState } from "./main-state.ts";
+import { askReadOnlyCall } from "./read-only-call.ts";
 import { GUARD_ENV, judgeCall, REFUSED_TOOLS, SUBAGENT_ENV_CHANNEL, type SubagentEnvRequest } from "./guard.ts";
 import { inertPayload, isStatusBlock, placeSideBreakpoint, requestedCacheTtlMs, splicePayload, SUPPORTED_APIS } from "./splice.ts";
 import { compactExchange, EXCHANGE_ENTRY } from "./thread.ts";
@@ -447,6 +448,7 @@ export class SidebarAgent {
           cwd: cctx.cwd,
           registry: this.main.ctx?.modelRegistry ?? cctx.modelRegistry,
           tool: (name) => cpi.getAllTools().find((tool) => tool.name === name),
+          readOnlyCall: (name, input) => askReadOnlyCall(cpi.events, name, input),
           subagentsGuarded: () => subagentsGuarded(cpi.events),
           ...(cctx.signal ? { signal: cctx.signal } : {}),
         });

@@ -39,6 +39,7 @@ import { elapsedMs, formatCount, formatElapsed, modelSourceMark, shortModel } fr
 import { RunsWidget, WIDGET_MODES, type WidgetMode } from "./ui/widget.ts";
 import { transcriptCheckpoint } from "./transcript-contract.ts";
 import { WORKING_MESSAGE_EVENT } from "./working-message.ts";
+import { declareReadOnlyCalls } from "./read-only-call.ts";
 import { onWebCommand, section, table as webTable, text as webText } from "./switchyard-web.ts";
 
 const finalReport = <T extends { details?: object }>(value: T, id: string) =>
@@ -409,6 +410,11 @@ export function savedOutput(run: Run): string {
 /** Whether a run can be resumed: stopped, lost, or failed on the account's rate limit. */
 export function resumable(state: Pick<ChildState, "status" | "error">): boolean {
   return state.status === "stopped" || state.status === "lost" || (state.status === "failed" && isRateLimit(state.error));
+}
+
+/** Whether a subagent call only reads: action=status or result (run is the default action). */
+export function subagentCallReadOnly(input: Record<string, unknown>): boolean {
+  return input.action === "status" || input.action === "result";
 }
 
 /** What `result` and `status` add for a run that did not finish. */
@@ -1849,6 +1855,8 @@ export default function subagents(pi: ExtensionAPI) {
     });
   };
   registerSubagentTool(delegationOf(config));
+  // status and result only read run records; run, steer, stop and resume start or control agents.
+  declareReadOnlyCalls(pi.events, "subagent", subagentCallReadOnly);
 
   // Switchyard's web app shows the runs and stats as views instead of the TUI list.
   onWebCommand(pi, ["subagents"], (_n, args) => args === "" || /^stats(\s+(all|--all))?$/u.test(args), (_n, args, ctx) => {
