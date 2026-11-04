@@ -1,6 +1,6 @@
 {
   "name": "@justmytwospence/pi-subscription-usage",
-  "version": "0.1.17",
+  "version": "0.1.18",
   "description": "Read-only subscription quota parsers and collectors for Pi.",
   "type": "module",
   "private": true,
