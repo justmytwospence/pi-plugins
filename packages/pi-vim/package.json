@@ -1,6 +1,6 @@
 {
   "name": "@justmytwospence/pi-vim",
-  "version": "0.1.13",
+  "version": "0.1.14",
   "description": "Vim modal editing for Pi's editor, with an optional editor factory other suite components use for embedded editors.",
   "type": "module",
   "license": "MIT",
