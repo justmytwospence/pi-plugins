@@ -682,3 +682,81 @@ test("Tab in a subagent's session switches to the next one; back in main, the li
   expect(ui.render("subagents-fleet").join("\n")).toMatch(/● Fix config/u);
   fleet.dispose();
 });
+
+const click = (component: { handleMouse(e: unknown): unknown }, y: number, type = "click", extra: Record<string, unknown> = {}) =>
+  component.handleMouse({ type, button: "left", x: 3, y, clickCount: 1, screenX: 0, screenY: 0, width: 100, height: 4, shift: false, alt: false, ctrl: false, ...extra });
+
+test("clicking a run row opens its conversation; main, blanks, modifiers and a busy fleet do nothing", async () => {
+  const { ui, fleet, runs } = setup();
+  const lines = ui.render("subagents-fleet");
+  expect(lines[0]).toMatch(/^ . main/u);
+  const component = ui.widgets.get("subagents-fleet")!.component;
+  // The spacer and modified clicks are not taken.
+  expect(click(component, lines.length - 1, "press")).toBeUndefined();
+  expect(click(component, 1, "press", { ctrl: true })).toBeUndefined();
+  // Main: taken, but opens nothing.
+  expect(click(component, 0, "press")).toEqual({ handled: true, render: false });
+  expect(click(component, 0)).toEqual({ handled: true });
+  expect(ui.customs).toHaveLength(0);
+  // A run's row opens its conversation; another click while it is open does nothing.
+  expect(click(component, 2)).toEqual({ handled: true });
+  expect(ui.customs).toHaveLength(1);
+  expect(ui.customs[0]!.component.current).toBe(runs[1]);
+  expect(click(component, 1)).toBeUndefined();
+  ui.customs[0]!.component.handleInput(KEY.escape);
+  await settled();
+  expect(ui.customs).toHaveLength(0);
+  fleet.dispose();
+});
+
+test("a click targets the row it was drawn for, not whatever took its place", () => {
+  const { ui, fleet, runs } = setup();
+  ui.render("subagents-fleet");
+  const component = ui.widgets.get("subagents-fleet")!.component;
+  // Find config's row; once it leaves, a click there opens nothing, not the run drawn there next.
+  runs.splice(0, 1);
+  expect(click(component, 1)).toEqual({ handled: true });
+  expect(ui.customs).toHaveLength(0);
+  fleet.dispose();
+});
+
+test("clicking a pill opens its dialog; clicking a notebook row opens it", async () => {
+  const ui = fakeUI();
+  normalFocus(ui);
+  let dialogs = 0;
+  const opened: string[] = [];
+  const rows = [{ key: "a", label: "a.py", detail: ":2718 · idle", status: "done" as const, stats: "", startedAt: 0 }];
+  const notebooks = { id: "marimo", title: "notebooks", entries: () => rows, open: async (key: string) => void opened.push(key), pill: () => ({ label: "", rows }) };
+  const tasks = { id: "bg", title: "tasks", entries: () => [], open: async () => undefined, pill: () => ({ label: "2 tasks" }), openDialog: async () => void dialogs++ };
+  const fleet = new FleetView({ runs: () => [], enabled: () => true, actions: () => ({}), sections: () => [notebooks, tasks] });
+  fleet.setUI(ui);
+  fleet.update();
+  expect(ui.render("subagents-fleet")).toEqual([expect.stringMatching(/^ ○ a\.py/u), " ○ 2 tasks", ""]);
+  const component = ui.widgets.get("subagents-fleet")!.component;
+  expect(click(component, 0)).toEqual({ handled: true });
+  await new Promise((r) => setTimeout(r, 0));
+  expect(opened).toEqual(["a"]);
+  expect(click(component, 1)).toEqual({ handled: true });
+  await new Promise((r) => setTimeout(r, 0));
+  expect(dialogs).toBe(1);
+  fleet.dispose();
+});
+
+test("in a subagent's session, clicking the list switches sessions, and main closes the view", async () => {
+  const { ui, fleet, runs } = setup();
+  const component = ui.widgets.get("subagents-fleet")!.component;
+  ui.render("subagents-fleet");
+  click(component, 1);
+  const view = ui.customs[0]!.component;
+  expect(view.current).toBe(runs[0]);
+  const lines: string[] = view.render(80);
+  const row = (re: RegExp) => lines.findIndex((l) => re.test(l));
+  expect(view.handleMouse({ type: "press", button: "left", x: 3, y: row(/Fix config/u), shift: false, alt: false, ctrl: false })).toEqual({ handled: true, render: false });
+  expect(view.handleMouse({ type: "click", button: "left", x: 3, y: row(/Fix config/u), clickCount: 1, shift: false, alt: false, ctrl: false })).toEqual({ handled: true });
+  expect(view.current).toBe(runs[1]);
+  const again: string[] = view.render(80);
+  view.handleMouse({ type: "click", button: "left", x: 3, y: again.findIndex((l) => /^ . main/u.test(l)), clickCount: 1, shift: false, alt: false, ctrl: false });
+  await settled();
+  expect(ui.customs).toHaveLength(0);
+  fleet.dispose();
+});

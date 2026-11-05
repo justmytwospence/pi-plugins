@@ -6,12 +6,12 @@
 // at an empty prompt moves into it; ↑/↓ or k/j select; Tab and Ctrl+J/Ctrl+K cycle through main too; Enter or l opens the selected run's
 // conversation viewer (Esc there comes back here) or the pill's dialog; x twice stops the selected
 // run, x on an ended run dismisses it; b moves a foreground run to the background; Esc, h, or ↑/k
-// past the first row, returns to the prompt. A run whose viewer is open stays until it closes.
+// past the first row, returns to the prompt. In fullscreen mode a click on a row opens it, as Enter does. A run whose viewer is open stays until it closes.
 // Keys go through `onTerminalInput` before the editor. Letter shortcuts require positively
 // identified idle Normal mode; native and Insert editors keep their text/edit keys. A modal state
 // change, autocomplete or another focused surface releases the virtual selection immediately.
 // Adapted from tintinweb/pi-subagents (MIT): https://github.com/tintinweb/pi-subagents
-import { type TUI, isKeyRelease, matchesKey, truncateToWidth } from "@earendil-works/pi-tui";
+import { type TUI, type TuiMouseEvent, type TuiMouseEventResult, isKeyRelease, matchesKey, truncateToWidth } from "@earendil-works/pi-tui";
 import { type ActivityEntry, type ActivityPill, type ActivitySection, captureMainEditor, focusedComponent, leavesPromptDown, mainEditorFocused, readEditorMode, stoppable as rowStoppable } from "../activity.ts";
 import type { Run } from "../run.ts";
 import { runLabel } from "../label.ts";
@@ -102,9 +102,19 @@ function taskRows(prefix: string, identity: string, metadata: string, width: num
   return [rightAlign(prefix + identity, metadata, width)];
 }
 
-export function renderFleet({ roster, selected, current, active, stopArmed, canBackground, normalKeys = true, note, now, width, theme }: FleetFrame): string[] {
-  if (!roster.length && !note) return [];
+export function renderFleet(frame: FleetFrame): string[] {
+  return renderFleetRows(frame).lines;
+}
+
+/** The list's lines and, for each, the roster index a click on it opens (undefined for hints, scroll markers, the note and the spacer). */
+export function renderFleetRows({ roster, selected, current, active, stopArmed, canBackground, normalKeys = true, note, now, width, theme }: FleetFrame): { lines: string[]; targets: (number | undefined)[] } {
+  if (!roster.length && !note) return { lines: [], targets: [] };
   const lines: string[] = [];
+  const targets: (number | undefined)[] = [];
+  const add = (rows: string[], target?: number) => {
+    lines.push(...rows);
+    targets.push(...rows.map(() => target));
+  };
   const runs = roster.flatMap((e) => (e.kind === "run" ? [e.run] : []));
   const pills = roster.flatMap((e, i) => (e.kind === "pill" || e.kind === "row" ? [{ e, i }] : []));
   const sel = Math.min(selected, Math.max(0, roster.length - 1));
@@ -125,15 +135,15 @@ export function renderFleet({ roster, selected, current, active, stopArmed, canB
               "dim",
               `${normalKeys ? "j/k select · l/enter view" : "↑/↓ select · enter view"}${stoppable ? " · x stop" : ""}${dismissable ? " · x dismiss" : ""}${stoppable && canBackground ? " · b background" : ""} · ${normalKeys ? "h/esc" : "esc"} back`,
             );
-    if (hint !== undefined) lines.push(truncateToWidth(` ${hint}`, width));
+    if (hint !== undefined) add([truncateToWidth(` ${hint}`, width)]);
     // Bold for the selected row and for the session shown now, as for the runs below.
     const mainOn = (active && sel === 0) || current === 0;
-    lines.push(truncateToWidth(` ${bullet(0)} ${mainOn ? theme.bold(theme.fg("text", "main")) : theme.fg("muted", "main")}`, width));
+    add([truncateToWidth(` ${bullet(0)} ${mainOn ? theme.bold(theme.fg("text", "main")) : theme.fg("muted", "main")}`, width)], 0);
     // Runs are roster rows 1..runs.length; scroll so the selected one shows.
     const visible = Math.min(MAX_ROWS, runs.length);
     const selRun = chosen?.kind === "run" ? sel - 1 : current !== undefined && roster[current]?.kind === "run" ? current - 1 : 0;
     const start = selRun < visible ? 0 : selRun - visible + 1;
-    if (start > 0) lines.push(rightAlign("", theme.fg("dim", `↑ ${start} more`), width));
+    if (start > 0) add([rightAlign("", theme.fg("dim", `↑ ${start} more`), width)]);
     for (let i = start; i < start + visible; i++) {
       const run = runs[i];
       if (!run) continue;
@@ -143,10 +153,10 @@ export function renderFleet({ roster, selected, current, active, stopArmed, canB
       const cost = formatCost(run.state.usage.cost.total);
       const stats = `${formatElapsed(elapsedMs(run, now))} · ↓ ${formatCount(displayTokens(run.state.usage))} tokens${cost ? ` · ${cost}` : ""}`;
       const done = run.state.status === "running" ? "" : `${statusIcon(run.state.status, theme)} `;
-      lines.push(...taskRows(prefix, identity, done + theme.fg(on ? "text" : "dim", stats), width));
+      add(taskRows(prefix, identity, done + theme.fg(on ? "text" : "dim", stats), width), i + 1);
     }
     const below = runs.length - (start + visible);
-    if (below > 0) lines.push(rightAlign("", theme.fg("dim", `↓ ${below} more`), width));
+    if (below > 0) add([rightAlign("", theme.fg("dim", `↓ ${below} more`), width)]);
   }
   // The pills: Claude Code's background-tasks indicator, and the rows (notebooks) some of them carry.
   for (const { e, i } of pills) {
@@ -158,7 +168,7 @@ export function renderFleet({ roster, selected, current, active, stopArmed, canB
       // How it ended goes before the stats, as for a run: `✗` failed, `■` stopped.
       const end = e.row.status === "failed" ? `${theme.fg("error", "✗")} ` : e.row.status === "stopped" ? `${theme.fg("warning", "■")} ` : "";
       const tail = armed ? theme.fg("error", "x again to stop") : e.row.line ? "" : theme.fg(on ? "text" : "dim", e.row.stats);
-      lines.push(...taskRows(lead, e.row.line ? e.row.line(theme) : `${name}${e.row.detail ? `  ${theme.fg("dim", e.row.detail)}` : ""}`, `${end}${tail}`.trimEnd(), width));
+      add(taskRows(lead, e.row.line ? e.row.line(theme) : `${name}${e.row.detail ? `  ${theme.fg("dim", e.row.detail)}` : ""}`, `${end}${tail}`.trimEnd(), width), i);
       continue;
     }
     if (e.kind !== "pill") continue;
@@ -166,17 +176,21 @@ export function renderFleet({ roster, selected, current, active, stopArmed, canB
     const label = ` ${bullet(i)} ${on ? theme.bold(theme.fg("text", e.pill.label)) : theme.fg("muted", e.pill.label)}`;
     const alert = e.pill.alert ? ` ${theme.fg("dim", "·")} ${theme.fg("error", e.pill.alert)}` : "";
     const hint = on && !runs.length && !pills.some((p) => p.e.kind === "row") ? theme.fg("dim", normalKeys ? "  l/enter view · h/esc back" : "  enter view · esc back") : "";
-    lines.push(truncateToWidth(`${label}${alert}${hint}`, width));
+    add([truncateToWidth(`${label}${alert}${hint}`, width)], i);
   }
-  if (note) lines.push(truncateToWidth(` ${theme.fg("dim", note)}`, width));
+  if (note) add([truncateToWidth(` ${theme.fg("dim", note)}`, width)]);
   // Pi puts the footer right under below-editor widgets.
-  lines.push("");
-  return lines;
+  add([""]);
+  return { lines, targets };
 }
 
 /** The part of `ctx.ui` FleetView uses. */
 export interface FleetUI extends ViewerUI {
-  setWidget(key: string, content: ((tui: TUI, theme: any) => { render(width: number): string[]; invalidate(): void }) | undefined, options?: { placement?: "aboveEditor" | "belowEditor" }): void;
+  setWidget(
+    key: string,
+    content: ((tui: TUI, theme: any) => { render(width: number): string[]; invalidate(): void; handleMouse?(e: TuiMouseEvent): TuiMouseEventResult | undefined }) | undefined,
+    options?: { placement?: "aboveEditor" | "belowEditor" },
+  ): void;
   onTerminalInput(handler: (data: string) => { consume?: boolean; data?: string } | undefined): () => void;
   getEditorText(): string;
   readonly theme?: Theme;
@@ -353,6 +367,8 @@ export class FleetView {
       return;
     }
     const ui = this.ui;
+    // The entry each rendered line belongs to, by identity, so a click after the roster changed opens what was clicked or nothing.
+    let targets: (string | undefined)[] = [];
     ui.setWidget(
       FLEET_KEY,
       (tui, factoryTheme: Theme) => {
@@ -367,8 +383,11 @@ export class FleetView {
             const stopArmed = this.stopArmed && (entry?.kind === "run" || entry?.kind === "row") && entryKey(entry) === this.armedKey && targetOf(entry) === this.armedTarget;
             // Below the main prompt, main is the session shown.
             const current = roster[0]?.kind === "main" ? 0 : undefined;
-            return renderFleet({ roster, selected: this.selected, current, active: this.active, stopArmed, canBackground, normalKeys: readEditorMode(this.focused())?.state === "normal", note: this.source.note?.(now), now, width, theme: ui.theme ?? factoryTheme });
+            const panel = renderFleetRows({ roster, selected: this.selected, current, active: this.active, stopArmed, canBackground, normalKeys: readEditorMode(this.focused())?.state === "normal", note: this.source.note?.(now), now, width, theme: ui.theme ?? factoryTheme });
+            targets = panel.targets.map((i) => (i === undefined || !roster[i] ? undefined : entryKey(roster[i] as FleetEntry)));
+            return panel.lines;
           },
+          handleMouse: (e: TuiMouseEvent) => (this.ui === ui ? this.handleMouse(e, targets[e.y]) : undefined),
           invalidate: () => undefined,
         };
       },
@@ -489,6 +508,29 @@ export class FleetView {
     }
     this.update();
     return { consume: true };
+  }
+
+  /**
+   * A left click on a row opens it, as Enter does when it is selected: a run's conversation, a
+   * pill's dialog, a notebook row's view; `main` just returns to the prompt. Pi passes mouse
+   * events to widgets only in fullscreen mode, and turns a press and release into a click only
+   * for the component that took the press.
+   */
+  private handleMouse(e: TuiMouseEvent, key: string | undefined): TuiMouseEventResult | undefined {
+    if (!key || e.button !== "left" || e.shift || e.alt || e.ctrl) return undefined;
+    if (!this.ui || !this.source.enabled() || this.prompts.blocked || this.viewer || !this.editorFocused()) return undefined;
+    if (e.type === "press") return { handled: true, render: false };
+    if (e.type !== "click") return undefined;
+    const roster = this.roster();
+    const index = roster.findIndex((entry) => entryKey(entry) === key);
+    const entry = roster[index];
+    if (!entry) return { handled: true };
+    this.stopArmed = false;
+    this.active = false;
+    this.select(roster, entry.kind === "main" ? 0 : index);
+    if (entry.kind !== "main") this.open(entry);
+    this.update();
+    return { handled: true };
   }
 
   /** Input callbacks cannot await another source; contain synchronous and asynchronous failures. */

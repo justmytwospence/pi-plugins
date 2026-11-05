@@ -15,7 +15,7 @@ import { type EditorModeContext, type EmbeddedEditor, type EditorFactoryOptions,
 import { discoverFamily, type FamilyService } from "../family-contract.ts";
 import { runLabel } from "../label.ts";
 import type { Run } from "../run.ts";
-import { type FleetEntry, fleetEntryKey, fleetRoster, fleetStopTarget, renderFleet } from "./fleet.ts";
+import { type FleetEntry, fleetEntryKey, fleetRoster, fleetStopTarget, renderFleetRows } from "./fleet.ts";
 import { mountViewerOverlay, type ViewerPromptState } from "./viewer-overlay.ts";
 import { acquireViewportInput } from "./viewport-input.ts";
 import { type Theme, formatCost, formatCount, statusIcon } from "./format.ts";
@@ -135,6 +135,8 @@ export class SessionView implements Component, Focusable {
   private scrollTop = 0;
   private follow = true;
   private lastViewport = 1;
+  /** The session list's rows in the last render: where they start, and the entry each one opens. */
+  private listRows: { top: number; keys: (string | undefined)[] } | undefined;
   private lastContent = 0;
   private readonly timer: ReturnType<typeof setInterval>;
 
@@ -487,6 +489,19 @@ export class SessionView implements Component, Focusable {
     this.tui.requestRender();
   }
 
+  /** A click on a list row: switch to that session (main closes the view), or open a pill or notebook row, as Enter does. */
+  private clickList(key: string): TuiMouseEventResult {
+    const roster = this.roster();
+    const entry = roster.find((e) => fleetEntryKey(e) === key);
+    if (!entry) return { handled: true };
+    this.listStopArmed = undefined;
+    if (this.listActive) this.leaveList();
+    if (entry.kind === "pill" || entry.kind === "row") invoke(() => this.openSection?.(entry));
+    else this.switchTo(entry.kind === "run" ? entry.run : undefined);
+    this.tui.requestRender();
+    return { handled: true };
+  }
+
   // ---- keys ----------------------------------------------------------------------------------------
 
   handleInput(data: string): void {
@@ -584,6 +599,11 @@ export class SessionView implements Component, Focusable {
       this.scrollTo("bottom");
       return { handled: true };
     }
+    const listKey = this.listRows?.keys[event.y - this.listRows.top];
+    if (listKey && event.button === "left" && !event.shift && !event.alt && !event.ctrl) {
+      if (event.type === "press") return { handled: true, render: false };
+      if (event.type === "click") return this.clickList(listKey);
+    }
     if (event.y < this.lastViewport) {
       const top = this.follow ? Math.max(0, this.lastContent - this.lastViewport) : this.scrollTop;
       return this.chat.handleMouse({ ...event, y: event.y + top }) ?? undefined;
@@ -663,6 +683,8 @@ export class SessionView implements Component, Focusable {
     // The run ended while shown: no more steering (an unsent draft is kept).
     if (this.composer && !this.canSteer()) this.closeComposer();
     const dock: string[] = [];
+    let listTop = -1;
+    let listKeys: (string | undefined)[] = [];
     // Pi's working row, then queued messages, then the blank row over the editor.
     if (this.running()) dock.push(...safeRender(this.loader, width));
     const queued = this.run.conversation.queued;
@@ -687,13 +709,17 @@ export class SessionView implements Component, Focusable {
       const selected = this.listActive ? this.listSelected : current;
       const entry = roster[selected];
       const canBackground = entry?.kind === "run" && Boolean(safe(() => this.actions(entry.run).canBackground?.()));
-      dock.push(...renderFleet({ roster, selected, current, active: this.listActive, stopArmed: Boolean(this.listStopArmed), canBackground, normalKeys: true, now: Date.now(), width, theme: th }));
+      const list = renderFleetRows({ roster, selected, current, active: this.listActive, stopArmed: Boolean(this.listStopArmed), canBackground, normalKeys: true, now: Date.now(), width, theme: th });
+      listTop = dock.length;
+      listKeys = list.targets.map((i) => (i === undefined || !roster[i] ? undefined : fleetEntryKey(roster[i]!)));
+      dock.push(...list.lines);
     } else dock.push("");
     dock.push(...this.footerLines(width));
 
     const viewport = Math.max(1, rows - dock.length);
     const content = this.chat.empty ? [th.fg("dim", " (waiting for the first message…)")] : safe(() => this.chat.render(width)) ?? [];
     this.lastViewport = viewport;
+    this.listRows = listTop >= 0 ? { top: viewport + listTop, keys: listKeys } : undefined;
     this.lastContent = content.length;
     const max = Math.max(0, content.length - viewport);
     if (this.follow) this.scrollTop = max;

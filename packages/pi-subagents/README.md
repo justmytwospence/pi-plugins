@@ -89,7 +89,7 @@ Sizes are capped: 4,000 characters of task, 12,000 of output and 8,000 of transc
 
 ### FleetView
 
-Claude Code's subagent panel, below the prompt: `main` and every running subagent with elapsed time, tokens and cost, then the pills of other sources it hosts (see below). A run that succeeds leaves the list at once, and a dim `/subagents to see subagents` (`/tasks to see subagents` when it hosts pi-bg) shows for 30 seconds after an async run succeeds. A failed or stopped run stays until your next typed message (a message another extension sends does not count), or until `x` dismisses it. A run whose session is open stays until you leave it. Selection and stop arming follow the row, not its position.
+Claude Code's subagent panel, below the prompt: `main` and every running subagent with elapsed time, tokens and cost, then the pills of other sources it hosts (see below). A run that succeeds leaves the list at once, and a dim `/subagents to see subagents` (`/tasks to see subagents` when it hosts pi-bg) shows for 30 seconds after an async run succeeds. A failed or stopped run stays until your next typed message (a message another extension sends does not count), or until `x` dismisses it. A run whose session is open stays until you leave it. Selection and stop arming follow the row, not its position. When Pi passes mouse events to widgets (fullscreen mode), clicking a row does what Enter does on it: a run opens its session, a pill its dialog, a notebook row its view; in a subagent's session, clicking a row in its list switches to that session, and `main` goes back.
 
 | key | action |
 |---|---|
