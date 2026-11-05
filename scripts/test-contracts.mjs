@@ -34,7 +34,7 @@ const identical = [
   ['pi-plan-mode','pi-compact-plan'].map(p => `packages/${p}/src/herdr-blocked.ts`),
   ['pi-plan-mode','pi-compact-plan'].map(p => `packages/${p}/src/review-card.ts`),
   ['packages/pi-cc-render/src/renderer/tool/bash-layout.ts','packages/pi-tool-gate/src/bash-layout.ts'],
-  ['pi-tool-gate','pi-herdr','pi-subagents','pi-sidebar'].map(p => `packages/${p}/src/read-only-call.ts`),
+  ['pi-tool-gate','pi-herdr','pi-subagents','pi-sidebar','pi-worktree'].map(p => `packages/${p}/src/read-only-call.ts`),
 ];
 for (const group of identical) {
   const expected = readFileSync(resolve(root, group[0]), 'utf8');
