@@ -9,13 +9,15 @@ test("Herdr guidance separates report-back delegation from persistent handoffs a
   vi.stubEnv("HERDR_ENV", "1");
   vi.stubEnv("HERDR_SOCKET_PATH", "/unused/herdr.sock");
   vi.stubEnv("HERDR_PANE_ID", "w1:p1");
+  const channels: string[] = [];
   let registered: Parameters<ExtensionAPI["registerTool"]>[0] | undefined;
   piHerdr({
-    events: { on() {} },
+    events: { on(channel: string) { channels.push(channel); } },
     on() {},
     registerTool(tool: Parameters<ExtensionAPI["registerTool"]>[0]) { registered = tool; },
   } as unknown as ExtensionAPI);
   expect(registered?.name).toBe("herdr");
+  expect(channels).toContain("worktree:place");
   expect(registered?.description).toContain("persistent, human-led");
   expect(registered?.description).toContain("use a headless subagent instead");
   expect(registered?.description).toContain("even for long or multi-step tasks");
@@ -27,10 +29,9 @@ test("Herdr guidance separates report-back delegation from persistent handoffs a
   expect(guidelines).toContain("where=split only for deliberate side-by-side");
   expect(guidelines).toContain("otherwise ask before creating one");
   expect(guidelines).toContain("already open");
-  expect(guidelines).toContain("feature/PR worktree request normally keeps this session");
-  expect(guidelines).toContain("move its existing Herdr pane");
-  expect(guidelines).toContain("rather than spawning a replacement");
-  expect(guidelines).toContain("moving layout does not switch Pi's working directory or checkout");
+  expect(guidelines).toContain("pi-worktree's `worktree` tool");
+  expect(guidelines).toContain("spawn where=worktree starts a separate session");
+  expect(guidelines).not.toContain("move its existing Herdr pane");
   expect(guidelines).not.toContain("Use herdr_child when the work is long or open-ended");
   // Messaging any agent goes through the tool, not bash `herdr agent prompt`.
   expect(guidelines).toContain("not `herdr agent prompt` in bash");

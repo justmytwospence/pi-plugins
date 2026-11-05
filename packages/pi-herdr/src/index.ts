@@ -62,6 +62,8 @@ import { withIntents } from "./intent.ts";
 import { SelfLocation, type LocationDependencies } from "./location.ts";
 import { PI_CHILD } from "./session.ts";
 import { registerTreeFork } from "./tree-fork.ts";
+import { PLACE_EVENT, type PlaceEvent } from "./place-contract.ts";
+import { placeSession } from "./worktree-place.ts";
 import { blockedSummary, type SummaryRegistry, turnSummary } from "./summary.ts";
 
 const TOOL = "herdr";
@@ -733,6 +735,19 @@ export default function piHerdr(pi: ExtensionAPI, dependencies: HerdrDependencie
   pi.events.on("herdr:probe", (e) => {
     if (active) (e as { reply?: () => void })?.reply?.();
   });
+  pi.events.on(PLACE_EVENT, (e) => {
+    const ev = e as PlaceEvent | undefined;
+    if (!active || !branchCurrent() || typeof ev?.claim !== "function" || !ev.claim("pi-herdr") || !ev.request) return;
+    const epoch = generation;
+    const revision = location.revision;
+    void placeSession({
+      call,
+      selfPane: async () => (await location.require()).paneId,
+      uniqueName: (w) => children.uniqueName(w),
+      isCurrent: () => active && epoch === generation && revision === location.revision && branchCurrent(),
+      ...(dependencies.pollMs ? { pollMs: dependencies.pollMs } : {}),
+    }, ev.request).then((r) => ev.done(r), (err) => ev.done({ ok: false, error: err instanceof Error ? err.message : String(err) }));
+  });
 
   const restoreBranch = (ctx: ExtensionContext) => {
     lastCtx = ctx;
@@ -1088,7 +1103,7 @@ export default function piHerdr(pi: ExtensionAPI, dependencies: HerdrDependencie
       "Herdr: talk to any agent in herdr (on this machine, or on a saved herdr machine with `machine`) and start persistent, human-led pi sessions (children) for an explicit interactive-session request or a clear handoff to the user. Children are not for delegated work whose purpose is to report back to this session: use a headless subagent instead, even for long or multi-step tasks. action=list shows the agents. send (name, message; delivery when the agent is working) messages any agent; a pi with pi-herdr gets it through its inbox, which never touches the draft in its editor, and the result says whether it started a turn, was steered, queued, held (a dialog is open, or its user is typing) or deferred (it has had many messages from you without its user answering). With await_reply, any agent's answer to that message arrives as a message when its turn ends, like a child's; `bg_wait herdr:<name>` waits for it, alone or with others. send with `names` or `cwd_prefix` instead of `name` broadcasts to several agents at once, with one result line each. read (name) returns its last reply or its screen; wait (name) blocks until its turn ends, then reads it (prefer await_reply). spawn takes `task` (plus optional name, where, branch, model, thinking, focus): a tab shares this checkout in the existing space; a split is for side-by-side interaction; a worktree gets its own space and requires a user-requested independent branch/checkout. A child's replies arrive as messages, so do not poll or wait on it. interrupt and close act on children only. crew (op status|claim|sync) coordinates this repository's worktree sessions from this session: status shows each one's state, PR and last turn; sync opens every worktree's space, resumes its pi and makes it your child; standing rules for all of them go in the directives file it names.",
     promptSnippet: "Message, read and wait on any herdr agent; start persistent human-led pi sessions in herdr for interactive requests or user handoffs, not report-back subagents",
     promptGuidelines: [
-      "A feature/PR worktree request normally keeps this session: move its existing Herdr pane into the worktree's grouped child space rather than spawning a replacement and leaving an idle coordinator. pi-herdr follows pane relocation automatically; moving layout does not switch Pi's working directory or checkout.",
+      "Moving this conversation into a worktree (a user-requested feature or PR checkout) is pi-worktree's `worktree` tool when it is available, not spawn: spawn where=worktree starts a separate session. Moving a Herdr pane by hand does not change Pi's working directory or checkout.",
       "Start a herdr child (herdr action=spawn) only for an explicit interactive-session request or a clear persistent, human-led handoff that the user will continue independently. Duration, complexity, the user possibly wanting to watch, and a child's ability to report back are not reasons to use one instead of a headless subagent.",
       "For an interactive handoff sharing the current checkout and branch, use where=tab in the existing Herdr space. Tabs and splits share files; do not treat them as isolated parallel editors. Use where=split only for deliberate side-by-side interaction or when requested, and preserve focus unless asked to switch.",
       "Use where=worktree for an independent branch/checkout only when the user requests a worktree or branch isolation; otherwise ask before creating one. It opens the checkout in its own Herdr space (or adds a tab there if already open). Do not create a new space or worktree merely because work is delegated, long, or parallel.",

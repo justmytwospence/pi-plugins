@@ -64,6 +64,12 @@ Workspace metadata is recomputed for the destination, not copied. The departed w
 
 This is automatic handling of an external move, not a new UI, command or `herdr` move action, and it does not migrate the checkout or cwd. A grouped worktree space can contain the existing session; spawning a child instead creates a separate session.
 
+To carry this conversation into a worktree, use pi-worktree (`/worktree new <branch>` or its `worktree` tool): it starts the forked session in the worktree's space through pi-herdr and closes this pane.
+
+### Worktree placement
+
+pi-herdr answers pi-worktree's `worktree:place` event on Pi's event bus. For a move it opens the worktree's grouped space with `worktree.open` (or adds a tab if the space is already open; the main checkout uses its own space, else a new one), starts `pi --session <fork>` there with the continuation prompt, and then closes this session's pane. For an open it resumes the worktree's latest session (`pi --continue`). A startup dialog or failure leaves this pane open and reports the session file.
+
 ## The `herdr` tool
 
 One tool for every agent in Herdr: this machine's, or a saved Herdr machine's with `machine` (the label `herdr --machine` takes). `name` is an agent's Herdr name or pane id; this session's children go by their names.
