@@ -116,7 +116,7 @@ import {
   modeStatus,
   PLAN_PROVIDER,
 } from "./modes.ts";
-import { answerSubagentEnv, inheritedModes, SUBAGENT_ENV_CHANNEL, subagentEnv } from "./subagent-env.ts";
+import { answerSubagentEnv, inheritedModes, SUBAGENT_ENV_CHANNEL, subagentEnv, subagentEnvHonored } from "./subagent-env.ts";
 import { loadRules } from "./rules.ts";
 import { agentBeforeLatestUser, approvedPlanOf, callerText, clip, clipTail, recentTexts, recentUserMessages } from "./transcript.ts";
 import { offerUserWords, resultText } from "./user-words.ts";
@@ -298,6 +298,10 @@ export interface PlanContext {
   root?: string;
   /** pi-plan-mode's plan file, always writable. */
   planFile?: string;
+  /** The chat or plan workflow's System 1 read check judged this shell call read-only: approvals treat it as a parsed read. */
+  judgedRead?: boolean;
+  /** Subagent runs start children in chat (a chat or plan parent whose subagent provider honors subagent-env): they only read. */
+  chatChildren?: boolean;
   /** Files this session downloaded: running one is always held. */
   downloads?: Downloads;
 }
@@ -386,6 +390,7 @@ function basePlan(tool: string, input: Record<string, unknown>, cwd: string, c: 
       return { kind: "allow", why: ALLOWED_BY_RULE };
     }
     if (isReadOnlyBash(command, config.readOnlyCommands)) return { kind: "allow", why: "read-only command" };
+    if (c.judgedRead) return { kind: "allow", why: "judged read" };
     if (allowing(rules, call)) return { kind: "allow", why: ALLOWED_BY_RULE };
     const keys = bashKeys(command, config.readOnlyCommands);
     return { kind: "judge", args: clip(command, 6_000), key: `bash:${keys.join("|")}`, offer: rulesOffer(suggest(call)) };
@@ -408,6 +413,7 @@ function basePlan(tool: string, input: Record<string, unknown>, cwd: string, c: 
     }
     return { kind: "allow", why: "read-only tool" };
   }
+  if (c.chatChildren && startsChatChild(tool, input)) return { kind: "allow", why: "chat subagent" };
   if (declaredRead(tool, input, c.annotations, c.readOnlyCall)) return { kind: "allow", why: "read-only hint" };
   if (allowing(rules, call)) return { kind: "allow", why: ALLOWED_BY_RULE };
   return { kind: "judge", args: clip(JSON.stringify(input), 6_000), key: `tool:${tool}`, offer: rulesOffer(suggest(call)) };
@@ -422,7 +428,8 @@ function declaredRead(tool: string, input: Record<string, unknown>, annotations?
 /**
  * Whether a call only reads, as chat and plan workflows count it: the allow list, Pi's reading
  * tools, read-only shell commands, calls whose tool's owner says they only read (herdr list,
- * subagent status; see read-only-call.ts) and tools with a read-only hint. Holds (credentials, the
+ * subagent status; see read-only-call.ts), tools with a read-only hint, and subagent runs when
+ * `chatChildren` (their children start in chat). Holds (credentials, the
  * directory policy) and rules do not change it; they belong to the approval setting.
  */
 export function onlyReads(
@@ -431,8 +438,10 @@ export function onlyReads(
   config: Pick<GateConfig, "allowTools" | "readOnlyCommands">,
   annotations?: (tool: string) => Annotations | undefined,
   readOnlyCall?: ReadOnlyCall,
+  chatChildren = false,
 ): boolean {
   if (config.allowTools.includes(tool) || BUILTIN_READ.has(tool)) return true;
+  if (chatChildren && startsChatChild(tool, input)) return true;
   if (SHELL_TOOLS.has(tool)) {
     // Expansions whose commands only read count here; the approval checks after this still treat them as unparsed.
     const command = String(input.command ?? "");
@@ -442,8 +451,8 @@ export function onlyReads(
 }
 
 /**
- * A subagent call that starts or resumes a child: in chat the child starts in chat too
- * (subagent-env.ts), so it can only read. Not with `worktree: true`, which creates checkouts.
+ * Whether a subagent call starts or resumes a child (not `worktree: true`, which creates
+ * checkouts); it only reads when the child starts in chat (`chatChildren`, subagent-env.ts).
  */
 export function startsChatChild(tool: string, input: Record<string, unknown>): boolean {
   if (tool !== "subagent" || input.worktree === true) return false;
@@ -1051,7 +1060,9 @@ export default function toolGate(pi: ExtensionAPI) {
   };
 
   /** The gate's plan for a call (`planCall`), after looking up git, the project and grants. */
-  const plan = async (tool: string, input: Record<string, unknown>, cwd: string): Promise<Plan> => {
+  const plan = async (
+    tool: string, input: Record<string, unknown>, cwd: string, reads: { judgedRead?: boolean; chatChildren?: boolean } = {},
+  ): Promise<Plan> => {
     const listed = config.allowTools.includes(tool);
     const shell = SHELL_TOOLS.has(tool) && !listed;
     const dir = shellDir(tool, input, cwd);
@@ -1070,6 +1081,7 @@ export default function toolGate(pi: ExtensionAPI) {
       root: (await projectOf(cwd))[0],
       planFile,
       downloads,
+      ...reads,
     });
   };
 
@@ -1493,7 +1505,11 @@ export default function toolGate(pi: ExtensionAPI) {
       // Workflow first: what kind of call may run at all, whatever the approval setting. Its blocks
       // never ask; only deny rules are checked before them.
       const current = effectiveWorkflow();
+      // What the workflow learned about reads, for approvals to reuse (work and exec leave both false).
+      let judgedRead = false;
+      let chatChildren = false;
       if (current === "chat" || current === "plan") {
+        chatChildren = subagentEnvHonored(pi.events);
         const forbidden = blocking(allRules, { tool, input, cwd: (await contextFor(ctx.cwd)).cwd, root: (await projectOf(ctx.cwd))[0], readOnlyCommands: config.readOnlyCommands });
         if (stale()) return staleResult();
         if (forbidden?.list === "deny") return deniedBy(tool, forbidden);
@@ -1508,13 +1524,14 @@ export default function toolGate(pi: ExtensionAPI) {
         }
         // Chat lets only reads run (an allow rule does not make a command read-only); plan lets only
         // read-only shell commands run, and leaves other tools to the approval setting.
-        let reads = onlyReads(tool, input, config, annotations, readOnlyCall) || (current === "chat" && startsChatChild(tool, input));
+        let reads = onlyReads(tool, input, config, annotations, readOnlyCall, chatChildren);
         let judged = false;
         if (!reads && SHELL_TOOLS.has(tool)) {
           // A command the parser cannot follow (a Python one-off, a heredoc) runs when System 1 is sure it only reads.
           const outcome = await judgedReadOnly(ctx, tool, input, recordUsage);
           if (stale() || outcome.stale) return staleResult();
           reads = outcome.reads;
+          judgedRead = outcome.reads;
           judged = outcome.judged;
         }
         const judgedNote = judged ? "System 1 judged that it may do more than read. " : "";
@@ -1556,7 +1573,7 @@ export default function toolGate(pi: ExtensionAPI) {
         return ask(ctx, { tool, input, held: critical.join("; ") }, undefined);
       }
 
-      const p = await plan(tool, input, ctx.cwd);
+      const p = await plan(tool, input, ctx.cwd, { judgedRead, chatChildren });
       if (stale()) return staleResult();
 
       const ruled = ruleOutcome(ctx, event.toolCallId, tool, input, p);
@@ -1971,7 +1988,7 @@ export default function toolGate(pi: ExtensionAPI) {
 
 export function chatEnterText(shortcut: string) {
   return `<system-reminder>
-Chat mode is active. The user wants to talk: answer questions, explain, discuss and recommend. You MUST NOT make edits, run commands that change files or the system, commit, or otherwise make changes, even if asked to; this supersedes any other instructions. Everything that only reads runs: reading and searching files, read-only shell commands (including git fetch, gh api GETs, ssh host '<read>' and scripts such as python3 -c that only read and print), web lookups, herdr reads, and subagents (they start in chat too). Try a read before saying you cannot do it; only calls that change something are blocked. If the user asks for a change, say what you would do, or hand them the command or prompt as an editable suggestion with tools that only offer text (offer_terminal, offer_prompt) when they are available; they can switch modes (${shortcut || "/mode"}) to let you act.
+Chat mode is active. The user wants to talk: answer questions, explain, discuss and recommend. You MUST NOT make edits, run commands that change files or the system, commit, or otherwise make changes, even if asked to; this supersedes any other instructions. Everything that only reads runs: reading and searching files, shell commands and scripts that only read and print, web lookups, and subagents (they start in chat too). Try a read before saying you cannot do it; only calls that change something are blocked. If the user asks for a change, say what you would do, or hand them the command or prompt as an editable suggestion with tools that only offer text (offer_terminal, offer_prompt) when they are available; they can switch modes (${shortcut || "/mode"}) to let you act.
 </system-reminder>`;
 }
 

@@ -51,3 +51,15 @@ test("the owner's answer decides reads for chat and plan and skips judgment, ove
   expect(planCall("herdr", { action: "list" }, "/tmp", { config: DEFAULT_CONFIG, readOnlyCall: owner })).toEqual({ kind: "allow", why: "read-only hint" });
   expect(planCall("herdr", { action: "send" }, "/tmp", { config: DEFAULT_CONFIG, readOnlyCall: owner }).kind).toBe("judge");
 });
+
+test("subagent runs and judged reads count as reads for workflows and approvals alike", () => {
+  expect(onlyReads("subagent", { task: "x" }, DEFAULT_CONFIG, undefined, undefined, true)).toBe(true);
+  expect(onlyReads("subagent", { task: "x" }, DEFAULT_CONFIG, undefined, undefined, false)).toBe(false);
+  expect(onlyReads("subagent", { task: "x", worktree: true }, DEFAULT_CONFIG, undefined, undefined, true)).toBe(false);
+  expect(planCall("subagent", { task: "x" }, "/tmp", { config: DEFAULT_CONFIG, chatChildren: true })).toEqual({ kind: "allow", why: "chat subagent" });
+  expect(planCall("subagent", { task: "x" }, "/tmp", { config: DEFAULT_CONFIG }).kind).toBe("judge");
+  const config = { ...DEFAULT_CONFIG, directories: { ...DEFAULT_CONFIG.directories, enabled: false } };
+  const judged = planCall("bash", { command: "python3 -c 'print(1)'" }, "/tmp", { config, judgedRead: true });
+  expect(judged).toEqual({ kind: "allow", why: "judged read" });
+  expect(planCall("bash", { command: "python3 -c 'print(1)'" }, "/tmp", { config }).kind).toBe("judge");
+});

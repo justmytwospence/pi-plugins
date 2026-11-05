@@ -610,6 +610,10 @@ describe("workflow guards precede approvals", () => {
     // Other tools are the approval setting's: auto judges them, yolo runs them.
     expect(await h.emit("tool_call", call("subagent", { task: "explore" }), ctx)).toBeUndefined();
     expect(jev.calls).toHaveLength(approval === "auto" ? 4 : 3);
+    // When the subagent provider honors subagent-env, the children start in chat: a read, not judged.
+    h.pi.events.on("pi-plugins.subagent-env.v1", (r: any) => { if (r?.probe) r.supported = true; });
+    expect(await h.emit("tool_call", call("subagent", { task: "explore2" }, "t2"), ctx)).toBeUndefined();
+    expect(jev.calls).toHaveLength(approval === "auto" ? 4 : 3);
     expect(ctx.ui.selects).toHaveLength(0);
   });
   test.each(["chat", "plan"] as const)("%s: reads outside the project and of credentials follow the approval setting", async workflow => {
@@ -649,8 +653,11 @@ describe("workflow guards precede approvals", () => {
     expect(jev.calls).toHaveLength(1);
     expect(Object.keys(jev.calls[0]!.questions)).toEqual(["only_reads"]);
   });
+  // As pi-subagents answers probes on the subagent-env contract.
+  const honorSubagentEnv = (h: ReturnType<typeof harness>) => h.pi.events.on("pi-plugins.subagent-env.v1", (r: any) => { if (r?.probe) r.supported = true; });
   test("chat runs subagents: their children start in chat too", async () => {
     const { h, ctx } = await start(setup());
+    honorSubagentEnv(h);
     await h.commands.get("approvals").handler("yolo", ctx);
     await h.commands.get("mode").handler("chat", ctx);
     for (const input of [{ task: "explore" }, { action: "run", tasks: [{ task: "a" }] }, { action: "resume", id: "x" }]) {
@@ -659,6 +666,24 @@ describe("workflow guards precede approvals", () => {
     for (const input of [{ action: "steer", id: "x", message: "edit it" }, { task: "x", worktree: true }]) {
       expect(await h.emit("tool_call", call("subagent", input), ctx)).toMatchObject({ block: true, reason: expect.stringMatching(/^Chat mode is on:/u) });
     }
+  });
+  test("chat blocks subagent runs when no provider honors subagent-env", async () => {
+    const { h, ctx } = await start(setup());
+    await h.commands.get("approvals").handler("yolo", ctx);
+    await h.commands.get("mode").handler("chat", ctx);
+    expect(await h.emit("tool_call", call("subagent", { task: "explore" }), ctx)).toMatchObject({ block: true, reason: expect.stringMatching(/^Chat mode is on:/u) });
+  });
+  test("chat+auto runs a judged read without a second judgment", async () => {
+    const s = setup();
+    const jev = fakeJev(() => ({ ...safe, only_reads: { type: "bool", probability: 0.97 } }));
+    s.ctx.modelRegistry = jev.registry;
+    const { h, ctx } = await start(s);
+    await h.commands.get("approvals").handler("auto", ctx);
+    await h.commands.get("mode").handler("chat", ctx);
+    await h.emit("before_agent_start", { prompt: "x" }, ctx);
+    expect(await h.emit("tool_call", call("bash", { command: "python3 -c \"print(1)\"" }), ctx)).toBeUndefined();
+    expect(jev.calls).toHaveLength(1);
+    expect(Object.keys(jev.calls[0]!.questions)).toEqual(["only_reads"]);
   });
   test.each([[0.97, true], [0.6, false]] as const)("chat runs an unparsed command System 1 is sure only reads (%s)", async (probability, runs) => {
     const s = setup();

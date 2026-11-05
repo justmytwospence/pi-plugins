@@ -13,11 +13,28 @@ export interface SubagentEnvRequest {
   version: 1;
   env: Record<string, string>;
   probe?: boolean;
+  /** Set by a subagent provider (pi-subagents) answering a probe. */
+  supported?: boolean;
 }
 
 /** What a child about to start inherits from this session's modes. */
 export function subagentEnv(approval: ApprovalMode, workflow: string): Record<string, string> {
   return { [APPROVAL_ENV]: approval, ...(workflow === "chat" || workflow === "plan" ? { [WORKFLOW_ENV]: "chat" } : {}) };
+}
+
+/**
+ * Whether a subagent provider (pi-subagents) will ask this channel for a child's environment, so a
+ * chat or plan parent's children start in chat. Probes the channel; false when nothing answers.
+ */
+export function subagentEnvHonored(events: { emit(channel: string, data: unknown): void } | undefined): boolean {
+  if (!events) return false;
+  const request: SubagentEnvRequest = { version: 1, env: {}, probe: true };
+  try {
+    events.emit(SUBAGENT_ENV_CHANNEL, request);
+  } catch {
+    return false;
+  }
+  return request.supported === true;
 }
 
 /** Fill a subagent-env request; ignores probes and anything malformed. */
