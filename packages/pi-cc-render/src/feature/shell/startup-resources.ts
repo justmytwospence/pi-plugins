@@ -417,6 +417,71 @@ function columnBlock(shape: Candidate, cells: Cell[], heading: string, available
 	return { lines, hits, width, height: lines.length, columns: shape.columns };
 }
 
+/*
+ * Fold planning measures hundreds of variants that share most of their group objects, so each group's
+ * shapes are kept per width, theme and category. Shared results are never mutated.
+ */
+const shapeCache = new WeakMap<ResourceGroup, Map<string, { theme: StartupTheme; shapes: ReturnType<typeof candidateShapes> }>>();
+function groupShapes(group: ResourceGroup, available: number, theme: StartupTheme, category?: ResourceSection["category"]): ReturnType<typeof candidateShapes> {
+	const key = `${available}\0${category ?? ""}\0${themeProbe(theme)}`;
+	let byKey = shapeCache.get(group);
+	const cached = byKey?.get(key);
+	if (cached?.theme === theme) return cached.shapes;
+	const shapes = candidateShapes(group, available, theme, category);
+	if (!byKey) shapeCache.set(group, byKey = new Map());
+	if (byKey.size >= 4) byKey.clear();
+	byKey.set(key, { theme, shapes });
+	return shapes;
+}
+
+/**
+ * The height layoutColumns arrives at, without laying anything out: the shortest tallest stack whose
+ * stacks fit side by side. For a height bound, each stack takes the narrowest width at which the
+ * shortest blocks no wider than it stay within the bound; a binary search finds the least bound that fits.
+ */
+function columnsHeight(groups: ResourceGroup[], available: number, theme: StartupTheme, category?: ResourceSection["category"]): number {
+	const options = groups.map((group) => groupShapes(group, available, theme, category).shapes
+		.map((shape) => ({ width: Math.min(available, shape.width), height: shape.rows + 1 })));
+	const widths = [...new Set(options.flatMap((blocks) => blocks.map((block) => block.width)))].sort((a, b) => a - b);
+	const least = options.map((blocks) => widths.map((width) =>
+		blocks.reduce((best, block) => block.width <= width ? Math.min(best, block.height) : best, Infinity)));
+	const fits = (bound: number): boolean => {
+		// narrowest[i]: total width of groups i.. in stacks no taller than bound, counting one gap per stack.
+		const narrowest = new Array<number>(groups.length + 1).fill(Infinity);
+		narrowest[groups.length] = 0;
+		for (let start = groups.length - 1; start >= 0; start--) {
+			const sums = new Array<number>(widths.length).fill(0);
+			for (let end = start; end < groups.length; end++) {
+				let width = Infinity;
+				for (let index = 0; index < widths.length; index++) {
+					sums[index]! += least[end]![index]!;
+					if (width === Infinity && sums[index]! <= bound) width = widths[index]!;
+				}
+				if (width === Infinity) break; // Even the widest blocks are too tall; more groups only add height.
+				narrowest[start] = Math.min(narrowest[start]!, width + COLUMN_GAP + narrowest[end + 1]!);
+			}
+		}
+		return narrowest[0]! - COLUMN_GAP <= available;
+	};
+	let low = Math.max(0, ...least.map((heights) => heights[heights.length - 1]!));
+	let high = least.reduce((sum, heights) => sum + heights[heights.length - 1]!, 0);
+	while (low < high) {
+		const middle = Math.floor((low + high) / 2);
+		if (fits(middle)) high = middle;
+		else low = middle + 1;
+	}
+	return low;
+}
+
+/** renderSection(...).length, computed without rendering column layouts. */
+export function sectionRows(section: ResourceSection, width: number, theme: StartupTheme): number {
+	// layoutSection reserves one cell of inset, and layoutColumns indents its blocks.
+	const inner = Math.max(0, Math.floor(width)) - 1;
+	if (inner <= 0) return 0;
+	if (section.layout !== "columns" || section.groups.length === 0) return renderSection(section, width, theme).length;
+	return 1 + columnsHeight(section.groups, Math.max(1, inner - INDENT), theme, section.category) + (section.notes?.length ?? 0);
+}
+
 type Stack = { blocks: Block[]; width: number; height: number; splits: number; key: string };
 type StackChoice = { width: number; height: number; splits: number; stacks: number; key: string; value: Stack[] };
 function compareChoices(a: { height: number; splits: number; stacks: number; key: string }, b: typeof a): number {
@@ -427,9 +492,11 @@ function compareChoices(a: { height: number; splits: number; stacks: number; key
 function layoutColumns(groups: ResourceGroup[], indent: number, ctx: RenderContext): SectionLayout {
 	const available = Math.max(1, ctx.width - indent);
 	const options = groups.map((group) => {
-		const { cells, heading, shapes } = candidateShapes(group, available, ctx.theme, ctx.section.category);
+		const { cells, heading, shapes } = groupShapes(group, available, ctx.theme, ctx.section.category);
 		return shapes.map((shape) => columnBlock(shape, cells, heading, available, ctx.theme));
 	});
+	// The chosen layout is never taller than the least achievable height, so no taller state can be part of it.
+	const tallest = columnsHeight(groups, available, ctx.theme, ctx.section.category);
 	// A suffix choice records used width and its tallest stack; within that state fewer splits,
 	// then fewer stacks wins. An ordered stack has the maximum width and summed heights of its groups.
 	const partition: Array<Map<string, StackChoice>> = Array.from({ length: groups.length + 1 }, () => new Map());
@@ -445,11 +512,13 @@ function layoutColumns(groups: ResourceGroup[], indent: number, ctx: RenderConte
 					height: stack.height + block.height, splits: stack.splits + block.columns - 1,
 					key: `${stack.key}${block.columns.toString().padStart(3, "0")},`,
 				};
+				if (choice.height > tallest) continue;
 				const key = `${width}:${choice.height}`;
 				const old = next.get(key);
 				if (!old || choice.splits < old.splits || (choice.splits === old.splits && choice.key < old.key)) next.set(key, choice);
 			}
 			frontier = next;
+			if (!frontier.size) break;
 			for (const stack of frontier.values()) for (const tail of partition[end + 1]!.values()) {
 				const width = stack.width + (tail.stacks ? COLUMN_GAP + tail.width : 0);
 				if (width > available) continue;
@@ -643,7 +712,12 @@ function compareFoldScore(a: { hidden: number; losses: [number, number, number];
 
 /** Exact for ordinary inventories; keep a deterministic beam when subgroup combinations exceed 256. */
 export function splashSectionCandidates(name: string, original: ResourceSection, width: number, theme: StartupTheme): SplashCandidate[] {
-	const rowsFor = (groups: ResourceGroup[]) => renderSection({ ...original, groups }, width, theme).length;
+	const measured = new WeakMap<ResourceGroup[], number>();
+	const rowsFor = (groups: ResourceGroup[]) => {
+		let rows = measured.get(groups);
+		if (rows === undefined) measured.set(groups, rows = sectionRows({ ...original, groups }, width, theme));
+		return rows;
+	};
 	const bounded = (variants: FoldVariant[]): FoldVariant[] => {
 		if (variants.length <= CANDIDATE_LIMIT) return variants;
 		return variants.sort((a, b) => (a.losses[0] + a.losses[1]) - (b.losses[0] + b.losses[1])
@@ -675,7 +749,7 @@ export function splashSectionCandidates(name: string, original: ResourceSection,
 	const groupVariants = combine(original.groups);
 	const result = groupVariants.map((variant): SplashCandidate => {
 		const section = variant.hidden ? { ...original, groups: variant.groups } : original;
-		return { section, rows: renderSection(section, width, theme).length, hidden: variant.hidden,
+		return { section, rows: variant.hidden ? rowsFor(variant.groups) : sectionRows(section, width, theme), hidden: variant.hidden,
 			losses: variant.losses, folds: variant.folds, order: variant.order };
 	});
 	if (original.count > 0) {
@@ -684,7 +758,7 @@ export function splashSectionCandidates(name: string, original: ResourceSection,
 			return sum.map((value, index) => value + part[index]!) as [number, number, number];
 		}, [0, 0, 0]);
 		const section = { ...original, groups: [], foldedCount: original.count };
-		result.push({ section, rows: renderSection(section, width, theme).length, hidden: original.count,
+		result.push({ section, rows: sectionRows(section, width, theme), hidden: original.count,
 			losses, folds: 1, order: "2" });
 	}
 	if (result.length <= CANDIDATE_LIMIT) return result;
@@ -699,7 +773,7 @@ export function planSplashSections(
 	sections: Record<string, ResourceSection>, width: number, theme: StartupTheme, availableRows: number,
 ): Record<string, ResourceSection> {
 	const names = ["Extensions", "Context", "Skills", "Prompts", "MCP", "Models"].filter((name) => sections[name]);
-	if (names.reduce((sum, name) => sum + renderSection(sections[name]!, width, theme).length, 0) <= availableRows) {
+	if (names.reduce((sum, name) => sum + sectionRows(sections[name]!, width, theme), 0) <= availableRows) {
 		return Object.fromEntries(names.map((name) => [name, sections[name]!]));
 	}
 	const options = names.map((name) => splashSectionCandidates(name, sections[name]!, width, theme));

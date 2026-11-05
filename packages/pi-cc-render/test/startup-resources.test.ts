@@ -17,6 +17,7 @@ import {
   layoutSection,
   planSplashSections,
   splashSectionCandidates,
+  sectionRows,
   buildMcpSection,
   type ResourceSection,
   type ResourceEntry,
@@ -997,6 +998,23 @@ describe("startup resources", () => {
     const impossible = planSplashSections({ Extensions: scope }, 46, plainTheme, 0).Extensions!;
     expect(impossible.foldedCount).toBe(29);
     expect(renderSection(impossible, 46, plainTheme)).toEqual([" Extensions 29 · +29 hidden"]);
+  });
+
+  test("column row counts match the rendered layout, and many model providers plan quickly", () => {
+    const sizes = [3, 40, 12, 25, 8, 30, 5, 18, 22, 9, 14, 6, 9];
+    const models: ResourceSection = { title: "Models", count: sizes.reduce((sum, size) => sum + size, 0), layout: "columns",
+      notes: [{ text: "note", color: "dim" }],
+      groups: sizes.map((size, group) => ({ label: `provider-${group}`, items: Array.from({ length: size }, (_, index) => `model-${group}-${index}${"x".repeat(index % 7)}`) })) };
+    const started = performance.now();
+    const candidates = splashSectionCandidates("Models", models, 158, plainTheme);
+    planSplashSections({ Models: models }, 158, plainTheme, 20);
+    expect(performance.now() - started).toBeLessThan(2000);
+    for (const width of [1, 2, 6, 30, 46, 80, 158, 220]) {
+      expect(sectionRows(models, width, plainTheme)).toBe(renderSection(models, width, plainTheme).length);
+      for (const candidate of width === 158 ? candidates : splashSectionCandidates("Models", models, width, plainTheme).slice(0, 40)) {
+        expect(candidate.rows).toBe(renderSection(candidate.section, width, plainTheme).length);
+      }
+    }
   });
 
   test("protected current-model and MCP problem scopes win over a smaller hidden count", () => {
