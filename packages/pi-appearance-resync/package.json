@@ -1,6 +1,6 @@
 {
   "name": "@justmytwospence/pi-appearance-resync",
-  "version": "0.1.21",
+  "version": "0.1.22",
   "description": "Keeps Pi's light/dark theme in step with the terminal inside multiplexers, such as herdr, that announce an appearance change before they report the new colors.",
   "type": "module",
   "license": "MIT",
