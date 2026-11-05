@@ -1,6 +1,6 @@
 {
   "name": "@justmytwospence/pi-select-nav",
-  "version": "0.1.22",
+  "version": "0.1.23",
   "description": "ctrl+j/ctrl+k and j/k navigation in every pi picker, built-in or from any plugin.",
   "type": "module",
   "license": "MIT",
