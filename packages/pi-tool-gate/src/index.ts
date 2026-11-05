@@ -66,7 +66,7 @@ import {
 } from "./permissions.ts";
 import { type DirGrant, rulesCommand, type RuleStore } from "./rules-command.ts";
 import { whileBlocked } from "./herdr.ts";
-import { type ClassifierUsage, type JevConfig, askJev } from "./jev.ts";
+import { type ClassifierUsage, type JevConfig, askJev, bool } from "./jev.ts";
 import { installSystem1Notifications, provenanceOf, resolveSystem1Target, SYSTEM1_CHANGED, type System1FailureCode } from "./system1.js";
 import {
   DEFAULT_THRESHOLDS,
@@ -75,6 +75,7 @@ import {
   WORKAROUNDS,
   judgeQuestions,
   judgeState,
+  readOnlyQuestion,
   steerReason,
   suggestions,
   verdict,
@@ -440,6 +441,15 @@ export function onlyReads(
   return declaredRead(tool, input, annotations, readOnlyCall);
 }
 
+/**
+ * A subagent call that starts or resumes a child: in chat the child starts in chat too
+ * (subagent-env.ts), so it can only read. Not with `worktree: true`, which creates checkouts.
+ */
+export function startsChatChild(tool: string, input: Record<string, unknown>): boolean {
+  if (tool !== "subagent" || input.worktree === true) return false;
+  return input.action === undefined || input.action === "run" || input.action === "resume";
+}
+
 /** The local script a shell call runs, for the judge to read (see `scriptFor`); undefined for other tools. */
 export function scriptOfCall(tool: string, input: Record<string, unknown>, cwd: string, downloads?: Downloads): Script | undefined {
   return SHELL_TOOLS.has(tool) ? scriptFor(String(input.command ?? ""), shellDir(tool, input, cwd), downloads) : undefined;
@@ -550,6 +560,39 @@ export default function toolGate(pi: ExtensionAPI) {
     return info?.annotations;
   };
   const readOnlyCall: ReadOnlyCall = (tool, input) => askReadOnlyCall(pi.events, tool, input);
+  /**
+   * The chat and plan workflows' fallback for a shell command the parser could not prove read-only:
+   * System 1's probability that it only reads, against `thresholds.readOnly`. Never reads when
+   * System 1 is off or fails; `judged` says it answered.
+   */
+  const judgedReadOnly = async (
+    ctx: ExtensionContext, tool: string, input: Record<string, unknown>, recordUsage: (usage: ClassifierUsage) => void,
+  ): Promise<{ reads: boolean; judged: boolean; stale?: boolean }> => {
+    const selectionKey = refreshSystem1Target().key;
+    const script = scriptOfCall(tool, input, ctx.cwd, downloads);
+    const state = {
+      cwd: ctx.cwd,
+      tool_call: { tool, arguments: clip(String(input.command ?? ""), 6_000) },
+      ...(script ? { script: { path: script.path, content: script.content } } : {}),
+    };
+    const outcome = await askJev(ctx.modelRegistry, config.jev, state, readOnlyQuestion({ script: script !== undefined }), ctx.signal);
+    if (outcome.usage) recordUsage(outcome.usage);
+    if (!outcome.ok) return { reads: false, judged: false };
+    if (outcome.selectionKey !== selectionKey) return { reads: false, judged: false, stale: true };
+    const p = bool(outcome.answers, "only_reads");
+    const reads = p !== undefined && p >= (config.thresholds.readOnly ?? DEFAULT_THRESHOLDS.readOnly);
+    pi.appendEntry("tool-gate:decision", {
+      tool,
+      args: clip(String(input.command ?? ""), 500),
+      check: "only-reads",
+      scores: p === undefined ? {} : { only_reads: p },
+      action: reads ? "allow" : "block",
+      latencyMs: outcome.latencyMs,
+      classifier: provenanceOf(outcome),
+      ...(outcome.usage ? { usage: outcome.usage } : {}),
+    });
+    return { reads, judged: p !== undefined };
+  };
 
   const keyConfig = loadConfig("tool-gate", DEFAULT_CONFIG, process.cwd());
   const shortcut = (typeof keyConfig.workflowShortcut === "string" ? keyConfig.workflowShortcut
@@ -1465,12 +1508,21 @@ export default function toolGate(pi: ExtensionAPI) {
         }
         // Chat lets only reads run (an allow rule does not make a command read-only); plan lets only
         // read-only shell commands run, and leaves other tools to the approval setting.
-        const reads = onlyReads(tool, input, config, annotations, readOnlyCall);
+        let reads = onlyReads(tool, input, config, annotations, readOnlyCall) || (current === "chat" && startsChatChild(tool, input));
+        let judged = false;
+        if (!reads && SHELL_TOOLS.has(tool)) {
+          // A command the parser cannot follow (a Python one-off, a heredoc) runs when System 1 is sure it only reads.
+          const outcome = await judgedReadOnly(ctx, tool, input, recordUsage);
+          if (stale() || outcome.stale) return staleResult();
+          reads = outcome.reads;
+          judged = outcome.judged;
+        }
+        const judgedNote = judged ? "System 1 judged that it may do more than read. " : "";
         if (current === "chat" && !reads) {
           return {
             block: true,
             reason:
-              `Chat mode is on: only read-only tools run, and this ${tool} call is not one. ` +
+              `Chat mode is on: only read-only tools run, and this ${tool} call is not one. ` + judgedNote +
               (SHELL_TOOLS.has(tool) ? `${SPLIT_HINT} ` : "") +
               `If it does more than read, do not retry it or work around it: answer from what you can read, or tell the user what you would do; they can switch modes (${shortcut || "/mode"}) to let you act.`,
           };
@@ -1479,7 +1531,7 @@ export default function toolGate(pi: ExtensionAPI) {
           return {
             block: true,
             reason:
-              `Plan mode is on: only read-only commands run until the user approves a plan, and this ${tool} call is not one. ` +
+              `Plan mode is on: only read-only commands run until the user approves a plan, and this ${tool} call is not one. ` + judgedNote +
               `${SPLIT_HINT} If it does more than read, do not retry it or work around it: put this step in the plan.`,
           };
         }
@@ -1919,7 +1971,7 @@ export default function toolGate(pi: ExtensionAPI) {
 
 export function chatEnterText(shortcut: string) {
   return `<system-reminder>
-Chat mode is active. The user wants to talk: answer questions, explain, discuss and recommend. You MUST NOT make edits, run commands that change files or the system, commit, or otherwise make changes, even if asked to; this supersedes any other instructions. Read-only tools (reading and searching files, read-only commands, web lookups) run; anything else is blocked. If the user asks for a change, say what you would do, or hand them the command or prompt as an editable suggestion with tools that only offer text (offer_terminal, offer_prompt) when they are available; they can switch modes (${shortcut || "/mode"}) to let you act.
+Chat mode is active. The user wants to talk: answer questions, explain, discuss and recommend. You MUST NOT make edits, run commands that change files or the system, commit, or otherwise make changes, even if asked to; this supersedes any other instructions. Everything that only reads runs: reading and searching files, read-only shell commands (including git fetch, gh api GETs, ssh host '<read>' and scripts such as python3 -c that only read and print), web lookups, herdr reads, and subagents (they start in chat too). Try a read before saying you cannot do it; only calls that change something are blocked. If the user asks for a change, say what you would do, or hand them the command or prompt as an editable suggestion with tools that only offer text (offer_terminal, offer_prompt) when they are available; they can switch modes (${shortcut || "/mode"}) to let you act.
 </system-reminder>`;
 }
 

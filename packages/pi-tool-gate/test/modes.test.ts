@@ -33,6 +33,8 @@ const safe = {
   in_scope: { type: "bool", probability: 0.95 }, irreversible: { type: "bool", probability: 0.05 },
   remote_change: { type: "bool", probability: 0.02 }, exfiltration: { type: "bool", probability: 0.01 },
   impact: { type: "score", score: 1, confidence: 0.9 },
+  // The workflows' read check for commands the parser cannot follow: these tests' commands write.
+  only_reads: { type: "bool", probability: 0.05 },
 };
 const call = (toolName: string, input: Record<string, unknown>, id = "t1") => ({ type: "tool_call", toolCallId: id, toolName, input });
 const entry = (customType: string, data: Record<string, unknown>) => ({ type: "custom", customType, data });
@@ -602,10 +604,12 @@ describe("workflow guards precede approvals", () => {
       expect(await h.emit("tool_call", call(tool, { command }), ctx)).toMatchObject({ block: true, reason: expect.stringMatching(/^Plan mode is on: only read-only commands run/u) });
     }
     expect(await h.emit("tool_call", call("bash", { command: "git status && rg -n x" }), ctx)).toBeUndefined();
-    expect(jev.calls).toHaveLength(0);
+    // Each command the parser could not follow got one read check, whatever the approval setting.
+    expect(jev.calls).toHaveLength(3);
+    expect(jev.calls.every(c => Object.keys(c.questions).join() === "only_reads")).toBe(true);
     // Other tools are the approval setting's: auto judges them, yolo runs them.
     expect(await h.emit("tool_call", call("subagent", { task: "explore" }), ctx)).toBeUndefined();
-    expect(jev.calls).toHaveLength(approval === "auto" ? 1 : 0);
+    expect(jev.calls).toHaveLength(approval === "auto" ? 4 : 3);
     expect(ctx.ui.selects).toHaveLength(0);
   });
   test.each(["chat", "plan"] as const)("%s: reads outside the project and of credentials follow the approval setting", async workflow => {
@@ -634,15 +638,40 @@ describe("workflow guards precede approvals", () => {
     }
     expect(ctx.ui.selects).toHaveLength(0);
   });
-  test.each(["auto", "yolo"])("chat+%s blocks mutations, MCP and allow rules without judging", async approval => {
+  test.each(["auto", "yolo"])("chat+%s blocks mutations, MCP and allow rules; only an unparsed command gets a read check", async approval => {
     configure({ permissions: { allow: ["Bash(npm test:*)", "mcp__notes__write"] } });
     const { h, jev, ctx } = await start(setup());
     await h.commands.get("approvals").handler(approval, ctx);
     await h.commands.get("mode").handler("chat", ctx);
     for (const [tool, input] of [["read", { path: "a.ts" }], ["bash", { command: "git log --oneline" }], ["web_search", { query: "x" }]] as const) expect(await h.emit("tool_call", call(tool, input), ctx)).toBeUndefined();
-    for (const [tool, input] of [["edit", { path: "src/a.ts", edits: [] }], ["write", { path: "src/a.ts", content: "x" }], ["bash", { command: "npm test" }], ["mcp__notes__write", { text: "x" }], ["subagent", { task: "x" }]] as const) expect(await h.emit("tool_call", call(tool, input), ctx)).toMatchObject({ block: true, reason: expect.stringMatching(/Chat mode is on:/u) });
+    for (const [tool, input] of [["edit", { path: "src/a.ts", edits: [] }], ["write", { path: "src/a.ts", content: "x" }], ["bash", { command: "npm test" }], ["mcp__notes__write", { text: "x" }], ["subagent", { task: "x", worktree: true }]] as const) expect(await h.emit("tool_call", call(tool, input), ctx)).toMatchObject({ block: true, reason: expect.stringMatching(/Chat mode is on:/u) });
     expect(ctx.ui.selects).toHaveLength(0);
-    expect(jev.calls).toHaveLength(0);
+    expect(jev.calls).toHaveLength(1);
+    expect(Object.keys(jev.calls[0]!.questions)).toEqual(["only_reads"]);
+  });
+  test("chat runs subagents: their children start in chat too", async () => {
+    const { h, ctx } = await start(setup());
+    await h.commands.get("approvals").handler("yolo", ctx);
+    await h.commands.get("mode").handler("chat", ctx);
+    for (const input of [{ task: "explore" }, { action: "run", tasks: [{ task: "a" }] }, { action: "resume", id: "x" }]) {
+      expect(await h.emit("tool_call", call("subagent", input), ctx)).toBeUndefined();
+    }
+    for (const input of [{ action: "steer", id: "x", message: "edit it" }, { task: "x", worktree: true }]) {
+      expect(await h.emit("tool_call", call("subagent", input), ctx)).toMatchObject({ block: true, reason: expect.stringMatching(/^Chat mode is on:/u) });
+    }
+  });
+  test.each([[0.97, true], [0.6, false]] as const)("chat runs an unparsed command System 1 is sure only reads (%s)", async (probability, runs) => {
+    const s = setup();
+    const jev = fakeJev(() => ({ only_reads: { type: "bool", probability } }));
+    s.ctx.modelRegistry = jev.registry;
+    const { h, ctx } = await start(s);
+    await h.commands.get("approvals").handler("yolo", ctx);
+    await h.commands.get("mode").handler("chat", ctx);
+    const command = "python3 -c \"import json; print(json.load(open('a.json'))['x'])\"";
+    const result = await h.emit("tool_call", call("bash", { command }), ctx);
+    if (runs) expect(result).toBeUndefined();
+    else expect(result).toMatchObject({ block: true, reason: expect.stringMatching(/^Chat mode is on: .*System 1 judged that it may do more than read/su) });
+    expect(jev.calls[0]!.state).toMatchObject({ tool_call: { tool: "bash", arguments: command } });
   });
   test.each(["chat", "plan"] as const)("%s: calls their tool's owner says only read run without judging; its other calls do not", async workflow => {
     const { h, jev, ctx } = await start(setup());

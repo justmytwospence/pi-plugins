@@ -17,6 +17,9 @@ const READ_ONLY_PROGRAMS = new Set([
   "history", "lsof", "cd", "sleep", "dig", "nslookup", "host", "ping", "traceroute", "ss",
   "netstat", "ifconfig", "ip", "free", "vm_stat", "pgrep", "nproc", "sysctl", "sw_vers",
   "lsblk", "mount", "groups", "locale", "xxd", "base64", "sha1sum", "cksum", "column",
+  "ffprobe", "[", "[[", ":", "continue", "break", "paste", "fold", "fmt", "expand", "unexpand", "join", "seq",
+  "hexdump", "zcat", "gzcat", "bzcat", "xzcat", "who", "w", "getconf", "arch", "tty", "system_profiler", "ioreg",
+  "mdls", "mdfind", "otool", "nm",
 ]);
 
 /** `<tool> <sub>` subcommands of other CLIs that only read. */
@@ -24,14 +27,121 @@ const READ_ONLY_SUBCOMMANDS: Record<string, Set<string>> = {
   docker: new Set(["ps", "logs", "inspect", "images", "image", "stats", "top", "version", "info", "port", "diff", "history", "network", "volume", "context", "events"]),
   podman: new Set(["ps", "logs", "inspect", "images", "stats", "top", "version", "info", "port"]),
   kubectl: new Set(["get", "describe", "logs", "explain", "top", "version", "api-resources", "config"]),
-  gh: new Set(["pr", "issue", "run", "repo", "release", "search", "status", "workflow"]),
+  gh: new Set(["pr", "issue", "run", "repo", "release", "search", "status", "workflow", "api", "auth", "gist", "label", "secret", "variable", "cache", "ruleset"]),
   systemctl: new Set(["status", "is-active", "is-enabled", "is-failed", "list-units", "list-unit-files", "show", "cat"]),
   journalctl: new Set(["*"]),
   launchctl: new Set(["list", "print"]),
   sqlite3: new Set(["-readonly"]),
   // Not `execute-template` (its template can run commands) or `apply`/`add`/`edit`/`init`/`update`/...
   chezmoi: new Set(["cat", "cat-config", "diff", "status", "managed", "unmanaged", "ignored", "source-path", "target-path", "data", "dump", "dump-config", "verify", "doctor", "help"]),
+  // Nouns; their verbs are checked in `isReadOnlyPart` (`herdr pane read` reads, `herdr pane close` does not).
+  herdr: new Set(["status", "pane", "agent", "tab", "workspace", "worktree", "session", "machine", "notification", "integration", "api"]),
+  vercel: new Set(["whoami", "ls", "list", "inspect", "logs", "teams", "team", "projects", "project", "domains", "dns", "env", "alias", "certs"]),
 };
+
+/** The verbs of `herdr <noun>` that only read; `herdr status` reads whatever follows. */
+const HERDR_READS = new Set(["list", "current", "get", "layout", "process-info", "neighbor", "edges", "read", "wait-output", "snapshot", "status"]);
+/** `vercel <sub>` commands that read with no verb, and the listing verbs of the others. */
+const VERCEL_BARE = new Set(["whoami", "ls", "list", "inspect", "logs"]);
+const VERCEL_READS = new Set(["ls", "list", "inspect"]);
+
+/**
+ * CLIs whose `--help` after any subcommand prints that subcommand's usage and runs nothing (git,
+ * and cobra or clap style parsers). Elsewhere `--help` can be an operand (`npx pkg --help` runs
+ * pkg, `rm foo --help` removes foo), so only a bare `prog --help` counts.
+ */
+const HELP_ANYWHERE = new Set(["git", "gh", "herdr", "vercel", "chezmoi", "helm", "kubectl", "gcloud"]);
+
+/**
+ * `prog --version`, `prog -V`, `prog --help`, or `cli sub command --help` for a CLI with
+ * subcommands: printing usage only reads. Not `rm foo --help`: BSD getopt stops at `foo`, so
+ * `--help` is a file name and foo is removed.
+ */
+function asksForHelpOrVersion(name: string, args: readonly string[]): boolean {
+  if (args.length === 1 && ["--version", "-V", "--help"].includes(args[0] as string)) return true;
+  return HELP_ANYWHERE.has(name) && args.length > 1 && args.length <= 4 && args[args.length - 1] === "--help" &&
+    args.slice(0, -1).every((a) => /^[a-z][a-z0-9-]*$/u.test(a));
+}
+
+/** ssh options that only change how it connects; anything else (forwarding, control sockets, log files) is not a read. */
+const SSH_READ_FLAGS = "46aCknqTtvx";
+const SSH_READ_VALUES = "oplicFJ";
+/** `-o` settings that run local commands, forward ports or write control sockets. */
+const SSH_UNSAFE_OPTIONS = /^(proxycommand|localcommand|permitlocalcommand|knownhostscommand|remotecommand|localforward|remoteforward|dynamicforward|controlmaster|controlpath|controlpersist|tunnel|tunneldevice|forwardx11|forwardagent|sessiontype|stdinnull|forkafterauthentication)$/iu;
+
+/**
+ * The command `ssh [options] host command...` runs on the remote host, as one string (ssh joins its
+ * words with spaces), or undefined for an interactive login or an option this does not follow.
+ */
+export function sshRemoteCommand(args: readonly string[]): string | undefined {
+  let i = 0;
+  for (; i < args.length; i++) {
+    const a = args[i] as string;
+    if (a === "--") { i++; break; }
+    if (!a.startsWith("-") || a === "-") break;
+    for (let j = 1; j < a.length; j++) {
+      const flag = a[j] as string;
+      if (SSH_READ_FLAGS.includes(flag)) continue;
+      if (!SSH_READ_VALUES.includes(flag)) return undefined;
+      const value = j + 1 < a.length ? a.slice(j + 1) : args[++i];
+      if (value === undefined) return undefined;
+      if (flag === "o" && SSH_UNSAFE_OPTIONS.test(value.split(/[=\s]/u, 1)[0]?.trim() ?? "")) return undefined;
+      break;
+    }
+  }
+  const command = args.slice(i + 1);
+  if (args[i] === undefined || !command.length) return undefined;
+  return command.join(" ");
+}
+
+/** sqlite3 dot-commands that only print. */
+const SQLITE_READ_DOTS = /^\.(tables|schema|fullschema|indexes|indices|headers|header|mode|dbinfo|databases|show|width|nullvalue|separator)\b/iu;
+const SQLITE_FLAGS = new Set(["-readonly", "-header", "-noheader", "-column", "-csv", "-json", "-line", "-list", "-box", "-table", "-markdown", "-quote", "-tabs", "-html", "-bail", "-batch"]);
+const SQLITE_VALUES = new Set(["-separator", "-newline", "-nullvalue"]);
+
+/** `sqlite3 [options] db sql...` whose statements and dot-commands only read. */
+function isReadOnlySqlite(args: readonly string[]): boolean {
+  let i = 0;
+  for (; i < args.length && (args[i] as string).startsWith("-"); i++) {
+    const a = args[i] as string;
+    if (SQLITE_VALUES.has(a)) i++;
+    else if (!SQLITE_FLAGS.has(a)) return false;
+  }
+  const [db, ...sql] = args.slice(i);
+  if (db === undefined || !sql.length) return false;
+  return sql.every((text) => {
+    const lines = text.split("\n");
+    // Dot-commands take a line each; SQL statements may span lines.
+    if (!lines.filter((l) => l.trim().startsWith(".")).every((l) => SQLITE_READ_DOTS.test(l.trim()))) return false;
+    const statements = lines.filter((l) => !l.trim().startsWith(".")).join("\n");
+    return statements.split(";").every((statement) => {
+      const s = statement.trim();
+      if (!s) return true;
+      if (/\b(insert|update|delete|replace|drop|create|alter|attach|detach|vacuum|reindex|load_extension|writefile|edit)\b/iu.test(s)) return false;
+      return /^(select|with|explain|values)\b/iu.test(s) || (/^pragma\b/iu.test(s) && !s.includes("="));
+    });
+  });
+}
+
+/** A `gh api` call that only reads: a GET (no fields or input, which make it a POST), or a GraphQL query that is no mutation. */
+function isReadOnlyGhApi(args: readonly string[]): boolean {
+  const endpoint = args.find((a) => !a.startsWith("-"));
+  let method: string | undefined;
+  const fields: string[] = [];
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i] as string;
+    const eq = a.indexOf("=");
+    const option = a.startsWith("--") && eq > 0 ? a.slice(0, eq) : a;
+    const value = () => (option === a ? args[++i] : a.slice(eq + 1)) ?? "";
+    if (option === "-X" || option === "--method") method = value().toUpperCase();
+    else if (/^-X.+/u.test(a)) method = a.slice(2).toUpperCase();
+    else if (["-f", "-F", "--field", "--raw-field"].includes(option)) fields.push(value());
+    else if (/^-[fF].+/u.test(a)) fields.push(a.slice(2));
+    else if (option === "--input") return false;
+  }
+  if (endpoint === "graphql") return (method === undefined || method === "POST") && !fields.some((f) => /\bmutation\b/iu.test(f));
+  return (method === undefined || method === "GET" || method === "HEAD") && (fields.length === 0 || method !== undefined);
+}
 
 /** Words that make a CLI subcommand change something, e.g. `gh pr merge`, `docker network rm`. */
 const MUTATING_WORDS = /^(create|delete|rm|remove|merge|close|reopen|edit|comment|review|approve|apply|set|add|prune|kill|stop|start|restart|run|exec|cp|push|pull|login|logout|enable|disable|mask|unmask|reload|deploy|upload|download|clone|fork|rename|archive|transfer|sync|cancel|rerun|dispatch|use-context|set-context|delete-context|connect|disconnect|update|upgrade|install|uninstall|write|import|export|tag|untag|load|save|build|commit|attach|pause|unpause|scale|rollout|patch|replace|label|annotate|taint|drain|cordon|uncordon|expose|autoscale|certificate)$/u;
@@ -50,11 +160,12 @@ function isReadOnlyFetch(name: string, args: readonly string[]): boolean {
   const flags = new Set(curl
     ? ["--silent", "--show-error", "--fail", "--fail-with-body", "--location", "--head", "--include", "--verbose", "--compressed", "--globoff", "--no-buffer", "--disable", "--ipv4", "--ipv6"]
     : ["--quiet", "--no-verbose", "--verbose", "--server-response", "--spider", "--no-check-certificate"]);
+  if (curl) flags.add("--insecure");
   const values = new Set(curl
-    ? ["--url", "--header", "--user-agent", "--cookie", "--referer", "--max-time", "--connect-timeout", "--retry", "--user", "--proxy", "--request"]
+    ? ["--url", "--header", "--user-agent", "--cookie", "--referer", "--max-time", "--connect-timeout", "--retry", "--user", "--proxy", "--request", "--write-out", "--output"]
     : ["--header", "--user-agent", "--timeout", "--connect-timeout", "--tries", "--output-document"]);
-  const shortFlags = curl ? "sSfLIivNqg46" : "qvSd";
-  const shortValues = curl ? "HAbemuxX" : "OUT";
+  const shortFlags = curl ? "sSfLIivNqgk46" : "qvSd";
+  const shortValues = curl ? "HAbemuxXow" : "OUT";
   let stdout = curl;
   let operands = false;
   const valueAllowed = (option: string, value: string | undefined): boolean => {
@@ -64,6 +175,9 @@ function isReadOnlyFetch(name: string, args: readonly string[]): boolean {
       stdout = value === "-";
       return stdout;
     }
+    // curl's output to stdout or nowhere; a `-w` format only prints (`%output{file}` would write).
+    if (curl && (option === "o" || option === "--output")) return value === "-" || value === "/dev/null";
+    if (curl && (option === "w" || option === "--write-out")) return !value.includes("%output{") && !value.startsWith("@");
     return true;
   };
   for (let i = 0; i < args.length; i++) {
@@ -98,6 +212,10 @@ const READ_ONLY_GIT = new Set([
   "status", "diff", "log", "show", "branch", "rev-parse", "ls-files", "ls-tree", "blame", "describe",
   "shortlog", "reflog", "cat-file", "grep", "remote", "tag", "config", "worktree", "stash", "merge-base",
   "name-rev", "for-each-ref", "show-ref", "rev-list", "whatchanged", "check-ignore",
+  "ls-remote", "cherry", "range-diff", "show-branch", "count-objects", "diff-tree", "diff-index", "diff-files",
+  "var", "version", "check-attr", "verify-commit", "verify-tag",
+  // Updates only remote-tracking refs and objects, never a branch or the work tree (checked below).
+  "fetch",
 ]);
 
 /** Git global options that take their value as the next token. */
@@ -154,6 +272,12 @@ function isReadOnlyGit(g: GitCommand): boolean {
     return args.some((a) => ["--get", "--list", "-l", "--get-all", "--get-regexp"].includes(a));
   }
   if (sub === "stash") return positional.length > 0 && ["list", "show"].includes(positional[0] as string);
+  // `--upload-pack` runs a program; a refspec with a destination (`main:main`) or `-u` moves a local branch.
+  if (sub === "ls-remote") return !args.some((a) => /^--upload-pack(=|$)/u.test(a));
+  if (sub === "fetch") {
+    return !args.some((a) => /^--(upload-pack|update-head-ok|refmap)(=|$)/u.test(a)) && !shortOption(args, "u") &&
+      !positional.some((a) => a.includes(":") && !/^[\w.+-]+:\/\//u.test(a) && !/^[\w.-]+@[\w.-]+:/u.test(a));
+  }
   if (sub === "worktree") return positional[0] === "list";
   return true;
 }
@@ -335,7 +459,7 @@ export function redirectsAt(command: string): { target: string; at: number }[] {
       targets.push({ target: ">", at });
       continue;
     }
-    if (target !== "/dev/null") targets.push({ target, at });
+    if (!["/dev/null", "/dev/stdout", "/dev/stderr"].includes(target)) targets.push({ target, at });
   }
   return targets;
 }
@@ -566,11 +690,20 @@ function partReadsWithUnknowns(tokens: string[], extra: readonly string[], depth
   // `read` only sets shell variables, which count as unknown wherever they are used; `[` and `[[` only test.
   if (p && ["read", "[", "[["].includes(p.name) && !p.unsafe && !tokens.slice(0, tokens.length - p.args.length).some((t) => t.includes(UNKNOWN))) return true;
   if (!tokens.some((t) => t.includes(UNKNOWN))) return isReadOnlyPart(tokens, extra);
-  if (!p || p.unsafe) return false;
+  // `f=$(ls -d x*)`: setting a shell variable runs nothing; its uses count as unknown words.
+  if (!p) return true;
+  if (p.unsafe) return false;
   // The program itself, its assignments and wrappers must be literal.
   const at = tokens.length - p.args.length;
   if (tokens.slice(0, at).some((t) => t.includes(UNKNOWN))) return false;
   if (READS_WITH_ANY_ARGS.has(p.name)) return isReadOnlyPart(tokens, extra);
+  // `git -C $d log`: the directory does not change what a git subcommand does; the rest must be literal.
+  if (p.name === "git") {
+    const literal = p.args.flatMap((a, i) => (a.includes(UNKNOWN) && p.args[i - 1] === "-C" ? [] : [a]));
+    if (literal.some((a) => a.includes(UNKNOWN)) || p.args.some((a, i) => a.includes(UNKNOWN) && p.args[i - 1] !== "-C")) return false;
+    const g = gitCommand(p.args);
+    return g !== undefined && !g.sub.includes(UNKNOWN) && !g.args.some((a) => a.includes(UNKNOWN)) && isReadOnlyGit(g);
+  }
   if (READS_WITH_ARGS_AFTER_DASHDASH.has(p.name)) {
     const dashdash = p.args.indexOf("--");
     if (dashdash < 0 || p.args.slice(0, dashdash).some((a) => a.includes(UNKNOWN))) return false;
@@ -796,8 +929,9 @@ function readsDespiteArgs(name: string, args: readonly string[]): boolean {
     case "find":
       return !has("-delete", "-exec", "-execdir", "-ok", "-okdir", "-fprint", "-fprint0", "-fprintf", "-fls");
     case "awk":
-      // Output redirection (`print > f`, `print | "cmd"`), `system()`, and script files are not followed.
-      return !args.some((a) => /system\s*\(|>|\||@(?:include|load)/u.test(a) || /^--(file|exec|load|dump-variables|profile|pretty-print)(=|$)/u.test(a)) && !cluster("fElop");
+      // Output redirection (`print > f`, `print | "cmd"`), commands piped to getline, `system()` and
+      // script files are not followed; a comparison (`$1 > 3500`, `a || b`) outside print is a read.
+      return !args.some((a) => /system\s*\(|\bprintf?\b[^;}\n]*(?:>|\|(?!\|))|(?<!\|)\|(?!\|)\s*&?\s*getline|@(?:include|load)/u.test(a) || /^--(file|exec|load|dump-variables|profile|pretty-print)(=|$)/u.test(a)) && !cluster("fElop");
     case "env":
       return !args.some((a) => !a.startsWith("-") && !a.includes("="));
     case "yq":
@@ -851,6 +985,9 @@ function readsDespiteArgs(name: string, args: readonly string[]): boolean {
     }
     case "history":
       return !cluster("cwardns");
+    case "ffprobe":
+      // `-o file` writes its output and `-report` a log file.
+      return !has("-o", "-report");
     case "man":
       return !cluster("PHl") && !args.some((a) => /^--(pager|html|local-file|preprocessor)(=|$)/u.test(a));
     case "less":
@@ -879,13 +1016,36 @@ export function composeCommand(args: readonly string[]): { sub: string; args: st
   return undefined;
 }
 
+/**
+ * `args` without the redirects that write nothing: `2>/dev/null`, `2>&1`, `> /dev/null`. Only those
+ * are dropped, so a quoted `">"` before a real argument (`find . ">" -delete`) cannot hide it.
+ */
+function withoutRedirects(args: readonly string[]): string[] {
+  const out: string[] = [];
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i] as string;
+    if (/^(?:[0-9]*|&)>>?(?:&(?:[0-9]+|-)|\/dev\/null)$/u.test(a)) continue;
+    if (/^(?:[0-9]*|&)>>?$/u.test(a) && args[i + 1] === "/dev/null") { i++; continue; }
+    out.push(a);
+  }
+  return out;
+}
+
 /** Whether one simple command (from `splitCommand`) only reads. */
 function isReadOnlyPart(tokens: string[], extra: readonly string[]): boolean {
   const p = program(tokens);
   if (!p) return true;
-  const { name, args } = p;
+  const name = p.name;
+  // Redirects are checked on the whole command (`writeRedirects`); they are not the program's arguments.
+  const args = withoutRedirects(p.args);
   if (p.unsafe || opaqueProgram(p)) return false;
   if (extra.includes(name)) return true;
+  if (asksForHelpOrVersion(name, args)) return true;
+  if (name === "ssh") {
+    const remote = sshRemoteCommand(args);
+    // Its expansions run on the remote host, so the local paths they could hide do not matter here.
+    return remote !== undefined && (isReadOnlyBash(remote, extra) || isReadOnlyBash(remote, extra, { expansions: true }));
+  }
   if (name === "git") {
     const g = gitCommand(args);
     return g !== undefined && isReadOnlyGit(g);
@@ -902,13 +1062,7 @@ function isReadOnlyPart(tokens: string[], extra: readonly string[]): boolean {
   if (name === "curl" || name === "wget") return isReadOnlyFetch(name, args);
   const cli = READ_ONLY_SUBCOMMANDS[name];
   if (cli) {
-    if (name === "sqlite3") {
-      return (
-        args.length === 3 && args[0] === "-readonly" && !args[1]?.startsWith("-") &&
-        (args[2] ?? "").split(";").every((sql) => !sql.trim() || /^\s*select\b/iu.test(sql)) &&
-        !args.some((a) => /(?:^|\n)\s*\.|\b(?:attach|load_extension|writefile|edit)\b/iu.test(a))
-      );
-    }
+    if (name === "sqlite3") return isReadOnlySqlite(args);
     if (name === "journalctl") return !args.some((a) => /^--(vacuum|rotate|flush|sync|relinquish-var|smart-relinquish-var|setup-keys|update-catalog)/u.test(a));
     if ((name === "docker" || name === "podman") && args[0] === "compose") {
       const compose = composeCommand(args.slice(1));
@@ -918,6 +1072,9 @@ function isReadOnlyPart(tokens: string[], extra: readonly string[]): boolean {
     const words = args.filter((a) => !a.startsWith("-"));
     const sub = words[0];
     if (sub === undefined || !cli.has(sub)) return false;
+    if (name === "gh" && sub === "api") return isReadOnlyGhApi(args.slice(args.indexOf("api") + 1));
+    if (name === "herdr") return sub === "status" || HERDR_READS.has(words[1] ?? "");
+    if (name === "vercel") return words.length === 1 ? VERCEL_BARE.has(sub) || sub === "teams" || sub === "projects" : VERCEL_BARE.has(sub) ? !words.slice(1).some((w) => MUTATING_WORDS.test(w)) : VERCEL_READS.has(words[1] ?? "");
     // `gh pr view` reads, `gh pr merge` does not; `docker network ls` reads, `docker network rm` does not.
     if (words.slice(1).some((w) => MUTATING_WORDS.test(w))) return false;
     if (name === "gh") {
@@ -926,6 +1083,8 @@ function isReadOnlyPart(tokens: string[], extra: readonly string[]): boolean {
         pr: ["view", "list", "status", "diff", "checks"], issue: ["view", "list", "status"],
         run: ["view", "list", "watch"], repo: ["view", "list"], release: ["view", "list"],
         search: ["prs", "issues", "repos", "code", "commits"], workflow: ["view", "list"],
+        auth: ["status"], gist: ["view", "list"], label: ["list"], secret: ["list"], variable: ["list", "get"],
+        cache: ["list"], ruleset: ["list", "view", "check"],
       };
       if (sub !== "status" && !verbs[sub]?.includes(words[1] ?? "")) return false;
     }
