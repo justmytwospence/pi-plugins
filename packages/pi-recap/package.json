@@ -1,6 +1,6 @@
 {
   "name": "@justmytwospence/pi-recap",
-  "version": "0.1.19",
+  "version": "0.1.20",
   "description": "A one-line recap of where the session stands, above the editor after you have been away, and the same line as the turn notification (pi-herdr).",
   "type": "module",
   "license": "MIT",
