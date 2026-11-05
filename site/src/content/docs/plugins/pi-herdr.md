@@ -33,7 +33,7 @@ Additional requirements depend on the feature:
 
 The `$bg` pane token uses compact icon/count badges: `⑂ 2` for pending subagents, `≡ 1` for planner holds, `↳ 1` for awaited child replies, and `⌘ 1` for jobs/other background holds (examples). Counts of the same kind are combined, without task names or parentheses. Its 90-second TTL is refreshed while held. A pane may correctly show idle while `$bg` counts unfinished work; the token is not a replacement working-state flag.
 
-`$wait` names what a turn kept open only to wait is waiting on (pi-bg's `bg_wait`, or its wait for a job at the turn's end), from `herdr:waiting` holds. The pane stays working, but typing ends the wait, so a client that reads the token can send a message at once instead of queueing it; herdr-web-ui's fork does with `HERDR_WEB_WAIT_TOKEN=wait`, and shows `Waiting on …` in its chat. Same TTL as `$bg`.
+`$wait` names what a turn kept open only to wait is waiting on (pi-bg's `bg_wait`, or its wait for a job at the turn's end), from `herdr:waiting` holds. The pane stays working, but typing ends the wait, so a client that reads the token can send a message at once instead of queueing it; Spencer's Ovis fork does with `OVIS_WAIT_TOKEN=wait`, and shows `Waiting on …` in its chat. Same TTL as `$bg`.
 
 The session name you set (not Recap's automatic one), or the first prompt's first line, becomes the pane title and `$task`. Pane title and model/effort context are separate from the canonical Herdr agent name. `$pr` is a space token describing the checkout branch's PR, refreshed at session start, after turns, and every three minutes. Set `PI_HERDR_PR=0` to disable PR reporting.
 

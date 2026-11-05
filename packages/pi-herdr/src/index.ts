@@ -6,7 +6,7 @@
 // - `bg` pane token: background work that will wake the agent (activity.ts).
 // - `wait` pane token: what a turn is kept open only to wait on (pi-bg's bg_wait, or its wait for a
 //   job at the turn's end), from `herdr:waiting { active, label, id }` holds. herdr still shows the
-//   pane working; a client that reads the token (herdr-web-ui's HERDR_WEB_WAIT_TOKEN) knows that
+//   pane working; a client that reads the token (Ovis's OVIS_WAIT_TOKEN, in Spencer's fork) knows that
 //   typing now ends the wait, as it does in the terminal.
 // - The pane's title (session name or first prompt; also the token `task`) and displayed agent
 //   name (`pi opus-5-5:xhigh`) (identity.ts).
