@@ -268,6 +268,32 @@ describe("collector", () => {
     assert.equal(calls, 1); collector.dispose();
   });
 
+  it("accepts large fetchAvailableModels catalogs up to 512 KB and rejects larger ones", async () => {
+    const summaryBody = () => json({ groups: [{ buckets: [
+      { bucketId: "gemini-5h", remainingFraction: 0.5 },
+      { bucketId: "gemini-weekly", remainingFraction: 0.75 },
+      { bucketId: "gemini-argon-wtu-weekly", remainingFraction: 0.4, resetTime: reset },
+    ] }] });
+    const okCollector = createProviderUsageCollector({ now: () => now, fetch: async url => {
+      if (url.endsWith("loadCodeAssist")) return project();
+      if (url.endsWith("retrieveUserQuotaSummary")) return summaryBody();
+      return json({
+        models: { "gemini-4-argon-medium": { quotaInfo: { remainingFraction: 0.4, resetTime: reset } } },
+        sharedModelExperiments: "x".repeat(150_000),
+      });
+    } });
+    assert.equal((await okCollector.refresh(argon)).state, "ready");
+    okCollector.dispose();
+
+    const oversizedCollector = createProviderUsageCollector({ now: () => now, fetch: async url => {
+      if (url.endsWith("loadCodeAssist")) return project();
+      if (url.endsWith("retrieveUserQuotaSummary")) return summaryBody();
+      return new Response("x".repeat(524_289));
+    } });
+    assert.equal((await oversizedCollector.refresh(argon)).state, "unavailable");
+    oversizedCollector.dispose();
+  });
+
   it("never fetches or executes for vault, invalid token, local or unsupported sources", async () => {
     const fetch = vi.fn(); const exec = vi.fn();
     const collector = createProviderUsageCollector({ fetch, exec });

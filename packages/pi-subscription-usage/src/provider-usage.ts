@@ -27,6 +27,7 @@ const MUSE_SOURCE = "Muse subscription";
 const FIVE_MINUTES = 300_000;
 const TEN_MINUTES = 600_000;
 const MAX_RESPONSE = 64 * 1024;
+const MAX_MODELS_RESPONSE = 512 * 1024;
 
 /** A past reset is not evidence of replenishment; keep the observation stale. */
 export function isUsageStale(usage: ProviderUsage, now: number): boolean {
@@ -170,7 +171,7 @@ const defaultExec: Exec = (binary, args, options) => new Promise((resolve, rejec
 });
 type CollectorOptions = { fetch?: typeof globalThis.fetch; exec?: Exec; now?: () => number };
 
-async function readJson(response: Response): Promise<unknown> {
+async function readJson(response: Response, maxBytes = MAX_RESPONSE): Promise<unknown> {
   if (!response.body) throw new Error("empty");
   const reader = response.body.getReader();
   const chunks: Uint8Array[] = [];
@@ -180,7 +181,7 @@ async function readJson(response: Response): Promise<unknown> {
       const { value, done } = await reader.read();
       if (done) break;
       size += value.byteLength;
-      if (size > MAX_RESPONSE) { await reader.cancel(); throw new Error("large"); }
+      if (size > maxBytes) { await reader.cancel(); throw new Error("large"); }
       chunks.push(value);
     }
   } finally { reader.releaseLock(); }
@@ -223,7 +224,7 @@ export function createProviderUsageCollector(options: CollectorOptions = {}) {
       if (!summaryResponse.ok || !modelResponse.ok)
         return unavailable("google", GOOGLE_SOURCE, "Google quota request was refused or unavailable.");
       const summary = parseGoogleSummary(await readJson(summaryResponse), now());
-      const model = parseGoogleModels(await readJson(modelResponse), source.model, now(), source.variant ?? "gemini-4-argon-medium");
+      const model = parseGoogleModels(await readJson(modelResponse, MAX_MODELS_RESPONSE), source.model, now(), source.variant ?? "gemini-4-argon-medium");
       if (summary.state === "unavailable" || model.state === "unavailable")
         return unavailable("google", GOOGLE_SOURCE, summary.reason ?? model.reason ?? "Google returned invalid model quota.");
       const windows = [...summary.windows.filter(window => window.pool === "Gemini"), ...model.windows];
@@ -237,7 +238,7 @@ export function createProviderUsageCollector(options: CollectorOptions = {}) {
     if (response.status === 404 || response.status === 501) {
       const fallback = await post("https://daily-cloudcode-pa.googleapis.com/v1internal:fetchAvailableModels", { project });
       if (!fallback.ok) return unavailable("google", GOOGLE_SOURCE, "Google model quota was refused or unavailable.");
-      return parseGoogleModels(await readJson(fallback), source.model!, now());
+      return parseGoogleModels(await readJson(fallback, MAX_MODELS_RESPONSE), source.model!, now());
     }
     if (!response.ok) return unavailable("google", GOOGLE_SOURCE, "Google quota was refused or unavailable.");
     return parseGoogleSummary(await readJson(response), now());
