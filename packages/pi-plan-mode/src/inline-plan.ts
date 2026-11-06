@@ -136,6 +136,8 @@ export interface InlineHost {
   implementHere(ctx: ExtensionContext, approval: Approval): string;
   /** Whether an approved plan is being implemented (exec mode). */
   executing(): boolean;
+  /** The execution menu: what needs the user now, else status. "stopped" when exec ended. */
+  executionMenu?(ctx: ExtensionContext): Promise<"stopped" | "kept">;
   /** The key that toggles plan mode without pi-tool-gate, for the status line. */
   toggleKey(): string | undefined;
 }
@@ -360,6 +362,19 @@ export function registerInlinePlanMode(pi: ExtensionAPI, host: InlineHost): Inli
     }
   };
 
+  /**
+   * A user-initiated mode change while exec is active opens the execution menu instead of a warning.
+   * True when exec ended there, so the change can go on.
+   */
+  const execMenu = async (ctx: ExtensionContext): Promise<boolean> => {
+    if (ctx.hasUI && host.executionMenu) {
+      const outcome = await host.executionMenu(ctx);
+      return outcome === "stopped" && !host.executing() && gate?.mode !== "exec";
+    }
+    ctx.ui.notify(EXEC_GUIDANCE, "warning");
+    return false;
+  };
+
   const enter = async (ctx: ExtensionContext, planFile?: string): Promise<boolean> => {
     settings.cancel("Plan entered explicitly.");
     // Fresh handoff recovery can precede our lifecycle handler. Be ready to persist
@@ -367,8 +382,7 @@ export function registerInlinePlanMode(pi: ExtensionAPI, host: InlineHost): Inli
     if (!restored) restore(ctx);
     hostCtx = ctx;
     if (host.executing() || gate?.mode === "exec") {
-      ctx.ui.notify(EXEC_GUIDANCE, "warning");
-      return false;
+      if (!(await execMenu(ctx))) return false;
     }
     const enteringGeneration = generation;
     if ((gate || queryFlow(pi.events)) && !(await requestMode("plan"))) return false;
@@ -902,7 +916,7 @@ export function registerInlinePlanMode(pi: ExtensionAPI, host: InlineHost): Inli
     async toggle(ctx, trigger) {
       hostCtx = ctx;
       if (host.executing() || gate?.mode === "exec") {
-        ctx.ui.notify(EXEC_GUIDANCE, "warning");
+        await execMenu(ctx);
         return false;
       }
       if (gate) {

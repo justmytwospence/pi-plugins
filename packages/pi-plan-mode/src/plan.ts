@@ -952,6 +952,7 @@ export default async function plan(pi: ExtensionAPI, dependencies: PlanDependenc
       return directImplementationBrief(approval);
     },
     executing: () => exec.active,
+    executionMenu: (ctx) => exec.menu(ctx),
     toggleKey: () => configuredPlanModeToggleShortcut(settings),
   });
 
@@ -1216,8 +1217,10 @@ export default async function plan(pi: ExtensionAPI, dependencies: PlanDependenc
       if (!runtimeActive || epoch !== branchEpoch) return;
       hostCtx = ctx;
       if (exec.active) {
-        ctx.ui.notify(EXEC_GUIDANCE, "warning");
-        return;
+        if (!ctx.hasUI || (await exec.menu(ctx)) !== "stopped" || exec.active) {
+          if (!ctx.hasUI) ctx.ui.notify(EXEC_GUIDANCE, "warning");
+          return;
+        }
       }
       const task = args.trim();
       if (!inline.active) await inline.enter(ctx);
@@ -1236,8 +1239,10 @@ export default async function plan(pi: ExtensionAPI, dependencies: PlanDependenc
       if (!runtimeActive || epoch !== branchEpoch) return;
       hostCtx = ctx;
       if (exec.active) {
-        ctx.ui.notify(EXEC_GUIDANCE, "warning");
-        return;
+        if (!ctx.hasUI || (await exec.menu(ctx)) !== "stopped" || exec.active) {
+          if (!ctx.hasUI) ctx.ui.notify(EXEC_GUIDANCE, "warning");
+          return;
+        }
       }
       if (ctx.mode !== "tui") {
         ctx.ui.notify("/planners needs the interactive terminal UI.", "warning");

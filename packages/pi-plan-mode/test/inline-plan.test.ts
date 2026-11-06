@@ -1813,6 +1813,7 @@ for (const gate of [false, true]) {
     const entries = h.mock.entries.length;
     const sent = h.mock.sentUserMessages.length;
     const transitions = h.gateEvents.length;
+    const menus = h.selects.length;
     await h.mock.commands.get("plan")?.handler("must not queue this task", h.context.ctx);
     await h.mock.commands.get("planners")?.handler("must not open planners", h.context.ctx);
     const entered = await h.tool(ENTER_TOOL).execute("enter", {}, undefined, undefined, h.context.ctx);
@@ -1821,10 +1822,14 @@ for (const gate of [false, true]) {
     await toggle.handler(h.context.ctx);
     assert.match(entered.content[0]?.text ?? "", /Exec is active\./u);
     assert.ok(entered.content[0]?.text.includes(EXEC_GUIDANCE));
+    // With a UI, /plan, /planners and the toggle open the execution menu (cancelled here) instead
+    // of warning; the enter_plan_mode tool still answers with the guidance.
     assert.deepEqual(
-      h.context.notifications.slice(-3).map((note) => note.message),
-      [EXEC_GUIDANCE, EXEC_GUIDANCE, EXEC_GUIDANCE],
+      h.selects.slice(menus).map((entry) => entry.options.slice(0, 2)),
+      [0, 1, 2].map(() => ["Continue", "Submit for review"]),
     );
+    assert.ok(h.selects.slice(menus).every((entry) => /^Implementing "/u.test(entry.title)));
+    assert.ok(!h.context.notifications.some((note) => note.message === EXEC_GUIDANCE));
     assert.equal(h.mock.entries.length, entries);
     assert.equal(h.mock.sentUserMessages.length, sent);
     assert.equal(h.gateEvents.length, transitions);
