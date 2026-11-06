@@ -40,11 +40,10 @@ test("here and fresh handoffs differ only in the explicit fresh-context claim", 
 
 test("the handoff describes conversational recovery without bypassing review safeguards", () => {
   const brief = implementationBrief({ plan: "# P", context: "here" });
-  assert.match(brief, /why you stopped, what is needed, and what happens after the answer/u);
-  assert.match(brief, /clarification is not authorization/u);
-  assert.match(brief, /continue_plan with action answer and its eligible replyId/u);
-  assert.match(brief, /only an explicit UI selection authorizes a retry or an extra revision attempt/u);
-  assert.match(brief, /dialog is canceled or unavailable, remain paused/u);
+  assert.match(brief, /The user resolves pauses in a dialog/u);
+  assert.doesNotMatch(brief, /replyId|action answer/u);
+  assert.match(brief, /only asks to open that dialog/u);
+  assert.match(brief, /never authorizes retry, extension or completion without review/u);
   assert.match(brief, /do not work around the pause or reset the revision budget/u);
   assert.match(brief, /evidence-backed disputes/u);
   assert.doesNotMatch(brief, /\/plan-exec resume/u);

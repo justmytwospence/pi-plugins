@@ -258,9 +258,9 @@ for (const width of [46, 120]) {
       ];
       if (details.negotiation?.pause) {
         assert.ok(text.includes(details.negotiation.pause.action ?? ""));
-        assert.ok(!text.includes("No retry has been authorized."));
-        assert.ok(!text.includes("Allow one more attempt"));
-        assert.ok(!text.includes("Reply here."));
+        assert.ok(!text.includes("Retry the review, finish without it, or stop."));
+        assert.ok(!text.includes("Allow one more revision"));
+        assert.ok(!text.includes("Answer below"));
       }
       for (const value of hidden) assert.ok(!text.includes(value), value);
       const expandedLines = renderFinish(details, { ...options, expanded: true }, theme, current).render(width);
@@ -376,13 +376,17 @@ for (const width of [46, 120]) {
           details.action ??
           details.negotiation?.pause?.action ??
           (reason === "user_needed"
-            ? "Reply here."
+            ? "Answer below"
             : reason === "exhausted"
-              ? "Allow one more attempt"
-              : "No retry has been authorized.");
+              ? "Allow one more revision"
+              : "Retry the review, finish without it, or stop.");
         assert.ok(text.includes(expected.replace(/\s+/gu, " ")), expected);
         if (explicit !== "default") {
-          for (const helper of ["Reply here.", "Allow one more attempt", "No retry has been authorized."])
+          for (const helper of [
+            "Answer below",
+            "Allow one more revision",
+            "Retry the review, finish without it, or stop.",
+          ])
             assert.ok(!text.includes(helper));
         }
         if (explicit === "details") assert.ok(!text.includes("Pause recovery"));

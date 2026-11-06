@@ -497,11 +497,11 @@ export function renderFinish(
         details.action ??
         pause?.action ??
         (reason === "user_needed"
-          ? "Reply here. Ask for clarification if you need it; answering lets implementation continue."
+          ? "Answer below, or press Esc and answer later from the footer or /plan-exec."
           : reason === "failure" || reason === "interrupted"
-            ? "Ask to retry the review, or discuss what happened. No retry has been authorized."
+            ? "Retry the review, finish without it, or stop."
             : reason === "exhausted"
-              ? "Allow one more attempt, discuss the findings, or finish without review."
+              ? "Allow one more revision, finish without review, or stop."
               : undefined);
       if (action && (!previous || full))
         section(body, theme, previous ? "Previous next action" : "Next action", action);
