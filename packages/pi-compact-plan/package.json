@@ -1,6 +1,6 @@
 {
   "name": "@justmytwospence/pi-compact-plan",
-  "version": "0.1.26",
+  "version": "0.1.27",
   "description": "/compact-plan: say what you will do next, answer any question the session has, then review and approve the compaction focus it drafts.",
   "type": "module",
   "license": "MIT",
