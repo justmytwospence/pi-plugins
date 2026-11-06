@@ -183,13 +183,7 @@ export function consultantAccess(input: ConsultantAccessInput): PlannerAccessCon
     expandPath: input.expandPath,
     ...(input.scoutProviderExtensions ? { scoutProviderExtensions: input.scoutProviderExtensions } : {}),
   });
-  const tools = [
-    ...access.config.tools.filter(
-      (tool) => tool !== PLAN_MODE_QUESTION_TOOL_NAME && tool !== PLAN_MODE_COMPLETE_TOOL_NAME,
-    ),
-    "edit",
-    "write",
-  ];
+  const tools = [...access.config.tools.filter((tool) => tool !== PLAN_MODE_COMPLETE_TOOL_NAME), "edit", "write"];
   const notes = plannerToolNotes({
     tools: access.extraTools,
     grants: access.grants,

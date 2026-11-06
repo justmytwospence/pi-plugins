@@ -45,7 +45,7 @@ export type PlannerStatus =
 export interface PendingQuestions {
   questions: PlanModeQuestion[];
   /** Your answers, or undefined to skip them. */
-  resolve(answers: PlanModeQuestionAnswer[] | undefined): void;
+  resolve(answers: PlanModeQuestionAnswer[] | undefined | { postponed: string }): void;
 }
 
 export interface PlannerStats {
@@ -93,6 +93,8 @@ export interface PlannerAgentOptions {
   /** Reconstructed branch state waits for explicit input, even before its session file was saved. */
   restored?: boolean;
   onChange(): void;
+  /** Called when the planner asks questions, right after they are pending. */
+  onQuestion?: (pending: PendingQuestions) => void;
   createSession?: PlannerSessionFactory;
   /** Optional family service; only its observer is loaded in the planner session. */
   family?: FamilyService;
@@ -290,6 +292,19 @@ export class PlannerAgent {
     if (this.status === "asking") this.status = "working";
     this.record(answers ? `Answered: ${answers.map((answer) => answer.answer).join(" · ")}` : "Questions skipped.");
     pending.resolve(answers);
+    if (this.handle?.session.isStreaming) this.armTimers();
+    this.changed();
+  }
+
+  /** The user put the questions off: the planner is told, and its tool returns the message. */
+  postpone(message: string) {
+    const pending = this.pending;
+    if (!pending) return;
+    this.pending = undefined;
+    if (this.status === "asking") this.status = "working";
+    this.record("Questions postponed.");
+    pending.resolve({ postponed: message });
+    if (this.handle?.session.isStreaming) this.armTimers();
     this.changed();
   }
 
@@ -440,8 +455,8 @@ export class PlannerAgent {
 
   private ask(questions: PlanModeQuestion[], signal: AbortSignal | undefined) {
     if (this.disposed) return Promise.resolve(undefined);
-    return new Promise<PlanModeQuestionAnswer[] | undefined>((resolve) => {
-      const done = (answers: PlanModeQuestionAnswer[] | undefined) => {
+    return new Promise<PlanModeQuestionAnswer[] | undefined | { postponed: string }>((resolve) => {
+      const done = (answers: PlanModeQuestionAnswer[] | undefined | { postponed: string }) => {
         signal?.removeEventListener("abort", onAbort);
         resolve(answers);
       };
@@ -457,6 +472,11 @@ export class PlannerAgent {
       // The clock stops while it waits for you.
       this.clearTimers();
       this.stats.lastActivity = "asking you";
+      try {
+        this.options.onQuestion?.(this.pending);
+      } catch {
+        // A question host must never break a planner.
+      }
       this.changed();
     });
   }

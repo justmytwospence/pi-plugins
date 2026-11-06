@@ -72,7 +72,10 @@ export interface PlannerPolicy {
   /** Path of this package's entry, which scouts load to enforce an MCP allowlist. */
   guardExtensionPath: string;
   /** Show questions in the planner's lane and wait for your answers; undefined when you skip them. */
-  ask(questions: PlanModeQuestion[], signal: AbortSignal | undefined): Promise<PlanModeQuestionAnswer[] | undefined>;
+  ask(
+    questions: PlanModeQuestion[],
+    signal: AbortSignal | undefined,
+  ): Promise<PlanModeQuestionAnswer[] | undefined | { postponed: string }>;
   /** The planner submitted (or resubmitted) its plan. */
   onPlan(plan: string): void;
 }
@@ -90,6 +93,9 @@ export function plannerExtension(policy: PlannerPolicy): ExtensionFactory {
         const parsed = normalizePlanModeQuestionParams(params);
         if (!parsed.ok) return planModeQuestionCancelled([], "invalid_input", `Error: ${parsed.error}`) as never;
         const answers = await policy.ask(parsed.questions, signal);
+        if (answers && !Array.isArray(answers)) {
+          return planModeQuestionCancelled(parsed.questions, "cancelled", answers.postponed) as never;
+        }
         if (!answers) {
           return planModeQuestionCancelled(
             parsed.questions,

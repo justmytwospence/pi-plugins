@@ -422,6 +422,81 @@ test("a planner waits for your answers to its questions", async () => {
   assert.equal(planner.status, "idle");
 });
 
+test("onQuestion sees the pending questions, and postponing returns the message to the tool", async () => {
+  let seen: string | undefined;
+  const { factory } = fakeSessions(async (_prompt, run) => {
+    const result = (await run.tool("plan_mode_question", {
+      questions: [
+        {
+          id: "lang",
+          header: "Language",
+          question: "Which?",
+          options: [
+            { label: "Python", description: "Py" },
+            { label: "Node", description: "JS" },
+          ],
+        },
+      ],
+    })) as { content: Array<{ text: string }>; details: { cancelled: boolean } };
+    seen = `${result.details.cancelled}:${result.content[0]?.text ?? ""}`;
+  });
+  const asked: string[] = [];
+  const planner = agent(factory, {
+    onQuestion: (pending) => asked.push(pending.questions[0]?.header ?? ""),
+  });
+  const started = planner.start("task", {} as never);
+  await flush();
+  assert.deepEqual(asked, ["Language"]);
+  assert.equal(planner.status, "asking");
+  planner.postpone("the user will answer later");
+  await started;
+  await flush();
+  assert.equal(planner.pending, undefined);
+  assert.match(seen ?? "", /^true:/u);
+  assert.match(seen ?? "", /the user will answer later/u);
+});
+
+test("answering a question re-arms the time limit that stopped while it waited", async () => {
+  vi.useFakeTimers();
+  try {
+    let release: () => void = () => undefined;
+    const done = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const { factory, sent } = fakeSessions(async (_prompt, run) => {
+      await run.tool("plan_mode_question", {
+        questions: [
+          {
+            id: "q",
+            header: "Q",
+            question: "Which?",
+            options: [
+              { label: "A", description: "a" },
+              { label: "B", description: "b" },
+            ],
+          },
+        ],
+      });
+      await done;
+    });
+    const planner = agent(factory, { timeoutMs: 1_000, wrapUpMessage: "wrap" });
+    void planner.start("task", {} as never);
+    await vi.advanceTimersByTimeAsync(0);
+    assert.equal(planner.status, "asking");
+    vi.advanceTimersByTime(5_000);
+    assert.equal(sent.filter((entry) => entry.kind === "steer").length, 0, "no clock while it waits for you");
+    planner.answer([{ id: "q", header: "Q", question: "Which?", answer: "A", wasCustom: false, optionIndex: 1 }]);
+    await vi.advanceTimersByTimeAsync(0);
+    vi.advanceTimersByTime(800);
+    assert.deepEqual(sent.at(-1), { kind: "steer", text: "wrap" });
+    release();
+    await vi.advanceTimersByTimeAsync(0);
+    planner.dispose();
+  } finally {
+    vi.useRealTimers();
+  }
+});
+
 test("a restored planner reopens its session file when you talk to it", async () => {
   const { factory, created } = fakeSessions(async () => undefined);
   const planner = agent(factory, { sessionFile: "/sessions/old.jsonl", plan: "# Old", revision: 2 });
@@ -616,7 +691,7 @@ test("the planner on call gets every toolset, grant and subagents, and may write
   });
   for (const tool of ["read", "bash", "web_search", "fetch_content", "plan_subagents", "edit", "write"])
     assert.ok(config.tools.includes(tool), tool);
-  assert.ok(!config.tools.includes("plan_mode_question"));
+  assert.ok(config.tools.includes("plan_mode_question"), "the planner on call asks the user itself");
   assert.ok(!config.tools.includes("plan_mode_complete"));
   assert.ok(config.extensions.includes("/ext/web"));
   assert.deepEqual(config.skills, ["/skills/jev"]);
