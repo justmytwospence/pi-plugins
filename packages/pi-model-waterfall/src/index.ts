@@ -92,7 +92,9 @@ export default function modelWaterfall(pi: ExtensionAPI): void {
   pi.on("session_shutdown", () => { clear(); session++; rungs = undefined; stopTicker(); collector.dispose(); });
   pi.events.on(WATERFALL_CHANNEL, (value: unknown) => {
     const request = value as WaterfallRequest;
-    if (request?.kind === "query") request.snapshot = structuredClone(rungs ? { ...snapshot, rungs: rungs.list, rungsObservedAt: rungs.at } : snapshot);
+    if (request?.kind !== "query") return;
+    const order = WATERFALL_MODELS.map(({ provider, id }) => ({ provider, model: id }));
+    request.snapshot = structuredClone(rungs ? { ...snapshot, order, rungs: rungs.list, rungsObservedAt: rungs.at } : { ...snapshot, order });
   });
 
   const candidate = async (ctx: ExtensionContext, physical: typeof WATERFALL_MODELS[number], level: ThinkingLevel, signal?: AbortSignal): Promise<WaterfallCandidate> => {

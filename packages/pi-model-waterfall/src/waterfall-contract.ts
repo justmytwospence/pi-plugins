@@ -16,6 +16,8 @@ export interface WaterfallSnapshot {
   physical?: { provider: string; id: string; thinkingLevel: string; quotaVariant?: string };
   skipped: Array<{ provider: string; reason: string }>;
   observedAt: number;
+  /** The fixed rungs in waterfall order, present from load, before any assessment. */
+  order?: Array<{ provider: string; model: string }>;
   /** Rungs in waterfall order; absent until the first background assessment. */
   rungs?: WaterfallRung[];
   rungsObservedAt?: number;

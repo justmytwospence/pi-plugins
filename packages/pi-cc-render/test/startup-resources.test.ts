@@ -1281,6 +1281,18 @@ describe("waterfall-ordered models", () => {
 		expect(section.groups[1]!.tones).toEqual(["dim"]);
 		expect(section.groups[3]!.tones).toBeUndefined();
 		expect(section.count).toBe(6);
+		// Before the first assessment the fixed order alone scopes and orders providers, without notes.
+		const early = buildModelsSection([
+			{ provider: "waterfall", id: "auto", virtual: true },
+			{ provider: "openrouter", id: "openai/gpt-6.1-sol" },
+			{ provider: "google", id: "antigravity-gemini-4-argon" },
+			{ provider: "anthropic", id: "claude-opus-5-5" },
+		], [], undefined, { order: [
+			{ provider: "anthropic", model: "claude-opus-5-5" }, { provider: "openai", model: "gpt-6.1-sol" },
+			{ provider: "google", model: "antigravity-gemini-4-argon" }, { provider: "muse-sdk", model: "muse-wonder-1.0" },
+		] })!;
+		expect(early.groups.map((group) => group.label)).toEqual(["auto", "1 anthropic", "3 google"]);
+		expect(early.groups[0]!.right).toEqual(["anthropic → openai → google → muse"]);
 		// Without a waterfall, providers stay alphabetical and the router is still not a provider group.
 		const plain = buildModelsSection([{ provider: "waterfall", id: "auto", virtual: true }, { provider: "openai", id: "gpt-6.1-sol" }, { provider: "anthropic", id: "claude-opus-5-5" }])!;
 		expect(plain.groups.map((group) => group.label)).toEqual(["auto", "anthropic", "openai"]);

@@ -202,6 +202,9 @@ describe("standalone virtual model", () => {
     const f = fixture();
     f.pi.events.emit(WATERFALL_CHANNEL, { kind: "other" });
     assert.equal(queryWaterfall(f.pi.events).version, 1);
+    // The fixed order is known before any assessment, so consumers can scope to it at startup.
+    assert.equal(queryWaterfall(f.pi.events).rungs, undefined);
+    assert.deepEqual(queryWaterfall(f.pi.events).order.map(r => r.provider), ["anthropic", "openai", "google", "muse-sdk"]);
   });
   it("ignores weekly limits scoped to other models and routes Opus without a 5h window", async () => {
     claude.windows = [{ label: "week", used: 10, observedAt: now(), reset: now() + 60_000 },

@@ -22,7 +22,7 @@ import { categoryStyle, GLYPHS } from "./startup-style.ts";
 import { readStartupContext, type StartupContextSnapshot } from "./startup-context.ts";
 import { renderContextTreemap } from "./startup-treemap.ts";
 import { attachStartupHost, disposeStartupHost } from "./startup-state.ts";
-import { queryWaterfall, type WaterfallRung } from "../../waterfall-contract.ts";
+import { queryWaterfall, type WaterfallRung, type WaterfallSnapshot } from "../../waterfall-contract.ts";
 import { querySystem1State, type System1Status } from "../../system1-contract.ts";
 import { createInteractiveSection, createSplashActionController } from "./startup-interactions.ts";
 export { GLYPHS } from "./startup-style.ts";
@@ -1210,7 +1210,7 @@ export function currentGeneration(ids: string[]): Set<string> {
 /**
  * The models section, one line per model under a heading per provider, with providers in ordered
  * vertical column stacks (the columns layout Context uses): every current-generation model of each
- * provider with credentials (only the waterfall's providers once its rungs are known, so a catalog
+ * provider with credentials (only the waterfall's providers when it is loaded, so a catalog
  * provider such as OpenRouter lists only favorites), plus the favorites (enabledModels or --models, with any thinking level) and the
  * session's model wherever they are. Favorites carry a star and come first in their provider, in the order they
  * are configured; the session's model is highlighted in green. Every model shows its context window on the right.
@@ -1219,7 +1219,7 @@ export function buildModelsSection(
 	available: ModelEntry[],
 	favorites: ModelEntry[] = [],
 	current?: { provider: string; id: string },
-	waterfall?: { rungs?: WaterfallRung[]; now?: number },
+	waterfall?: { rungs?: WaterfallRung[]; order?: WaterfallSnapshot["order"]; now?: number },
 	system1?: System1Status["candidates"],
 ): ResourceSection | undefined {
 	const key = (model: { provider: string; id: string }) => `${model.provider}/${model.id}`;
@@ -1243,10 +1243,13 @@ export function buildModelsSection(
 	for (const favorite of favorites) add({ ...byKey.get(key(favorite)), ...favorite });
 	const availableProviders = new Map<string, ModelEntry[]>();
 	for (const model of available) availableProviders.set(model.provider, [...(availableProviders.get(model.provider) ?? []), model]);
+	// Assessed rungs carry state; until the first assessment, the waterfall's fixed order still
+	// decides which providers belong and where they go.
 	const rungs = waterfall?.rungs ?? [];
-	const rungOf = (provider: string) => rungs.findIndex((rung) => vendorOf(rung.provider) === vendorOf(provider));
+	const ladder: Array<{ provider: string }> = rungs.length ? rungs : waterfall?.order ?? [];
+	const rungOf = (provider: string) => ladder.findIndex((rung) => vendorOf(rung.provider) === vendorOf(provider));
 	for (const [provider, list] of availableProviders) {
-		if (rungs.length && rungOf(provider) < 0) continue;
+		if (ladder.length && rungOf(provider) < 0) continue;
 		const current = currentGeneration(list.map((model) => model.id));
 		const rest = list.filter((model) => current.has(model.id) && !favoriteKeys.has(key(model)));
 		for (const model of rest.sort((a, b) => compareNames(a.id, b.id))) add(model);
@@ -1257,13 +1260,13 @@ export function buildModelsSection(
 	// Providers follow the subscription waterfall's order when it is known, numbered, with
 	// rungs it would skip now dimmed and labeled why; the rest follow alphabetically.
 	const now = waterfall?.now ?? Date.now();
-	const rank = (provider: string) => { const index = rungOf(provider); return index < 0 ? rungs.length : index; };
+	const rank = (provider: string) => { const index = rungOf(provider); return index < 0 ? ladder.length : index; };
 	const ordered = [...providers].sort(([a], [b]) => rank(a) - rank(b) || compareNames(a, b));
 	const groups: ResourceGroup[] = ordered.map(([provider, list]) => {
 		const marks = list.map((model) => (current && key(model) === key(current) ? CURRENT_MARK : undefined));
 		const prefixes = list.map((model) => (favoriteKeys.has(key(model)) ? FAVORITE_MARK : undefined));
 		const index = rungOf(provider);
-		const note = index < 0 ? undefined : rungNote(rungs[index]!, now);
+		const note = index < 0 || !rungs[index] ? undefined : rungNote(rungs[index]!, now);
 		return {
 			label: index < 0 ? provider : `${index + 1} ${provider}${note ? ` · ${note}` : ""}`,
 			...(note ? { tones: list.map(() => "dim") } : {}),
@@ -1278,7 +1281,7 @@ export function buildModelsSection(
 		};
 	});
 	if (virtual.length) {
-		const order = rungs.length ? rungs.map((rung) => vendorOf(rung.provider)).join(" → ") : "";
+		const order = ladder.map((rung) => vendorOf(rung.provider)).join(" → ");
 		groups.unshift({
 			label: "auto",
 			uncounted: true,
@@ -1309,7 +1312,7 @@ export function buildModelsSection(
 }
 
 /** The session's models as a section; undefined when there are none or pi's model API is missing. */
-export function collectModelsSection(mode: any, verifiedGoogle: ModelEntry[] = [], rungs?: WaterfallRung[], system1?: System1Status["candidates"]): ResourceSection | undefined {
+export function collectModelsSection(mode: any, verifiedGoogle: ModelEntry[] = [], waterfall?: Pick<WaterfallSnapshot, "rungs" | "order">, system1?: System1Status["candidates"]): ResourceSection | undefined {
 	try {
 		const session = mode?.session;
 		const scopedModels = (session?.scopedModels ?? []) as Array<{ model: any; thinkingLevel?: string }>;
@@ -1323,7 +1326,7 @@ export function collectModelsSection(mode: any, verifiedGoogle: ModelEntry[] = [
 			(model) => ({ provider: model.provider, id: model.id, contextWindow: model.contextWindow, ...(model.api === "pi-virtual" ? { virtual: true } : {}) }),
 		);
 		const current = session?.model ? { provider: session.model.provider, id: session.model.id } : undefined;
-		return buildModelsSection(available, favorites, current, rungs ? { rungs } : undefined, system1);
+		return buildModelsSection(available, favorites, current, waterfall ? { rungs: waterfall.rungs, order: waterfall.order } : undefined, system1);
 	} catch {
 		return undefined;
 	}
@@ -1461,7 +1464,7 @@ export function replaceSections(mode: any, options: unknown, pi?: ExtensionAPI):
 		const snapshot = readStartupContext(mode);
 		try {
 			const sections = collectSections(mode, options as { extensions?: any[] } | undefined, snapshot);
-			const model = collectModelsSection(mode, verifiedGoogle, pi ? queryWaterfall(pi.events)?.rungs : undefined,
+			const model = collectModelsSection(mode, verifiedGoogle, pi ? queryWaterfall(pi.events) : undefined,
 				pi ? querySystem1State(pi.events)?.candidates : undefined);
 			if (model) sections.Models = model;
 			refreshGoogle();

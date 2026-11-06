@@ -25,7 +25,7 @@ type Frozen = { sections: Record<string, ResourceSection>; context: ReturnType<t
  * splash it never polls, never measures the chat and never replans: its folds are planned for
  * one screen once per width, and its lines are cached per width and theme.
  */
-export function freezeSplash(mode: any, rungs = undefined as Parameters<typeof collectModelsSection>[2], system1 = undefined as Parameters<typeof collectModelsSection>[3]): Frozen | undefined {
+export function freezeSplash(mode: any, waterfall = undefined as Parameters<typeof collectModelsSection>[2], system1 = undefined as Parameters<typeof collectModelsSection>[3]): Frozen | undefined {
 	if (!mode?.session) return undefined;
 	const context = readStartupContext(mode);
 	let sections: Record<string, ResourceSection> = {};
@@ -34,7 +34,7 @@ export function freezeSplash(mode: any, rungs = undefined as Parameters<typeof c
 		const mcp = collectMcpSection(mode, collectMcpEntries(mode), new Map(), context);
 		if (mcp) sections.MCP = mcp;
 	} catch { /* MCP unavailable. */ }
-	const models = collectModelsSection(mode, [], rungs, system1);
+	const models = collectModelsSection(mode, [], waterfall, system1);
 	if (models) sections.Models = models;
 	const rows = Number(mode.ui?.terminal?.rows);
 	return { sections, context, rows: Number.isFinite(rows) && rows > 0 ? rows : 40 };
@@ -67,7 +67,7 @@ export function installSplashCommand(pi: ExtensionAPI): void {
 				if (cache?.width === width) return cache.lines;
 				if (!frozen.has(entry.id)) {
 					// Resumed entries freeze the current session too: the splash shows this session, now.
-					const built = manager ? freezeSplash(getInteractiveModeForManager(manager), queryWaterfall(pi.events)?.rungs, querySystem1State(pi.events)?.candidates) : undefined;
+					const built = manager ? freezeSplash(getInteractiveModeForManager(manager), queryWaterfall(pi.events), querySystem1State(pi.events)?.candidates) : undefined;
 					if (built) frozen.set(entry.id, built);
 				}
 				const snapshot = frozen.get(entry.id);
