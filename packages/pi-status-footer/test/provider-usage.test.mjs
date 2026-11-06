@@ -356,7 +356,7 @@ describe("collector", () => {
     collector.dispose(); assert.equal(options.signal.aborted, true);
   });
 
-  it("collects only from the Muse SDK bridge and its login marker, not legacy Muse models", async () => {
+  it("collects only from the Muse SDK bridge and its login marker, not unmarked muse-code sources", async () => {
     const alias = { provider: "muse-sdk", sourceId: "sdk-account" };
     const exec = vi.fn(async () => JSON.stringify({ ...museEnvelope, allowance: museAllowance }));
     const fetch = vi.fn();
@@ -369,9 +369,11 @@ describe("collector", () => {
       assert.deepEqual(result.windows, parseMuseUsage({ ...museEnvelope, allowance: museAllowance }, now).windows);
     }
     const before = exec.mock.calls.length;
-    const legacy = { provider: "muse-code", sourceId: "legacy-bridge", auth: { kind: "local-oauth" } };
-    assert.match(dispatchProviderUsage(legacy, now).reason, /legacy Muse bridge/);
-    assert.equal((await collector.refresh(legacy)).state, "unavailable");
+    for (const auth of [{ kind: "local-oauth" }, { kind: "api-key", token: "muse-code-local" }, { kind: "local-oauth", token: "other" }]) {
+      const legacy = { provider: "muse-code", sourceId: "legacy-bridge", baseUrl: "http://localhost", auth };
+      assert.match(dispatchProviderUsage(legacy, now).reason, /pi-muse-bridge/);
+      assert.equal((await collector.refresh(legacy)).state, "unavailable");
+    }
     for (const token of ["synthetic-api-key", "", undefined]) {
       const source = { ...alias, auth: { kind: "api-key", token } };
       assert.match(dispatchProviderUsage(source, now).reason, /API key/i);
@@ -379,6 +381,28 @@ describe("collector", () => {
     }
     assert.equal(exec.mock.calls.length, before); assert.equal(fetch.mock.calls.length, 0);
     collector.dispose();
+  });
+
+  it("collects pi-muse-bridge's muse-code from the signed-in CLI despite its localhost URL, unless META_API_KEY is set", async () => {
+    const bridge = { provider: "muse-code", sourceId: "muse-wonder-1.0", model: "muse-wonder-1.0", baseUrl: "http://localhost", auth: { kind: "local-oauth", token: "muse-code-local" } };
+    const exec = vi.fn(async () => JSON.stringify({ ...museEnvelope, allowance: museAllowance }));
+    const collector = createProviderUsageCollector({ now: () => now, exec });
+    assert.equal(dispatchProviderUsage(bridge, now), undefined);
+    const result = await collector.refresh(bridge);
+    assert.equal(result.state, "ready");
+    assert.equal(result.provider, "muse-code");
+    assert.deepEqual(result.windows, parseMuseUsage({ ...museEnvelope, allowance: museAllowance }, now).windows);
+    vi.stubEnv("META_API_KEY", "synthetic");
+    try { assert.match(dispatchProviderUsage(bridge, now).reason, /META_API_KEY/); }
+    finally { vi.unstubAllEnvs(); }
+    collector.dispose();
+  });
+
+  it("explains a Muse window with no usage yet without inventing zero", () => {
+    const result = parseMuseUsage({ schemaVersion: 1, allowance: null, reason: "server_sent_no_usage", hint: "synthetic" }, now);
+    assert.equal(result.state, "unavailable");
+    assert.match(result.reason, /no usage yet/);
+    assert.deepEqual(result.windows, []);
   });
 
   it("handles Muse invalid output, oversized output and command failures without exposing details", async () => {

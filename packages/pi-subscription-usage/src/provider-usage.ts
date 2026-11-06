@@ -92,7 +92,8 @@ export function parseMuseUsage(payload: unknown, observedAt: number): ProviderUs
   if (!envelope || envelope.schemaVersion !== 1 || !Object.hasOwn(envelope, "allowance") ||
       (envelope.reason !== undefined && envelope.reason !== null && typeof envelope.reason !== "string") ||
       (envelope.hint !== undefined && envelope.hint !== null && typeof envelope.hint !== "string")) return invalid();
-  if (envelope.allowance === null) return unavailable("muse-sdk", MUSE_SOURCE, envelope.reason === "api_key" ? "Subscription usage is unavailable for API key authentication." : "Muse subscription usage is unavailable.");
+  if (envelope.allowance === null) return unavailable("muse-sdk", MUSE_SOURCE, envelope.reason === "api_key" ? "Subscription usage is unavailable for API key authentication." :
+    envelope.reason === "server_sent_no_usage" ? "Muse reported no usage yet in this window." : "Muse subscription usage is unavailable.");
   const allowance = object(envelope.allowance);
   const timestamp = (value: unknown): value is number => typeof value === "number" && Number.isSafeInteger(value) && value > 0 && value <= 8_640_000_000_000_000;
   const period = (value: unknown, label: string): UsageWindow | undefined => {
@@ -123,9 +124,15 @@ export function dispatchProviderUsage(source: UsageSource, _observedAt: number):
     if (auth?.kind !== "local-oauth" || !/^ya29\.[A-Za-z0-9_-]+$/.test(auth.token ?? "")) return unavailable(provider, GOOGLE_SOURCE, "A local Google OAuth credential is unavailable.");
     return undefined;
   }
+  if (provider === "muse-code") {
+    // pi-muse-bridge registers muse-code at http://localhost with a "muse-code-local"
+    // marker key and runs `muse exec` on the Muse CLI's signed-in subscription.
+    if (auth?.kind !== "local-oauth" || auth.token !== "muse-code-local") return unavailable(provider, MUSE_SOURCE, "Only pi-muse-bridge's signed-in Muse CLI exposes subscription usage.");
+    if (process.env.META_API_KEY) return unavailable(provider, MUSE_SOURCE, "META_API_KEY is set, so Muse may bill the API key instead of the subscription.");
+    return undefined;
+  }
   if (localEndpoint(baseUrl)) return { provider, source: "Local inference", state: "not-applicable", windows: [], reason: "Local inference has no account quota." };
   if (provider === "openai") return { ...unavailable(provider, "OpenAI subscription", "OpenAI subscription limits are unavailable."), detailsUrl: "https://chatgpt.com/settings/usage" };
-  if (provider === "muse-code") return unavailable(provider, MUSE_SOURCE, "The legacy Muse bridge cannot verify subscription billing or Pi tool permissions.");
   if (provider === "muse-sdk") {
     const placeholder = auth?.kind === "api-key" && auth.token === "muse-code-login";
     return auth?.kind === "api-key" && !placeholder ? unavailable(provider, MUSE_SOURCE, "Subscription usage is unavailable for API key authentication.") : undefined;
@@ -254,7 +261,7 @@ export function createProviderUsageCollector(options: CollectorOptions = {}) {
     refresh(source: UsageSource): Promise<ProviderUsage> {
       if (disposed) return Promise.resolve(unavailable(source.provider, source.provider, "Usage collector is disposed."));
       // Include credential identity without retaining the credential in cache keys.
-      const key = createHash("sha256").update(JSON.stringify(source)).update(source.provider === "muse-sdk" ? process.env.PI_MUSE_BINARY ?? "" : "").digest("hex");
+      const key = createHash("sha256").update(JSON.stringify(source)).update(source.provider === "muse-sdk" || source.provider === "muse-code" ? process.env.PI_MUSE_BINARY ?? "" : "").digest("hex");
       // The footer can poll a different model while the router reads Argon.
       // Do not cancel one model's flight just because it shares a provider.
       const slotKey = `${source.provider}\u0000${source.sourceId}\u0000${source.model ?? ""}\u0000${source.variant ?? ""}`;

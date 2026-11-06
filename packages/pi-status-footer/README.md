@@ -55,8 +55,9 @@ model. When the router is present, it publishes a detached, credential-free
 `pi-plugins.model-waterfall.v1` snapshot so the footer can show its selected
 physical model without a new row, control, or inference request. For Argon,
 it reads only the routed physical reasoning variant, not a generic model quota.
-The footer works without the router. The older `muse-code` provider is never shown as a
-verified Muse subscription reading.
+The footer works without the router. pi-muse-bridge's `muse-code` provider (identified by
+its `muse-code-local` key) reads the same signed-in Muse CLI usage as `muse-sdk`, despite
+its `http://localhost` URL, unless `META_API_KEY` is set.
 
 The selections persist in the session without entering model context. New sessions
 start with the custom footer and both extras on. Native mode still keeps the cached account

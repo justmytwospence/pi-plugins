@@ -1618,9 +1618,14 @@ export default function statusFooter(pi: ExtensionAPI): void {
       if (!model) return;
       const variant = id === "google" && routed?.provider === id && routed.id === model.id ? routed.quotaVariant : undefined;
       if (id === "google" && routed?.provider === id && model.id === "antigravity-gemini-4-argon" && !variant) return;
-      // Only the audited SDK bridge uses the signed-in Muse CLI. The older
-      // muse-code provider may bill an unrelated API key or execute tools itself.
+      // The Muse SDK bridge and pi-muse-bridge (muse-code, marked by its
+      // "muse-code-local" key) both run on the Muse CLI's signed-in subscription.
       let auth: UsageSource["auth"] = id === "muse-sdk" ? { kind: "local-oauth" } : { kind: "api-key" };
+      if (id === "muse-code") {
+        let key: string | undefined;
+        try { key = await context.modelRegistry.getApiKeyForProvider(id); } catch { /* Not the bridge's marker. */ }
+        if (key === "muse-code-local") auth = { kind: "local-oauth", token: key };
+      }
       if (id === "google") {
         let selected = routed?.provider === id ? context.modelRegistry.find(id, routed.id) : context.model?.provider === id ? context.model : undefined;
         let localOAuth = false;
