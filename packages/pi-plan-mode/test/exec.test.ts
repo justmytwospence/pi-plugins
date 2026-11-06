@@ -35,7 +35,11 @@ type Tool = { name: string; execute(...args: unknown[]): Promise<Result> };
 
 /** A fake planner session: each prompt runs `script`, which answers (and may amend the plan file). */
 type ScriptReply = { reply: string; amend?: () => void; error?: string };
-function fakeSessions(script: (prompt: string) => ScriptReply | Promise<ScriptReply>, abortDelayMs = 0) {
+type ScriptRun = { tool(name: string, params: unknown): Promise<any> };
+function fakeSessions(
+  script: (prompt: string, run: ScriptRun) => ScriptReply | Promise<ScriptReply>,
+  abortDelayMs = 0,
+) {
   const created: PlannerSessionOptions[] = [];
   const prompts: string[] = [];
   let aborts = 0;
@@ -44,6 +48,14 @@ function fakeSessions(script: (prompt: string) => ScriptReply | Promise<ScriptRe
   let stop: (() => void) | undefined;
   const factory: PlannerSessionFactory = async (_host, options) => {
     created.push(options);
+    const planTools = new Map<string, { execute(...args: unknown[]): Promise<unknown> }>();
+    (options.policy as unknown as (pi: unknown) => void)({
+      registerTool: (tool: { name: string; execute(...args: unknown[]): Promise<unknown> }) =>
+        planTools.set(tool.name, tool),
+      on: () => undefined,
+      getAllTools: () => [],
+    });
+    const run: ScriptRun = { tool: (name, params) => planTools.get(name)!.execute("call", params) as Promise<any> };
     const listeners = new Set<(event: unknown) => void>();
     const emit = (event: unknown) => {
       for (const listener of listeners) listener(event);
@@ -55,7 +67,7 @@ function fakeSessions(script: (prompt: string) => ScriptReply | Promise<ScriptRe
         session.isStreaming = true;
         emit({ type: "agent_start" });
         const { reply, amend, error } = await Promise.race([
-          Promise.resolve().then(() => script(text)),
+          Promise.resolve().then(() => script(text, run)),
           new Promise<ScriptReply>((resolve) => {
             stop = () => resolve({ reply: "", error: "aborted" });
           }),
@@ -123,7 +135,7 @@ async function setup(
     restoreName?: string;
     returnTo?: string;
     plan?: string;
-    script?: (prompt: string) => ScriptReply | Promise<ScriptReply>;
+    script?: (prompt: string, run: ScriptRun) => ScriptReply | Promise<ScriptReply>;
     select?: Array<string | undefined>;
   } = {},
 ) {
@@ -1701,3 +1713,117 @@ for (const exhausted of [false, true])
     await submit(s);
     assert.ok(s.context.statuses.get(EXEC_STATUS_KEY)?.includes(exhausted ? "needs your decision" : "review failed"));
   });
+
+const plannerQuestion = {
+  questions: [
+    {
+      id: "acct",
+      header: "Account",
+      question: "Which account?",
+      options: [
+        { label: "Staging", description: "Safe" },
+        { label: "Production", description: "Risky" },
+      ],
+    },
+  ],
+};
+
+test("a planner question during ask_planner is answered in a dialog and reaches the planner", async () => {
+  let seen = "";
+  const s = await setup({
+    select: ["Staging"],
+    script: async (_prompt, run) => {
+      const result = await run.tool("plan_mode_question", plannerQuestion);
+      seen = result.content[0].text;
+      return { reply: "Use staging." };
+    },
+  });
+  const updates: any[] = [];
+  const result = await s
+    .tool(ASK_TOOL)
+    .execute("ask", { message: "Which account?" }, undefined, (u: unknown) => updates.push(u), s.context.ctx);
+  assert.match(seen, /Staging/u);
+  assert.match(resultText(result), /Use staging\./u);
+  assert.equal(s.selects.at(-1)?.title, "Which account?");
+  const asking = updates.findIndex((u) => u.details?.askUserQuestion);
+  assert.ok(asking >= 0, "the question is advertised before the dialog");
+  assert.ok(
+    updates.slice(asking + 1).some((u) => !u.details?.askUserQuestion),
+    "and cleared afterwards",
+  );
+  assert.equal(s.latest().pendingQuestion, undefined);
+});
+
+test("Esc on a planner question postpones it; the next turn end reopens it and resumes the implementer", async () => {
+  const prompts: string[] = [];
+  const s = await setup({
+    select: [undefined, "Staging"],
+    script: async (prompt, run) => {
+      prompts.push(prompt);
+      if (prompts.length === 1) {
+        await run.tool("plan_mode_question", plannerQuestion);
+        return { reply: "Waiting for the user." };
+      }
+      return { reply: "Use staging." };
+    },
+  });
+  const result = await s
+    .tool(ASK_TOOL)
+    .execute("ask", { message: "Which account?" }, undefined, undefined, s.context.ctx);
+  assert.equal(result.terminate, true);
+  assert.equal(result.details.postponed, true);
+  assert.equal(s.latest().pendingQuestion?.implementerMessage, "Which account?");
+  assert.match(s.context.statuses.get(EXEC_STATUS_KEY) ?? "", /planner asks you/u);
+  await s.emit("agent_settled", { aborted: false });
+  await tick();
+  assert.equal(s.selects.length, 1, "already shown in this run");
+  await s.emit("agent_start", {});
+  await s.emit("agent_settled", { aborted: false });
+  await tick();
+  await tick();
+  assert.equal(s.selects.length, 2);
+  assert.equal(s.latest().pendingQuestion, undefined);
+  assert.match(prompts[1] ?? "", /From the user, answering the questions you asked earlier/u);
+  assert.match(prompts[1] ?? "", /Which account\? → Staging/u);
+  const sent = s.mock.sentMessages.find((m) => (m.message as any).customType === "plan-mode-planner-answer");
+  assert.ok(sent);
+  assert.deepEqual(sent.options, { triggerTurn: true });
+});
+
+test("a draft in the editor keeps a postponed question closed", async () => {
+  const s = await setup({
+    select: [undefined],
+    script: async (_p, run) => {
+      await run.tool("plan_mode_question", plannerQuestion);
+      return { reply: "ok" };
+    },
+  });
+  await s.tool(ASK_TOOL).execute("ask", { message: "q" }, undefined, undefined, s.context.ctx);
+  (s.context.ctx as any).ui.setEditorText("typing");
+  await s.emit("agent_start", {});
+  await s.emit("agent_settled", { aborted: false });
+  await tick();
+  assert.equal(s.selects.length, 1);
+});
+
+test("ask_user_question is blocked while a planner is on call, and allowed without one", async () => {
+  const s = await setup();
+  const blocked = await s.emit("tool_call", { toolName: "ask_user_question", input: {} });
+  assert.equal(blocked?.block, true);
+  assert.match(blocked.reason, /ask_planner/u);
+  const none = await setup({ planner: false });
+  assert.equal(await none.emit("tool_call", { toolName: "ask_user_question", input: {} }), undefined);
+});
+
+test("a malformed pending question is dropped on restore", async () => {
+  const s = await setup();
+  const saved = structuredClone(s.latest());
+  saved.pendingQuestion = { id: "x", questions: [], implementerMessage: "m" } as never;
+  s.mock.entries.push({ customType: EXEC_ENTRY, data: saved });
+  await s.emit("session_tree", {});
+  assert.equal(s.latest().pendingQuestion, undefined);
+  saved.pendingQuestion = { id: "x", questions: plannerQuestion.questions, implementerMessage: "m" } as never;
+  s.mock.entries.push({ customType: EXEC_ENTRY, data: saved });
+  await s.emit("session_tree", {});
+  assert.equal(s.latest().pendingQuestion?.id, "x");
+});

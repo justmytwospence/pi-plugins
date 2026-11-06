@@ -529,6 +529,7 @@ export function registerExec(pi: ExtensionAPI, host: ExecHost): ExecController {
       seed: [],
       sessionFile: planner.sessionFile,
       onChange: () => undefined,
+      onQuestion: (pending) => questionHandler?.(pending),
       ...(host.createSession ? { createSession: host.createSession } : {}),
     });
     return agent;
