@@ -2506,6 +2506,45 @@ test("provider usage layout preserves unknown windows and reset-due stale readin
   }
 });
 
+const overageRows = (usage, width) => mod.renderFooter({ ...fixture(), quotas: [], providerUsage: [usage] }, width, theme).map(plain);
+const claudeReading = (used, extra) => ({ provider: "anthropic", source: "Claude subscription", state: "ready", observedAt: now,
+  windows: [{ label: "week", used, reset: now + 3 * 86400_000 }], extra });
+const codexReading = (used, access) => ({ provider: "openai-codex", source: "Codex account", state: "ready", observedAt: now,
+  windows: [{ label: "week", used, reset: now + 3 * 86400_000 }], access });
+
+test("Claude past a full window shows its extra usage spend", () => {
+  const spend = { enabled: true, used: 76.73, limit: 100, currency: "USD", capReached: false };
+  for (const width of [46, 120, 180]) {
+    for (const reading of [claudeReading(100, spend), claudeReading(100, { ...spend, capReached: true }), claudeReading(100, { enabled: false }), claudeReading(95, spend)]) {
+      assert.ok(overageRows(reading, width).every((row) => visibleWidth(row) <= width));
+    }
+  }
+  const wide = overageRows(claudeReading(100, spend), 180).at(-1);
+  assert.match(wide, /week 100% used/);
+  assert.match(wide, /over limit · \$76\.73\/100 extra usage/);
+  assert.doesNotMatch(wide, /extra usage on/);
+  assert.match(overageRows(claudeReading(100, spend), 46).at(-1), /over · \$76\.73/);
+  assert.match(overageRows(claudeReading(100, { ...spend, capReached: true }), 180).at(-1), /over limit · extra usage cap reached/);
+  assert.match(overageRows(claudeReading(100, { enabled: false }), 180).at(-1), /limit reached/);
+  const under = overageRows(claudeReading(95, spend), 180).at(-1);
+  assert.match(under, /extra usage on \$76\.73\/100/);
+  assert.doesNotMatch(under, /over limit/);
+});
+
+test("Codex past a full window shows whether it still serves", () => {
+  for (const width of [46, 120, 180]) {
+    for (const reading of [codexReading(100, { allowed: true, limitReached: false }), codexReading(100, { limitReached: true }), codexReading(50, { allowed: true })]) {
+      assert.ok(overageRows(reading, width).every((row) => visibleWidth(row) <= width));
+    }
+  }
+  assert.match(overageRows(codexReading(100, { allowed: true, limitReached: false }), 180).at(-1), /over limit · still allowed/);
+  const blocked = overageRows(codexReading(100, { allowed: false, limitReached: true }), 180).at(-1);
+  assert.match(blocked, /limit reached/);
+  assert.doesNotMatch(blocked, /still allowed/);
+  assert.match(overageRows(codexReading(100, { allowed: true, credits: { balance: 12.5, unlimited: false } }), 180).at(-1), /12\.5 credits/);
+  assert.doesNotMatch(overageRows(codexReading(50, { allowed: true }), 180).at(-1), /over limit|limit reached/);
+});
+
 test("provider snapshots select Google pools, child sources and invalidate changed identities without render I/O", async () => {
   const realFetch = globalThis.fetch;
   const calls = [];

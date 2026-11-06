@@ -239,8 +239,15 @@ labeled.
   same-account reading and otherwise report limits unavailable.
 - **stale:** cache/header snapshot is at least ten minutes old or its reset time
   has passed. Never assume the provider reset a quota to zero without fresh data.
-- **extra:** shared Claude account extra usage enabled/disabled state. An old spent
-  pool is not an active warning when extra usage is off.
+- **extra:** Claude account extra usage enabled/disabled state and its spend
+  (`extra usage on $X/limit`). An old spent pool is not an active warning when extra
+  usage is off.
+- **over limit:** when a shown window is at 100%, Claude's row says
+  `over limit · $X/limit extra usage` (or `extra usage cap reached`, or `limit reached`
+  when extra usage is off), and Codex's says `over limit · still allowed` while ChatGPT
+  still serves requests, `limit reached` once it stops, plus any prepaid credit balance.
+  Neither provider reports usage past 100%, so the overage is the provider's billing and
+  access state, never an extrapolated percentage.
 
 Ordinary quota windows retain their routine countdowns when a future reset is known. Percentages are **used**, not remaining. The selectively displayed Fable window appears above 70% used, including exhaustion, regardless of days remaining; otherwise it appears only when over its seven-day usage trajectory and less than 48 hours from reset. Fable requires a known percentage and future reset. Unknown or past-reset data does not imply replenishment.
 

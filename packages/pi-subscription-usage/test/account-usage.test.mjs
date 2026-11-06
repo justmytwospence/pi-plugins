@@ -388,3 +388,50 @@ test("a rejected Anthropic read reports its HTTP status and error code, never th
   const throttled = await readPiAnthropicUsage(context("sk-ant-oat-test-account-y"));
   assert.equal(throttled.reason, "The usage endpoint answered HTTP 429.");
 });
+
+test("Claude extra usage records whether its spend cap is reached", () => {
+  const quota = parseClaudeQuota({
+    seven_day: { utilization: 100, resets_at: "2026-09-30T12:00:00Z" },
+    extra_usage: { is_enabled: true, monthly_limit: 10000, used_credits: 7673, currency: "USD", decimal_places: 2, spend_limit_reached: false },
+  }, now);
+  assert.equal(quota.windows[0].used, 100);
+  assert.deepEqual(quota.extra, { enabled: true, used: 76.73, limit: 100, currency: "USD", capReached: false });
+});
+
+test("Codex endpoint records access and only real credit balances", () => {
+  const window = { used_percent: 100, limit_window_seconds: 604800, reset_at: 1_800_000_000 };
+  const rate_limit = { allowed: true, limit_reached: false, primary_window: window };
+  assert.deepEqual(parseCodexUsage({ rate_limit, credits: { has_credits: false, balance: "0", unlimited: false } }, now).access, { allowed: true, limitReached: false });
+  assert.deepEqual(parseCodexUsage({ rate_limit, credits: { has_credits: true, balance: "12.5", unlimited: false } }, now).access,
+    { allowed: true, limitReached: false, credits: { balance: 12.5, unlimited: false } });
+  assert.equal(parseCodexUsage({ rate_limit, credits: { has_credits: true, balance: "abc", unlimited: false } }, now).access.credits, undefined);
+  assert.equal(parseCodexUsage({ rate_limit: { primary_window: window } }, now).access, undefined);
+});
+
+test("account readers carry extra usage and access through memory and disk cache", async () => {
+  await isolatedCache();
+  const reset = () => Math.floor(Date.now() / 1000) + 3600;
+  const claudeBody = () => ({ seven_day: { utilization: 100, resets_at: new Date(Date.now() + 3600_000).toISOString() },
+    extra_usage: { is_enabled: true, monthly_limit: 10000, used_credits: 7673, currency: "USD", decimal_places: 2, spend_limit_reached: true } });
+  const codexBody = () => ({ rate_limit: { allowed: true, limit_reached: false, primary_window: { used_percent: 100, limit_window_seconds: 604800, reset_at: reset() } },
+    credits: { has_credits: true, balance: "3", unlimited: false } });
+  const fetcher = vi.fn(async url => json(String(url).includes("anthropic") ? claudeBody() : codexBody()));
+  vi.stubGlobal("fetch", fetcher);
+  const token = `h.${Buffer.from(JSON.stringify({ "https://api.openai.com/auth": { chatgpt_account_id: "account-x" } })).toString("base64url")}.s`;
+  const claudeExpected = { enabled: true, used: 76.73, limit: 100, currency: "USD", capReached: true };
+  const codexExpected = { allowed: true, limitReached: false, credits: { balance: 3, unlimited: false } };
+  assert.deepEqual((await readPiAnthropicUsage(context("sk-ant-oat-test-extra"))).extra, claudeExpected);
+  assert.deepEqual((await readCodexUsage(context(token))).access, codexExpected);
+  assert.equal(fetcher.mock.calls.length, 2);
+  vi.resetModules();
+  const cold = await import("../src/account-usage.ts");
+  assert.deepEqual((await cold.readPiAnthropicUsage(context("sk-ant-oat-test-extra"))).extra, claudeExpected);
+  assert.deepEqual((await cold.readCodexUsage(context(token))).access, codexExpected);
+  assert.equal(fetcher.mock.calls.length, 2);
+});
+
+test("mergeQuota keeps access from the base", () => {
+  const base = { source: "Codex acct", updated: now, windows: [{ label: "week", used: 100 }], access: { allowed: true } };
+  const merged = mergeQuota(base, { source: "Codex acct", updated: now + 1, windows: [{ label: "week", used: 100 }] });
+  assert.deepEqual(merged.access, { allowed: true });
+});

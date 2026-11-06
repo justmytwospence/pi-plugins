@@ -4,13 +4,13 @@ import { lstat, mkdir, open, realpath, rename, rmdir, unlink } from "node:fs/pro
 import { homedir } from "node:os";
 import path from "node:path";
 import { stripVTControlCharacters } from "node:util";
-import type { ProviderUsage } from "./provider-usage.ts";
+import type { ProviderUsage, ExtraUsage, AccountAccess } from "./provider-usage.ts";
 
 type RecordValue = Record<string, unknown>;
 export interface QuotaWindow { label: string; used: number; reset?: number; observedAt?: number }
 export interface Quota {
   source: string; updated: number; windows: QuotaWindow[];
-  extra?: { enabled: boolean; used?: number; limit?: number; currency?: string };
+  extra?: ExtraUsage; access?: AccountAccess;
 }
 /** The small registry surface needed in TUI, print and RPC contexts alike. */
 export interface AccountUsageContext {
@@ -25,6 +25,27 @@ const record = (value: unknown): RecordValue =>
 const number = (value: unknown): number | undefined =>
   typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : undefined;
 const clean = (value: string): string => stripVTControlCharacters(value).replace(/[\x00-\x1f\x7f-\x9f]/g, " ").trim();
+const bool = (value: unknown): boolean | undefined => typeof value === "boolean" ? value : undefined;
+function sanitizeExtra(value: unknown): ExtraUsage | undefined {
+  const item = record(value);
+  if (typeof item.enabled !== "boolean") return undefined;
+  const currency = typeof item.currency === "string" && /^[A-Z]{3}$/.test(item.currency) ? item.currency : undefined;
+  const out: ExtraUsage = { enabled: item.enabled };
+  if (number(item.used) !== undefined) out.used = number(item.used);
+  if (number(item.limit) !== undefined) out.limit = number(item.limit);
+  if (currency) out.currency = currency;
+  if (bool(item.capReached) !== undefined) out.capReached = bool(item.capReached);
+  return out;
+}
+function sanitizeAccess(value: unknown): AccountAccess | undefined {
+  const item = record(value), credits = record(item.credits);
+  const out: AccountAccess = {};
+  if (bool(item.allowed) !== undefined) out.allowed = bool(item.allowed);
+  if (bool(item.limitReached) !== undefined) out.limitReached = bool(item.limitReached);
+  if (number(credits.balance) !== undefined && typeof credits.unlimited === "boolean")
+    out.credits = { balance: number(credits.balance)!, unlimited: credits.unlimited };
+  return Object.keys(out).length ? out : undefined;
+}
 const timestamp = (value: unknown): number | undefined => {
   const result = typeof value === "string" ? Date.parse(value) : number(value);
   return result !== undefined && Number.isFinite(result) ? result : undefined;
@@ -74,6 +95,7 @@ export function parseClaudeQuota(raw: unknown, updated: number): Quota & { [inva
     used: usedMinor === undefined ? undefined : usedMinor / 10 ** exponent,
     limit: capMinor === undefined ? undefined : capMinor / 10 ** capExponent,
     currency: typeof currency === "string" ? clean(currency) : undefined,
+    ...(typeof extra.spend_limit_reached === "boolean" ? { capReached: extra.spend_limit_reached } : {}),
   };
   if (malformedApplicable) {
     quota.windows = [];
@@ -115,7 +137,11 @@ export function parseCodexUsage(raw: unknown, now: number): Quota {
   addLimit(data.rate_limit);
   const extras = Array.isArray(data.additional_rate_limits) ? data.additional_rate_limits.map(record) : [];
   for (const item of extras) if (typeof item.limit_name === "string") addLimit(item.rate_limit, item.limit_name);
-  return { source: "Codex acct", updated: now, windows };
+  const rl = record(data.rate_limit), credits = record(data.credits);
+  const balance = typeof credits.balance === "string" && /^\d+(?:\.\d+)?$/.test(credits.balance) ? Number(credits.balance) : number(credits.balance);
+  const access = sanitizeAccess({ allowed: rl.allowed, limitReached: rl.limit_reached,
+    credits: credits.has_credits === true ? { balance, unlimited: credits.unlimited === true } : undefined });
+  return { source: "Codex acct", updated: now, windows, ...(access ? { access } : {}) };
 }
 
 // Passive, tied to the actual Pi request: on Pi's default WebSocket transport the
@@ -163,7 +189,7 @@ export function mergeQuota(base: Quota | undefined, update: Quota): Quota {
     if (index < 0) windows.push(window);
     else if (window.observedAt >= windows[index].observedAt!) windows[index] = window;
   }
-  return { ...base, ...update, extra: update.extra ?? base.extra, updated: Math.max(base.updated, update.updated), windows };
+  return { ...base, ...update, extra: update.extra ?? base.extra, access: update.access ?? base.access, updated: Math.max(base.updated, update.updated), windows };
 }
 
 // Passive, tied to the actual Pi request. Only the SSE transport exposes these
@@ -258,8 +284,11 @@ function reading(quota: Quota, id: Identity): ProviderUsage | undefined {
   const safeLabel = (label: string) => label.length > 0 && label.length <= 160 && label === clean(label) &&
     !label.includes(id.token) && !/(?:sk-ant-|sk-[A-Za-z0-9_-]{8}|Bearer\s|eyJ[A-Za-z0-9_-]*\.)/i.test(label);
   if (quota.windows.some(window => !safeLabel(window.label) || number(window.used) === undefined || window.used > 100)) return undefined;
+  const extra = id.provider === "anthropic" ? sanitizeExtra(quota.extra) : undefined;
+  const access = id.provider === "openai-codex" ? sanitizeAccess(quota.access) : undefined;
   return {
     provider: id.provider, source: source(id.provider), state: "ready", observedAt: quota.updated,
+    ...(extra ? { extra } : {}), ...(access ? { access } : {}),
     windows: quota.windows.map(window => ({ label: window.label, used: window.used, reset: window.reset, observedAt: window.observedAt ?? quota.updated })),
     ...(id.provider === "openai-codex" ? { reason: "Diagnostic Codex quota only; applicability to modern OpenAI models is unverified." } : {}),
   };
@@ -317,7 +346,7 @@ async function readCache(file: string, id: Identity, signal: AbortSignal): Promi
       windows: windows.map(window => {
         const item = record(window);
         return { label: item.label as string, used: item.used as number, reset: item.reset as number, observedAt: item.observedAt as number };
-      }) };
+      }), extra: sanitizeExtra(data.extra), access: sanitizeAccess(data.access) };
     return reading(quota, id);
   } catch { return undefined; }
   finally { await handle?.close().catch(() => undefined); }
@@ -329,7 +358,8 @@ async function writeCache(file: string, id: Identity, value: ProviderUsage, sign
   try {
     check(signal);
     handle = await open(temporary, "wx", 0o600);
-    await handle.writeFile(JSON.stringify({ version: 1, account: id.digest, provider: id.provider, updated: value.observedAt, windows: value.windows }));
+    await handle.writeFile(JSON.stringify({ version: 1, account: id.digest, provider: id.provider, updated: value.observedAt, windows: value.windows,
+      ...(value.extra ? { extra: value.extra } : {}), ...(value.access ? { access: value.access } : {}) }));
     await handle.close(); handle = undefined;
     check(signal);
     await rename(temporary, file);

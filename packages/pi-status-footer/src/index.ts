@@ -396,6 +396,8 @@ function showQuotaWindow(window: { label: string; used?: number; reset?: number 
   return window.used > 70 || (left < 48 * 3600_000 && window.used > (1 - left / (7 * 86400_000)) * 100);
 }
 const money = (n: number): string => `$${n.toFixed(n > 0 && n < 0.01 ? 3 : 2)}`;
+const extraAmount = (extra: { used?: number; limit?: number; currency?: string }): string =>
+  extra.used === undefined ? "" : `${extra.currency === "USD" ? money(extra.used) : `${extra.used.toFixed(2)} ${extra.currency ?? "?"}`}${extra.limit === undefined ? "" : `/${extra.limit.toFixed(0)}`}`;
 // Pi's system theme puts accent at the same contrast as muted gray, so the
 // footer's accents (project, model, gauges) read no stronger than its secondary
 // text. Lift accent halfway from its own OKLab lightness to the theme's body
@@ -1059,19 +1061,37 @@ export function layoutFooter(snapshot: Snapshot, width: number, theme: Paint): F
         const reset = window.reset !== undefined && window.reset > s.now ? `${sep}${theme.fg("dim", `resets in ${duration(window.reset - s.now)}`)}` : "";
         return { text: `${val}${reset}`, short: val, priority: 50 + Math.min(100, value ?? 0) };
       });
-      const existing = usage.provider === "anthropic" ? s.quotas.find((quota) => quota.source === "Claude acct") : undefined;
-      const extra = existing?.extra;
+      const extra = usage.extra;
       let extraText = "";
       if (extra?.enabled) {
         extraText = "extra usage on";
-        if (extra.used !== undefined) extraText += ` ${extra.currency === "USD" ? money(extra.used) : `${extra.used.toFixed(2)} ${extra.currency ?? "?"}`}${extra.limit === undefined ? "" : `/${extra.limit.toFixed(0)}`}`;
+        if (extra.used !== undefined) extraText += ` ${extraAmount(extra)}`;
+      }
+      const full = shown.some((window) => window.used !== undefined && window.used >= 100 && !(window.reset !== undefined && window.reset <= s.now));
+      let over: Segment | undefined;
+      if (usage.provider === "anthropic" && full) {
+        if (extra?.enabled && extra.capReached) over = { text: theme.fg("error", "over limit · extra usage cap reached"), short: theme.fg("error", "extra capped"), priority: 230 };
+        else if (extra?.enabled) {
+          const amount = extraAmount(extra);
+          over = { text: theme.fg("error", amount ? `over limit · ${amount} extra usage` : "over limit · on extra usage"),
+            short: theme.fg("error", extra.used !== undefined && extra.currency === "USD" ? `over · ${money(extra.used)}` : "over limit"), priority: 230 };
+        } else over = { text: theme.fg("error", "limit reached"), short: theme.fg("error", "limit reached"), priority: 230 };
+      }
+      const access = usage.provider === "openai-codex" ? usage.access : undefined;
+      if (usage.provider === "openai-codex" && (full || access?.limitReached === true || access?.allowed === false)) {
+        const blocked = access?.limitReached === true || access?.allowed === false;
+        const credits = access?.credits ? ` · ${access.credits.unlimited ? "unlimited" : +access.credits.balance.toFixed(2)} credits` : "";
+        over = blocked
+          ? { text: theme.fg("error", `limit reached${credits}`), short: theme.fg("error", "limit reached"), priority: 230 }
+          : { text: theme.fg("warning", `over limit · still allowed${credits}`), short: theme.fg("warning", "over limit"), priority: 230 };
       }
       const billed = usage.provider === "anthropic" && usage.source !== "Claude Code account" ? s.extraBilled : undefined;
       const segments: Segment[] = [
         { text: label(account), separatorAfter: "", priority: 200 },
         { text: stale ? theme.fg("warning", `stale ${duration(age)}${expired ? " · reset due" : ""}`) : "", short: stale ? theme.fg("warning", expired ? "stale · reset due" : "stale") : "", priority: 210 },
         ...windows,
-        { text: extraText ? theme.fg("warning", extraText) : "", short: extra?.enabled ? "extra on" : "", priority: extra?.enabled ? 75 : 5 },
+        over ?? { text: "", priority: 0 },
+        { text: extraText && !over ? theme.fg("warning", extraText) : "", short: extra?.enabled && !over ? "extra on" : "", priority: extra?.enabled ? 75 : 5 },
         { text: billed ? theme.fg("error", `${billed} request${billed === 1 ? "" : "s"} billed to extra usage`) : "", short: billed ? theme.fg("error", `extra x${billed}`) : "", priority: 220 },
         { text: more ? theme.fg("dim", more) : "", priority: 30 },
       ];
@@ -1099,8 +1119,7 @@ export function layoutFooter(snapshot: Snapshot, width: number, theme: Paint): F
     if (extra?.enabled) {
       extraText = "extra usage on";
       if (extra.enabled && extra.used !== undefined) {
-        const amount = extra.currency === "USD" ? money(extra.used) : `${extra.used.toFixed(2)} ${extra.currency ?? "?"}`;
-        extraText += ` ${amount}${extra.limit === undefined ? "" : `/${extra.limit.toFixed(0)}`}`;
+        extraText += ` ${extraAmount(extra)}`;
       }
     }
     const extraColor = extra?.enabled ? "warning" : "dim";
@@ -1385,7 +1404,8 @@ export default function statusFooter(pi: ExtensionAPI): void {
         if (active && epoch === generation) claudeReason = reading.state === "ready" ? undefined : reading.reason;
         if (active && epoch === generation && reading.state === "ready" && reading.observedAt !== undefined) {
           const parsed: Quota = { source: "Claude acct", updated: reading.observedAt,
-            windows: reading.windows.map((window) => ({ label: window.label, used: window.used!, reset: window.reset, observedAt: window.observedAt })) };
+            windows: reading.windows.map((window) => ({ label: window.label, used: window.used!, reset: window.reset, observedAt: window.observedAt })),
+            extra: reading.extra };
           claudePiAccount = true;
           claude = claudeHeaders && claudeHeaders.updated > parsed.updated ? mergeQuota(parsed, claudeHeaders) : parsed;
         }
@@ -1554,7 +1574,7 @@ export default function statusFooter(pi: ExtensionAPI): void {
   const cachedUsage = (provider: string, modelId?: string): ProviderUsage => {
     if (provider === "anthropic") return claude ? {
       provider, source: claudePiAccount ? "Claude subscription" : "Claude Code account", state: "ready", observedAt: claude.updated,
-      windows: claude.windows.map((window) => ({ ...window })),
+      windows: claude.windows.map((window) => ({ ...window })), ...(claude.extra ? { extra: claude.extra } : {}),
     } : { provider, source: "Claude", state: "unavailable", windows: [], reason: claudeReason ?? "Anthropic subscription usage has not been observed." };
     if (provider === "openai-codex") return codex ??
       { provider, source: "Codex account", state: "unavailable", windows: [], reason: "Codex subscription usage has not been observed." };

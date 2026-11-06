@@ -4,7 +4,11 @@ import { homedir } from "node:os";
 
 export type UsageState = "ready" | "unavailable" | "not-applicable";
 export type UsageWindow = { label: string; used?: number; reset?: number; pool?: string; model?: string; observedAt?: number };
-export type ProviderUsage = { provider: string; source: string; state: UsageState; observedAt?: number; windows: UsageWindow[]; reason?: string; detailsUrl?: string };
+/** Claude extra usage (billed past plan limits). Amounts in major currency units. */
+export type ExtraUsage = { enabled: boolean; used?: number; limit?: number; currency?: string; capReached?: boolean };
+/** Codex plan access at the limit: whether requests are still served, and prepaid credits. */
+export type AccountAccess = { allowed?: boolean; limitReached?: boolean; credits?: { balance: number; unlimited: boolean } };
+export type ProviderUsage = { provider: string; source: string; state: UsageState; observedAt?: number; windows: UsageWindow[]; reason?: string; detailsUrl?: string; extra?: ExtraUsage; access?: AccountAccess };
 
 export type UsageSource = {
   provider: string;

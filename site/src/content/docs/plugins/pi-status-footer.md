@@ -155,7 +155,7 @@ Estimated session cost uses recorded token-price usage, including tool, summary 
 
 Quota data becomes stale after ten minutes or when its reset time passes. Failed refreshes preserve the last reading and do not invent a reset to zero. Missing percentages remain unknown; subscription allowances, API throttles, balances and session cost are different measurements.
 
-Percentages show **used**, not remaining. Ordinary windows retain routine countdowns when a future reset is known. The selectively displayed Fable window appears above 70% used, including exhaustion, regardless of days remaining; otherwise it appears only when over its seven-day usage trajectory and less than 48 hours from reset. Fable requires a known percentage and future reset. Unknown or past-reset data does not imply replenishment.
+Percentages show **used**, not remaining. Ordinary windows retain routine countdowns when a future reset is known. The selectively displayed Fable window appears above 70% used, including exhaustion, regardless of days remaining; otherwise it appears only when over its seven-day usage trajectory and less than 48 hours from reset. Fable requires a known percentage and future reset. Unknown or past-reset data does not imply replenishment. Neither provider reports usage past 100%. At 100%, the Claude row shows the extra usage billed past the limit (`over limit · $76.73/100 extra usage`, example), `extra usage cap reached`, or `limit reached` when extra usage is off; the Codex row shows `over limit · still allowed` while ChatGPT keeps serving, `limit reached` once it stops, and a prepaid credit balance when the account has one.
 
 ## Account data and configuration
 
