@@ -629,63 +629,43 @@ export default function (pi) {
         reviews.push({ content: text(JSON.stringify({ outcome: 'user_needed', summary: 'Human check required.',
           evidence: ['Automated checks passed.'], limitations: ['Cannot observe physical indicator.'], findings: [],
           question, recommendation: 'Check the indicator and reply here.' })) });
-        await turn('Submit the implementation for review.', [() => tool('finish_plan', completion)]);
-        assert.equal(state().negotiation.pause.reason, 'user_needed');
-        assert.equal(state().negotiation.pause.question, question);
-        const paused = structuredClone(state().negotiation);
-        let clarificationId;
-        await turn('Which indicator do you mean?', [context => {
-          const current = guidance(context);
-          assert.match(current, /Answer clarification normally/u);
-          assert.match(current, /replyId: /u);
-          clarificationId = /replyId: (\S+)/u.exec(current)[1];
-          return text('The status indicator on the physical device.');
-        }]);
-        assert.deepEqual(state().negotiation, paused, 'clarification is discussion, not recovery');
-        assert.equal(reviewRequests.length, 1, 'clarification never consults the reviewer');
-        await turn('The indicator is green.', [context => {
-          assert.match(guidance(context), /No eligible delivered textual reply/u);
-          return tool('continue_plan', { action: 'answer', replyId: clarificationId });
-        }, () => text('Please provide a fresh human answer.')], 'extension');
-        assert.deepEqual(state().negotiation, paused, 'extension delivery cannot consume a stale trusted reply');
-        const answer = 'Yes, the physical indicator turned green.  I checked it myself.';
+        choices.push('Use recommendation');
+        await turn('Submit the implementation for review.', [() => tool('finish_plan', completion), () => text('Waiting.')]);
+        assert.equal(state().negotiation.pause, undefined);
+        // The pause opens one dialog during finish_plan; Use recommendation answers the reviewer.
+        assert.equal(dialogs.length, 1, 'a user-needed pause opens its dialog once');
+        assert.equal(dialogs[0].title, question);
+        assert.deepEqual(dialogs[0].options, ['Use recommendation', 'Finish unreviewed', 'Stop implementation', 'Type something.']);
+        assert.equal(state().negotiation.phase, 'revising');
+        assert.deepEqual(state().negotiation.userAnswers, ['Use your recommendation: Check the indicator and reply here.']);
         reviews.push({ content: text(JSON.stringify(accepted)) });
-        await turn(answer, [context => {
-          const current = guidance(context);
-          assert(current.includes(JSON.stringify(answer)), 'guidance exposes the delivered human text verbatim');
-          const replyId = /replyId: (\S+)/u.exec(current)?.[1];
-          assert(replyId && replyId !== clarificationId, 'ordinary RPC delivery gets fresh authority');
-          assert.equal(delivered.at(-1).content.filter(part => part.type === 'text').map(part => part.text).join(''), answer);
-          return tool('continue_plan', { action: 'answer', replyId });
-        }, () => {
-          assert.deepEqual(state().negotiation.userAnswers, [answer]);
-          assert.equal(state().negotiation.phase, 'revising');
-          return tool('finish_plan', { ...completion, concerns: 'None.' });
-        }]);
-        assert(JSON.stringify(reviewRequests[1].messages).includes(answer), 'review receives captured human evidence');
-        assert.deepEqual(dialogs, [], 'human answers require no recovery selector');
-        assert.deepEqual(inputs.map(event => event.source), ['rpc', 'rpc', 'extension', 'rpc']);
-        assert.equal(delivered.length, 4, 'each input was actually delivered through the real session');
+        await turn('Continue.', [() => tool('finish_plan', { ...completion, concerns: 'None.' })]);
+        assert(JSON.stringify(reviewRequests[1].messages).includes('Use your recommendation'), 'review receives the human evidence');
+        assert.equal(delivered.length, 2, 'each input was actually delivered through the real session');
+        assert.deepEqual(inputs.map(event => event.source), ['rpc', 'rpc']);
       } else {
-        reviews.push({ error: 'Local reviewer transport failed.' });
+        // A failed review is retried once automatically; the second failure pauses and asks.
+        reviews.push({ error: 'Local reviewer transport failed.' }, { error: 'Local reviewer transport failed.' });
         choices.push(undefined);
         await turn('Submit the implementation for review.', [() => tool('finish_plan', completion)]);
         const paused = structuredClone(state().negotiation);
         assert.equal(paused.pause.reason, 'failure');
         assert.equal(dialogs.length, 1, 'new failure offers recovery once');
         assert.match(dialogs[0].title, /Review did not finish/u);
-        assert.deepEqual(dialogs[0].options, ['Retry review', 'Discuss first', 'Finish without review', 'Stop implementation']);
+        assert.deepEqual(dialogs[0].options, ['Retry review', 'Finish unreviewed', 'Stop implementation', 'Type something.']);
+        choices.push(undefined);
         await turn('What happened to the review?', [context => {
-          assert.match(guidance(context), /No retry has been authorized/u);
-          return text('The local reviewer transport failed. No retry has been authorized.');
+          assert.match(guidance(context), /Do not implement while paused/u);
+          return text('The local reviewer transport failed.');
         }]);
+        await new Promise(resolve => setTimeout(resolve, 50));
         assert.deepEqual(state().negotiation, paused);
-        assert.equal(dialogs.length, 1, 'discussion must not reopen the canceled automatic choice');
-        assert.equal(reviewRequests.length, 1, 'discussion must not retry the reviewer');
+        assert.equal(dialogs.length, 2, 'the turn ending reopens the pause dialog; cancelling it changes nothing');
+        assert.equal(reviewRequests.length, 2, 'discussion must not retry the reviewer');
         choices.push('Retry review');
         reviews.push({ content: text(JSON.stringify(accepted)) });
         await turn('Please retry the review.', [() => tool('continue_plan', { action: 'retry' }), () => {
-          assert.equal(dialogs.length, 2, 'retry requires a fresh native confirmation');
+          assert.equal(dialogs.length, 3, 'retry requires a fresh dialog choice');
           assert.equal(state().negotiation.phase, 'implementing');
           return tool('finish_plan', { report: 'Replacement must not be used.', verification: 'Replacement.', concerns: 'Replacement.' });
         }]);
@@ -694,7 +674,7 @@ export default function (pi) {
       }
       assert.equal(state().active, false);
       assert.equal(state().completion.completion, 'accepted');
-      assert.equal(reviewRequests.length, 2, 'exactly the two scripted reviewer calls');
+      assert.equal(reviewRequests.length, scenario === 'human-answer' ? 2 : 3, 'exactly the scripted reviewer calls');
       assert(reviewRequests.every(call => call.model === planningId));
       assert(requests.every(call => call.model === implementationId));
       assert.equal(reviews.length, 0);
