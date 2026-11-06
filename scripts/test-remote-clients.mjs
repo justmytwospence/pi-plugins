@@ -48,6 +48,7 @@ const { default: historySearch } = await jiti.import('../packages/pi-history-sea
 const { ApprovalPicker, pickApproval, createApprovalState, handoffLabel, HERE: IMPLEMENT_HERE, COMPACT_HERE, LINKED_EXECUTE, LINKED_COMPACT, LINKED_FRESH, EDIT, SAVE, KEEP } = await jiti.import('../packages/pi-plan-mode/src/approval-picker.ts');
 const { PlanNameInput } = await jiti.import('../packages/pi-plan-mode/src/plan-name-input.ts');
 const { registerExec, FINISH_MESSAGE_TYPE } = await jiti.import('../packages/pi-plan-mode/src/exec.ts');
+const { default: askUserQuestion } = await jiti.import('../packages/pi-ask-user-question/src/index.ts');
 const { createNegotiation } = await jiti.import('../packages/pi-plan-mode/src/negotiation.ts');
 const { renderFooter, layoutFooter, absorbStatuses } = await jiti.import('../packages/pi-status-footer/src/index.ts');
 const { settingsCycles } = await jiti.import('../packages/pi-status-footer/src/settings-cycle.ts');
@@ -193,7 +194,7 @@ const UNDERS = {
       ];
     });
   })),
-  ...Object.fromEntries(['waiting for answer', 'review failed', 'approval needed', 'idle · not completed'].flatMap(phase => {
+  ...Object.fromEntries(['needs your answer', 'review failed', 'needs your decision', 'idle', 'planner asks you'].flatMap(phase => {
     const rows = width => statusFooter(width, modeStatuses('exec', 'auto', phase), { compact: true, phase });
     return [
       [`exec ${phase} footer`, rows],
@@ -329,9 +330,6 @@ function coldCacheLines(width, menu = coldMenu) {
 // Exercise real registerExec command/tool selects, not copies of their questions/options.
 const EXEC_SELECTS = [
   { name: 'override confirmation', reason: 'user_needed', command: 'accept', question: 'Finish without planner acceptance?', labels: ['Finish without review', 'Keep paused'] },
-  { name: 'failure recovery', reason: 'failure', command: '', question: 'Review did not finish\nThe review service was unavailable.\nAsk to retry the review, or discuss what happened. No retry has been authorized.', labels: ['Retry review', 'Discuss first', 'Finish without review', 'Stop implementation'] },
-  { name: 'exhausted recovery', reason: 'exhausted', command: '', question: 'Another revision needs your approval\nRevisions used: 2. Outstanding findings: 0.\nAllow one more attempt, discuss the findings, or finish without review.', labels: ['Allow one more attempt', 'Discuss first', 'Finish without review', 'Stop implementation'] },
-  { name: 'user-needed menu', reason: 'user_needed', command: '', question: 'Waiting for your answer\nDid the browser readiness check pass?\nProvide human verification.\nReply here. Ask for clarification if you need it; answering lets implementation continue.', labels: ['Answer in chat', 'Finish without review', 'Stop implementation'] },
   { name: 'stop confirmation', reason: 'user_needed', tool: 'stop', question: 'Stop implementation?', labels: ['Stop implementation', 'Keep working'] },
 ];
 async function execSelectLines(width, spec) {
@@ -379,8 +377,71 @@ async function execSelectLines(width, spec) {
   assert.ok(exec.active, 'canceling the fixture select must leave execution paused');
   assert.deepEqual(negotiation, before, 'canceling must not authorize recovery or alter the pause');
   assert.equal(blocked, false, 'execution select must release herdr:blocked');
-  const phase = spec.reason === 'user_needed' ? 'waiting for answer' : spec.reason === 'exhausted' ? 'approval needed' : 'review failed';
+  const phase = spec.reason === 'user_needed' ? 'needs your answer' : spec.reason === 'exhausted' ? 'needs your decision' : 'review failed';
   assert.ok(status.startsWith(`exec mode on · ${phase} ·`), 'actual execution status must describe its pause');
+  return lines;
+}
+
+
+// Exec's handoffs are pi-ask-user-question dialogs: drive the real registerExec and the real
+// ask extension (its service channel) and render the dialog it opens; cancelling must change nothing.
+const EXEC_DIALOGS = [
+  { name: 'failure pause', labels: ['Retry review', 'Finish unreviewed', 'Stop implementation'], negotiation: n => { n.phase = 'paused'; n.pause = { reason: 'failure', action: 'The review service was unavailable.' }; }, open: 'command' },
+  { name: 'exhausted pause', labels: ['Allow one more revision', 'Finish unreviewed', 'Stop implementation'], negotiation: n => { n.phase = 'paused'; n.revisionsUsed = 2; n.pause = { reason: 'exhausted', action: 'Automatic revision budget exhausted.' }; }, open: 'command' },
+  { name: 'reviewer question', question: 'Did the browser readiness check pass on staging after the last migration, including login, billing and the export job?', labels: ['Use recommendation', 'Finish unreviewed', 'Stop implementation'], negotiation: n => { n.phase = 'paused'; n.pause = { reason: 'user_needed', action: 'Provide human verification.', question: 'Did the browser readiness check pass on staging after the last migration, including login, billing and the export job?' }; }, open: 'command' },
+  { name: 'pending planner question', labels: ['Staging', 'Production'], pendingQuestion: { id: 'q1', implementerMessage: 'Which account?', questions: [{ id: 'acct', header: 'Account', question: 'Which account should the migration use?', options: [{ label: 'Staging', description: 'Safe to rerun' }, { label: 'Production', description: 'Live data' }] }] }, open: 'command' },
+  { name: 'implementer stopped', labels: ['Continue', 'Submit for review', 'Stop implementation'], open: 'settle' },
+  { name: 'execution menu', labels: ['Continue', 'Submit for review', 'Stop implementation'], open: 'footer' },
+];
+const tick = () => new Promise(resolve => setTimeout(resolve, 20));
+async function execDialogLines(width, spec) {
+  const handlers = new Map(), commands = new Map(), events = new EventEmitter();
+  let blocked = false, held = false, lines, shown = 0;
+  events.on('herdr:blocked', ({ active }) => { blocked = active; if (active) held = true; });
+  const pi = {
+    on: (name, handler) => handlers.set(name, [...(handlers.get(name) ?? []), handler]),
+    registerTool() {}, registerMessageRenderer() {}, registerShortcut() {},
+    registerCommand: (name, command) => commands.set(name, command),
+    getActiveTools: () => [], setActiveTools() {}, appendEntry() {}, sendMessage() {}, sendUserMessage() {},
+    events,
+  };
+  askUserQuestion(pi);
+  const exec = registerExec(pi, { completionReview: () => true, completionMaxRevisions: () => 2 });
+  const negotiation = createNegotiation('remote-client-dialog', 2);
+  spec.negotiation?.(negotiation);
+  const state = { active: true, planFile: '/tmp/client-plan.md', implementer: 'Terra', implementerModel: 'openai-codex/gpt-6.1-terra', asks: 0, costUsd: 0, negotiation, planner: { spec: 'anthropic/claude-opus-5-5:high', name: 'Claude Opus 5.5', sessionFile: '/tmp/client-planner.jsonl' }, ...(spec.pendingQuestion ? { pendingQuestion: spec.pendingQuestion } : {}) };
+  const ctx = {
+    hasUI: true, mode: 'tui', cwd: '/tmp', isIdle: () => true, hasPendingMessages: () => false, abort() {},
+    sessionManager: { getBranch: () => [{ type: 'custom', customType: 'plan-mode:exec', data: state }] },
+    ui: {
+      setStatus() {}, notify() {}, getEditorText: () => '',
+      select: async () => { throw new Error('an exec handoff must use the ask dialog, not a Pi select'); },
+      custom: async (factory) => {
+        assert.equal(shown++, 0, 'execution fixture must open exactly one dialog');
+        assert.ok(blocked, 'the ask service must hold herdr:blocked while the dialog is open');
+        const component = factory(tui, theme, kb, () => {});
+        lines = component.render(width);
+        component.dispose?.();
+        return { cancelled: true, answers: [] };
+      },
+    },
+  };
+  for (const handler of handlers.get('session_start') ?? []) await handler({}, ctx);
+  const before = structuredClone(exec.state);
+  if (spec.open === 'command') await commands.get('plan-exec').handler('', ctx);
+  else if (spec.open === 'footer') {
+    const request = { version: 1, actions: {} };
+    events.emit('pi-plugins.footer-actions.v1', request);
+    await request.actions['execution.status'].run();
+  } else for (const handler of handlers.get('agent_settled') ?? []) await handler({ aborted: false }, ctx);
+  await tick();
+  assert.equal(shown, 1, `${spec.name} must open its dialog`);
+  assert.ok(held && !blocked, 'the dialog must release herdr:blocked');
+  assert.ok(exec.active, 'cancelling must leave execution active');
+  assert.deepEqual(exec.state, before, 'cancelling must not change the execution');
+  assert.ok(!wrapsRow(spec.labels, 46), 'dialog labels must fit the phone width');
+  const plain = stripVTControlCharacters(lines.join('\n'));
+  for (const label of spec.labels) assert.ok(plain.includes(label), `dialog must show ${label}`);
   return lines;
 }
 
@@ -518,6 +579,12 @@ const DIALOGS = [
     name: `plan exec ${spec.name}`, lines: width => execSelectLines(width, spec), question: spec.question.replace(/\s+/gu, ' ').trim(),
     herdr: { options: spec.labels.length, multi: false, labels: spec.labels },
     collie: { kind: 'prompt-select', options: spec.labels.length + 1, labels: spec.labels, wraps: spec.labels },
+  })),
+  ...EXEC_DIALOGS.map(spec => ({
+    name: `plan exec ${spec.name}`, lines: width => execDialogLines(width, spec),
+    ...(spec.question ? { question: spec.question } : {}),
+    herdr: { options: spec.labels.length + 1, multi: false },
+    collie: { kind: 'prompt-select', options: spec.labels.length + 1 },
   })),
   ...await gatePickerDialogs({
     // Read-only picker capture does not display history, but its extension API
@@ -916,7 +983,7 @@ const pausedDetails = {
 for (const width of [46, 120]) {
   tui.terminal.columns = width;
   for (const paused of [false, true]) {
-    const dialog = DIALOGS.find(item => item.name === (paused ? 'plan exec user-needed menu' : '/mode picker'));
+    const dialog = DIALOGS.find(item => item.name === (paused ? 'plan exec reviewer question' : '/mode picker'));
     const lines = await dialog.lines(width);
     const transcript = paused
       ? renderReview({ content: [], details: pausedDetails }, { expanded: false, isPartial: false }, theme)
