@@ -17,6 +17,7 @@ import {
   readSystem1Setting,
   resetSystem1Runtime,
   resolveSystem1Route,
+  setSystem1SessionStart,
   subscribeSystem1Events,
   system1Path,
   type System1Backend,
@@ -368,6 +369,7 @@ export default async function system1Extension(pi: ExtensionAPI): Promise<void> 
             (candidate) =>
               `${system1Label(candidate.backend)}: ${candidate.provider}/${candidate.model}; local: ${candidate.local}${candidate.cooldownUntil && candidate.cooldownUntil > now ? `; cooldown: ${Math.ceil((candidate.cooldownUntil - now) / 1000)}s remaining` : ""}${candidate.lastFailure ? `; last failure: ${candidate.lastFailure.code}` : ""}`,
           ),
+          ...(status.sessionStart ? [`Session start: ${system1Label(status.sessionStart)}`] : []),
           status.lastUsed
             ? `Last main-registry route: ${system1Label(status.lastUsed.backend)}${status.lastUsed.fallback ? "* (fallback)" : ""} — ${status.lastUsed.provider}/${status.lastUsed.model}`
             : "Last main-registry route: unknown",
@@ -465,6 +467,15 @@ export default async function system1Extension(pi: ExtensionAPI): Promise<void> 
     } catch {
       // Read-per-request remains authoritative if the directory cannot be watched.
     }
+    await refresh(ctx);
+    // Start on the first configured backend that has local credentials and is not cooling
+    // down. Nothing is probed; failover to the rest still happens per call.
+    if (!current() || !state) return;
+    const now = Date.now();
+    const pick = state.candidates.find((c) => c.local !== "missing" && !(c.cooldownUntil && c.cooldownUntil > now));
+    setSystem1SessionStart(ctx.modelRegistry, pick?.backend);
+    if (pick && pick.backend !== state.waterfall[0] && ctx.hasUI)
+      ctx.ui.notify(`System 1: starting on ${system1Label(pick.backend)}; ${system1Label(state.waterfall[0]!)} is not configured.`, "info");
     await refresh(ctx);
   });
   pi.on("session_tree", async (_event, ctx) => {

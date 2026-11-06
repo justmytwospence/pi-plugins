@@ -128,3 +128,10 @@ test("the real System 1 value opens its provider picker only while current, focu
     assert.equal(calls, 1);
   } finally { component.dispose(); release(); controller.dispose(); }
 });
+
+test("the System 1 chip shows the session's starting backend until a call completes", async () => {
+  const { system1Current } = await jiti.import(fileURLToPath(new URL("../src/index.ts", import.meta.url)));
+  const now = Date.now();
+  assert.equal(system1Current({ ...status(), sessionStart: "openai-decisions" }, now), "OpenAI");
+  assert.equal(system1Current({ ...status(), sessionStart: "openai-decisions", lastUsed: { backend: "jev", provider: "typesafe", model: "jev-latest", at: now, fallback: false } }, now), "Jev");
+});

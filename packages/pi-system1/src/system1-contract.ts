@@ -13,6 +13,8 @@ export interface System1Status {
     lastFailure?: { code: string; at: number };
   }[];
   status: "unknown" | "ready" | "fallback" | "unavailable";
+  /** The backend this session tries first; absent means the configured order. */
+  sessionStart?: "jev" | "openai-decisions";
   /** Last completed main-registry request, not a universally active model. */
   lastUsed?: {
     backend: "jev" | "openai-decisions";

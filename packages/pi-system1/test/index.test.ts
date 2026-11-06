@@ -211,6 +211,25 @@ describe("registration and status", () => {
     expect(h.registry.classify).not.toHaveBeenCalled();
   });
 
+  it("starts the session on the first configured backend with local credentials", async () => {
+    writeOrder(["jev", "openai-decisions"]);
+    let h = await harness();
+    await h.start();
+    expect(querySystem1State(h.events)).toMatchObject({ sessionStart: "jev" });
+    expect(h.notify).not.toHaveBeenCalled();
+    await h.close();
+    h = await harness();
+    (h.registry.hasConfiguredAuth as any).mockImplementation((model: { provider: string }) => model.provider !== "typesafe");
+    h.registry.getProviderAuthStatus.mockImplementation(() => ({ configured: true }));
+    await h.start();
+    expect(querySystem1State(h.events)).toMatchObject({ sessionStart: "openai-decisions" });
+    expect(h.notify.mock.calls.some((call) => String(call[0]).startsWith("System 1: starting on"))).toBe(true);
+    await h.close();
+    h = await harness({ credentials: false });
+    await h.start();
+    expect(querySystem1State(h.events)?.sessionStart).toBeUndefined();
+  });
+
   it("stays usable in Jev mode on hosts without the Decisions provider", async () => {
     providerFactory.mockResolvedValueOnce(undefined as never);
     const h = await harness({ decisions: false });
@@ -238,7 +257,7 @@ describe("registration and status", () => {
     const reads = vi.mocked(readFileSync).mock.calls.length;
     const snapshot = querySystem1State(h.events)!;
     expect(snapshot).toEqual({
-      waterfall: ["openai-decisions"], status: "ready",
+      waterfall: ["openai-decisions"], status: "ready", sessionStart: "openai-decisions",
       candidates: [{ backend: "openai-decisions", provider: "system1-openai", model: "gpt-6-luna", local: "configured" }],
     });
     snapshot.waterfall.length = 0; snapshot.candidates[0]!.local = "missing";
@@ -691,7 +710,7 @@ describe("retry, cached runtime state and notification ownership", () => {
     const result = await judge(h); await flush();
     expect(getSystem1RuntimeSnapshot(h.registry, DEFAULT_CLASSIFIER).lastOutcome).toEqual(result.structuredContent);
     const expected = {
-      waterfall: ["jev", "openai-decisions"], status: "fallback",
+      waterfall: ["jev", "openai-decisions"], status: "fallback", sessionStart: "jev",
       candidates: [
         { backend: "jev", provider: "typesafe", model: "jev-latest", local: "configured", cooldownUntil: expect.any(Number), lastFailure: { code: "quota_exhausted", at: expect.any(Number) } },
         { backend: "openai-decisions", provider: "system1-openai", model: "gpt-6-luna", local: "configured" },

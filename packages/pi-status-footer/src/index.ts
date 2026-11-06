@@ -384,6 +384,7 @@ export function system1Current(state: System1Status, now: number): string {
   if (state.status === "unavailable" && !(state.nextRetryAt !== undefined && state.nextRetryAt <= now)) return "unavailable";
   const cooling = (backend: string) => state.candidates.some((c) => c.backend === backend && c.cooldownUntil !== undefined && c.cooldownUntil > now);
   if (state.lastUsed && state.waterfall.includes(state.lastUsed.backend) && !cooling(state.lastUsed.backend)) return name(state.lastUsed.backend);
+  if (state.sessionStart && state.waterfall.includes(state.sessionStart) && !cooling(state.sessionStart)) return name(state.sessionStart);
   const ready = state.waterfall.find((backend) => !cooling(backend) && state.candidates.find((c) => c.backend === backend)?.local !== "missing");
   const first = ready ?? state.waterfall[0];
   return first ? name(first) : "unavailable";

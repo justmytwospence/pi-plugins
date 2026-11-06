@@ -10,6 +10,8 @@ import {
   readSystem1Setting,
   resetSystem1Runtime,
   resolveSystem1Route,
+  getSystem1SessionStart,
+  setSystem1SessionStart,
   subscribeSystem1Events,
   system1Path,
   type ClassifierConfig,
@@ -683,5 +685,44 @@ describe("notification binder runtime lifecycle", () => {
     expect(a.classify).toHaveBeenCalledTimes(2);
     expect(b.classify).toHaveBeenCalledTimes(2);
     await h.emit("session_shutdown", ctx);
+  });
+});
+
+describe("session starting backend", () => {
+  it("tries the session's start first without calling it a fallback", async () => {
+    const f = fake();
+    setSystem1SessionStart(f.registry, "openai-decisions");
+    expect(getSystem1SessionStart(f.registry)).toBe("openai-decisions");
+    expect(await request(f.registry)).toMatchObject({ ok: true, backend: "openai-decisions", fallback: false, attempts: [{ status: "succeeded" }] });
+    expect(f.findOfType.mock.calls[0][1]).toBe("system1-openai");
+  });
+
+  it("still fails over to the other rung when the start fails operationally", async () => {
+    const f = fake(async (model) => (isJev(model) ? success() : failure("429 rate limit")));
+    setSystem1SessionStart(f.registry, "openai-decisions");
+    expect(await request(f.registry)).toMatchObject({
+      ok: true, backend: "jev", fallback: true,
+      attempts: [{ backend: "openai-decisions", status: "failed" }, { backend: "jev", status: "succeeded" }],
+    });
+  });
+
+  it("is discarded when the configured order changes, and cleared on request", async () => {
+    const f = fake();
+    setSystem1SessionStart(f.registry, "openai-decisions");
+    select(["jev"]);
+    expect(getSystem1SessionStart(f.registry)).toBeUndefined();
+    expect(await request(f.registry)).toMatchObject({ backend: "jev" });
+    select();
+    setSystem1SessionStart(f.registry, "openai-decisions");
+    setSystem1SessionStart(f.registry, undefined);
+    expect(getSystem1SessionStart(f.registry)).toBeUndefined();
+    expect(await request(f.registry)).toMatchObject({ backend: "jev", fallback: false });
+  });
+
+  it("survives a manual reset", () => {
+    const f = fake();
+    setSystem1SessionStart(f.registry, "openai-decisions");
+    resetSystem1Runtime(f.registry);
+    expect(getSystem1SessionStart(f.registry)).toBe("openai-decisions");
   });
 });

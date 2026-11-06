@@ -5,6 +5,7 @@ import { saveSystem1Waterfall } from "./settings.ts";
 import {
   SYSTEM1_CHANGED,
   getSystem1RuntimeSnapshot,
+  getSystem1SessionStart,
   readSystem1Setting,
   resolveSystem1Route,
   system1Path,
@@ -84,6 +85,7 @@ export async function inspectSystem1Status(registry: unknown): Promise<System1St
       !runtime.candidates.find((value) => value.backend === candidate.backend)?.probing,
   );
   const lastUsed = runtime.lastUsed;
+  const start = getSystem1SessionStart(registry);
   const status: System1Status["status"] = !eligible.length
     ? "unavailable"
     : runtime.lastOutcome && !runtime.lastOutcome.ok && runtime.lastOutcome.code === "exhausted"
@@ -97,6 +99,7 @@ export async function inspectSystem1Status(registry: unknown): Promise<System1St
     waterfall: [...route.waterfall],
     candidates,
     status,
+    ...(start ? { sessionStart: start } : {}),
     ...(lastUsed
       ? {
           lastUsed: {

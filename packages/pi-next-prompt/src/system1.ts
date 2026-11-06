@@ -232,6 +232,8 @@ interface Runtime {
   circuits: Map<string, Circuit>;
   lastOutcome?: System1Outcome;
   lastUsed?: System1RuntimeSnapshot["lastUsed"];
+  /** The backend this session tries first; kept across policy resets, valid only for its setting key. */
+  start?: { policy: string; backend: System1Backend };
   session?: unknown;
   sessionEvent?: unknown;
   epoch: number;
@@ -321,12 +323,37 @@ export function resolveSystem1Target(
   const route = resolveSystem1Route(config, setting);
   return route.ok ? { ok: true, ...route.targets[0], key: route.key } : route;
 }
+export function setSystem1SessionStart(registry: unknown, backend: System1Backend | undefined): void {
+  const setting = readSystem1Setting();
+  if (!setting.ok) return;
+  const current = runtime(hub(), registry, setting.key);
+  if (backend) current.start = { policy: setting.key, backend };
+  else delete current.start;
+}
+export function getSystem1SessionStart(registry: unknown): System1Backend | undefined {
+  const setting = readSystem1Setting();
+  if (!setting.ok || !objectKey(registry)) return undefined;
+  const start = hub().registries.get(registry)?.start;
+  return start && start.policy === setting.key && setting.waterfall.includes(start.backend) ? start.backend : undefined;
+}
+/** The configured targets, with the session's starting backend moved to the front. */
+function sessionTargets(
+  route: Extract<System1Route, { ok: true }>,
+  current: Runtime,
+  policy: string,
+): ClassifierProvenance[] {
+  const start = current.start;
+  if (!start || start.policy !== policy) return route.targets;
+  const index = route.targets.findIndex((t) => t.backend === start.backend);
+  if (index <= 0) return route.targets;
+  return [route.targets[index], ...route.targets.filter((_, i) => i !== index)];
+}
 export function getSystem1RoutingKey(registry: unknown, config: Pick<ClassifierConfig, "provider" | "model">): string {
   const setting = readSystem1Setting();
   const route = resolveSystem1Route(config, setting);
   if (!route.ok) return route.key;
   const current = runtime(hub(), registry, setting.key);
-  const target = route.targets.find((t) => {
+  const target = sessionTargets(route, current, setting.key).find((t) => {
     const c = current.circuits.get(system1TargetKey(t));
     return !c?.probing && (!c?.cooldownUntil || c.cooldownUntil <= Date.now());
   });
@@ -896,6 +923,7 @@ export async function askSystem1(
   if (!route.ok) return fail("invalid_input", route.reason);
   current = runtime(h, registry, setting.key);
   const active = current;
+  const targets = sessionTargets(route, current, setting.key);
   const deadline = started + config.timeoutMs;
   requestEpoch = current.epoch;
   const check = () =>
@@ -917,10 +945,10 @@ export async function askSystem1(
         notice.kind !== "recovered" && cooldowns.length ? Math.max(...cooldowns) : 0,
       );
   };
-  for (let index = 0; index < route.targets.length; index++) {
+  for (let index = 0; index < targets.length; index++) {
     const stopped = check();
     if (stopped) return fail(stopped);
-    const target = route.targets[index];
+    const target = targets[index];
     const targetKey = system1TargetKey(target);
     const circuit = current.circuits.get(targetKey) ?? { probing: false };
     current.circuits.set(targetKey, circuit);
@@ -941,7 +969,7 @@ export async function askSystem1(
       if (!attempts.length) return fail("timeout");
       break;
     }
-    const runnable = route.targets.slice(index).filter((t) => {
+    const runnable = targets.slice(index).filter((t) => {
       const c = active.circuits.get(system1TargetKey(t));
       return !c?.probing && (!c?.cooldownUntil || c.cooldownUntil <= Date.now());
     }).length;
@@ -963,7 +991,7 @@ export async function askSystem1(
         Math.min(deadline, rungStarted + budget),
         signal,
         check,
-        route.targets.length === 1 && target.backend === "jev" && options.retryTimeout !== false,
+        targets.length === 1 && target.backend === "jev" && options.retryTimeout !== false,
       );
     } finally {
       circuit.probing = false;
@@ -1002,7 +1030,7 @@ export async function askSystem1(
         circuit.recovering = true;
       } else delete circuit.cooldownUntil;
       if (circuit.cooldownUntil) attempt.retryAt = circuit.cooldownUntil;
-      const next = route.targets.slice(index + 1).find((t) => {
+      const next = targets.slice(index + 1).find((t) => {
         const c = active.circuits.get(system1TargetKey(t));
         return !c?.probing && (!c?.cooldownUntil || c.cooldownUntil <= Date.now());
       });
