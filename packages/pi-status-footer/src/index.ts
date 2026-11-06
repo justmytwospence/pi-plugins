@@ -396,8 +396,12 @@ function showQuotaWindow(window: { label: string; used?: number; reset?: number 
   return window.used > 70 || (left < 48 * 3600_000 && window.used > (1 - left / (7 * 86400_000)) * 100);
 }
 const money = (n: number): string => `$${n.toFixed(n > 0 && n < 0.01 ? 3 : 2)}`;
-const extraAmount = (extra: { used?: number; limit?: number; currency?: string }): string =>
-  extra.used === undefined ? "" : `${extra.currency === "USD" ? money(extra.used) : `${extra.used.toFixed(2)} ${extra.currency ?? "?"}`}${extra.limit === undefined ? "" : `/${extra.limit.toFixed(0)}`}`;
+const extraAmount = (extra: { used?: number; limit?: number; currency?: string }): string => {
+  if (extra.used === undefined) return "";
+  const usd = extra.currency === "USD";
+  const limit = extra.limit === undefined ? "" : `/${usd ? "$" : ""}${extra.limit.toFixed(0)}`;
+  return usd ? `${money(extra.used)}${limit}` : `${extra.used.toFixed(2)}${limit} ${extra.currency ?? "?"}`;
+};
 // Pi's system theme puts accent at the same contrast as muted gray, so the
 // footer's accents (project, model, gauges) read no stronger than its secondary
 // text. Lift accent halfway from its own OKLab lightness to the theme's body
@@ -1075,7 +1079,8 @@ export function layoutFooter(snapshot: Snapshot, width: number, theme: Paint): F
           const amount = extraAmount(extra);
           over = { text: theme.fg("error", amount ? `${amount} extra usage` : "on extra usage"),
             short: theme.fg("error", extra.used !== undefined && extra.currency === "USD" ? `${money(extra.used)} extra` : "on extra"), priority: 230 };
-        } else over = { text: theme.fg("error", "limit reached"), short: theme.fg("error", "limit reached"), priority: 230 };
+        } else if (extra) over = { text: theme.fg("error", "limit reached"), short: theme.fg("error", "limit reached"), priority: 230 };
+        // Unknown extra usage state: the red 100% window says enough without guessing.
       }
       const access = usage.provider === "openai-codex" ? usage.access : undefined;
       if (usage.provider === "openai-codex" && (full || access?.limitReached === true || access?.allowed === false)) {

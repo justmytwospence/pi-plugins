@@ -247,6 +247,9 @@ type Identity = { provider: Provider; token: string; digest: string };
 type Flight = { promise: Promise<ProviderUsage>; controller: AbortController; subscribers: number };
 const flights = new Map<string, Flight>();
 const memory = new Map<string, ProviderUsage>();
+/** Version 1 files written with extra usage and access support carry this marker. */
+const CACHE_DETAIL = 2;
+const legacy = new WeakSet<ProviderUsage>();
 const digest = (value: string): string => createHash("sha256").update(value).digest("hex");
 const source = (provider: Provider): string => provider === "anthropic" ? "Pi Anthropic subscription" : "Codex account (diagnostic only)";
 const unavailable = (provider: Provider, reason: string): ProviderUsage =>
@@ -347,7 +350,11 @@ async function readCache(file: string, id: Identity, signal: AbortSignal): Promi
         const item = record(window);
         return { label: item.label as string, used: item.used as number, reset: item.reset as number, observedAt: item.observedAt as number };
       }), extra: sanitizeExtra(data.extra), access: sanitizeAccess(data.access) };
-    return reading(quota, id);
+    const result = reading(quota, id);
+    // Files from writers that predate extra usage and access lack this marker.
+    // Such a reading can still serve as a fallback, but is not fresh enough to skip a fetch.
+    if (result && data.detail !== CACHE_DETAIL) legacy.add(result);
+    return result;
   } catch { return undefined; }
   finally { await handle?.close().catch(() => undefined); }
 }
@@ -358,7 +365,7 @@ async function writeCache(file: string, id: Identity, value: ProviderUsage, sign
   try {
     check(signal);
     handle = await open(temporary, "wx", 0o600);
-    await handle.writeFile(JSON.stringify({ version: 1, account: id.digest, provider: id.provider, updated: value.observedAt, windows: value.windows,
+    await handle.writeFile(JSON.stringify({ version: 1, detail: CACHE_DETAIL, account: id.digest, provider: id.provider, updated: value.observedAt, windows: value.windows,
       ...(value.extra ? { extra: value.extra } : {}), ...(value.access ? { access: value.access } : {}) }));
     await handle.close(); handle = undefined;
     check(signal);
@@ -484,7 +491,7 @@ async function collect(id: Identity, key: string, signal: AbortSignal): Promise<
   catch { return unavailable(id.provider, "A secure account quota cache is unavailable."); }
   const disk = await readCache(file, id, signal);
   if (disk && (!cached || disk.observedAt! > cached.observedAt!)) cached = disk;
-  if (cached && fresh(cached, REFRESH_MS)) return cached;
+  if (cached && !legacy.has(cached) && fresh(cached, REFRESH_MS)) return cached;
   let release: (() => Promise<void>) | undefined;
   try {
     // A contending process may have completed since our first read.
@@ -493,7 +500,7 @@ async function collect(id: Identity, key: string, signal: AbortSignal): Promise<
       release = await lock(file, signal);
       const shared = await readCache(file, id, signal);
       if (shared && (!cached || shared.observedAt! > cached.observedAt!)) cached = shared;
-      if (cached && fresh(cached, REFRESH_MS)) return cached;
+      if (cached && !legacy.has(cached) && fresh(cached, REFRESH_MS)) return cached;
       if (!release) await pause(signal);
     }
     const fetched = await fetchQuota(id, signal);

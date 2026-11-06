@@ -435,3 +435,26 @@ test("mergeQuota keeps access from the base", () => {
   const merged = mergeQuota(base, { source: "Codex acct", updated: now + 1, windows: [{ label: "week", used: 100 }] });
   assert.deepEqual(merged.access, { allowed: true });
 });
+
+test("a fresh cache file from a writer without extra usage support is refetched once", async () => {
+  const dir = await isolatedCache();
+  const token = "sk-ant-oat-test-legacy-writer";
+  const account = createHash("sha256").update(token).digest("hex");
+  const at = Date.now();
+  const { writeFile, chmod } = await import("node:fs/promises");
+  await mkdir(path.join(dir, "pi-subscription-usage"), { mode: 0o700 });
+  const file = path.join(dir, "pi-subscription-usage", `anthropic-${account}.json`);
+  await writeFile(file, JSON.stringify({ version: 1, account, provider: "anthropic", updated: at,
+    windows: [{ label: "week", used: 100, reset: at + 3600_000, observedAt: at }] }), { mode: 0o600 });
+  await chmod(file, 0o600);
+  const fetcher = vi.fn(async () => json({ seven_day: { utilization: 100, resets_at: new Date(Date.now() + 3600_000).toISOString() },
+    extra_usage: { is_enabled: true, monthly_limit: 10000, used_credits: 7673, currency: "USD", decimal_places: 2 } }));
+  vi.stubGlobal("fetch", fetcher);
+  const first = await readPiAnthropicUsage(context(token));
+  assert.equal(fetcher.mock.calls.length, 1);
+  assert.deepEqual(first.extra, { enabled: true, used: 76.73, limit: 100, currency: "USD" });
+  vi.resetModules();
+  const cold = await import("../src/account-usage.ts");
+  assert.deepEqual((await cold.readPiAnthropicUsage(context(token))).extra, first.extra);
+  assert.equal(fetcher.mock.calls.length, 1);
+});

@@ -2521,14 +2521,17 @@ test("Claude past a full window shows its extra usage spend", () => {
   }
   const wide = overageRows(claudeReading(100, spend), 180).at(-1);
   assert.match(wide, /week 100% used/);
-  assert.match(wide, /100% used.* · \$76\.73\/100 extra usage/);
+  assert.match(wide, /100% used.* · \$76\.73\/\$100 extra usage/);
   assert.doesNotMatch(wide, /extra usage on/);
   assert.match(overageRows(claudeReading(100, spend), 46).at(-1), /\$76\.73 extra/);
   assert.match(overageRows(claudeReading(100, { ...spend, capReached: true }), 180).at(-1), /extra usage cap reached/);
   assert.match(overageRows(claudeReading(100, { enabled: false }), 180).at(-1), /limit reached/);
+  const unknown = overageRows(claudeReading(100, undefined), 180).at(-1);
+  assert.match(unknown, /week 100% used/);
+  assert.doesNotMatch(unknown, /limit reached|extra usage/);
   const under = overageRows(claudeReading(95, spend), 180).at(-1);
-  assert.match(under, /extra usage on \$76\.73\/100/);
-  assert.doesNotMatch(under, /extra usage cap|\/100 extra usage/);
+  assert.match(under, /extra usage on \$76\.73\/\$100/);
+  assert.doesNotMatch(under, /extra usage cap|\/\$100 extra usage/);
 });
 
 test("Codex past a full window shows whether it still serves", () => {

@@ -241,10 +241,10 @@ labeled.
 - **stale:** cache/header snapshot is at least ten minutes old or its reset time
   has passed. Never assume the provider reset a quota to zero without fresh data.
 - **extra:** Claude account extra usage enabled/disabled state and its spend
-  (`extra usage on $X/limit`). An old spent pool is not an active warning when extra
+  (`extra usage on $X/$Y`). An old spent pool is not an active warning when extra
   usage is off.
 - **at limit:** when a shown window is at 100%, Claude's row says
-  `$X/limit extra usage` (or `extra usage cap reached`, or `limit reached`
+  `$X/$Y extra usage` (or `extra usage cap reached`, or `limit reached`
   when extra usage is off), and Codex's says `still allowed` while ChatGPT
   still serves requests, `limit reached` once it stops, plus any prepaid credit balance.
   Neither provider reports usage past 100%, so the overage is the provider's billing and
