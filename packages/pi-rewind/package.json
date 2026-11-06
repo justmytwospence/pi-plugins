@@ -1,6 +1,6 @@
 {
   "name": "@justmytwospence/pi-rewind",
-  "version": "0.1.29",
+  "version": "0.1.30",
   "description": "Restore files alongside pi's conversation rewinds (/tree and /fork).",
   "type": "module",
   "license": "MIT",

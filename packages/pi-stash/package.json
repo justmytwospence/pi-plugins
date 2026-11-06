@@ -1,6 +1,6 @@
 {
   "name": "@justmytwospence/pi-stash",
-  "version": "0.1.29",
+  "version": "0.1.30",
   "description": "Ctrl+S stashes the main editor draft, runs a slash or shell command, and restores the draft (cursor and mode too with pi-vim) without overwriting new text.",
   "type": "module",
   "license": "MIT",

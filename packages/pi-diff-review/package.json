@@ -1,6 +1,6 @@
 {
   "name": "@justmytwospence/pi-diff-review",
-  "version": "0.1.29",
+  "version": "0.1.30",
   "description": "Review what the agent changed in Pi: per-turn and unreviewed diffs, vim keys, and line comments sent back to the agent.",
   "type": "module",
   "license": "MIT",
