@@ -2521,14 +2521,14 @@ test("Claude past a full window shows its extra usage spend", () => {
   }
   const wide = overageRows(claudeReading(100, spend), 180).at(-1);
   assert.match(wide, /week 100% used/);
-  assert.match(wide, /over limit · \$76\.73\/100 extra usage/);
+  assert.match(wide, /100% used.* · \$76\.73\/100 extra usage/);
   assert.doesNotMatch(wide, /extra usage on/);
-  assert.match(overageRows(claudeReading(100, spend), 46).at(-1), /over · \$76\.73/);
-  assert.match(overageRows(claudeReading(100, { ...spend, capReached: true }), 180).at(-1), /over limit · extra usage cap reached/);
+  assert.match(overageRows(claudeReading(100, spend), 46).at(-1), /\$76\.73 extra/);
+  assert.match(overageRows(claudeReading(100, { ...spend, capReached: true }), 180).at(-1), /extra usage cap reached/);
   assert.match(overageRows(claudeReading(100, { enabled: false }), 180).at(-1), /limit reached/);
   const under = overageRows(claudeReading(95, spend), 180).at(-1);
   assert.match(under, /extra usage on \$76\.73\/100/);
-  assert.doesNotMatch(under, /over limit/);
+  assert.doesNotMatch(under, /extra usage cap|\/100 extra usage/);
 });
 
 test("Codex past a full window shows whether it still serves", () => {
@@ -2537,12 +2537,12 @@ test("Codex past a full window shows whether it still serves", () => {
       assert.ok(overageRows(reading, width).every((row) => visibleWidth(row) <= width));
     }
   }
-  assert.match(overageRows(codexReading(100, { allowed: true, limitReached: false }), 180).at(-1), /over limit · still allowed/);
+  assert.match(overageRows(codexReading(100, { allowed: true, limitReached: false }), 180).at(-1), /still allowed/);
   const blocked = overageRows(codexReading(100, { allowed: false, limitReached: true }), 180).at(-1);
   assert.match(blocked, /limit reached/);
   assert.doesNotMatch(blocked, /still allowed/);
   assert.match(overageRows(codexReading(100, { allowed: true, credits: { balance: 12.5, unlimited: false } }), 180).at(-1), /12\.5 credits/);
-  assert.doesNotMatch(overageRows(codexReading(50, { allowed: true }), 180).at(-1), /over limit|limit reached/);
+  assert.doesNotMatch(overageRows(codexReading(50, { allowed: true }), 180).at(-1), /still allowed|limit reached/);
 });
 
 test("provider snapshots select Google pools, child sources and invalidate changed identities without render I/O", async () => {

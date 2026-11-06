@@ -1070,11 +1070,11 @@ export function layoutFooter(snapshot: Snapshot, width: number, theme: Paint): F
       const full = shown.some((window) => window.used !== undefined && window.used >= 100 && !(window.reset !== undefined && window.reset <= s.now));
       let over: Segment | undefined;
       if (usage.provider === "anthropic" && full) {
-        if (extra?.enabled && extra.capReached) over = { text: theme.fg("error", "over limit · extra usage cap reached"), short: theme.fg("error", "extra capped"), priority: 230 };
+        if (extra?.enabled && extra.capReached) over = { text: theme.fg("error", "extra usage cap reached"), short: theme.fg("error", "extra capped"), priority: 230 };
         else if (extra?.enabled) {
           const amount = extraAmount(extra);
-          over = { text: theme.fg("error", amount ? `over limit · ${amount} extra usage` : "over limit · on extra usage"),
-            short: theme.fg("error", extra.used !== undefined && extra.currency === "USD" ? `over · ${money(extra.used)}` : "over limit"), priority: 230 };
+          over = { text: theme.fg("error", amount ? `${amount} extra usage` : "on extra usage"),
+            short: theme.fg("error", extra.used !== undefined && extra.currency === "USD" ? `${money(extra.used)} extra` : "on extra"), priority: 230 };
         } else over = { text: theme.fg("error", "limit reached"), short: theme.fg("error", "limit reached"), priority: 230 };
       }
       const access = usage.provider === "openai-codex" ? usage.access : undefined;
@@ -1083,7 +1083,7 @@ export function layoutFooter(snapshot: Snapshot, width: number, theme: Paint): F
         const credits = access?.credits ? ` · ${access.credits.unlimited ? "unlimited" : +access.credits.balance.toFixed(2)} credits` : "";
         over = blocked
           ? { text: theme.fg("error", `limit reached${credits}`), short: theme.fg("error", "limit reached"), priority: 230 }
-          : { text: theme.fg("warning", `over limit · still allowed${credits}`), short: theme.fg("warning", "over limit"), priority: 230 };
+          : { text: theme.fg("warning", `still allowed${credits}`), short: theme.fg("warning", "still allowed"), priority: 230 };
       }
       const billed = usage.provider === "anthropic" && usage.source !== "Claude Code account" ? s.extraBilled : undefined;
       const segments: Segment[] = [
