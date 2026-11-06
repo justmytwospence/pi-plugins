@@ -847,7 +847,11 @@ export default function toolGate(pi: ExtensionAPI) {
   if (shortcut) {
     pi.registerShortcut(shortcut as never, {
       description: "Cycle workflow (work, chat, plan)",
-      handler: async (ctx) => { void stageWorkflow(ctx, true); },
+      handler: async (ctx) => {
+        // During exec the cycle opens the execution menu instead of refusing.
+        if (execActive && ctx.hasUI) { await executionStatus(ctx); return; }
+        void stageWorkflow(ctx, true);
+      },
     });
   }
   if (approvalShortcut && !duplicateShortcut) {
@@ -1873,6 +1877,7 @@ export default function toolGate(pi: ExtensionAPI) {
       if (legacyApproval) { setApproval(legacyApproval, ctx); return; }
       if (arg) {
         const next = parseWorkflow(arg);
+        if (next && execActive && ctx.hasUI) { await executionStatus(ctx); return; }
         if (next) await setWorkflow(next, ctx, true);
         else ctx.ui.notify("Usage: /mode [work|chat|plan].", "warning");
         return;

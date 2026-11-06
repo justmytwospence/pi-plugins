@@ -274,6 +274,21 @@ describe("workflow and approval ownership", () => {
     expect(ctx.ui.notes.at(-1)?.message).toMatch(/handoff/u);
     expect(ctx.ui.status.get(WORKFLOW_STATUS_KEY)).toContain("work");
   });
+  test("with an execution provider, Shift+Tab and /mode <workflow> open the execution menu instead of warning", async () => {
+    const { h, ctx } = await start(setup());
+    const status = vi.fn();
+    h.pi.events.on("pi-plugins.footer-actions.v1", (request: any) => {
+      request.actions["execution.status"] = { label: "Execution status", run: status };
+    });
+    h.pi.events.emit(EXEC_CHANGED, { active: true, source: "transition" });
+    const notes = ctx.ui.notes.length;
+    await h.shortcuts.get("shift+tab").handler(ctx);
+    expect(status).toHaveBeenCalledTimes(1);
+    await h.commands.get("mode").handler("plan", ctx);
+    expect(status).toHaveBeenCalledTimes(2);
+    expect(ctx.ui.notes.length).toBe(notes);
+    expect(ctx.ui.status.get(WORKFLOW_STATUS_KEY)).toBe("workflow: exec");
+  });
   test("session_tree restores only the active branch, retaining provider availability", async () => {
     const { h, ctx, branch } = await start(setup([entry(MODE_ENTRY, { mode: "yolo" }), entry(MODE_ENTRY, { mode: "plan" })]));
     h.pi.events.emit(PLAN_PROVIDER, { planFile: "/tmp/plan.md" });
