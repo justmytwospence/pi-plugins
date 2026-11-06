@@ -375,7 +375,8 @@ for (const retry of ["finish", "command", "continue"] as const) {
 
 for (const action of ["stop", "accept"] as const) {
   test(`authorized ${action} intent survives Work failure/reload without new approval or review`, async () => {
-    const s = fixture({ hook: async () => false, replies: ["invalid"] });
+    // Two unusable replies: the first review is retried automatically once, then pauses.
+    const s = fixture({ hook: async () => false, replies: ["invalid", "invalid"] });
     s.begin();
     await s.tool(FINISH_TOOL);
     const select = vi.fn(async () => "Finish without review");
@@ -392,7 +393,7 @@ for (const action of ["stop", "accept"] as const) {
     });
     await s.command("retry");
     assert.deepEqual(s.latest().completion, intent);
-    assert.equal(s.prompts.length, 1);
+    assert.equal(s.prompts.length, 2);
     assert.equal(select.mock.calls.length, action === "accept" ? 1 : 0);
     assert.equal(s.messages().length, 1);
     assert.equal(s.restoreModel.mock.calls.length, 0);
@@ -634,9 +635,9 @@ test("footer status and /plan-exec status are notification-only, including pendi
   const s = fixture({ review: false, hook: async () => false });
   assert.equal(queryFooterActions(s.mock.eventBus)["execution.status"], undefined);
   s.begin();
-  const select = vi.fn(async () => {
-    throw new Error("Status must not open a recovery dialog");
-  });
+  // `/plan-exec status` only notifies; the footer badge opens the execution menu (a dialog whose
+  // cancellation changes nothing).
+  const select = vi.fn(async () => undefined);
   s.ctx.ui.select = select;
   for (const paused of [false, true]) {
     if (paused) await s.tool(FINISH_TOOL);
@@ -645,10 +646,12 @@ test("footer status and /plan-exec status are notification-only, including pendi
     const tools = s.mock.rawPi.getActiveTools();
     const action = queryFooterActions(s.mock.eventBus)["execution.status"];
     assert.ok(action);
+    const opened = select.mock.calls.length;
     await action.run();
-    const footerNotice = s.context.notifications.at(-1);
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    assert.equal(select.mock.calls.length, opened + 1, "the footer badge opens the execution menu");
     await s.command("status");
-    assert.deepEqual(s.context.notifications.at(-1), footerNotice);
+    const footerNotice = s.context.notifications.at(-1);
     assert.match(footerNotice?.message ?? "", /\/plan-exec/u);
     if (paused) assert.ok(footerNotice?.message.startsWith(unavailable));
     assert.deepEqual(s.mock.entries, entries);
@@ -657,7 +660,6 @@ test("footer status and /plan-exec status are notification-only, including pendi
     assert.equal(s.mock.sentUserMessages.length, 0);
     assert.equal(s.mock.sentMessages.length, 0);
   }
-  assert.equal(select.mock.calls.length, 0);
 });
 
 for (const lifecycle of ["session_tree", "session_start", "session_shutdown", "begin", "end"] as const) {

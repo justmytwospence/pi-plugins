@@ -12,6 +12,14 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 import { Container, Text } from "@earendil-works/pi-tui";
 import { setToolsActive } from "./active-tools.js";
 import {
+  ASK_DETAILS_KEY,
+  type AskQuestion,
+  askUser,
+  PLANNER_QUESTION_LABEL,
+  toAskQuestions,
+  toPlannerAnswers,
+} from "./exec-ask.js";
+import {
   type AskDetails,
   assessmentSummary,
   type ChangeSummary,
@@ -27,7 +35,7 @@ import {
   renderFinish,
   responsesText,
 } from "./exec-cards.js";
-import { ExecReplyTracker, pausePresentation, recoveryChoices } from "./exec-interaction.js";
+import { pausePresentation, pauseQuestion, stalledQuestion, statusQuestion } from "./exec-interaction.js";
 import { discoverFamily } from "./family-contract.js";
 import { type FlowState, queryFlow } from "./flow-contract.js";
 import { FOOTER_ACTIONS_CHANNEL, type FooterActionsRequest } from "./footer-actions.js";
@@ -47,12 +55,25 @@ import {
   validateResponses,
 } from "./negotiation.js";
 import { planDiff, planDiffText } from "./plan-diff.js";
-import { inPlan, isPlanFile, planPaths, readPlan, tildify } from "./plan-file.js";
+import { inPlan, isPlanFile, planPaths, planTitle, readPlan, tildify } from "./plan-file.js";
 import { expandHome } from "./plan-hook.js";
-import { type PlannerAccessConfig, PlannerAgent } from "./planner/agent.js";
-import { CONSULT_WRAP_UP, consultMessage, reviewRequest } from "./planner/prompt.js";
+import { type PendingQuestions, type PlannerAccessConfig, PlannerAgent } from "./planner/agent.js";
+import {
+  CONSULT_POSTPONED,
+  CONSULT_WRAP_UP,
+  consultMessage,
+  postponedAnswerMessage,
+  REVIEW_POSTPONED,
+  reviewRequest,
+  userDiscussionMessage,
+} from "./planner/prompt.js";
 import { type PlannerSessionFactory, plannerSessionDir } from "./planner/session.js";
 import { formatCost } from "./planners.js";
+import {
+  normalizePlanModeQuestionParams,
+  type PlanModeQuestion,
+  type PlanModeQuestionAnswer,
+} from "./question-tool.js";
 import { reviewCard, reviewTitle } from "./review-card.js";
 import { emptyUsage, type Usage } from "./scout-process.js";
 import { transcriptCheckpoint } from "./transcript-contract.js";
@@ -67,6 +88,8 @@ export const FINISH_MESSAGE_TYPE = "plan-mode-finish";
 export const FINISH_TOOL = "finish_plan";
 export const CONTINUE_TOOL = "continue_plan";
 export const EXEC_STATUS_MESSAGE_TYPE = "plan-mode-exec-status";
+export const PLANNER_ANSWER_MESSAGE_TYPE = "plan-mode-planner-answer";
+export const EXEC_CONTINUE_MESSAGE_TYPE = "plan-mode-exec-continue";
 export const EXEC_TOOLS = [FINISH_TOOL, ASK_TOOL, CONTINUE_TOOL] as const;
 /** Per question to the planner on call. */
 export const CONSULT_TIMEOUT_MS = 10 * 60_000;
@@ -93,6 +116,8 @@ export interface ExecState {
   /** Authorized completion retained until the Linked Work-model transition commits. */
   pendingCompletion?: FinishDetails;
   touched?: string[];
+  /** A planner question the user put off; answering it resumes the implementer. */
+  pendingQuestion?: { id: string; questions: PlanModeQuestion[]; implementerMessage: string; plannerNote?: string };
   pendingReturn?: { leaf: string; details: FinishDetails };
   completion?: FinishDetails;
 }
@@ -112,6 +137,8 @@ export interface ExecController {
   readonly active: boolean;
   readonly state: ExecState | undefined;
   begin(ctx: ExtensionContext, state: ExecState, options: { record: boolean }): void;
+  /** The execution menu: whatever needs the user now, else status. "stopped" when exec ended. */
+  menu(ctx: ExtensionContext): Promise<"stopped" | "kept">;
 }
 
 const NOT_ACTIVE = "No approved plan is being implemented.";
@@ -132,8 +159,12 @@ export function registerExec(pi: ExtensionAPI, host: ExecHost): ExecController {
   let state: ExecState | undefined;
   let epoch = 0;
   let busy = false;
-  let pauseShownThisRun = false;
-  const replies = new ExecReplyTracker();
+  let shownThisRun = false;
+  let implementationDriven = false;
+  let stopRequested = false;
+  let plannerUnavailable = false;
+  let questionHandler: ((pending: PendingQuestions) => void) | undefined;
+  let questionsOpen = 0;
   const dialogs = new Set<AbortController>();
   const cancelDialogs = () => {
     for (const controller of dialogs) controller.abort();
@@ -178,19 +209,23 @@ export function registerExec(pi: ExtensionAPI, host: ExecHost): ExecController {
       const n = state.negotiation;
       const phase = state.pendingCompletion
         ? "completion pending"
-        : n?.phase === "reviewing"
-          ? `review ${n.attempts}`
-          : n?.phase === "revising" && busy
-            ? `revising · ${outstanding(n).length} findings`
-            : n?.phase === "paused"
-              ? n.pause?.reason === "user_needed"
-                ? "waiting for answer"
-                : n.pause?.reason === "exhausted"
-                  ? "approval needed"
-                  : "review failed"
-              : busy
-                ? (n?.phase ?? "implementing")
-                : "idle · not completed";
+        : state.pendingQuestion || questionsOpen > 0
+          ? "planner asks you"
+          : n?.phase === "reviewing"
+            ? `review ${n.attempts}`
+            : n?.phase === "consulting"
+              ? "asking planner"
+              : n?.phase === "revising" && busy
+                ? `revising · ${outstanding(n).length} findings`
+                : n?.phase === "paused"
+                  ? n.pause?.reason === "user_needed"
+                    ? "needs your answer"
+                    : n.pause?.reason === "exhausted"
+                      ? "needs your decision"
+                      : "review failed"
+                  : busy
+                    ? "implementing"
+                    : "idle";
       text = `exec mode on · ${phase} · ${state.asks} consultations · ${formatCost(state.costUsd)} consult · ${formatCost(n?.reviewCostUsd ?? 0)} review`;
     }
     safely(() => ctx.ui.setStatus(EXEC_STATUS_KEY, text));
@@ -208,7 +243,6 @@ export function registerExec(pi: ExtensionAPI, host: ExecHost): ExecController {
   };
 
   const persist = () => {
-    replies.sync(state?.active ? state.negotiation : undefined);
     if (state) {
       state.touched = [...touched];
       const snapshot = structuredClone(state);
@@ -224,10 +258,12 @@ export function registerExec(pi: ExtensionAPI, host: ExecHost): ExecController {
     const linkedFlow = next.linkedFlow === undefined ? undefined : parseLinkedFlow(next.linkedFlow);
     if (next.linkedFlow !== undefined && !linkedFlow) throw new Error("Invalid linked execution flow.");
     epoch++;
-    replies.invalidate();
     cancelDialogs();
     busy = !ctx.isIdle();
-    pauseShownThisRun = false;
+    shownThisRun = false;
+    implementationDriven = true;
+    stopRequested = false;
+    plannerUnavailable = false;
     cards.begin(ctx);
     pendingReturn = undefined;
     hostCtx = ctx;
@@ -326,7 +362,7 @@ export function registerExec(pi: ExtensionAPI, host: ExecHost): ExecController {
         }
         if (!currentSession()) return text("Execution changed; finalization discarded.");
         if (!committed) {
-          pauseShownThisRun = true;
+          shownThisRun = true;
           disposeAgent();
           return {
             content: [{ type: "text", text: WORK_MODEL_UNAVAILABLE }],
@@ -393,10 +429,12 @@ export function registerExec(pi: ExtensionAPI, host: ExecHost): ExecController {
 
   const restore = (ctx: ExtensionContext) => {
     epoch++;
-    replies.invalidate();
     cancelDialogs();
     busy = !ctx.isIdle();
-    pauseShownThisRun = false;
+    shownThisRun = false;
+    implementationDriven = true;
+    stopRequested = false;
+    plannerUnavailable = false;
     cards.begin(ctx);
     hostCtx = ctx;
     disposeAgent();
@@ -454,10 +492,9 @@ export function registerExec(pi: ExtensionAPI, host: ExecHost): ExecController {
   pi.on("session_tree", (_event, ctx) => restore(ctx));
   pi.on("session_shutdown", () => {
     epoch++;
-    replies.invalidate();
     cancelDialogs();
     busy = false;
-    pauseShownThisRun = false;
+    shownThisRun = false;
     cards.end();
     disposeAgent();
     // Reload replaces this runtime, not the durable execution. Only release transient UI ownership.
@@ -661,33 +698,388 @@ export function registerExec(pi: ExtensionAPI, host: ExecHost): ExecController {
     return text(instructions);
   };
 
-  const recoveryMenu = async (
+  const cacheUsage = (u: Usage) => ({ input: u.input, cacheRead: u.cacheRead, cacheWrite: u.cacheWrite });
+
+  /** A question dialog that closes on navigation, abort or recovery elsewhere. */
+  const dialog = async (
+    current: ExecState,
+    token: number,
+    ctx: ExtensionContext,
+    questions: AskQuestion[],
+    label: string,
+    signal?: AbortSignal,
+  ) => {
+    if (!ctx.hasUI || !live(current, token) || !current.active) return undefined;
+    const controller = new AbortController();
+    dialogs.add(controller);
+    const signals = [controller.signal, signal, ctx.signal].filter(
+      (value): value is AbortSignal => value !== undefined,
+    );
+    const dialogSignal = AbortSignal.any(signals);
+    try {
+      const result = await askUser(pi, ctx, questions, { label, signal: dialogSignal });
+      return !dialogSignal.aborted && live(current, token) && current.active ? result : undefined;
+    } finally {
+      dialogs.delete(controller);
+    }
+  };
+
+  type Postponed = { questions: PlanModeQuestion[]; plannerNote?: string };
+  let postponed: Postponed | undefined;
+  const takePostponed = () => {
+    const value = postponed;
+    postponed = undefined;
+    return value;
+  };
+
+  /** Answers the planner's questions in a dialog; the user's Esc postpones them. */
+  const serveQuestions =
+    (
+      planner: PlannerAgent,
+      ctx: ExtensionContext,
+      current: ExecState,
+      token: number,
+      base: () => object,
+      onUpdate: ((update: unknown) => void) | undefined,
+      purpose: "consult" | "review",
+      signal?: AbortSignal,
+    ) =>
+    (pending: PendingQuestions) => {
+      void (async () => {
+        const questions = toAskQuestions(pending.questions);
+        const note = planner.lastReply.trim().slice(0, 2000) || undefined;
+        // This update must precede the dialog: it is what Switchyard's adapter claims the form from.
+        safely(() =>
+          onUpdate?.({
+            content: [{ type: "text", text: "Planner asks you…" }],
+            details: {
+              ...base(),
+              pending: true,
+              asking: true,
+              plannerNote: note,
+              [ASK_DETAILS_KEY]: { questions },
+            },
+          }),
+        );
+        questionsOpen++;
+        updateStatus(ctx);
+        let result: Awaited<ReturnType<typeof dialog>>;
+        try {
+          result = await dialog(current, token, ctx, questions, PLANNER_QUESTION_LABEL, signal);
+        } finally {
+          questionsOpen--;
+        }
+        if (!live(current, token)) return;
+        if (!ctx.hasUI) planner.answer(undefined);
+        else if (result && !result.cancelled) planner.answer(toPlannerAnswers(pending.questions, result));
+        else {
+          planner.postpone(purpose === "review" ? REVIEW_POSTPONED : CONSULT_POSTPONED);
+          if (purpose === "consult") postponed = { questions: pending.questions, plannerNote: note };
+        }
+        safely(() =>
+          onUpdate?.({
+            content: [{ type: "text", text: "Planner working…" }],
+            details: { ...base(), pending: true },
+          }),
+        );
+        updateStatus(ctx);
+      })();
+    };
+
+  /** What the user typed into a pause dialog goes to the planner, and its answer is posted as a card. */
+  const discussWithPlanner = async (
+    current: ExecState,
+    token: number,
+    ctx: ExtensionContext,
+    context: string,
+    message: string,
+  ): Promise<boolean> => {
+    const planner = consultant(ctx, "consult");
+    if (!planner || !current.planner) {
+      plannerUnavailable = true;
+      safely(() => ctx.ui.notify("The planner is unavailable; your message was not sent.", "warning"));
+      return false;
+    }
+    const name = current.planner.name;
+    takePostponed();
+    questionHandler = serveQuestions(
+      planner,
+      ctx,
+      current,
+      token,
+      () => ({ question: message, planner: name, fromUser: true }),
+      undefined,
+      "consult",
+    );
+    let result: Awaited<ReturnType<PlannerAgent["consult"]>>;
+    try {
+      result = await planner.consult(userDiscussionMessage(context, message), ctx, "user", ctx.signal, message);
+    } finally {
+      questionHandler = undefined;
+    }
+    takePostponed();
+    if (!live(current, token)) return false;
+    record(result.usage, ctx);
+    if (result.error) {
+      disposeAgent();
+      plannerUnavailable = true;
+      safely(() => ctx.ui.notify(`The planner failed: ${result.error}`, "warning"));
+      return false;
+    }
+    plannerUnavailable = false;
+    const reply = result.reply.trim();
+    pi.sendMessage(
+      {
+        customType: PLANNER_ANSWER_MESSAGE_TYPE,
+        content: reply || "(the planner answered with no text)",
+        display: true,
+        details: {
+          question: message,
+          reply,
+          planner: name,
+          fromUser: true,
+          usage: cacheUsage(result.usage),
+          costUsd: result.usage.cost.total,
+        } satisfies AskDetails,
+      },
+      { triggerTurn: false },
+    );
+    return true;
+  };
+
+  /** The user answers a planner question they put off; the planner resumes the implementer with its decision. */
+  const answerPendingQuestion = async (
+    current: ExecState,
+    token: number,
+    ctx: ExtensionContext,
+    typed?: string,
+  ): Promise<boolean> => {
+    const pq = current.pendingQuestion;
+    if (!pq || !current.planner) return false;
+    let answers: PlanModeQuestionAnswer[];
+    if (typed !== undefined) {
+      answers = pq.questions.map((q, i) => ({
+        id: q.id,
+        header: q.header,
+        question: q.question,
+        answer: i === 0 ? typed : "No answer. Use your recommendation.",
+        wasCustom: true,
+      }));
+    } else {
+      questionsOpen++;
+      updateStatus(ctx);
+      let result: Awaited<ReturnType<typeof dialog>>;
+      try {
+        result = await dialog(current, token, ctx, toAskQuestions(pq.questions), PLANNER_QUESTION_LABEL);
+      } finally {
+        questionsOpen--;
+        updateStatus(ctx);
+      }
+      if (!live(current, token) || !result || result.cancelled) return false;
+      answers = toPlannerAnswers(pq.questions, result);
+    }
+    current.pendingQuestion = undefined;
+    persist();
+    updateStatus(ctx);
+    const restoreQuestion = () => {
+      if (!live(current, token)) return;
+      current.pendingQuestion = pq;
+      persist();
+      updateStatus(ctx);
+    };
+    const planner = consultant(ctx, "consult");
+    if (!planner) {
+      plannerUnavailable = true;
+      safely(() => ctx.ui.notify("The planner is unavailable; your answer was kept for later.", "warning"));
+      restoreQuestion();
+      return false;
+    }
+    const name = current.planner.name;
+    const before = readPlan(current.planFile);
+    takePostponed();
+    questionHandler = serveQuestions(
+      planner,
+      ctx,
+      current,
+      token,
+      () => ({ question: pq.implementerMessage, planner: name }),
+      undefined,
+      "consult",
+    );
+    let result: Awaited<ReturnType<PlannerAgent["consult"]>>;
+    try {
+      result = await planner.consult(
+        postponedAnswerMessage(answers, pq.implementerMessage),
+        ctx,
+        "implementer",
+        ctx.signal,
+        pq.implementerMessage,
+      );
+    } finally {
+      questionHandler = undefined;
+    }
+    if (!live(current, token)) return false;
+    record(result.usage, ctx);
+    const again = takePostponed();
+    if (again) {
+      current.pendingQuestion = {
+        id: randomUUID(),
+        questions: again.questions,
+        implementerMessage: pq.implementerMessage,
+        ...(again.plannerNote ? { plannerNote: again.plannerNote } : {}),
+      };
+      persist();
+      updateStatus(ctx);
+      return true;
+    }
+    if (result.error) {
+      disposeAgent();
+      plannerUnavailable = true;
+      safely(() => ctx.ui.notify(`The planner failed: ${result.error}`, "warning"));
+      restoreQuestion();
+      return false;
+    }
+    plannerUnavailable = false;
+    const after = readPlan(current.planFile);
+    const changes = before === after ? [] : planDiff(before, after);
+    const reply = result.reply.trim();
+    const amended =
+      changes.length > 0
+        ? `\n\nIt amended the plan (${tildify(current.planFile)}):\n${planDiffText(changes)}\n\nFollow the amended plan.`
+        : "";
+    implementationDriven = true;
+    pi.sendMessage(
+      {
+        customType: PLANNER_ANSWER_MESSAGE_TYPE,
+        content: `The planner answered after asking the user:\n\n${reply || "(it answered with no text)"}${amended}\n\nContinue the implementation.`,
+        display: true,
+        details: {
+          question: pq.implementerMessage,
+          reply,
+          planner: name,
+          changes,
+          usage: cacheUsage(result.usage),
+          costUsd: result.usage.cost.total,
+        } satisfies AskDetails,
+      },
+      { triggerTurn: true },
+    );
+    return true;
+  };
+
+  /** The dialog for a pause: every recovery is a choice here, and typed text is a message. */
+  const presentPause = async (
     current: ExecState,
     token: number,
     ctx: ExtensionContext,
     origin: Origin,
     signal?: AbortSignal,
   ): Promise<ActionResult> => {
-    const n = current.negotiation!;
-    if (current.pendingCompletion) return pausedResult(`${WORK_MODEL_UNAVAILABLE}\nUse /plan-exec retry.`);
-    if (n.phase !== "paused") return text("Implementation remains active; completion has not been confirmed.");
-    const choices = recoveryChoices(n);
-    const selected = await select(
+    for (let round = 0; round < 5; round++) {
+      if (!live(current, token) || !current.active || signal?.aborted || ctx.signal?.aborted)
+        return pausedResult("Execution changed or was interrupted; no recovery authorized.");
+      const n = current.negotiation!;
+      if (!current.pendingCompletion && n.phase !== "paused")
+        return text("Implementation remains active; completion has not been confirmed.");
+      const { question, actions } = pauseQuestion(n, Boolean(current.pendingCompletion));
+      const reason = current.pendingCompletion ? undefined : n.pause?.reason;
+      const result = await dialog(
+        current,
+        token,
+        ctx,
+        [question],
+        question.header === "Reviewer" ? "Review needs you" : "Review",
+        signal,
+      );
+      if (!live(current, token) || current.negotiation !== n || signal?.aborted || ctx.signal?.aborted)
+        return pausedResult("Execution changed or was interrupted; no recovery authorized.");
+      const answer = result && !result.cancelled ? result.answers[0] : undefined;
+      if (!answer || answer.answer === null)
+        return pausedResult(ctx.hasUI ? pauseText(n) : `${pauseText(n)}\nNo UI is available; no recovery authorized.`);
+      if (answer.kind === "custom") {
+        if (reason === "user_needed") return applyAction(current, token, "resume", ctx, origin, answer.answer, signal);
+        if (!(await discussWithPlanner(current, token, ctx, pauseText(n), answer.answer)))
+          return pausedResult(pauseText(n));
+        continue;
+      }
+      if (reason === "user_needed" && answer.answer === "Use recommendation") {
+        const recommendation = n.history.at(-1)?.decision?.recommendation ?? "the reviewer's recommendation";
+        return applyAction(current, token, "resume", ctx, origin, `Use your recommendation: ${recommendation}`, signal);
+      }
+      const action = actions[answer.answer];
+      if (!action) return pausedResult(pauseText(n));
+      return applyAction(current, token, action === "extend" ? "resume" : action, ctx, origin, undefined, signal);
+    }
+    return pausedResult(pauseText(current.negotiation!));
+  };
+
+  const continueImplementation = (submit: boolean) => {
+    implementationDriven = true;
+    pi.sendMessage(
+      {
+        customType: EXEC_CONTINUE_MESSAGE_TYPE,
+        content: submit
+          ? "Submit your work now with finish_plan: report, verification and concerns."
+          : "Continue implementing the approved plan. Use ask_planner instead of stopping when something needs a decision.",
+        display: true,
+      },
+      { triggerTurn: true },
+    );
+  };
+
+  const presentStalled = async (current: ExecState, token: number, ctx: ExtensionContext) => {
+    const result = await dialog(
       current,
       token,
-      n,
       ctx,
-      origin,
-      pauseText(n),
-      choices.map((c) => c.label),
-      signal,
+      [stalledQuestion(planTitle(current.planFile))],
+      "Implementer stopped",
     );
-    if (!live(current, token) || current.negotiation !== n || signal?.aborted || ctx.signal?.aborted)
-      return pausedResult("Execution changed or was interrupted; no recovery authorized.");
-    const action = choices.find((c) => c.label === selected)?.action;
-    if (!action || action === "discuss" || action === "answer")
-      return pausedResult(!ctx.hasUI ? `${pauseText(n)}\nNo UI is available; no recovery authorized.` : pauseText(n));
-    return applyAction(current, token, action === "extend" ? "resume" : action, ctx, origin, undefined, signal);
+    const answer = result && !result.cancelled ? result.answers[0] : undefined;
+    if (!answer || answer.answer === null || !live(current, token) || !current.active) return;
+    if (answer.kind === "custom") pi.sendUserMessage(answer.answer);
+    else if (answer.answer === "Stop implementation") await applyAction(current, token, "stop", ctx, "command");
+    else continueImplementation(answer.answer === "Submit for review");
+  };
+
+  const presentStatus = async (current: ExecState, token: number, ctx: ExtensionContext) => {
+    const result = await dialog(
+      current,
+      token,
+      ctx,
+      [statusQuestion(planTitle(current.planFile), current.implementer, current.planner?.name, busy)],
+      "Implementing",
+    );
+    const answer = result && !result.cancelled ? result.answers[0] : undefined;
+    if (!answer || answer.answer === null || !live(current, token) || !current.active) return;
+    if (answer.answer === "Keep going") return;
+    if (answer.answer === "Stop implementation") {
+      if (ctx.isIdle()) await applyAction(current, token, "stop", ctx, "command");
+      else {
+        stopRequested = true;
+        ctx.abort();
+      }
+      return;
+    }
+    continueImplementation(answer.answer === "Submit for review");
+  };
+
+  /** Whatever needs the user now, in priority order; `settle` only opens what the turn's end calls for. */
+  const presentNext = async (ctx: ExtensionContext, origin: "settle" | "menu") => {
+    const current = state;
+    if (!current?.active || !ctx.hasUI || dialogs.size > 0) return;
+    hostCtx = ctx;
+    const token = epoch;
+    if (current.pendingQuestion) {
+      await answerPendingQuestion(current, token, ctx);
+      return;
+    }
+    if (current.pendingCompletion || current.negotiation?.phase === "paused") {
+      await presentPause(current, token, ctx, "command");
+      return;
+    }
+    if (origin === "menu") await presentStatus(current, token, ctx);
+    else await presentStalled(current, token, ctx);
   };
 
   pi.registerTool({
@@ -695,14 +1087,13 @@ export function registerExec(pi: ExtensionAPI, host: ExecHost): ExecController {
     ...flags,
     label: "Continue plan",
     description:
-      "Resolve a paused implementation. Consume a delivered human answer by replyId, or ask for explicit UI authorization to retry, extend, finish without review or stop. Discussion and clarification do not authorize recovery.",
+      "Ask to open the paused implementation's recovery dialog (retry, extend, finish without review or stop). The user decides in the dialog.",
     parameters: {
       type: "object",
       additionalProperties: false,
       required: ["action"],
       properties: {
-        action: { type: "string", enum: ["answer", "retry", "extend", "accept", "stop"] },
-        replyId: { type: "string" },
+        action: { type: "string", enum: ["retry", "extend", "accept", "stop"] },
       },
     } as never,
     async execute(_id, params: unknown, signal, _onUpdate, ctx) {
@@ -712,21 +1103,11 @@ export function registerExec(pi: ExtensionAPI, host: ExecHost): ExecController {
       if (signal?.aborted || ctx.signal?.aborted) return pausedResult("Interrupted; no recovery authorized.");
       const token = epoch;
       const n = current.negotiation!;
-      const { action, replyId } = (params ?? {}) as { action?: string; replyId?: unknown };
+      const { action } = (params ?? {}) as { action?: string };
       if (current.pendingCompletion && action !== "stop")
         return action === "retry"
           ? applyAction(current, token, "retry", ctx, "tool", undefined, signal)
           : pausedResult(WORK_MODEL_UNAVAILABLE);
-      if (action === "answer") {
-        if (n.phase !== "paused" || n.pause?.reason !== "user_needed" || typeof replyId !== "string")
-          return text("A fresh delivered user answer and its current replyId are required; no change made.");
-        const reply = replies.consume(n, replyId);
-        if (!reply)
-          return text(
-            "A fresh trusted textual user answer is needed; this replyId is missing, stale or ineligible. No change made.",
-          );
-        return applyAction(current, token, "resume", ctx, "tool", reply.text, signal);
-      }
       if (action === "retry" || action === "extend") {
         const matches =
           n.phase === "paused" &&
@@ -734,34 +1115,39 @@ export function registerExec(pi: ExtensionAPI, host: ExecHost): ExecController {
             ? n.pause?.reason === "exhausted"
             : n.pause?.reason === "failure" || n.pause?.reason === "interrupted");
         if (!matches) return text("This recovery action is not available for the current phase; no change made.");
-        return recoveryMenu(current, token, ctx, "tool", signal);
+        return presentPause(current, token, ctx, "tool", signal);
       }
       if (action === "accept" || action === "stop")
         return applyAction(current, token, action, ctx, "tool", undefined, signal);
-      return text("Choose answer, retry, extend, accept or stop.");
+      return text("Choose retry, extend, accept or stop.");
     },
   });
 
   pi.on("input", (event) => {
-    replies.input(state?.active ? state.negotiation : undefined, event);
+    if (event.source !== "extension") implementationDriven = false;
   });
-  pi.on("message_end", (event) => {
-    replies.messageEnd(state?.active ? state.negotiation : undefined, event);
+  pi.on("tool_call", (event) => {
+    if (state?.active && state.planner && !plannerUnavailable && event.toolName === "ask_user_question")
+      return {
+        block: true,
+        reason:
+          "During plan execution the planner on call asks the user. Call ask_planner with what you need decided; it will ask the user if the decision is theirs.",
+      };
+    return undefined;
   });
   pi.on("context", (event) => {
     if (!state?.active) return;
     const n = state.negotiation!;
-    const reply = replies.eligible(n);
+    const pq = state.pendingQuestion;
     const guidance = [
       "An approved plan is being implemented. Human questions do not cancel the task; answer them normally. Follow explicit requests to pause. Keep human-facing explanations concise; do not dump review history or advertise recovery commands.",
-      state.pendingCompletion
-        ? `${WORK_MODEL_UNAVAILABLE}\nCompletion is already authorized and saved. Do not implement or rerun review. finish_plan or continue_plan(action=retry) retries only the saved completion handoff.`
-        : n.phase === "paused"
-          ? `${pauseText(n)}\nDo not implement while awaiting this decision. Answer clarification normally. Call continue_plan(action=answer, replyId) only when an eligible reply resolves the pending reviewer question; clarification alone is not recovery. Never interpret conversational text as retry, extension or unreviewed-completion authorization; those require a native selection.`
-          : "Continue the approved implementation unless the user changes direction. Completion requires finish_plan and the existing review safeguards.",
-      reply
-        ? `Eligible delivered human reply: ${JSON.stringify(reply.text)}\nreplyId: ${reply.id}`
-        : "No eligible delivered textual reply is available. If attribution failed or several inputs were queued, ask: Please send your answer once more now that the conversation has stopped. No slash command is needed.",
+      pq
+        ? `The planner is waiting for the user's answer to: ${pq.questions.map((q) => q.question).join(" / ")}. Do not work around it; stop and wait.`
+        : state.pendingCompletion
+          ? `${WORK_MODEL_UNAVAILABLE}\nCompletion is already authorized and saved. Do not implement or rerun review. finish_plan or continue_plan(action=retry) retries only the saved completion handoff.`
+          : n.phase === "paused"
+            ? `${pauseText(n)}\nDo not implement while paused. The user resolves it in a dialog; answer their questions briefly if they ask.`
+            : "Continue the approved implementation unless the user changes direction. Completion requires finish_plan and the existing review safeguards.\nNever ask the user directly or end your turn with a question: use ask_planner. When the user changes direction, tell the planner with ask_planner so it amends the plan, then follow its answer.",
     ].join("\n\n");
     return {
       messages: [
@@ -777,7 +1163,7 @@ export function registerExec(pi: ExtensionAPI, host: ExecHost): ExecController {
     };
   });
   pi.on("agent_start", (_event, ctx) => {
-    if (!busy) pauseShownThisRun = false;
+    if (!busy) shownThisRun = false;
     busy = true;
     hostCtx = ctx;
     updateStatus(ctx);
@@ -792,7 +1178,7 @@ export function registerExec(pi: ExtensionAPI, host: ExecHost): ExecController {
       "Ask the planner that wrote the plan you are implementing, and wait for its answer. It keeps its full research context and can read the current files, including your changes. Use it when the plan does not fit what you find: a step cannot be done as written, a fact it states is wrong, a change it does not list is needed, or it leaves a choice open. It answers with a decision, and amends the plan file when the plan changes.",
     promptSnippet: "Ask the plan's planner when the plan does not fit what you find",
     promptGuidelines: [
-      "While implementing an approved plan with its planner on call, call ask_planner instead of improvising whenever the plan does not fit what you find. Say what you found, where, and the options you see; follow its answer, and ask the user when it says the decision is theirs.",
+      "While implementing an approved plan with its planner on call, call ask_planner instead of improvising whenever the plan does not fit what you find. Say what you found, where, and the options you see; follow its answer. It asks the user itself when the decision is theirs; never ask the user directly.",
     ],
     parameters: {
       type: "object",
@@ -832,7 +1218,9 @@ export function registerExec(pi: ExtensionAPI, host: ExecHost): ExecController {
       if (!message) return text("Say what you found and what you need decided.");
       const planner = consultant(ctx);
       if (!planner) {
-        const error = "The planner's session is missing; ask the user about anything the approved plan leaves open.";
+        plannerUnavailable = true;
+        const error =
+          "The planner's session is missing; ask the user with ask_user_question about anything the approved plan leaves open.";
         return finalResult(
           {
             content: [{ type: "text", text: error }],
@@ -867,6 +1255,17 @@ export function registerExec(pi: ExtensionAPI, host: ExecHost): ExecController {
       const onAbort = () => void planner.stop();
       signal?.addEventListener("abort", onAbort, { once: true });
       let result: Awaited<ReturnType<PlannerAgent["consult"]>>;
+      takePostponed();
+      questionHandler = serveQuestions(
+        planner,
+        ctx,
+        current,
+        token,
+        () => ({ ...askIdentity, question: message, planner: name }),
+        onUpdate as ((update: unknown) => void) | undefined,
+        "consult",
+        signal,
+      );
       try {
         result = await planner.consult(consultMessage(message, "implementer"), ctx, "implementer", signal, message);
       } catch (error) {
@@ -883,13 +1282,50 @@ export function registerExec(pi: ExtensionAPI, host: ExecHost): ExecController {
           id,
         ) as never;
       } finally {
+        questionHandler = undefined;
         unsubscribe();
         signal?.removeEventListener("abort", onAbort);
       }
       if (!live(current, token)) return text("Execution changed; discarded stale planner response.");
       n.phase = previousPhase;
       if (signal?.aborted || result.error) disposeAgent();
+      if (result.error) plannerUnavailable = true;
       record(result.usage, ctx);
+      const waiting = takePostponed();
+      if (waiting && !signal?.aborted && !result.error) {
+        plannerUnavailable = false;
+        current.pendingQuestion = {
+          id: randomUUID(),
+          questions: waiting.questions,
+          implementerMessage: message,
+          ...(waiting.plannerNote ? { plannerNote: waiting.plannerNote } : {}),
+        };
+        persist();
+        updateStatus(ctx);
+        shownThisRun = true;
+        return finalResult(
+          {
+            content: [
+              {
+                type: "text",
+                text: "The planner asked the user a question; the user will answer later. Stop now and end your turn. Do not decide it yourself or work around it.",
+              },
+            ],
+            details: {
+              ...askIdentity,
+              question: message,
+              planner: name,
+              postponed: true,
+              reply: result.reply.trim(),
+              usage: cacheUsage(result.usage),
+              costUsd: result.usage.cost.total,
+            } satisfies AskDetails,
+            usage: result.usage,
+            terminate: true,
+          },
+          id,
+        ) as never;
+      }
       if (signal?.aborted)
         return {
           content: [{ type: "text", text: "Stopped waiting for the planner." }],
@@ -908,7 +1344,7 @@ export function registerExec(pi: ExtensionAPI, host: ExecHost): ExecController {
             content: [
               {
                 type: "text",
-                text: `The planner failed: ${result.error}. Decide within the plan, and ask the user about anything it leaves open.`,
+                text: `The planner failed: ${result.error}. Decide within the plan, and ask the user with ask_user_question about anything it leaves open.`,
               },
             ],
             details: {
@@ -916,6 +1352,7 @@ export function registerExec(pi: ExtensionAPI, host: ExecHost): ExecController {
               error: result.error,
               question: message,
               planner: name,
+              usage: cacheUsage(result.usage),
               costUsd: result.usage.cost.total,
             } satisfies AskDetails,
             usage: result.usage,
@@ -923,6 +1360,7 @@ export function registerExec(pi: ExtensionAPI, host: ExecHost): ExecController {
           id,
         ) as never;
       }
+      plannerUnavailable = false;
       const after = readPlan(current.planFile);
       const changes = before === after ? [] : planDiff(before, after);
       const reply = result.reply.trim();
@@ -940,6 +1378,7 @@ export function registerExec(pi: ExtensionAPI, host: ExecHost): ExecController {
             reply,
             planner: name,
             changes,
+            usage: cacheUsage(result.usage),
             costUsd: result.usage.cost.total,
           } satisfies AskDetails,
           usage: result.usage,
@@ -1009,7 +1448,7 @@ export function registerExec(pi: ExtensionAPI, host: ExecHost): ExecController {
         return finalize(current, token, structuredClone(current.pendingCompletion), ctx, undefined, signal, id);
       }
       if (n.phase === "paused") {
-        pauseShownThisRun = true;
+        shownThisRun = true;
         const previous = n.history.at(-1);
         if (!live(current, token) || current.negotiation !== n || signal?.aborted || ctx.signal?.aborted)
           return pausedResult("Execution changed or was interrupted; no action taken.");
@@ -1088,133 +1527,195 @@ export function registerExec(pi: ExtensionAPI, host: ExecHost): ExecController {
       updateStatus(ctx);
       let decision: ReviewDecision | undefined;
       let reviewCost = 0;
-      try {
-        if (!current.planner) details.assessment = { state: "unavailable", reason: "No planner is on call." };
-        else {
-          const planner = consultant(ctx, "review");
-          if (!planner) {
-            details.assessment = { state: "unavailable", reason: "The planner's session is missing or invalid." };
-          } else {
-            const baseline = planner.stats.costUsd;
-            const baselineTokens = planner.stats.totalTokens;
-            const progress = () => {
-              if (!live(current, token)) return;
-              safely(() =>
-                onUpdate?.({
-                  content: [{ type: "text", text: "Planner reviewing…" }],
-                  details: { ...details, pending: true, activity: planner.stats.lastActivity },
-                } as never),
-              );
-            };
-            const unsubscribe = planner.subscribe(progress);
-            const controller = new AbortController();
-            let timer: ReturnType<typeof setTimeout> | undefined;
-            let interrupted: "cancelled" | "timed out" | undefined;
-            let stopping: Promise<void> | undefined;
-            let interrupt: (reason: "cancelled" | "timed out") => void = () => undefined;
-            const stopped = new Promise<undefined>((done) => {
-              interrupt = (reason) => {
-                if (interrupted) return;
-                interrupted = reason;
-                controller.abort();
-                stopping = planner.stop().catch(() => undefined);
-                done(undefined);
-              };
-            });
-            const onAbort = () => interrupt("cancelled");
-            signal?.addEventListener("abort", onAbort, { once: true });
-            try {
-              progress();
-              timer = setTimeout(() => interrupt("timed out"), CONSULT_TIMEOUT_MS);
-              if (signal?.aborted) onAbort();
-              const result = interrupted
-                ? undefined
-                : await Promise.race([
-                    planner.consult(
-                      reviewRequest(submission.report, {
-                        verification: submission.verification,
-                        concerns: submission.concerns,
-                        previousFindings: outstanding(n),
-                        responses,
-                        userEvidence: n.userAnswers,
-                        remainingRevisions:
-                          Math.max(0, n.maxRevisions - n.revisionsUsed) + (n.revisionAuthorized ? 1 : 0),
-                        planFile: current.planFile,
-                        changes: changeSummaryText(details.changes),
-                      }),
-                      ctx,
-                      "completion review",
-                      controller.signal,
-                    ),
-                    stopped,
-                  ]);
-              // Drain asynchronous final abort usage before disposal; broken aborts get bounded cleanup.
-              if (stopping) {
-                let cleanupTimer: ReturnType<typeof setTimeout> | undefined;
-                try {
-                  await Promise.race([
-                    stopping,
-                    new Promise<void>((resolve) => {
-                      cleanupTimer = setTimeout(resolve, 5000);
-                    }),
-                  ]);
-                } finally {
-                  clearTimeout(cleanupTimer);
+      const runReview = async (): Promise<void> => {
+        decision = undefined;
+        reviewCost = 0;
+        usage = undefined;
+        try {
+          if (!current.planner) details.assessment = { state: "unavailable", reason: "No planner is on call." };
+          else {
+            const planner = consultant(ctx, "review");
+            if (!planner) {
+              details.assessment = { state: "unavailable", reason: "The planner's session is missing or invalid." };
+            } else {
+              const baseline = planner.stats.costUsd;
+              const baselineTokens = planner.stats.totalTokens;
+              let started = false;
+              const progress = () => {
+                if (!live(current, token)) return;
+                // The clock stops while the planner waits for you, and restarts after.
+                if (planner.pending) {
+                  clearTimeout(timer);
+                  timer = undefined;
+                } else if (!timer && !interrupted && started) {
+                  timer = setTimeout(() => interrupt("timed out"), CONSULT_TIMEOUT_MS);
                 }
-              }
-              if (!live(current, token)) return text("Execution changed; discarded stale review.");
-              usage = result?.usage;
-              const costUsd = Math.max(usage?.cost.total ?? 0, planner.stats.costUsd - baseline, 0);
-              if (interrupted && (!usage || usage.cost.total < costUsd)) {
-                usage = emptyUsage();
-                usage.cost.total = costUsd;
-                usage.totalTokens = Math.max(0, planner.stats.totalTokens - baselineTokens);
-              }
-              reviewCost = costUsd;
-              if (interrupted || signal?.aborted) {
+                safely(() =>
+                  onUpdate?.({
+                    content: [{ type: "text", text: "Planner reviewing…" }],
+                    details: { ...details, pending: true, activity: planner.stats.lastActivity },
+                  } as never),
+                );
+              };
+              const unsubscribe = planner.subscribe(progress);
+              const controller = new AbortController();
+              let timer: ReturnType<typeof setTimeout> | undefined;
+              let interrupted: "cancelled" | "timed out" | undefined;
+              let stopping: Promise<void> | undefined;
+              let interrupt: (reason: "cancelled" | "timed out") => void = () => undefined;
+              const stopped = new Promise<undefined>((done) => {
+                interrupt = (reason) => {
+                  if (interrupted) return;
+                  interrupted = reason;
+                  controller.abort();
+                  stopping = planner.stop().catch(() => undefined);
+                  done(undefined);
+                };
+              });
+              const onAbort = () => interrupt("cancelled");
+              signal?.addEventListener("abort", onAbort, { once: true });
+              try {
+                progress();
+                timer = setTimeout(() => interrupt("timed out"), CONSULT_TIMEOUT_MS);
+                started = true;
+                questionHandler = serveQuestions(
+                  planner,
+                  ctx,
+                  current,
+                  token,
+                  () => details,
+                  onUpdate as ((update: unknown) => void) | undefined,
+                  "review",
+                  signal,
+                );
+                if (signal?.aborted) onAbort();
+                const result = interrupted
+                  ? undefined
+                  : await Promise.race([
+                      planner.consult(
+                        reviewRequest(submission.report, {
+                          verification: submission.verification,
+                          concerns: submission.concerns,
+                          previousFindings: outstanding(n),
+                          responses,
+                          userEvidence: n.userAnswers,
+                          remainingRevisions:
+                            Math.max(0, n.maxRevisions - n.revisionsUsed) + (n.revisionAuthorized ? 1 : 0),
+                          planFile: current.planFile,
+                          changes: changeSummaryText(details.changes),
+                        }),
+                        ctx,
+                        "completion review",
+                        controller.signal,
+                      ),
+                      stopped,
+                    ]);
+                // Drain asynchronous final abort usage before disposal; broken aborts get bounded cleanup.
+                if (stopping) {
+                  let cleanupTimer: ReturnType<typeof setTimeout> | undefined;
+                  try {
+                    await Promise.race([
+                      stopping,
+                      new Promise<void>((resolve) => {
+                        cleanupTimer = setTimeout(resolve, 5000);
+                      }),
+                    ]);
+                  } finally {
+                    clearTimeout(cleanupTimer);
+                  }
+                }
+                if (!live(current, token)) return;
+                usage = result?.usage;
+                const costUsd = Math.max(usage?.cost.total ?? 0, planner.stats.costUsd - baseline, 0);
+                if (interrupted && (!usage || usage.cost.total < costUsd)) {
+                  usage = emptyUsage();
+                  usage.cost.total = costUsd;
+                  usage.totalTokens = Math.max(0, planner.stats.totalTokens - baselineTokens);
+                }
+                reviewCost = costUsd;
+                if (usage) details.usage = cacheUsage(usage);
+                if (interrupted || signal?.aborted) {
+                  details.assessment = {
+                    state: "failed",
+                    reason: `Planner review ${interrupted ?? "cancelled"}.`,
+                    costUsd,
+                  };
+                } else if (result?.error) {
+                  details.assessment = { state: "failed", reason: result.error, costUsd };
+                } else if (!result?.reply.trim()) {
+                  details.assessment = { state: "failed", reason: "The planner returned an empty reply.", costUsd };
+                } else {
+                  decision = parseReviewDecision(result.reply);
+                  details.assessment = {
+                    state: "reviewed",
+                    planner: current.planner.name,
+                    narrative: result.reply.trim(),
+                    verdict: decision.outcome === "accepted" ? "done" : "changes",
+                    costUsd,
+                  };
+                }
+              } catch (error: unknown) {
+                reviewCost = Math.max(0, planner.stats.costUsd - baseline);
                 details.assessment = {
                   state: "failed",
-                  reason: `Planner review ${interrupted ?? "cancelled"}.`,
-                  costUsd,
+                  reason: error instanceof Error ? error.message : String(error),
+                  costUsd: reviewCost,
                 };
-              } else if (result?.error) {
-                details.assessment = { state: "failed", reason: result.error, costUsd };
-              } else if (!result?.reply.trim()) {
-                details.assessment = { state: "failed", reason: "The planner returned an empty reply.", costUsd };
-              } else {
-                decision = parseReviewDecision(result.reply);
-                details.assessment = {
-                  state: "reviewed",
-                  planner: current.planner.name,
-                  narrative: result.reply.trim(),
-                  verdict: decision.outcome === "accepted" ? "done" : "changes",
-                  costUsd,
-                };
+              } finally {
+                questionHandler = undefined;
+                clearTimeout(timer);
+                unsubscribe();
+                signal?.removeEventListener("abort", onAbort);
               }
-            } catch (error: unknown) {
-              reviewCost = Math.max(0, planner.stats.costUsd - baseline);
-              details.assessment = {
-                state: "failed",
-                reason: error instanceof Error ? error.message : String(error),
-                costUsd: reviewCost,
-              };
-            } finally {
-              clearTimeout(timer);
-              unsubscribe();
-              signal?.removeEventListener("abort", onAbort);
             }
           }
+        } catch (error: unknown) {
+          details.assessment = { state: "failed", reason: error instanceof Error ? error.message : String(error) };
         }
-      } catch (error: unknown) {
-        details.assessment = { state: "failed", reason: error instanceof Error ? error.message : String(error) };
-      }
+      };
+      await runReview();
       if (!live(current, token)) return text("Execution changed; discarded stale review.");
-      let error =
-        details.assessment?.state === "failed" || details.assessment?.state === "unavailable"
-          ? details.assessment.reason
-          : undefined;
-      n = finishReview(n, { decision, error, costUsd: reviewCost });
-      error = n.history.at(-1)?.error ?? error;
+      let error: string | undefined;
+      let retried = false;
+      for (;;) {
+        if (!live(current, token)) return text("Execution changed; discarded stale review.");
+        error =
+          details.assessment?.state === "failed" || details.assessment?.state === "unavailable"
+            ? details.assessment.reason
+            : undefined;
+        n = finishReview(n, { decision, error, costUsd: reviewCost });
+        error = n.history.at(-1)?.error ?? error;
+        // One automatic retry of a provider failure or an unusable reply; never of a timeout,
+        // a cancellation, or a planner that is not available.
+        if (
+          error &&
+          !retried &&
+          details.assessment?.state === "failed" &&
+          !/^Planner review (timed out|cancelled)\.$/u.test(details.assessment.reason) &&
+          !signal?.aborted &&
+          !ctx.signal?.aborted &&
+          n.phase === "paused" &&
+          n.pause?.reason === "failure"
+        ) {
+          try {
+            const next = startReview(recoverNegotiation(n, "retry"), submission, responses);
+            retried = true;
+            disposeAgent();
+            n = next;
+            current.negotiation = n;
+            details.exchangeId = n.latestExchangeId;
+            details.round = n.attempts;
+            details.negotiation = structuredClone(n);
+            persist();
+            updateStatus(ctx);
+            await runReview();
+            continue;
+          } catch {
+            // Keep the failure and its pause.
+          }
+        }
+        break;
+      }
       if (error) {
         disposeAgent();
         details.assessment = { state: "failed", reason: error, costUsd: reviewCost };
@@ -1236,30 +1737,28 @@ export function registerExec(pi: ExtensionAPI, host: ExecHost): ExecController {
         return await finalize(current, token, details, ctx, usage, signal, id);
       }
       if (n.phase === "paused") {
-        pauseShownThisRun = true;
-        if (n.pause?.reason === "failure" || n.pause?.reason === "exhausted") {
-          // Show the durable outcome before asking once. Already-paused calls and restores never enter here.
-          safely(() => onUpdate?.({ content: [{ type: "text", text: pauseText(n) }], details } as never));
-          if (!signal?.aborted && !ctx.signal?.aborted) {
-            const result = await recoveryMenu(current, token, ctx, "tool", signal);
-            if (!live(current, token)) return text("Execution changed; discarded stale recovery choice.");
-            return finalResult(
-              {
-                ...result,
-                content: result.details
-                  ? result.content
-                  : [
-                      {
-                        type: "text",
-                        text: `${finishMessageText(details)}\n\n${result.content.map((part) => part.text).join("\n")}`,
-                      },
-                    ],
-                details: result.details ?? details,
-                ...(usage ? { usage } : {}),
-              },
-              id,
-            ) as never;
-          }
+        shownThisRun = true;
+        // Show the durable outcome before asking once. Already-paused calls and restores never enter here.
+        safely(() => onUpdate?.({ content: [{ type: "text", text: pauseText(n) }], details } as never));
+        if (!signal?.aborted && !ctx.signal?.aborted) {
+          const result = await presentPause(current, token, ctx, "tool", signal);
+          if (!live(current, token)) return text("Execution changed; discarded stale recovery choice.");
+          return finalResult(
+            {
+              ...result,
+              content: result.details
+                ? result.content
+                : [
+                    {
+                      type: "text",
+                      text: `${finishMessageText(details)}\n\n${result.content.map((part) => part.text).join("\n")}`,
+                    },
+                  ],
+              details: result.details ?? details,
+              ...(usage ? { usage } : {}),
+            },
+            id,
+          ) as never;
         }
       }
       return finalResult(
@@ -1309,8 +1808,10 @@ export function registerExec(pi: ExtensionAPI, host: ExecHost): ExecController {
           current.active &&
           hostCtx?.sessionManager === manager &&
           manager.getSessionId?.() === sessionId
-        )
-          showStatus(hostCtx);
+        ) {
+          if (hostCtx.hasUI) void presentNext(hostCtx, "menu");
+          else showStatus(hostCtx);
+        }
       },
     };
   });
@@ -1326,8 +1827,13 @@ export function registerExec(pi: ExtensionAPI, host: ExecHost): ExecController {
       }
       const token = epoch;
       const n = current.negotiation!;
-      if (!action && (current.pendingCompletion || n.phase !== "paused" || !ctx.isIdle())) {
-        showStatus(ctx);
+      if (!action) {
+        if (ctx.hasUI) await presentNext(ctx, "menu");
+        else showStatus(ctx);
+        return;
+      }
+      if (action === "resume" && current.pendingQuestion && words.join(" ").trim()) {
+        await answerPendingQuestion(current, token, ctx, words.join(" ").trim());
         return;
       }
       if (!ctx.isIdle()) {
@@ -1352,7 +1858,7 @@ export function registerExec(pi: ExtensionAPI, host: ExecHost): ExecController {
             "command",
             action === "resume" ? words.join(" ") : undefined,
           )
-        : await recoveryMenu(current, token, ctx, "command");
+        : text("");
       // Preserve silent confirmation cancellation and command continuation behavior. Only status
       // requests and refused actions need a notification; obsolete dialogs must not post anywhere.
       const refused =
@@ -1365,26 +1871,43 @@ export function registerExec(pi: ExtensionAPI, host: ExecHost): ExecController {
 
   // Explicit recovery of legacy saved returns; normal completion stays on the current branch.
   pi.on("agent_settled", (event, ctx) => {
-    replies.settled();
     busy = false;
     updateStatus(ctx);
     if (!state?.active) return;
-    const n = state.negotiation!;
-    if (n.phase === "paused" && pauseShownThisRun) return;
-    pi.sendMessage(
-      {
-        customType: EXEC_STATUS_MESSAGE_TYPE,
-        content:
-          n.phase === "paused"
-            ? pauseText(n)
-            : event.aborted
-              ? "Implementation was interrupted. Reply to continue or change direction."
-              : "Implementation is idle; completion has not been confirmed. Reply to continue or change direction.",
-        display: true,
-      },
-      { triggerTurn: false },
-    );
+    const current = state;
+    if (stopRequested) {
+      stopRequested = false;
+      void applyAction(current, epoch, "stop", ctx, "command");
+      return;
+    }
+    let draft = "";
+    let queued = false;
+    try {
+      draft = ctx.ui.getEditorText?.() ?? "";
+      queued = ctx.hasPendingMessages?.() ?? false;
+    } catch {
+      // A UI without a readable editor: treat it as empty.
+    }
+    if (!ctx.hasUI || shownThisRun || queued || draft.trim()) return;
+    const n = current.negotiation!;
+    const needsYou = Boolean(current.pendingQuestion || current.pendingCompletion || n.phase === "paused");
+    const stalled =
+      !event.aborted &&
+      implementationDriven &&
+      !current.pendingQuestion &&
+      (n.phase === "implementing" || n.phase === "revising");
+    // Never await a dialog here: settlement must finish first.
+    if (needsYou) void presentNext(ctx, "menu");
+    else if (stalled) void presentNext(ctx, "settle");
   });
+  pi.registerMessageRenderer(PLANNER_ANSWER_MESSAGE_TYPE, (message, options, theme) =>
+    renderAsk(message.details as AskDetails | undefined, { expanded: options.expanded, isPartial: false }, theme),
+  );
+  pi.registerMessageRenderer(
+    EXEC_CONTINUE_MESSAGE_TYPE,
+    (message, _options, theme) =>
+      new Text(theme.fg("muted", typeof message.content === "string" ? message.content : ""), 0, 0),
+  );
   pi.registerMessageRenderer(
     EXEC_STATUS_MESSAGE_TYPE,
     (message, _options, theme) =>
@@ -1511,8 +2034,20 @@ export function registerExec(pi: ExtensionAPI, host: ExecHost): ExecController {
     get state() {
       return state ? structuredClone(state) : undefined;
     },
+    async menu(ctx: ExtensionContext) {
+      await presentNext(ctx, "menu");
+      return state?.active ? "kept" : "stopped";
+    },
     begin,
   };
+}
+
+function validPendingQuestion(value: unknown): value is NonNullable<ExecState["pendingQuestion"]> {
+  if (!value || typeof value !== "object") return false;
+  const pq = value as Record<string, unknown>;
+  if (typeof pq.id !== "string" || typeof pq.implementerMessage !== "string") return false;
+  if (pq.plannerNote !== undefined && typeof pq.plannerNote !== "string") return false;
+  return normalizePlanModeQuestionParams({ questions: pq.questions }).ok;
 }
 
 function validState(data: unknown): ExecState | undefined {
@@ -1549,6 +2084,7 @@ function validState(data: unknown): ExecState | undefined {
     ...(entry.completion && typeof entry.completion.report === "string"
       ? { completion: structuredClone(entry.completion) }
       : {}),
+    ...(validPendingQuestion(entry.pendingQuestion) ? { pendingQuestion: structuredClone(entry.pendingQuestion) } : {}),
     ...(Array.isArray(entry.touched) && entry.touched.every((p) => typeof p === "string")
       ? { touched: [...entry.touched] }
       : {}),

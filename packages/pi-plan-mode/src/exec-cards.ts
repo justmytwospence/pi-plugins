@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { type ExtensionContext, getMarkdownTheme, type Theme } from "@earendil-works/pi-coding-agent";
 import { type Component, Container, Spacer, Text } from "@earendil-works/pi-tui";
+import type { AskQuestion } from "./exec-ask.js";
 import { PlanMarkdown } from "./mermaid-art.js";
 import { type DiffLine, renderPlanDiff } from "./plan-diff.js";
 import { planTitle } from "./plan-file.js";
@@ -12,6 +13,11 @@ export interface ExchangeIdentity {
   exchangeId?: string;
   unresolvedReviewId?: string;
 }
+export interface CacheUsage {
+  input: number;
+  cacheRead: number;
+  cacheWrite: number;
+}
 export interface AskDetails extends ExchangeIdentity {
   question: string;
   reply?: string;
@@ -22,6 +28,24 @@ export interface AskDetails extends ExchangeIdentity {
   pending?: boolean;
   activity?: string;
   error?: string;
+  /** The planner is asking the user; the question is shown in a dialog. */
+  asking?: boolean;
+  plannerNote?: string;
+  /** The user put the planner's question off. */
+  postponed?: boolean;
+  /** The user's own message to the planner. */
+  fromUser?: boolean;
+  usage?: CacheUsage;
+  askUserQuestion?: { questions: AskQuestion[] };
+}
+
+/** `cache 92% · 120k read · 8k written`, or "" when nothing was counted. */
+export function cacheSummary(u?: CacheUsage): string {
+  if (!u) return "";
+  const total = u.input + u.cacheRead + u.cacheWrite;
+  if (total <= 0) return "";
+  const k = (n: number) => `${Math.round(n / 1000)}k`;
+  return `cache ${Math.round((100 * u.cacheRead) / total)}% · ${k(u.cacheRead)} read · ${k(u.cacheWrite)} written`;
 }
 export interface ChangeSummary {
   edited: string[];
@@ -54,6 +78,10 @@ export type CompletionAssessment =
   | { state: "unavailable"; reason: string }
   | { state: "failed"; reason: string; costUsd?: number };
 export interface FinishDetails extends ExchangeIdentity {
+  asking?: boolean;
+  plannerNote?: string;
+  usage?: CacheUsage;
+  askUserQuestion?: { questions: AskQuestion[] };
   report: string;
   verification?: string;
   concerns?: string;
@@ -140,11 +168,20 @@ export function renderAsk(
     body.addChild(
       reviewTitle(
         theme,
-        `Consultation · ${details.pending ? "Planner thinking…" : unavailable ? "Unavailable" : "Planner answered"}`,
+        details.fromUser
+          ? "Question to planner"
+          : details.asking
+            ? "Consultation · Planner asks you"
+            : details.postponed
+              ? "Consultation · Waiting for your answer"
+              : `Consultation · ${details.pending ? "Planner thinking…" : unavailable ? "Unavailable" : "Planner answered"}`,
       ),
     );
-    if (full) section(body, theme, "Question", details.question);
-    if (details.pending) {
+    if (full || details.asking) section(body, theme, "Question", details.question);
+    if (details.asking && details.plannerNote) section(body, theme, "Planner", details.plannerNote);
+    if (details.asking || details.postponed) {
+      // The dialog (or the footer) carries the question; nothing more to show here.
+    } else if (details.pending) {
       section(body, theme, "Planner decision", `Planner thinking…${details.activity ? ` ${details.activity}` : ""}`);
     } else if (details.error || !details.reply?.trim()) {
       body.addChild(new PlanMarkdown(details.error || "The planner returned no decision.", getMarkdownTheme(), theme));
@@ -162,13 +199,29 @@ export function renderAsk(
     status(
       body,
       theme,
-      details.pending
-        ? "Planner thinking…"
-        : details.error || !details.reply?.trim()
-          ? "Consultation unavailable"
-          : "Planner answered",
-      details.pending ? "pending" : details.error || !details.reply?.trim() ? "error" : "warning",
-      `${details.planner}${details.costUsd !== undefined ? ` · ${formatCost(details.costUsd)}` : ""}`,
+      details.asking
+        ? "Planner asks you"
+        : details.postponed
+          ? "Waiting for your answer"
+          : details.pending
+            ? "Planner thinking…"
+            : details.error || !details.reply?.trim()
+              ? "Consultation unavailable"
+              : "Planner answered",
+      details.asking || details.pending
+        ? "pending"
+        : details.postponed
+          ? "warning"
+          : details.error || !details.reply?.trim()
+            ? "error"
+            : "warning",
+      [
+        details.planner,
+        details.costUsd !== undefined ? formatCost(details.costUsd) : "",
+        full ? cacheSummary(details.usage) : "",
+      ]
+        .filter(Boolean)
+        .join(" · "),
     );
     return body;
   });
@@ -394,9 +447,12 @@ export function renderFinish(
           theme,
           details.completion
             ? finishTitle(details)
-            : `Review ${details.round ?? details.negotiation?.attempts ?? 1} · ${label}`,
+            : details.asking
+              ? "Implementation review · Planner asks you"
+              : `Review ${details.round ?? details.negotiation?.attempts ?? 1} · ${label}`,
         ),
       );
+    if (details.asking && details.plannerNote) section(body, theme, "Planner", details.plannerNote);
     if (details.completion && !options.expanded) {
       for (const [label, value] of [
         ["Changed", details.report || "Not provided."],

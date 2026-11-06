@@ -1,5 +1,4 @@
-import { randomUUID } from "node:crypto";
-import type { InputEvent, InputSource, MessageEndEvent } from "@earendil-works/pi-coding-agent";
+import type { AskQuestion } from "./exec-ask.js";
 import { type NegotiationState, outstanding } from "./negotiation.js";
 
 export interface PausePresentation {
@@ -22,159 +21,120 @@ export function pausePresentation(n: NegotiationState): PausePresentation {
         title: "Waiting for your answer",
         reason: pause.action,
         question: pause.question,
-        next: "Reply here. Ask for clarification if you need it; answering lets implementation continue.",
+        next: "Answer below, or press Esc and answer later from the footer or /plan-exec.",
       };
     case "failure":
     case "interrupted":
       return {
         title: "Review did not finish",
         reason: pause.action,
-        next: "Ask to retry the review, or discuss what happened. No retry has been authorized.",
+        next: "Retry the review, finish without it, or stop.",
       };
     case "exhausted":
       return {
         title: "Another revision needs your approval",
         reason: `Revisions used: ${n.revisionsUsed}. Outstanding findings: ${outstanding(n).length}.`,
-        next: "Allow one more attempt, discuss the findings, or finish without review.",
+        next: "Allow one more revision, finish without review, or stop.",
       };
   }
 }
 
-export interface RecoveryChoice {
-  action: "retry" | "extend" | "discuss" | "answer" | "accept" | "stop";
-  label: string;
-}
+export type PauseAction = "answer" | "retry" | "extend" | "accept" | "stop" | "planner";
 
-/** Actions describe choices, not authorization; callers must await the user's selection. */
-export function recoveryChoices(n: NegotiationState): RecoveryChoice[] {
-  const pause = currentPause(n);
-  const first: RecoveryChoice[] =
-    pause.reason === "user_needed"
-      ? [{ action: "answer", label: "Answer in chat" }]
-      : [
-          pause.reason === "exhausted"
-            ? { action: "extend", label: "Allow one more attempt" }
-            : { action: "retry", label: "Retry review" },
-          { action: "discuss", label: "Discuss first" },
-        ];
-  return [
-    ...first,
-    { action: "accept", label: "Finish without review" },
-    { action: "stop", label: "Stop implementation" },
-  ];
-}
+const cut = (text: string, max: number) => (text.length > max ? `${text.slice(0, max - 1)}…` : text);
 
-export interface EligibleReply {
-  id: string;
-  source: "interactive" | "rpc";
-  text: string;
-  executionId: string;
-  exchangeId?: string;
-}
-
-interface PendingReply {
-  source: InputSource;
-  text: string;
-  executionId: string;
-  exchangeId?: string;
-  eligible: boolean;
-}
+const STOP = { label: "Stop implementation", description: "End without claiming completion" };
+const FINISH_UNREVIEWED = { label: "Finish unreviewed", description: "Complete without planner acceptance" };
 
 /**
- * Runtime-only authority. Pass the live negotiation to every event/read and sync on state transitions.
- * Call invalidate on reload, navigation and shutdown, even when restoring the same pause.
- * Returned replies are copies; consume returns captured text once, never model-supplied text.
+ * The dialog for a pause. `actions` maps option labels to recovery actions; `Use recommendation`
+ * (user_needed) is not in it: the caller answers with the reviewer's recommendation. Typed text
+ * answers a user_needed question and is a message to the planner for every other pause.
  */
-export class ExecReplyTracker {
-  private pauseKey?: string;
-  private pending?: PendingReply;
-  private quarantined = false;
-  private reply?: EligibleReply;
-
-  sync(n: NegotiationState | undefined): void {
-    const key =
-      n?.phase === "paused" && n.pause?.reason === "user_needed"
-        ? JSON.stringify([n.executionId, n.latestExchangeId, n.pause.question, n.pause.action])
-        : undefined;
-    if (key !== this.pauseKey) {
-      this.invalidate();
-      this.pauseKey = key;
-    }
-  }
-
-  invalidate(): void {
-    this.pauseKey = undefined;
-    this.pending = undefined;
-    this.quarantined = false;
-    this.reply = undefined;
-  }
-
-  /** Only settlement proves that a queued batch has drained. */
-  settled(): void {
-    this.pending = undefined;
-    this.quarantined = false;
-    this.reply = undefined;
-  }
-
-  input(n: NegotiationState | undefined, event: InputEvent): void {
-    this.sync(n);
-    if (!this.pauseKey || !n) return;
-    this.reply = undefined;
-    if (this.quarantined) return;
-    if (this.pending) {
-      this.pending = undefined;
-      this.quarantined = true;
-      return;
-    }
-    this.pending = {
-      source: event.source,
-      text: event.text,
-      executionId: n.executionId,
-      exchangeId: n.latestExchangeId,
-      eligible: Boolean(event.text.trim()) && !/^[/!]/u.test(event.text.trimStart()) && !event.images?.length,
+export function pauseQuestion(
+  n: NegotiationState,
+  pendingCompletion: boolean,
+): { question: AskQuestion; actions: Record<string, Exclude<PauseAction, "answer" | "planner">> } {
+  if (pendingCompletion) {
+    return {
+      question: {
+        header: "Completion",
+        question: "Work model unavailable. Retry completion or stop?",
+        options: [{ label: "Retry completion", description: "Switch back to the work model and finish" }, STOP],
+      },
+      actions: { "Retry completion": "retry", [STOP.label]: "stop" },
     };
   }
-
-  messageEnd(n: NegotiationState | undefined, event: MessageEndEvent): void {
-    this.sync(n);
-    if (event.message.role !== "user") return;
-    // Every delivered user message supersedes any earlier authority, even if unmatched or image-only.
-    this.reply = undefined;
-    if (!this.pauseKey) return;
-    const content = event.message.content;
-    const text =
-      typeof content === "string"
-        ? content
-        : content
-            .filter((part) => part.type === "text")
-            .map((part) => part.text)
-            .join("");
-    const captured = this.pending;
-    this.pending = undefined;
-    if (this.quarantined) return;
-    if (!captured || captured.text !== text) {
-      this.quarantined = true;
-      return;
-    }
-    if (!captured.eligible || captured.source === "extension") return;
-    this.reply = {
-      id: randomUUID(),
-      source: captured.source,
-      text: captured.text,
-      executionId: captured.executionId,
-      exchangeId: captured.exchangeId,
-    };
+  const pause = currentPause(n);
+  switch (pause.reason) {
+    case "user_needed":
+      return {
+        question: {
+          header: "Reviewer",
+          question: cut(pause.question ?? pause.action, 160),
+          options: [
+            {
+              label: "Use recommendation",
+              description: cut(n.history.at(-1)?.decision?.recommendation ?? "The reviewer's recommendation", 120),
+            },
+            FINISH_UNREVIEWED,
+            STOP,
+          ],
+        },
+        actions: { [FINISH_UNREVIEWED.label]: "accept", [STOP.label]: "stop" },
+      };
+    case "exhausted":
+      return {
+        question: {
+          header: "Review",
+          question: `Revisions used up (${n.revisionsUsed}). ${outstanding(n).length} findings remain.`,
+          options: [
+            { label: "Allow one more revision", description: "One more fix and review cycle" },
+            FINISH_UNREVIEWED,
+            STOP,
+          ],
+        },
+        actions: { "Allow one more revision": "extend", [FINISH_UNREVIEWED.label]: "accept", [STOP.label]: "stop" },
+      };
+    default:
+      return {
+        question: {
+          header: "Review",
+          question: cut(`Review did not finish: ${pause.action}`, 160),
+          options: [{ label: "Retry review", description: "Run the same review again" }, FINISH_UNREVIEWED, STOP],
+        },
+        actions: { "Retry review": "retry", [FINISH_UNREVIEWED.label]: "accept", [STOP.label]: "stop" },
+      };
   }
+}
 
-  eligible(n: NegotiationState | undefined): EligibleReply | undefined {
-    this.sync(n);
-    return this.reply ? { ...this.reply } : undefined;
-  }
+const CONTINUE = { label: "Continue", description: "Keep implementing the plan" };
+const SUBMIT = { label: "Submit for review", description: "Ask it to call finish_plan now" };
 
-  consume(n: NegotiationState | undefined, replyId: string): EligibleReply | undefined {
-    const reply = this.eligible(n);
-    if (!reply || reply.id !== replyId) return undefined;
-    this.reply = undefined;
-    return reply;
-  }
+/** The implementer ended its turn before finishing. */
+export function stalledQuestion(title: string): AskQuestion {
+  return {
+    header: "Implementing",
+    question: `The implementer stopped before finishing "${title}".`,
+    options: [CONTINUE, SUBMIT, STOP],
+  };
+}
+
+/** The menu behind the footer badge, `/plan-exec` and mode changes. */
+export function statusQuestion(
+  title: string,
+  implementer: string,
+  planner: string | undefined,
+  busy: boolean,
+): AskQuestion {
+  return {
+    header: "Implementing",
+    question: `Implementing "${title}" with ${implementer}${planner ? `; ${planner} on call` : ""}.`,
+    options: busy
+      ? [
+          { label: "Keep going", description: "Close this" },
+          { ...STOP, description: "Interrupt and end without claiming completion" },
+        ]
+      : [CONTINUE, SUBMIT, STOP],
+  };
 }
