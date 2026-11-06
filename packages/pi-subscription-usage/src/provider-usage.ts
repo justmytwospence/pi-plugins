@@ -20,6 +20,8 @@ export type UsageSource = {
   auth?: { kind: "local-oauth" | "api-key" | "vault"; token?: string };
 };
 
+/** The Muse CLI answers this before the first use in a window; it is not an outage. */
+export const MUSE_NO_USAGE_REASON = "Muse reported no usage yet in this window.";
 const GOOGLE_SOURCE = "Google Antigravity subscription";
 const MUSE_SOURCE = "Muse subscription";
 const FIVE_MINUTES = 300_000;
@@ -93,7 +95,7 @@ export function parseMuseUsage(payload: unknown, observedAt: number): ProviderUs
       (envelope.reason !== undefined && envelope.reason !== null && typeof envelope.reason !== "string") ||
       (envelope.hint !== undefined && envelope.hint !== null && typeof envelope.hint !== "string")) return invalid();
   if (envelope.allowance === null) return unavailable("muse-sdk", MUSE_SOURCE, envelope.reason === "api_key" ? "Subscription usage is unavailable for API key authentication." :
-    envelope.reason === "server_sent_no_usage" ? "Muse reported no usage yet in this window." : "Muse subscription usage is unavailable.");
+    envelope.reason === "server_sent_no_usage" ? MUSE_NO_USAGE_REASON : "Muse subscription usage is unavailable.");
   const allowance = object(envelope.allowance);
   const timestamp = (value: unknown): value is number => typeof value === "number" && Number.isSafeInteger(value) && value > 0 && value <= 8_640_000_000_000_000;
   const period = (value: unknown, label: string): UsageWindow | undefined => {

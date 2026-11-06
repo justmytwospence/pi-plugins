@@ -49,13 +49,12 @@ chip are part of this component now.
 - `/status` or `/status details`: show detailed measurements and explain sources.
 - `/status working on|off`: the working-row statistics (default on).
 - `/status mcp on|off`: the built-in MCP chip (default on).
-The separately selectable [pi-model-waterfall](../pi-model-waterfall/README.md) extension owns
-`waterfall/auto` and `/waterfall`. This footer neither registers nor routes that
-model. When the router is present, it publishes a detached, credential-free
-`pi-plugins.model-waterfall.v1` snapshot so the footer can show its selected
-physical model without a new row, control, or inference request. For Argon,
-it reads only the routed physical reasoning variant, not a generic model quota.
-The footer works without the router. pi-muse-bridge's `muse-code` provider (identified by
+The separately selectable [pi-model-waterfall](../pi-model-waterfall/README.md) extension
+owns `/waterfall` and may switch a new interactive session to the first subscription model
+under quota at startup. This footer neither switches nor routes models: it shows the
+session's actual model. When the extension is present, it publishes a detached,
+credential-free `pi-plugins.model-waterfall.v1` snapshot, which the footer reads without a
+new row, control, or inference request. The footer works without it. pi-muse-bridge's `muse-code` provider (identified by
 its `muse-code-local` key) reads the same signed-in Muse CLI usage as `muse-sdk`, despite
 its `http://localhost` URL, unless `META_API_KEY` is set.
 

@@ -131,7 +131,7 @@ An ordinary prompt flushes the pending selection before it proceeds. If applicat
 
 ## Optional model waterfall
 
-The separate [Model waterfall](/plugins/pi-model-waterfall/) extension owns the `waterfall/auto` virtual model, eligibility checks and `/waterfall` command. This footer only displays its optional, credential-free physical-route snapshot and, for Argon, reads the same exact reasoning-variant quota rather than a generic or previous-variant reading; without that extension it remains a standalone status display. The router's OpenAI app-quota mapping and Muse historical-image handoff remain unverified, so no automatic four-rung default is enabled.
+The separate [Model waterfall](/plugins/pi-model-waterfall/) extension owns the startup model choice and `/waterfall` command. The footer shows the session's actual model, which the waterfall may have chosen at startup, and reads its optional, credential-free snapshot; without that extension it remains a standalone status display.
 
 ## Working row and MCP chip
 

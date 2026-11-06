@@ -1,30 +1,32 @@
 import assert from "node:assert/strict";
 import { beforeEach, describe, it, vi } from "vitest";
-import modelWaterfall from "../src/index.ts";
+import modelWaterfall, { explicitModelArg } from "../src/index.ts";
 import { queryWaterfall, WATERFALL_CHANNEL } from "../src/waterfall-contract.ts";
 
 const now = () => Date.now();
 const quota = (provider, used = 10) => ({ provider, source: "test OAuth", state: "ready", observedAt: now(),
   windows: ["5h", "week"].map(label => ({ label, used, observedAt: now(), reset: now() + 60_000 })) });
-let claude, google, reads, googleReads, sources, collectors, disposed, googleRead, googleCredential;
+let claude, codex, google, museRead, reads, googleReads, sources, collectors, disposed, googleRead, googleCredential;
 vi.mock("@justmytwospence/pi-subscription-usage", () => ({
   isUsageStale: (reading, time) => reading.observedAt >= time + 30_000 || time - reading.observedAt >= 600_000 ||
     reading.windows.some(w => w.reset <= time || (w.observedAt !== undefined && time - w.observedAt >= 600_000)),
+  MUSE_NO_USAGE_REASON: "Muse reported no usage yet in this window.",
   readPiAnthropicUsage: async () => { reads++; return structuredClone(claude); },
-  createProviderUsageCollector: () => { collectors++; return { refresh: async source => { googleReads++; sources.push(source); return googleRead ? googleRead(source) : structuredClone(google); }, dispose() { disposed++; } }; },
+  readCodexUsage: async () => structuredClone(codex),
+  createProviderUsageCollector: () => { collectors++; return { refresh: async source => { googleReads++; sources.push(source); if (source.provider === "muse-code") return structuredClone(museRead); return googleRead ? googleRead(source) : structuredClone(google); }, dispose() { disposed++; } }; },
 }));
 const models = [
   { provider: "anthropic", id: "claude-opus-5-5", api: "anthropic-messages", reasoning: true, baseUrl: "https://api.anthropic.com" },
   { provider: "openai", id: "gpt-6.1-sol", api: "openai-responses" },
   { provider: "google", id: "antigravity-gemini-4-argon", api: "google", reasoning: true, baseUrl: "https://cloudcode-pa.googleapis.com" },
-  { provider: "muse-sdk", id: "muse-wonder-1.0", api: "muse" },
+  { provider: "muse-code", id: "muse-wonder-1.0", api: "muse", baseUrl: "http://localhost" },
 ];
 const fixture = (available = models) => {
-  const handlers = new Map(), events = new Map(), commands = new Map(); let virtual;
+  const handlers = new Map(), events = new Map(), commands = new Map(); 
   const pi = {
     on(name, fn) { handlers.set(name, fn); },
     events: { on(name, fn) { events.set(name, fn); }, emit(name, request) { events.get(name)?.(request); } },
-    registerVirtualModel(definition) { virtual = definition; }, registerCommand(name, command) { commands.set(name, command); },
+    setModel: vi.fn(async () => true), registerCommand(name, command) { commands.set(name, command); },
     getThinkingLevel() { return "medium"; },
   };
   modelWaterfall(pi);
@@ -32,13 +34,13 @@ const fixture = (available = models) => {
   const ctx = {
     modelRegistry: {
       find(provider, id) { return available.find(m => m.provider === provider && m.id === id); },
-      isUsingOAuth(model) { return model.provider !== "muse-sdk"; },
-      async getApiKeyForProvider() { return googleCredential; },
+      isUsingOAuth(model) { return model.provider !== "muse-code"; },
+      async getApiKeyForProvider(p) { return p === "muse-code" ? "muse-code-local" : googleCredential; },
     },
+    hasUI: true, model: available[0], isIdle: () => true,
     ui: { notify(...args) { output.push(args); } },
   };
-  const request = (options = {}) => ({ reason: "user", thinkingLevel: "medium", messages: [{ role: "user", content: "hello" }], ...options });
-  return { pi, ctx, handlers, commands, get route() { return virtual.route; }, request, output };
+  return { pi, ctx, handlers, commands, output, start: (reason = "startup") => handlers.get("session_start")({ reason }, ctx) };
 };
 const googleQuota = () => ({ provider: "google", source: "Antigravity", state: "ready", observedAt: now(), windows: [
   { label: "5h", pool: "Gemini", used: 1, reset: now() + 60_000 },
@@ -47,188 +49,82 @@ const googleQuota = () => ({ provider: "google", source: "Antigravity", state: "
   { label: "model", pool: "Gemini", model: "antigravity-gemini-4-argon", used: 1, reset: now() + 60_000 },
 ] });
 
-beforeEach(() => { claude = quota("anthropic"); google = googleQuota(); reads = 0; googleReads = 0; sources = []; collectors = 0; disposed = 0; googleRead = undefined; googleCredential = "ya29.test"; });
-describe("standalone virtual model", () => {
-  it("routes the first turn, rechecks user turns and exposes only a detached read-only snapshot", async () => {
-    const f = fixture();
-    const first = await f.route(f.request(), f.ctx);
-    assert.equal(first.model.provider, "anthropic");
-    assert.deepEqual(first.state, { version: 1, physical: { provider: "anthropic", id: "claude-opus-5-5", thinkingLevel: "medium" } });
-    const view = queryWaterfall(f.pi.events);
-    assert.equal(view.physical.provider, "anthropic");
-    view.physical.id = "tampered";
-    await f.commands.get("waterfall").handler("", f.ctx);
-    assert.match(f.output[0][0], /claude-opus-5-5/);
-    assert.equal(reads, 1);
-    await f.route(f.request({ state: first.state }), f.ctx);
-    assert.equal(reads, 2);
-    f.handlers.get("session_tree")();
-    assert.equal(queryWaterfall(f.pi.events).physical, undefined);
+const codexQuota = (used = 10, access) => ({ provider: "openai-codex", source: "Codex", state: "ready", observedAt: now(), windows: [{ label: "week", used, observedAt: now(), reset: now() + 60_000 }], ...(access ? { access } : {}) });
+const noUsage = () => ({ provider: "muse-code", source: "Muse", state: "unavailable", windows: [], reason: "Muse reported no usage yet in this window." });
+beforeEach(() => { codex = codexQuota(); museRead = noUsage(); claude = quota("anthropic"); google = googleQuota(); reads = 0; googleReads = 0; sources = []; collectors = 0; disposed = 0; googleRead = undefined; googleCredential = "ya29.test"; });
+describe("session-start waterfall", () => {
+  const settle = async (f) => { f.start(); await vi.waitFor(() => assert.ok(f.output.length || f.pi.setModel.mock.calls.length || queryWaterfall(f.pi.events).physical)); await new Promise(r => setTimeout(r, 20)); };
+  it("keeps the current model when Anthropic is under quota", async () => {
+    const f = fixture(); await settle(f);
+    assert.equal(f.pi.setModel.mock.calls.length, 0);
+    assert.equal(queryWaterfall(f.pi.events).physical.provider, "anthropic");
   });
-  it("recreates the quota collector after a session replacement", async () => {
-    const f = fixture();
-    assert.equal(collectors, 1);
-    f.handlers.get("session_shutdown")();
-    f.handlers.get("session_start")();
-    assert.equal(collectors, 2);
-    assert.equal(disposed, 2);
-    claude = quota("anthropic", 95);
-    const result = await f.route(f.request(), f.ctx);
-    assert.equal(result.model.provider, "google");
-    assert.equal(googleReads, 1);
+  it("starts on OpenAI when Anthropic is over quota, naming what it skipped", async () => {
+    claude = quota("anthropic", 100);
+    const f = fixture(); await settle(f);
+    assert.equal(f.pi.setModel.mock.calls[0][0].id, "gpt-6.1-sol");
+    assert.match(f.output[0][0], /started on openai\/gpt-6\.1-sol \(skipped anthropic:/);
+    assert.equal(f.output[0][1], "info");
   });
-  it("does not trust a manual previous model or route state without matching prior response", async () => {
-    const f = fixture();
-    const prior = { model: models[0], thinkingLevel: "medium" };
-    claude = quota("anthropic", 95);
-    const out = await f.route(f.request({ reason: "continuation", previous: prior, state: undefined }), f.ctx);
-    assert.equal(out.model.provider, "google");
-    assert.equal(googleReads, 1);
-    await assert.rejects(f.route(f.request({ reason: "retry", failed: prior, state: { version: 1, physical: { provider: "anthropic", id: "claude-opus-5-5", thinkingLevel: "medium" } } }), f.ctx), /no verified subscription route/);
+  it("skips OpenAI when both are over quota, or when Codex is blocked below 95%", async () => {
+    claude = quota("anthropic", 100); codex = codexQuota(100);
+    let f = fixture(); await settle(f);
+    assert.equal(f.pi.setModel.mock.calls[0][0].provider, "google");
+    codex = codexQuota(10, { allowed: true, limitReached: true });
+    f = fixture(); await settle(f);
+    assert.equal(f.pi.setModel.mock.calls[0][0].provider, "google");
   });
-  it("checks direct calls without writing branch presentation or trusting state", async () => {
-    const f = fixture();
-    await f.route(f.request({ reason: "direct", state: undefined }), f.ctx);
-    assert.equal(queryWaterfall(f.pi.events).physical, undefined);
-    assert.equal(reads, 1);
+  it("falls through to muse-code when it has no usage yet", async () => {
+    claude = quota("anthropic", 100); codex = codexQuota(100); google = { provider: "google", state: "unavailable", windows: [], reason: "x" };
+    const f = fixture(); await settle(f);
+    assert.equal(f.pi.setModel.mock.calls[0][0].provider, "muse-code");
   });
-  it("fails before inference when all readings are unknown and never selects disabled OpenAI/Muse", async () => {
-    claude = { provider: "anthropic", state: "unavailable", windows: [], reason: "missing" };
-    google = { provider: "google", state: "unavailable", windows: [], reason: "missing" };
-    const f = fixture();
-    await assert.rejects(f.route(f.request(), f.ctx), /no verified subscription route below 95%/);
-    const view = queryWaterfall(f.pi.events);
-    assert.equal(view.physical, undefined);
-    assert.deepEqual(view.skipped.map(x => x.provider), ["anthropic", "openai", "google", "muse-sdk"]);
-    assert.ok(view.skipped.some(x => /not been verified/.test(x.reason)));
-    assert.ok(view.skipped.some(x => /lossy/.test(x.reason)));
+  it("warns and stays put when nothing qualifies", async () => {
+    claude = quota("anthropic", 100); codex = codexQuota(100); google = { provider: "google", state: "unavailable", windows: [], reason: "x" };
+    museRead = { provider: "muse-code", state: "unavailable", windows: [], reason: "failed" };
+    const f = fixture(); await settle(f);
+    assert.equal(f.pi.setModel.mock.calls.length, 0);
+    assert.match(f.output[0][0], /^Waterfall: no subscription under quota/);
+    assert.equal(f.output[0][1], "warning");
   });
-  it("rechecks a branch-sticky pending-tool turn at its verified thinking level", async () => {
-    const f = fixture();
-    claude = quota("anthropic", 95);
-    const first = await f.route(f.request({ thinkingLevel: "high" }), f.ctx);
-    assert.equal(first.model.provider, "google");
-    assert.equal(sources[0].variant, "gemini-4-argon-high");
-    const steered = f.request({ reason: "user", thinkingLevel: "low", state: first.state,
-      previous: { model: models[2], thinkingLevel: "high" },
-      messages: [{ role: "assistant", content: [{ type: "toolCall", id: "tool" }] }, { role: "user", content: "steer" }] });
-    const kept = await f.route(steered, f.ctx);
-    assert.equal(kept.model.provider, "google");
-    assert.equal(kept.thinkingLevel, "high");
-    assert.equal(sources[1].variant, "gemini-4-argon-high");
-    assert.equal(reads, 1);
+  it("does nothing for resume, fork, reload, headless sessions or an explicit model argument", async () => {
+    claude = quota("anthropic", 100);
+    for (const reason of ["resume", "fork", "reload"]) { const f = fixture(); f.start(reason); await new Promise(r => setTimeout(r, 30)); assert.equal(f.pi.setModel.mock.calls.length, 0, reason); }
+    let f = fixture(); f.ctx.hasUI = false; f.start(); await new Promise(r => setTimeout(r, 30)); assert.equal(f.pi.setModel.mock.calls.length, 0);
+    const argv = process.argv; process.argv = [...argv, "--model", "x"];
+    try { f = fixture(); f.start(); await new Promise(r => setTimeout(r, 30)); assert.equal(f.pi.setModel.mock.calls.length, 0); }
+    finally { process.argv = argv; }
   });
-  it("rejects Google quota read under a changed or missing OAuth account", async () => {
-    claude = quota("anthropic", 95);
-    let finish;
-    googleRead = () => new Promise(resolve => { finish = resolve; });
-    const f = fixture();
-    const pending = f.route(f.request(), f.ctx);
-    await vi.waitFor(() => assert.equal(typeof finish, "function"));
-    googleCredential = "ya29.other";
-    finish(googleQuota());
-    await assert.rejects(pending, /no verified subscription route/);
-    assert.equal(queryWaterfall(f.pi.events).physical, undefined);
-    assert.equal(sources[0].auth.token, "ya29.test");
+  it("does not switch after the user changed model or started a turn during the quota read", async () => {
+    claude = quota("anthropic", 100);
+    let f = fixture(); f.start(); f.ctx.model = models[2];
+    await new Promise(r => setTimeout(r, 30));
+    assert.equal(f.pi.setModel.mock.calls.length, 0);
+    f = fixture(); f.ctx.isIdle = () => false; f.start();
+    await new Promise(r => setTimeout(r, 30));
+    assert.equal(f.pi.setModel.mock.calls.length, 0);
   });
-  it("clamps physical reasoning before selecting Argon quota and saves the effective level", async () => {
-    claude = quota("anthropic", 95);
-    const physical = { ...models[2], thinkingLevelMap: { off: null, minimal: null, low: null, max: "medium" } };
-    const f = fixture([models[0], models[1], physical, models[3]]);
-    const out = await f.route(f.request({ thinkingLevel: "off" }), f.ctx);
-    assert.equal(out.thinkingLevel, "medium");
-    assert.equal(sources[0].variant, "gemini-4-argon-medium");
-    assert.equal(out.state.physical.thinkingLevel, "medium");
-    const max = await f.route(f.request({ thinkingLevel: "max" }), f.ctx);
-    assert.equal(max.thinkingLevel, "max");
-    assert.equal(sources[1].variant, "gemini-4-argon-medium");
-  });
-  it("rejects a changed physical model and a cancelled pending quota read", async () => {
-    claude = quota("anthropic", 95);
-    const physical = { ...models[2] };
-    let finish;
-    googleRead = () => new Promise(resolve => { finish = resolve; });
-    const f = fixture([models[0], models[1], physical, models[3]]);
-    const pending = f.route(f.request(), f.ctx);
-    await vi.waitFor(() => assert.equal(typeof finish, "function"));
-    physical.baseUrl = "https://external.example";
-    finish(googleQuota());
-    await assert.rejects(pending, /no verified subscription route/);
-    assert.equal(queryWaterfall(f.pi.events).physical, undefined);
-
-    physical.baseUrl = "https://cloudcode-pa.googleapis.com";
-    let cancelFinish;
-    googleRead = () => new Promise(resolve => { cancelFinish = resolve; });
-    const controller = new AbortController();
-    const cancelling = f.route(f.request({ signal: controller.signal }), f.ctx);
-    await vi.waitFor(() => assert.equal(typeof cancelFinish, "function"));
-    controller.abort();
-    await assert.rejects(cancelling, /cancelled/);
-    cancelFinish(googleQuota());
-    assert.equal(queryWaterfall(f.pi.events).physical, undefined);
-  });
-  it("preserves a clamped physical route across a pending-tool steer", async () => {
-    claude = quota("anthropic", 95);
-    const physical = { ...models[2], thinkingLevelMap: { off: null, minimal: null, low: null } };
-    const f = fixture([models[0], models[1], physical, models[3]]);
-    const first = await f.route(f.request({ thinkingLevel: "off" }), f.ctx);
-    const kept = await f.route(f.request({ reason: "user", thinkingLevel: "high", previous: {
-      model: physical, thinkingLevel: "medium" }, state: first.state,
-      messages: [{ role: "assistant", content: [{ type: "toolCall", id: "tool" }] }, { role: "user", content: "steer" }] }), f.ctx);
-    assert.equal(kept.thinkingLevel, "medium");
-    assert.equal(sources[1].variant, "gemini-4-argon-medium");
-  });
-  it("rejects an external Anthropic endpoint even with OAuth and valid quota", async () => {
-    const f = fixture([{ ...models[0], baseUrl: "https://external.example" }, ...models.slice(1)]);
-    const selected = await f.route(f.request(), f.ctx);
-    assert.equal(selected.model.provider, "google");
-    assert.equal(reads, 0);
-    assert.match(queryWaterfall(f.pi.events).skipped[0].reason, /unverified subscription endpoint/);
-  });
-  it("rejects missing exact Google window and missing physical models", async () => {
-    claude = quota("anthropic", 95);
-    google.windows = google.windows.filter(x => x.label !== "model");
-    const f = fixture(models.filter(m => m.provider !== "openai"));
-    await assert.rejects(f.route(f.request(), f.ctx), /no verified subscription route/);
-    assert.equal(queryWaterfall(f.pi.events).physical, undefined);
-  });
-  it("aborts an already-cancelled route without a quota read", async () => {
-    const f = fixture();
-    const controller = new AbortController(); controller.abort();
-    await assert.rejects(f.route(f.request({ signal: controller.signal }), f.ctx), /cancelled/);
-    assert.equal(reads, 0);
-  });
-  it("keeps the channel's query synchronous and ignores unknown messages", () => {
-    const f = fixture();
-    f.pi.events.emit(WATERFALL_CHANNEL, { kind: "other" });
-    assert.equal(queryWaterfall(f.pi.events).version, 1);
-    // The fixed order is known before any assessment, so consumers can scope to it at startup.
-    assert.equal(queryWaterfall(f.pi.events).rungs, undefined);
-    assert.deepEqual(queryWaterfall(f.pi.events).order.map(r => r.provider), ["anthropic", "openai", "google", "muse-sdk"]);
-  });
-  it("ignores weekly limits scoped to other models and routes Opus without a 5h window", async () => {
-    claude.windows = [{ label: "week", used: 10, observedAt: now(), reset: now() + 60_000 },
-      { label: "Fable", used: 99, observedAt: now(), reset: now() + 60_000 }];
-    const f = fixture();
-    assert.equal((await f.route(f.request(), f.ctx)).model.provider, "anthropic");
-    claude.windows.push({ label: "Opus 5.5", used: 96, observedAt: now(), reset: now() + 60_000 });
-    assert.equal((await f.route(f.request(), f.ctx)).model.provider, "google");
-    claude.windows = [{ label: "Fable", used: 1, observedAt: now(), reset: now() + 60_000 }];
-    assert.equal((await f.route(f.request(), f.ctx)).model.provider, "google");
-    assert.match(queryWaterfall(f.pi.events).skipped[0].reason, /weekly allowance is unknown/);
-  });
-  it("publishes every rung in order from a background assessment on session start", async () => {
+  it("keeps the order and publishes rung states for the status surfaces", async () => {
     claude = quota("anthropic", 97);
     const f = fixture();
-    assert.equal(queryWaterfall(f.pi.events).rungs, undefined);
-    f.handlers.get("session_start")({}, f.ctx);
+    assert.deepEqual(queryWaterfall(f.pi.events).order.map(r => r.provider), ["anthropic", "openai", "google", "muse-code"]);
+    f.start("resume");
     await vi.waitFor(() => assert.ok(queryWaterfall(f.pi.events).rungs));
-    const rungs = queryWaterfall(f.pi.events).rungs;
-    assert.deepEqual(rungs.map(r => [r.provider, r.state]), [["anthropic", "exhausted"], ["openai", "disabled"], ["google", "available"], ["muse-sdk", "disabled"]]);
-    assert.ok(rungs[0].resetAt > now());
-    f.handlers.get("session_tree")();
-    assert.equal(queryWaterfall(f.pi.events).rungs.length, 4, "route clears keep the subscription view");
+    assert.deepEqual(queryWaterfall(f.pi.events).rungs.map(r => [r.provider, r.state]), [["anthropic", "exhausted"], ["openai", "available"], ["google", "available"], ["muse-code", "available"]]);
+    f.pi.events.emit(WATERFALL_CHANNEL, { kind: "other" });
     f.handlers.get("session_shutdown")();
     assert.equal(queryWaterfall(f.pi.events).rungs, undefined);
+    await f.commands.get("waterfall").handler("", f.ctx);
+    assert.match(f.output.at(-1)[0], /no startup choice/);
+  });
+  it("recreates the quota collector after a session replacement", () => {
+    const f = fixture();
+    assert.equal(collectors, 1);
+    f.handlers.get("session_shutdown")(); f.handlers.get("session_start")({ reason: "resume" }, f.ctx);
+    assert.equal(collectors, 2); assert.equal(disposed, 2);
+  });
+  it("recognizes an explicit model argument", () => {
+    for (const arg of ["--model", "-m", "--model=x", "--provider", "--provider=y"]) assert.equal(explicitModelArg(["node", "pi", arg]), true, arg);
+    assert.equal(explicitModelArg(["node", "pi"]), false);
   });
 });

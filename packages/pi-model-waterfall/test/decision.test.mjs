@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { describe, it } from "vitest";
-import { chooseWaterfall, evaluateAllowance, forPhysicalModel, pendingToolRound, stickyPhysicalModel, waterfallUnavailable } from "../src/decision.ts";
+import { chooseWaterfall, evaluateAllowance, forPhysicalModel } from "../src/decision.ts";
 
 const now = 1_800_000_000_000;
 const reading = (windows, observedAt = now) => ({ provider: "anthropic", source: "subscription", state: "ready", observedAt, windows });
@@ -25,7 +25,6 @@ describe("subscription waterfall decision", () => {
       candidate("google", [window(undefined)]), candidate("muse-sdk", [window(100)])], now);
     assert.equal(decision.chosen, undefined);
     assert.equal(decision.skipped.length, 4);
-    assert.match(waterfallUnavailable(decision).message, /Select a physical model manually/);
   });
   it("rejects stale, reset-due, future timestamps, empty, invalid and missing readings", () => {
     assert.match(evaluateAllowance(reading([window(0)], now - 600_000), now), /stale/);
@@ -40,18 +39,13 @@ describe("subscription waterfall decision", () => {
   it("keeps only exact model-specific windows, plus shared ones", () => {
     assert.deepEqual(forPhysicalModel(reading([window(12), { ...window(99), model: "other" }, { ...window(13), model: "ours" }]), "ours").windows.map(w => w.used), [12, 13]);
   });
-  it("sticks to the selected physical model across tools, retry and steering", () => {
-    const previous = { model: { provider: "anthropic", id: "claude-opus-5-5" }, thinkingLevel: "medium" };
-    const messages = [{ role: "assistant", content: [{ type: "toolCall", id: "call-1" }] }, { role: "user", content: "steer" }];
-    assert.ok(pendingToolRound(messages));
-    const state = { version: 1, physical: { provider: "anthropic", id: "claude-opus-5-5", thinkingLevel: "medium" } };
-    assert.deepEqual(stickyPhysicalModel("user", previous, undefined, messages, state), state.physical);
-    assert.deepEqual(stickyPhysicalModel("continuation", previous, undefined, [], state), state.physical);
-    assert.deepEqual(stickyPhysicalModel("retry", undefined, previous, [], state), state.physical);
-    assert.equal(stickyPhysicalModel("user", previous, undefined, [...messages, { role: "toolResult", toolCallId: "call-1" }], state), undefined);
-    assert.equal(stickyPhysicalModel("user", { model: { provider: "meta", id: "paid" } }, undefined, messages, state), undefined);
-    assert.equal(stickyPhysicalModel("retry", undefined, previous, [], undefined), undefined);
-    assert.equal(stickyPhysicalModel("continuation", { ...previous, thinkingLevel: "high" }, undefined, [], state), undefined);
-    assert.equal(stickyPhysicalModel("direct", previous, undefined, [], state), undefined);
+  it("treats a blocked Codex account as exhausted even below 95%", () => {
+    assert.match(evaluateAllowance({ ...reading([window(10)]), access: { allowed: true, limitReached: true } }, now), /limit reached/);
+    assert.match(evaluateAllowance({ ...reading([window(10)]), access: { allowed: false } }, now), /limit reached/);
+    assert.equal(evaluateAllowance({ ...reading([window(10)]), access: { allowed: true, limitReached: false } }, now), undefined);
+  });
+  it("chooses a Muse rung that has no usage yet without windows", () => {
+    const decision = chooseWaterfall([candidate("anthropic", [window(99)]), { provider: "muse-code", model: "m", verified: true, noUsage: true, reading: reading([]) }], now);
+    assert.equal(decision.chosen?.provider, "muse-code");
   });
 });
