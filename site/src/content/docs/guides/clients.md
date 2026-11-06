@@ -96,3 +96,5 @@ Source and installed checks prove different things. An explicit Ovis source chec
 ## Historical audit baseline
 
 Collie was checked against its pi reader on the `frames.toml` branch (`npm run check:clients`, 46 and 120 columns) and live from a phone on a two-machine crew. The herdr-web-ui layout was checked against its v17, v27 (0.4.8) and v31 (0.4.12) prompt parsers (`parseInteractivePrompt`) at 46 and 120 columns; other limits against herdr-web-ui `dc2f11de`, Paseo `4a3ff87e` and Omnigent `f8f69988`. Custom question/gate frames were tested against the web prompt parser; the standard plan selector was recognized. This is not a live iPhone or end-to-end model test. Newer client revisions may behave differently.
+
+Exec handoffs (a planner's question, a review pause, a postponed question, an implementer that stopped) are `ask_user_question` dialogs; only the two confirmations remain Pi selects.

@@ -98,7 +98,7 @@ RPC uses one native dialog per question. Single-select offers numbered options f
 
 While a dialog is open, the tool emits a `herdr:blocked` hold, released on answer, decline, or error. Herdr's own Pi integration consumes this event; pi-herdr is not required to handle blocked state. Elsewhere it has no effect.
 
-Other extensions can open the same dialog for their own questions: emit `{ version: 1 }` on the `pi-plugins.ask-user-question.v1` event channel and this component sets `ask(ctx, { questions }, { signal, label })` on it, which validates the questions like the tool, holds `herdr:blocked`, and returns the answers (with notes and the Review note) or the validation error. [Compaction plan](/plugins/pi-compact-plan/) uses it for its questions and review.
+Other extensions can open the same dialog for their own questions: emit `{ version: 1 }` on the `pi-plugins.ask-user-question.v1` event channel and this component sets `ask(ctx, { questions }, { signal, label })` on it, which validates the questions like the tool, holds `herdr:blocked`, and returns the answers (with notes and the Review note) or the validation error. [Compaction plan](/plugins/pi-compact-plan/) uses it for its questions and review. For Switchyard, a tool that asks through the service may put `{ askUserQuestion: { questions } }` in its `onUpdate` details before asking; the adapter shows it as one form.
 
 Headless pi-subagents cannot use this tool. Workers return decisions and permission blockers to their parent instead of opening user dialogs.
 

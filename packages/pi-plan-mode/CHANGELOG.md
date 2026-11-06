@@ -4,6 +4,8 @@
 
 ### Minor Changes
 
+- Exec handoffs are one dialog. The planner on call is the only agent that asks you (the implementer asks it with `ask_planner`; its own `ask_user_question` is blocked). Pauses, postponed planner questions and an implementer that stopped early open as `ask_user_question` dialogs, reopened when a turn ends with an empty editor and from the footer badge, `/plan-exec`, Shift+Tab and `/plan`. Chat-text answer capture (`replyId`) is gone; a review that fails with a provider error is retried once; consultation cards show cache hit rates; exec phase words are `planner asks you`, `needs your answer`, `needs your decision`, `review failed`, `implementing`, `idle`.
+
 - Exec mode reads as a mode of your chat: its footer label takes the permission mode's place
   (`exec mode on · auto`), and plans are named by their first heading, not their random file name,
   in the footer, the handoff row, the approval question and the cards. `finish_plan`'s card lists
