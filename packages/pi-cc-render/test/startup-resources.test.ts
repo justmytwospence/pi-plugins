@@ -1252,19 +1252,29 @@ describe("waterfall-ordered models", () => {
 		const section = buildModelsSection([
 			{ provider: "waterfall", id: "auto", virtual: true },
 			{ provider: "lmstudio", id: "qwen3.8-27b" },
+			{ provider: "lmstudio", id: "qwen3.8-9b" },
+			{ provider: "openrouter", id: "anthropic/claude-opus-5-5" },
+			{ provider: "openrouter", id: "openai/gpt-6.1-sol" },
 			{ provider: "muse-code", id: "muse-wonder-1.0" },
 			{ provider: "google", id: "antigravity-gemini-4-argon" },
 			{ provider: "openai", id: "gpt-6.1-sol" },
 			{ provider: "anthropic", id: "claude-opus-5-5" },
-		], [{ provider: "waterfall", id: "auto" }], { provider: "waterfall", id: "auto" }, { now, rungs: [
+		], [{ provider: "waterfall", id: "auto" }, { provider: "lmstudio", id: "qwen3.8-27b" }], { provider: "waterfall", id: "auto" }, { now, rungs: [
 			{ provider: "anthropic", model: "claude-opus-5-5", state: "exhausted", resetAt: now + 3 * 3_600_000 },
 			{ provider: "openai", model: "gpt-6.1-sol", state: "disabled" },
 			{ provider: "google", model: "antigravity-gemini-4-argon", state: "available" },
 			{ provider: "muse-sdk", model: "muse-wonder-1.0", state: "unknown" },
-		] })!;
+		] }, [
+			{ backend: "jev", provider: "typesafe", model: "jev-1", local: "configured" },
+			{ backend: "openai-decisions", provider: "openai", model: "gpt-6-mini", local: "missing" },
+		])!;
+		// Providers outside the waterfall (OpenRouter, lmstudio) list only their favorites; System 1 comes last.
 		expect(section.groups.map((group) => group.label)).toEqual([
-			"auto", "1 anthropic · resets 3h", "2 openai · off", "3 google", "4 muse-code · unverified", "lmstudio",
+			"auto", "1 anthropic · resets 3h", "2 openai · off", "3 google", "4 muse-code · unverified", "lmstudio", "System 1",
 		]);
+		expect(section.groups[5]!.items).toEqual(["qwen3.8-27b"]);
+		expect(section.groups[6]).toMatchObject({ uncounted: true, items: ["typesafe/jev-1", "openai/gpt-6-mini"],
+			right: ["jev", "openai-decisions"], tones: [undefined, "dim"] });
 		expect(section.groups[0]).toMatchObject({ uncounted: true, items: ["waterfall"], actions: [{ kind: "model", provider: "waterfall", id: "auto" }],
 			right: ["anthropic → openai → google → muse"] });
 		expect(section.groups[0]!.marks![0]).toBeTruthy();

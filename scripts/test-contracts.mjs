@@ -24,7 +24,7 @@ const identical = [
   ['packages/pi-plan-mode/src/app/pi-chat.ts','packages/pi-sidebar/src/pi-chat.ts','packages/pi-subagents/src/ui/pi-chat.ts'],
   ['pi-auto-effort','pi-copy','pi-next-prompt','pi-subagents','pi-tool-gate'].map(p => `packages/${p}/src/jev.ts`),
   ['pi-system1','pi-auto-effort','pi-copy','pi-next-prompt','pi-subagents','pi-tool-gate','pi-sidebar','pi-cache-guard','pi-plan-mode'].map(p => `packages/${p}/src/system1.ts`),
-  ['pi-system1','pi-status-footer'].map(p => `packages/${p}/src/system1-contract.ts`),
+  ['pi-system1','pi-status-footer','pi-cc-render'].map(p => `packages/${p}/src/system1-contract.ts`),
   ['pi-model-waterfall','pi-status-footer','pi-cc-render'].map(p => `packages/${p}/src/waterfall-contract.ts`),
   ['pi-auto-effort','pi-copy','pi-next-prompt','pi-subagents'].map(p => `packages/${p}/src/transcript.ts`),
   ['pi-auto-effort','pi-next-prompt','pi-tool-gate'].map(p => `packages/${p}/src/config.ts`),

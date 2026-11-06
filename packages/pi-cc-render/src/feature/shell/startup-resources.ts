@@ -23,6 +23,7 @@ import { readStartupContext, type StartupContextSnapshot } from "./startup-conte
 import { renderContextTreemap } from "./startup-treemap.ts";
 import { attachStartupHost, disposeStartupHost } from "./startup-state.ts";
 import { queryWaterfall, type WaterfallRung } from "../../waterfall-contract.ts";
+import { querySystem1State, type System1Status } from "../../system1-contract.ts";
 import { createInteractiveSection, createSplashActionController } from "./startup-interactions.ts";
 export { GLYPHS } from "./startup-style.ts";
 
@@ -1209,7 +1210,8 @@ export function currentGeneration(ids: string[]): Set<string> {
 /**
  * The models section, one line per model under a heading per provider, with providers in ordered
  * vertical column stacks (the columns layout Context uses): every current-generation model of each
- * provider with credentials, plus the favorites (enabledModels or --models, with any thinking level) and the
+ * provider with credentials (only the waterfall's providers once its rungs are known, so a catalog
+ * provider such as OpenRouter lists only favorites), plus the favorites (enabledModels or --models, with any thinking level) and the
  * session's model wherever they are. Favorites carry a star and come first in their provider, in the order they
  * are configured; the session's model is highlighted in green. Every model shows its context window on the right.
  */
@@ -1218,6 +1220,7 @@ export function buildModelsSection(
 	favorites: ModelEntry[] = [],
 	current?: { provider: string; id: string },
 	waterfall?: { rungs?: WaterfallRung[]; now?: number },
+	system1?: System1Status["candidates"],
 ): ResourceSection | undefined {
 	const key = (model: { provider: string; id: string }) => `${model.provider}/${model.id}`;
 	// Routers are not providers: a virtual model is one line above the provider groups.
@@ -1240,7 +1243,10 @@ export function buildModelsSection(
 	for (const favorite of favorites) add({ ...byKey.get(key(favorite)), ...favorite });
 	const availableProviders = new Map<string, ModelEntry[]>();
 	for (const model of available) availableProviders.set(model.provider, [...(availableProviders.get(model.provider) ?? []), model]);
-	for (const [, list] of availableProviders) {
+	const rungs = waterfall?.rungs ?? [];
+	const rungOf = (provider: string) => rungs.findIndex((rung) => vendorOf(rung.provider) === vendorOf(provider));
+	for (const [provider, list] of availableProviders) {
+		if (rungs.length && rungOf(provider) < 0) continue;
 		const current = currentGeneration(list.map((model) => model.id));
 		const rest = list.filter((model) => current.has(model.id) && !favoriteKeys.has(key(model)));
 		for (const model of rest.sort((a, b) => compareNames(a.id, b.id))) add(model);
@@ -1250,9 +1256,7 @@ export function buildModelsSection(
 	if (count === 0) return undefined;
 	// Providers follow the subscription waterfall's order when it is known, numbered, with
 	// rungs it would skip now dimmed and labeled why; the rest follow alphabetically.
-	const rungs = waterfall?.rungs ?? [];
 	const now = waterfall?.now ?? Date.now();
-	const rungOf = (provider: string) => rungs.findIndex((rung) => vendorOf(rung.provider) === vendorOf(provider));
 	const rank = (provider: string) => { const index = rungOf(provider); return index < 0 ? rungs.length : index; };
 	const ordered = [...providers].sort(([a], [b]) => rank(a) - rank(b) || compareNames(a, b));
 	const groups: ResourceGroup[] = ordered.map(([provider, list]) => {
@@ -1285,6 +1289,17 @@ export function buildModelsSection(
 				? { marks: virtual.map((model) => (current && key(model) === key(current) ? CURRENT_MARK : undefined)) } : {}),
 		});
 	}
+	// System 1's judgment models, in its waterfall order; they are not chat models, so they are not counted.
+	if (system1?.length) {
+		groups.push({
+			label: "System 1",
+			uncounted: true,
+			items: system1.map((candidate) => `${candidate.provider}/${candidate.model}`),
+			right: system1.map((candidate) => candidate.backend),
+			...(system1.some((candidate) => candidate.local === "missing")
+				? { tones: system1.map((candidate) => (candidate.local === "missing" ? "dim" : undefined)) } : {}),
+		});
+	}
 	return {
 		title: "Models",
 		count,
@@ -1294,7 +1309,7 @@ export function buildModelsSection(
 }
 
 /** The session's models as a section; undefined when there are none or pi's model API is missing. */
-export function collectModelsSection(mode: any, verifiedGoogle: ModelEntry[] = [], rungs?: WaterfallRung[]): ResourceSection | undefined {
+export function collectModelsSection(mode: any, verifiedGoogle: ModelEntry[] = [], rungs?: WaterfallRung[], system1?: System1Status["candidates"]): ResourceSection | undefined {
 	try {
 		const session = mode?.session;
 		const scopedModels = (session?.scopedModels ?? []) as Array<{ model: any; thinkingLevel?: string }>;
@@ -1308,7 +1323,7 @@ export function collectModelsSection(mode: any, verifiedGoogle: ModelEntry[] = [
 			(model) => ({ provider: model.provider, id: model.id, contextWindow: model.contextWindow, ...(model.api === "pi-virtual" ? { virtual: true } : {}) }),
 		);
 		const current = session?.model ? { provider: session.model.provider, id: session.model.id } : undefined;
-		return buildModelsSection(available, favorites, current, rungs ? { rungs } : undefined);
+		return buildModelsSection(available, favorites, current, rungs ? { rungs } : undefined, system1);
 	} catch {
 		return undefined;
 	}
@@ -1446,7 +1461,8 @@ export function replaceSections(mode: any, options: unknown, pi?: ExtensionAPI):
 		const snapshot = readStartupContext(mode);
 		try {
 			const sections = collectSections(mode, options as { extensions?: any[] } | undefined, snapshot);
-			const model = collectModelsSection(mode, verifiedGoogle, pi ? queryWaterfall(pi.events)?.rungs : undefined);
+			const model = collectModelsSection(mode, verifiedGoogle, pi ? queryWaterfall(pi.events)?.rungs : undefined,
+				pi ? querySystem1State(pi.events)?.candidates : undefined);
 			if (model) sections.Models = model;
 			refreshGoogle();
 			const now = JSON.stringify(sections);
