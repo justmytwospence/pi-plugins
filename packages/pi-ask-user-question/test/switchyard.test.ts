@@ -111,6 +111,9 @@ function harness() {
     start: (questions: unknown[]) =>
       adapter.onToolStart({ toolCallId: CALL, name: "ask_user_question", args: { questions } }, ctx),
     end: () => adapter.onToolEnd({ toolCallId: CALL, name: "ask_user_question" }, ctx),
+    update: (toolCallId: string, name: string, details: unknown) =>
+      adapter.onToolUpdate({ toolCallId, name, details }, ctx),
+    endTool: (toolCallId: string, name: string) => adapter.onToolEnd({ toolCallId, name }, ctx),
     queued: () => queue.length,
     onUiRequest(req: PiUiRequest): Outcome {
       const i = queue.findIndex((s) => (typeof s.match === "function" ? s.match(req) : false));
@@ -302,5 +305,48 @@ describe("ask-user-question switchyard adapter", () => {
     await h.start([sizeQuestion]);
     expect(h.onUiRequest(sizeSelect)).toMatchObject({ kind: "claim" });
     expect(h.onUiRequest({ ...sizeSelect, id: "again" })).toEqual({ kind: "generic" });
+  });
+
+  describe("questions another tool advertises in details.askUserQuestion", () => {
+    const PLANNER_CALL = "call-ask-planner-1";
+
+    it("claims the dialog as a form owned by that tool call", () => {
+      const h = harness();
+      h.update(PLANNER_CALL, "ask_planner", { askUserQuestion: { questions: [sizeQuestion] } });
+      const claim = claimOf(h, sizeSelect);
+      expect(claim.ownerToolCallId).toBe(PLANNER_CALL);
+      expect(claim.presentation).toMatchObject({ t: "form", formId: `ask-user-question:${PLANNER_CALL}` });
+    });
+
+    it("drops the claim when an update no longer advertises a question, and when the tool ends", () => {
+      const cleared = harness();
+      cleared.update(PLANNER_CALL, "ask_planner", { askUserQuestion: { questions: [sizeQuestion] } });
+      cleared.update(PLANNER_CALL, "ask_planner", { pending: true });
+      expect(cleared.onUiRequest(sizeSelect)).toEqual({ kind: "generic" });
+      const ended = harness();
+      ended.update(PLANNER_CALL, "finish_plan", { askUserQuestion: { questions: [sizeQuestion] } });
+      ended.endTool(PLANNER_CALL, "finish_plan");
+      expect(ended.onUiRequest(sizeSelect)).toEqual({ kind: "generic" });
+    });
+
+    it("ignores malformed advertisements and does not reset a claimed question on a repeat", () => {
+      const bad = harness();
+      bad.update(PLANNER_CALL, "ask_planner", { askUserQuestion: { questions: [{ question: "?" }] } });
+      expect(bad.onUiRequest(sizeSelect)).toEqual({ kind: "generic" });
+      const h = harness();
+      const details = { askUserQuestion: { questions: [sizeQuestion] } };
+      h.update(PLANNER_CALL, "ask_planner", details);
+      expect(h.onUiRequest(sizeSelect)).toMatchObject({ kind: "claim" });
+      h.update(PLANNER_CALL, "ask_planner", details);
+      expect(h.onUiRequest({ ...sizeSelect, id: "again" })).toEqual({ kind: "generic" });
+    });
+
+    it("leaves the tool's own path unchanged: its own updates are ignored", async () => {
+      const h = harness();
+      await h.start([sizeQuestion]);
+      h.update(CALL, "ask_user_question", { askUserQuestion: { questions: [fruitQuestion] } });
+      expect(h.onUiRequest(fruitSelect)).toEqual({ kind: "generic" });
+      expect(h.onUiRequest(sizeSelect)).toMatchObject({ kind: "claim" });
+    });
   });
 });

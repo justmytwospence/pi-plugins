@@ -4,7 +4,7 @@
   "target": {
     "extension": "@justmytwospence/pi-ask-user-question",
     "versionRange": ">=0.1.0 <0.2.0",
-    "testedVersions": ["0.1.2"]
+    "testedVersions": ["0.1.2", "0.1.26"]
   },
   "protocolVersion": 1,
   "server": "adapter.ts",

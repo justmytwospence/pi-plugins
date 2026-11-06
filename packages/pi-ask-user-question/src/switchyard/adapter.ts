@@ -330,8 +330,26 @@ export default {
     ctx.state.set(`${PENDING}${e.toolCallId}`, { toolCallId: e.toolCallId, args, claimed: false });
   },
 
+  /**
+   * Another tool (for example plan-mode's ask_planner) advertises the question it is about to ask
+   * through the dialog service in `details.askUserQuestion`; an update without it clears the claim.
+   */
+  onToolUpdate(e: { toolCallId: string; name: string; details?: unknown }, ctx: AdapterContext): void {
+    if (e.name === TOOL_NAME) return;
+    const key = `${PENDING}${e.toolCallId}`;
+    const raw = (e.details as Record<string, unknown> | null | undefined)?.askUserQuestion;
+    const args = raw === undefined ? undefined : parseAskArgs(raw);
+    if (!args) {
+      ctx.state.delete(key);
+      return;
+    }
+    const existing = ctx.state.get<Pending>(key);
+    if (existing && JSON.stringify(existing.args) === JSON.stringify(args)) return;
+    ctx.state.set(key, { toolCallId: e.toolCallId, args, claimed: false });
+  },
+
   onToolEnd(e: { toolCallId: string; name: string }, ctx: AdapterContext): void {
-    if (e.name === TOOL_NAME) ctx.state.delete(`${PENDING}${e.toolCallId}`);
+    ctx.state.delete(`${PENDING}${e.toolCallId}`);
   },
 
   claimInteraction(req: PiUiRequest, ctx: AdapterContext): Claim | undefined {
