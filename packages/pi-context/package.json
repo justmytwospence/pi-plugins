@@ -1,6 +1,6 @@
 {
   "name": "@justmytwospence/pi-context",
-  "version": "0.1.30",
+  "version": "0.1.31",
   "description": "/context shows how pi's context window is used, with previews of the system prompt, memory files, skills, tool definitions, tool results and conversation.",
   "type": "module",
   "license": "MIT",

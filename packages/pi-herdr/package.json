@@ -1,6 +1,6 @@
 {
   "name": "@justmytwospence/pi-herdr",
-  "version": "0.1.30",
+  "version": "0.1.31",
   "description": "Pi inside herdr: pending background work and the session's task and model in herdr's sidebar, interactive pi children in herdr tabs, splits or worktrees, PR status on worktree spaces, and one event-bus bridge other extensions use instead of talking to herdr themselves.",
   "type": "module",
   "license": "MIT",
