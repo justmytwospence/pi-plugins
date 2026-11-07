@@ -52,7 +52,7 @@ The MCP section lists all configured servers, including `enabled: false`, groupe
 
 Each MCP row has one square indicating connection state, not context inclusion. A connected row shows `N · ~X tok`: the live tool count and the estimated tokens in that server's directly visible prepared tool declarations, respectively. These are distinct measures and can differ; unavailable counts use `?`, and unavailable token estimates use `? tok`. Non-connected rows show neither metric. Individual rows exclude declarations that cannot be attributed to a server. When origin attribution is known, the MCP heading shows the estimated total, including unattributed MCP declarations; its category swatch corresponds to the chart, not connection state. Estimates are not provider billing.
 
-Models use a muted `★` for favorites and a green highlight and `●` for the current model.
+Models use a muted solid star for favorites and a green highlight and `●` for the current model.
 
 The MCP listing refreshes for as long as the splash exists, including late state, tool-count and configuration changes. Configuration files are stat-checked on polling ticks and parsed only when changed, never during rendering. This updates the display only: Pi still needs `/reload` to apply externally edited MCP configuration; the splash neither applies configuration nor connects servers. Compact warning/error icons and counts in the heading replace Pi's per-server startup warning while the section is shown; configuration warnings remain. Open the native manager for failure details. Use `/mcp` to resolve server problems.
 

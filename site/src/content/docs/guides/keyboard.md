@@ -230,7 +230,6 @@ Merge, `/reload`, then inspect `/hotkeys` and startup diagnostics. An array repl
   "app.model.cycleBackward": [],
   "app.thinking.cycle": "ctrl+t",
   "app.thinking.toggle": [],
-  "app.tree.filter.noTools": "ctrl+shift+t",
   "app.tree.filter.labeledOnly": "ctrl+shift+l",
   "app.editor.external": [],
   "app.exit": [],

@@ -81,6 +81,8 @@ try {
       profile?.["app.thinking.cycle"] === "shift+tab" || profile?.["app.thinking.toggle"] === "ctrl+t") {
     fail("Personal approvals key must pair Ctrl+Y with unbound native yank, and the profile must free Shift+Tab and Ctrl+T.");
   }
+  const bound = new Set(Object.values(profile ?? {}).flat());
+  if (bound.has("ctrl+shift+t")) fail("Labeled personal profile must leave Ctrl+Shift+T free for pi-todo's default collapseKey.");
 } catch { fail("Invalid optional personal keymap or todo profile."); }
 
 const paths = (await filesIn(docs)).filter((file) => /\.mdx?$/.test(file));
