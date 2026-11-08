@@ -1091,7 +1091,11 @@ const hours = (ms: number) => ms >= 86_400_000 ? `${Math.round(ms / 86_400_000)}
 /** A rung's heading suffix: why the waterfall would skip it now, or nothing when it would not. */
 function rungNote(rung: WaterfallRung, now: number): string | undefined {
 	if (rung.state === "available") return undefined;
-	if (rung.state === "exhausted") return rung.resetAt && rung.resetAt > now ? `resets ${hours(rung.resetAt - now)}` : "quota";
+	if (rung.state === "exhausted") {
+		const reset = rung.resetAt !== undefined && Number.isFinite(rung.resetAt) && rung.resetAt > now ? `resets ${hours(rung.resetAt - now)}` : undefined;
+		if (rung.provider === "google" && rung.blockingQuota?.label) return [rung.blockingQuota.label, reset].filter(Boolean).join(" · ");
+		return reset ?? "quota";
+	}
 	return rung.state === "disabled" ? "off" : "unverified";
 }
 

@@ -1,45 +1,32 @@
-import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { getAgentDir, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
-import { clampThinkingLevel, type Model } from "@earendil-works/pi-ai";
-import { createProviderUsageCollector, MUSE_NO_USAGE_REASON, readCodexUsage, readPiAnthropicUsage, type ProviderUsage, type UsageSource } from "@justmytwospence/pi-subscription-usage";
-import { chooseWaterfall, evaluateAllowance, forPhysicalModel, WATERFALL_MODELS, type WaterfallCandidate } from "./decision.ts";
+import { clampThinkingLevel } from "@earendil-works/pi-ai";
+import { argonQuotaIssue, argonQuotaVariant, createProviderUsageCollector, MUSE_NO_USAGE_REASON, readCodexUsage, readPiAnthropicUsage, type ProviderUsage, type UsageSource } from "@justmytwospence/pi-subscription-usage";
+import { chooseWaterfall, inspectAllowance, forPhysicalModel, DEFAULT_WATERFALL_ORDER, waterfallModels, type WaterfallCandidate } from "./decision.ts";
+import { loadWaterfallConfig } from "./config.ts";
 import { WATERFALL_CHANNEL, type WaterfallRequest, type WaterfallRung, type WaterfallSnapshot } from "./waterfall-contract.ts";
 
 const cancelled = () => new Error("Waterfall quota check cancelled.");
 /** Rung state is display-only; reassess at most this often outside a route. */
 const ASSESS_MS = 60_000;
-const DISABLED = new Set<string>();
 
 /** Classify one checked rung for display: why it would or would not be chosen now. */
 export function rungState(candidate: WaterfallCandidate, now: number): WaterfallRung {
   const { provider, model } = candidate;
   if (!candidate.verified) {
     const reason = candidate.reason ?? "Subscription routing is not verified.";
-    return { provider, model, state: DISABLED.has(reason) ? "disabled" : "unknown", reason };
+    return { provider, model, state: "unknown", reason };
   }
   if (candidate.noUsage) return { provider, model, state: "available" };
-  const reason = evaluateAllowance(candidate.reading, now);
-  if (!reason) return { provider, model, state: "available" };
-  const spent = candidate.reading?.windows.filter(w => typeof w.used === "number" && w.used >= 95 && w.reset !== undefined) ?? [];
-  if (!spent.length) return { provider, model, state: "unknown", reason };
-  return { provider, model, state: "exhausted", reason, resetAt: Math.max(...spent.map(w => w.reset!)) };
+  const inspected = inspectAllowance(candidate.reading, now);
+  // Scoped blocking metadata describes Google's binding allowance, not inference rejection.
+  const { blockingQuota, ...state } = inspected;
+  return { provider, model, ...state, ...(provider === "google" && blockingQuota ? { blockingQuota } : {}) };
 }
 
 /** An argument that names the model, provider or both: an explicit choice the waterfall must not override. */
 export function explicitModelArg(argv: readonly string[]): boolean {
   return argv.some(arg => arg === "--model" || arg === "-m" || arg === "--provider" || arg.startsWith("--model=") || arg.startsWith("--provider="));
-}
-
-/** An Argon quota variant must match the physical model's mapped reasoning level. */
-function argonVariant(model: Model<any>, level: ThinkingLevel): string | undefined {
-  if (!model.reasoning) return undefined;
-  const mapped = model.thinkingLevelMap?.[level];
-  const effective = mapped === undefined ? level : mapped;
-  if (effective === null) return undefined;
-  if (["off", "minimal", "low"].includes(effective)) return "gemini-4-argon-low";
-  if (effective === "medium") return "gemini-4-argon-medium";
-  if (["high", "xhigh", "max"].includes(effective)) return "gemini-4-argon-high";
-  return undefined;
 }
 
 /** Cancellation also works when a registry or collector implementation ignores AbortSignal. */
@@ -60,29 +47,36 @@ export default function modelWaterfall(pi: ExtensionAPI): void {
   let snapshot: WaterfallSnapshot = { version: 1, skipped: [], observedAt: Date.now() };
   // Rung state survives route-snapshot clears: it describes the subscriptions, not a branch.
   let rungs: { list: WaterfallRung[]; at: number } | undefined;
-  let session = 0, assessing = false, assessedAt = 0;
+  let activeModels = waterfallModels(DEFAULT_WATERFALL_ORDER);
+  let configError: string | undefined;
+  let session = 0, assessingSession: number | undefined, assessedAt = 0;
   let ticker: ReturnType<typeof setInterval> | undefined;
   const clear = () => { snapshot = { version: 1, skipped: [], observedAt: Date.now() }; };
   const assess = async (ctx: ExtensionContext | undefined, force = false) => {
-    if (!ctx?.modelRegistry || assessing || (!force && Date.now() - assessedAt < ASSESS_MS)) return;
-    const mine = session;
-    assessing = true; assessedAt = Date.now();
+    if (!ctx?.modelRegistry || !activeModels.length || assessingSession === session || (!force && Date.now() - assessedAt < ASSESS_MS)) return;
+    const mine = session, models = activeModels;
+    assessingSession = mine; assessedAt = Date.now();
     try {
       const level = (pi.getThinkingLevel?.() ?? "medium") as ThinkingLevel;
       const list: WaterfallRung[] = [];
-      for (const physical of WATERFALL_MODELS) {
+      for (const physical of models) {
+        if (mine !== session) return;
         const checked = await candidate(ctx, physical, level).catch((): WaterfallCandidate =>
           ({ provider: physical.provider, model: physical.id, verified: false, reason: "Subscription quota read failed." }));
         list.push(rungState(checked, Date.now()));
       }
       if (mine === session) rungs = { list, at: Date.now() };
-    } finally { assessing = false; }
+    } finally { if (assessingSession === mine) assessingSession = undefined; }
   };
   const stopTicker = () => { if (ticker) clearInterval(ticker); ticker = undefined; };
   pi.on("session_start", (event: { reason?: string } | undefined, ctx) => {
     clear(); session++; rungs = undefined; assessedAt = 0; collector.dispose(); collector = createProviderUsageCollector();
     stopTicker();
     if (!ctx) return;
+    const policy = loadWaterfallConfig(ctx.cwd, getAgentDir());
+    activeModels = waterfallModels(policy.order); configError = policy.error;
+    if (configError && ctx.hasUI) ctx.ui.notify(`Waterfall: ${configError}`, "warning");
+    if (!activeModels.length) return;
     void assess(ctx, true);
     if (ctx.hasUI && (event?.reason === "startup" || event?.reason === "new") && !explicitModelArg(process.argv)) void pickStartModel(ctx, session);
     // Allowances reset while a session sits idle; quota reads are cached for minutes.
@@ -94,11 +88,11 @@ export default function modelWaterfall(pi: ExtensionAPI): void {
   pi.events.on(WATERFALL_CHANNEL, (value: unknown) => {
     const request = value as WaterfallRequest;
     if (request?.kind !== "query") return;
-    const order = WATERFALL_MODELS.map(({ provider, id }) => ({ provider, model: id }));
+    const order = activeModels.map(({ provider, id }) => ({ provider, model: id }));
     request.snapshot = structuredClone(rungs ? { ...snapshot, order, rungs: rungs.list, rungsObservedAt: rungs.at } : { ...snapshot, order });
   });
 
-  const candidate = async (ctx: ExtensionContext, physical: typeof WATERFALL_MODELS[number], level: ThinkingLevel, signal?: AbortSignal): Promise<WaterfallCandidate> => {
+  const candidate = async (ctx: ExtensionContext, physical: typeof activeModels[number], level: ThinkingLevel, signal?: AbortSignal): Promise<WaterfallCandidate> => {
     const { provider, id } = physical;
     const fail = (reason: string): WaterfallCandidate => ({ provider, model: id, verified: false, reason });
     if (signal?.aborted) throw cancelled();
@@ -111,7 +105,7 @@ export default function modelWaterfall(pi: ExtensionAPI): void {
     try {
       if (provider !== "muse-code" && !ctx.modelRegistry.isUsingOAuth(model)) return fail("A local subscription OAuth login is required; API keys are not eligible.");
       const physicalLevel = clampThinkingLevel(model, level) as ThinkingLevel;
-      const variant = provider === "google" ? argonVariant(model, physicalLevel) : undefined;
+      const variant = provider === "google" && model.reasoning ? argonQuotaVariant(physicalLevel, model.thinkingLevelMap) : undefined;
       if (provider === "google" && !variant) return fail("The physical Argon reasoning variant cannot be verified.");
       let reading: ProviderUsage;
       let credential: string | undefined;
@@ -145,14 +139,10 @@ export default function modelWaterfall(pi: ExtensionAPI): void {
         const source: UsageSource = { provider, sourceId: id, model: id, variant,
           baseUrl: model.baseUrl, auth: { kind: "local-oauth", token: credential } };
         reading = await interruptible(collector.refresh(source), signal);
-        if (reading.state !== "ready") return fail("Exact Antigravity subscription quota is unavailable.");
-        // Shared 5h, weekly, Argon weekly and the exact reasoning variant all bind.
-        const windows = forPhysicalModel(reading, id).windows;
-        if (!["5h", "weekly", "Argon weekly", "model"].every(label => windows.some(w => w.label === label && w.pool === "Gemini")) ||
-            !windows.some(w => w.label === "Argon weekly" && w.model === id) ||
-            !windows.some(w => w.label === "model" && w.model === id))
-          return fail("An applicable shared, Argon weekly or exact reasoning-variant quota is unknown.");
-        reading = { ...reading, windows };
+        const issue = argonQuotaIssue(reading, variant!);
+        if (issue) return fail(issue);
+        // Healthy shared windows never substitute for missing or exhausted Argon quota.
+        reading = forPhysicalModel(reading, id);
       }
       if (signal?.aborted) throw cancelled();
       // A credential/model can change while the read is pending. Neither the
@@ -160,7 +150,8 @@ export default function modelWaterfall(pi: ExtensionAPI): void {
       const current = ctx.modelRegistry.find(provider, id);
       if (!current || current.api === "pi-virtual" || current.api !== model.api || (endpoint && current.baseUrl !== endpoint) ||
           (provider !== "muse-code" && !ctx.modelRegistry.isUsingOAuth(current)) || clampThinkingLevel(current, level) !== physicalLevel ||
-          (provider === "google" && (argonVariant(current, physicalLevel) !== variant ||
+          (pi.getThinkingLevel?.() ?? "medium") !== level ||
+          (provider === "google" && (!current.reasoning || argonQuotaVariant(physicalLevel, current.thinkingLevelMap) !== variant ||
             await interruptible(ctx.modelRegistry.getApiKeyForProvider("google"), signal) !== credential)) ||
           (provider === "muse-code" && await interruptible(ctx.modelRegistry.getApiKeyForProvider("muse-code"), signal) !== credential))
         return fail("The subscription account or physical model changed during the quota read.");
@@ -178,7 +169,9 @@ export default function modelWaterfall(pi: ExtensionAPI): void {
       const was = ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : undefined;
       const level = (pi.getThinkingLevel?.() ?? "medium") as ThinkingLevel;
       const candidates: WaterfallCandidate[] = [];
-      for (const physical of WATERFALL_MODELS) {
+      const models = activeModels;
+      if (!models.length) return;
+      for (const physical of models) {
         candidates.push(await candidate(ctx, physical, level));
         if (mine !== session) return;
         if (chooseWaterfall(candidates, Date.now()).chosen) break;
@@ -188,7 +181,8 @@ export default function modelWaterfall(pi: ExtensionAPI): void {
       const skipped = decision.skipped.map(x => ({ ...x }));
       const reasons = skipped.map(x => `${x.provider}: ${x.reason}`).join("; ");
       // The user picked a model, or sent a turn, while quota was being read.
-      if ((ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : undefined) !== was || ctx.isIdle?.() === false) return;
+      if ((ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : undefined) !== was || ctx.isIdle?.() === false ||
+          (pi.getThinkingLevel?.() ?? "medium") !== level) return;
       if (!decision.chosen) {
         snapshot = { version: 1, skipped, observedAt: Date.now() };
         ctx.ui.notify(`Waterfall: no subscription under quota; staying on ${was ?? "the current model"}. ${reasons}`, "warning");
@@ -213,6 +207,8 @@ export default function modelWaterfall(pi: ExtensionAPI): void {
   pi.registerCommand("waterfall", {
     description: "Show the model this session started on and each subscription rung's state, without fetching quota",
     handler: async (_args, ctx) => {
+      if (configError) { ctx.ui.notify(`Waterfall: ${configError}`, "warning"); return; }
+      if (!activeModels.length) { ctx.ui.notify("Waterfall: automatic selection disabled.", "info"); return; }
       const route = snapshot.physical ? `started on ${snapshot.physical.provider}/${snapshot.physical.id}` : "no startup choice in this session";
       const skipped = snapshot.skipped.length ? snapshot.skipped.map(x => `${x.provider}: ${x.reason}`).join("; ") : "";
       const lines = (rungs?.list ?? []).map(r => `${r.provider}/${r.model}: ${r.state}${r.reason ? ` (${r.reason})` : ""}`);

@@ -17,6 +17,7 @@ import { stripVTControlCharacters } from "node:util";
 import { CustomEditor, getAgentDir, type ExtensionAPI, type ExtensionContext, type Theme } from "@earendil-works/pi-coding-agent";
 import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
 import { getSupportedThinkingLevels } from "@earendil-works/pi-ai/compat";
+import { clampThinkingLevel, type Model } from "@earendil-works/pi-ai";
 import { hyperlink, truncateToWidth, visibleWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
 import { builtinMcpOwnsCommand, connectedMcpServers, countMcp, McpConfigReader, MCP_STATUS_KEY, type McpCount } from "./mcp.ts";
 import { SHOW_TIMER_AFTER_MS, WORKING_REFRESH_MS, WORKING_STATS_CHANNEL, workingMessage, WorkingStats, workingStatsService, type WorkingStatsRequest } from "./working.ts";
@@ -28,7 +29,7 @@ import { queryFooterActions, type FooterAction, type FooterActionId } from "./fo
 import { querySystem1State, type System1Status } from "./system1-contract.ts";
 import { settingsCycles, SETTINGS_REASONING_COMMITTED, type SettingCycleSnapshot, type SettingKey } from "./settings-cycle.ts";
 import { createFooterActionController, createFooterComponent, type FooterEditor, type FooterTui, type FooterHit, type FooterLayout } from "./interactions.ts";
-import { createProviderUsageCollector, dispatchProviderUsage, isUsageStale, selectGooglePool, type ProviderUsage, type UsageSource } from "./provider-usage.ts";
+import { ARGON_MODEL, argonQuotaVariant, createProviderUsageCollector, dispatchProviderUsage, isUsageStale, selectGooglePool, type ArgonQuotaVariant, type ProviderUsage, type UsageSource } from "./provider-usage.ts";
 import { queryWaterfall } from "./waterfall-contract.ts";
 import { parseClaudeQuota, codexRateLimitsEvent, mergeQuota, parseClaudeHeaders, readCodexUsage, readPiAnthropicUsage, claudeCodeUserAgent, type Quota } from "@justmytwospence/pi-subscription-usage";
 export { parseClaudeQuota, parseCodexUsage, codexRateLimitsEvent, codexAccountId, mergeQuota, parseCodexHeaders, parseClaudeHeaders, codexWindowLabel } from "@justmytwospence/pi-subscription-usage";
@@ -1045,7 +1046,8 @@ export function layoutFooter(snapshot: Snapshot, width: number, theme: Paint): F
   // retain the legacy quota fallback below.
   if (s.providerUsage) {
     for (const [index, usage] of s.providerUsage.entries()) {
-      const account = usage.source === "Claude Code account" ? "Claude Code" : ({
+      const antigravity = usage.provider === "google" && usage.source === "Google Antigravity subscription";
+      const account = antigravity ? "Antigravity" : usage.source === "Claude Code account" ? "Claude Code" : ({
         anthropic: "Claude", "openai-codex": "Codex", openai: "OpenAI", google: "Google", "muse-sdk": "Muse", "muse-code": "Muse",
       } as Record<string, string>)[usage.provider] ?? (usage.state === "not-applicable" ? "Local" : clean(usage.provider));
       const more = index === 1 && s.providerUsageMore ? `+${s.providerUsageMore} more` : "";
@@ -1064,7 +1066,11 @@ export function layoutFooter(snapshot: Snapshot, width: number, theme: Paint): F
         const color = stale || value === undefined || value < 70 ? "muted" : heat(value);
         const val = `${theme.fg("muted", clean(window.label))} ${theme.bold(theme.fg(color, value === undefined ? "unknown" : percent(value)))}${value === undefined ? "" : theme.fg("dim", " used")}`;
         const reset = window.reset !== undefined && window.reset > s.now ? `${sep}${theme.fg("dim", `resets in ${duration(window.reset - s.now)}`)}` : "";
-        return { text: `${val}${reset}`, short: val, priority: 50 + Math.min(100, value ?? 0) };
+        const short = antigravity ? `${theme.fg("muted", clean(window.label))} ${theme.bold(theme.fg(color, value === undefined ? "unknown" : percent(value)))}` : val;
+        // Scope is data, not a match against labels. Equal usage favors the
+        // model-specific limit; a binding limit outlasts healthy detail.
+        const priority = 50 + Math.min(100, value ?? 0) + (antigravity && window.scope && window.scope !== "shared" ? 0.5 : 0);
+        return { text: `${val}${reset}`, short, priority };
       });
       const extra = usage.extra;
       let extraText = "";
@@ -1094,7 +1100,7 @@ export function layoutFooter(snapshot: Snapshot, width: number, theme: Paint): F
       const billed = usage.provider === "anthropic" && usage.source !== "Claude Code account" ? s.extraBilled : undefined;
       const segments: Segment[] = [
         { text: label(account), separatorAfter: "", priority: 200 },
-        { text: stale ? theme.fg("warning", `stale ${duration(age)}${expired ? " · reset due" : ""}`) : "", short: stale ? theme.fg("warning", expired ? "stale · reset due" : "stale") : "", priority: 210 },
+        { text: stale ? theme.fg("warning", `stale ${duration(age)}${expired ? " · reset due" : ""}`) : "", short: stale ? theme.fg("warning", expired ? (antigravity ? "reset due" : "stale · reset due") : "stale") : "", priority: 210 },
         ...windows,
         over ?? { text: "", priority: 0 },
         { text: extraText && !over ? theme.fg("warning", extraText) : "", short: extra?.enabled && !over ? "extra on" : "", priority: extra?.enabled ? 75 : 5 },
@@ -1254,6 +1260,23 @@ export default function statusFooter(pi: ExtensionAPI): void {
   const providerModels = new Map<string, { id: string; baseUrl?: string }>();
   const providerIdentities = new Map<string, string>();
   const providerVariants = new Map<string, string | undefined>();
+  const googleVariantMaps = new Map<string, Partial<Record<ThinkingLevel, ArgonQuotaVariant>>>();
+  let providerSelectionEpoch = 0;
+  const rememberGoogleVariants = (model: Model<any>) => {
+    if (model.provider !== "google" || model.id !== ARGON_MODEL) return;
+    const variants: Partial<Record<ThinkingLevel, ArgonQuotaVariant>> = {};
+    if (model.reasoning) for (const level of ["off", "minimal", "low", "medium", "high", "xhigh", "max"] as ThinkingLevel[]) {
+      const variant = argonQuotaVariant(clampThinkingLevel(model, level), model.thinkingLevelMap);
+      if (variant) variants[level] = variant;
+    }
+    googleVariantMaps.set(model.id, variants);
+  };
+  const expectedGoogleVariant = (modelId: string | undefined, thinking: string | undefined) =>
+    modelId === ARGON_MODEL && thinking ? googleVariantMaps.get(modelId)?.[thinking as ThinkingLevel] : undefined;
+  const invalidateGoogleUsage = () => {
+    providerSelectionEpoch++;
+    providerReadings.delete("google"); providerVariants.delete("google"); providerIdentities.delete("google");
+  };
   let phase: string | undefined;
   /** Open `herdr:blocked` holds: dialogs waiting on the user. */
   let blockedHolds = 0;
@@ -1558,15 +1581,20 @@ export default function statusFooter(pi: ExtensionAPI): void {
     try { available = typeof context.modelRegistry.getAvailable === "function" ? context.modelRegistry.getAvailable() : []; }
     catch { /* Keep the active physical model when optional discovery fails. */ }
     const found = new Map<string, { id: string; baseUrl?: string }>();
+    googleVariantMaps.clear();
     for (const model of available) {
       if (!model || model.api === "pi-virtual") continue;
+      rememberGoogleVariants(model);
       try {
         const physical = context.modelRegistry.getProvider?.(model.provider);
         if (!physical?.getModels().some((entry) => entry.id === model.id)) continue;
         if (!found.has(model.provider)) found.set(model.provider, { id: model.id, baseUrl: model.baseUrl });
       } catch { /* An unavailable optional provider must not take down the footer. */ }
     }
-    if (activeModel && activeModel.api !== "pi-virtual") found.set(activeModel.provider, { id: activeModel.id, baseUrl: activeModel.baseUrl });
+    if (activeModel && activeModel.api !== "pi-virtual") {
+      rememberGoogleVariants(activeModel);
+      found.set(activeModel.provider, { id: activeModel.id, baseUrl: activeModel.baseUrl });
+    }
     providerModels.clear();
     for (const [id, model] of found) providerModels.set(id, model);
     for (const id of providerReadings.keys()) if (!found.has(id)) { providerReadings.delete(id); providerIdentities.delete(id); providerVariants.delete(id); }
@@ -1577,7 +1605,7 @@ export default function statusFooter(pi: ExtensionAPI): void {
     return index < 0 ? order.length : index;
   };
   const orderedProviders = () => [...new Set([...providerModels.keys()].map(accountUsageProvider))].sort((a, b) => usageOrder(a) - usageOrder(b) || a.localeCompare(b));
-  const cachedUsage = (provider: string, modelId?: string): ProviderUsage => {
+  const cachedUsage = (provider: string, modelId?: string, expectedVariant?: ArgonQuotaVariant): ProviderUsage => {
     if (provider === "anthropic") return claude ? {
       provider, source: claudePiAccount ? "Claude subscription" : "Claude Code account", state: "ready", observedAt: claude.updated,
       windows: claude.windows.map((window) => ({ ...window })), ...(claude.extra ? { extra: claude.extra } : {}),
@@ -1585,9 +1613,8 @@ export default function statusFooter(pi: ExtensionAPI): void {
     if (provider === "openai-codex") return codex ??
       { provider, source: "Codex account", state: "unavailable", windows: [], reason: "Codex subscription usage has not been observed." };
     const cached = providerReadings.get(provider);
-    if (provider === "google" && modelId === "antigravity-gemini-4-argon" && ctx?.model?.provider === "waterfall") {
-      const variant = queryWaterfall(pi.events)?.physical?.quotaVariant;
-      if (!variant || providerVariants.get(provider) !== variant) return { provider, source: "Google Antigravity subscription", state: "unavailable", windows: [], reason: "The exact Argon reasoning-variant quota has not been observed." };
+    if (provider === "google" && modelId === ARGON_MODEL) {
+      if (!expectedVariant || providerVariants.get(provider) !== expectedVariant) return { provider, source: "Google Antigravity subscription", state: "unavailable", windows: [], reason: "The exact Argon reasoning-variant quota has not been observed." };
     }
     if (cached) return cached;
     if (provider === "google") return { provider, source: "Google Antigravity subscription", state: "unavailable", windows: [], reason: "Google quota has not been observed for the selected model." };
@@ -1597,23 +1624,24 @@ export default function statusFooter(pi: ExtensionAPI): void {
       baseUrl: model?.baseUrl, auth: provider === "google" ? { kind: "vault" } : { kind: "api-key" } }, Date.now()) ??
       { provider, source: provider, state: "unavailable", windows: [], reason: "Subscription usage has not been observed." };
   };
-  const selectedUsage = (provider: string, modelId?: string) => {
+  const selectedUsage = (provider: string, modelId?: string, thinking?: string) => {
     provider = accountUsageProvider(provider);
-    const forRow = (id: string, selected?: string): ProviderUsage => {
-      const reading = cachedUsage(id, selected);
+    const forRow = (id: string, selected?: string, level?: string): ProviderUsage => {
+      selected ??= providerModels.get(id)?.id;
+      const reading = cachedUsage(id, selected, expectedGoogleVariant(selected, level));
       if (id !== "google" || reading.state !== "ready") return reading;
       const windows = selectGooglePool(reading, selected ?? providerModels.get(id)?.id ?? "");
       return windows.length ? { ...reading, windows } : { ...reading, state: "unavailable", windows: [], reason: reading.windows.some((window) => window.model) ? "No quota has been observed for the selected Google model." : "No quota window matches the selected Google model pool." };
     };
-    const active = forRow(provider, modelId);
+    const active = forRow(provider, modelId, thinking);
     if (!showAll) return { rows: [active], more: 0 };
-    const others = orderedProviders().filter((id) => id !== provider).map((id) => forRow(id))
+    const others = orderedProviders().filter((id) => id !== provider).map((id) => forRow(id, undefined, pi.getThinkingLevel()))
       .filter((usage) => usage.state !== "not-applicable");
     return { rows: others.length ? [active, others[0]] : [active], more: Math.max(0, others.length - 1) };
   };
   const updateProviderUsage = async () => {
     if (!active || !ctx) return;
-    const context = ctx, epoch = generation;
+    const context = ctx, epoch = generation, selectionEpoch = providerSelectionEpoch;
     discoverProviders(context);
     const routed = context.model?.provider === "waterfall" ? queryWaterfall(pi.events)?.physical : undefined;
     const ids = showAll ? orderedProviders() : [routed?.provider ?? context.model?.provider].filter((id): id is string => !!id).map(accountUsageProvider);
@@ -1622,8 +1650,22 @@ export default function statusFooter(pi: ExtensionAPI): void {
       try { model = routed?.provider === id ? context.modelRegistry.find(id, routed.id) : providerModels.get(id); }
       catch { return; }
       if (!model) return;
-      const variant = id === "google" && routed?.provider === id && routed.id === model.id ? routed.quotaVariant : undefined;
-      if (id === "google" && routed?.provider === id && model.id === "antigravity-gemini-4-argon" && !variant) return;
+      let variant: ArgonQuotaVariant | undefined;
+      if (id === "google" && model.id === ARGON_MODEL) {
+        // Resolve physical models outside render. Never assume medium when the
+        // exact physical model's reasoning mapping is unavailable.
+        let physical;
+        try { physical = context.modelRegistry.find(id, model.id); } catch { /* Unknown. */ }
+        if (physical) rememberGoogleVariants(physical);
+        variant = expectedGoogleVariant(model.id, routed?.thinkingLevel ?? pi.getThinkingLevel());
+        if (routed?.provider === id && routed.quotaVariant !== variant) variant = undefined;
+        if (!variant) {
+          providerReadings.delete(id); providerVariants.delete(id); providerIdentities.delete(id);
+          providerReadings.set(id, { provider: id, source: "Google Antigravity subscription", state: "unavailable", windows: [], reason: "The exact Argon reasoning variant is unknown." });
+          requestRender?.();
+          return;
+        }
+      }
       // The Muse SDK bridge and pi-muse-bridge (muse-code, marked by its
       // "muse-code-local" key) both run on the Muse CLI's signed-in subscription.
       let auth: UsageSource["auth"] = id === "muse-sdk" ? { kind: "local-oauth" } : { kind: "api-key" };
@@ -1644,7 +1686,7 @@ export default function statusFooter(pi: ExtensionAPI): void {
           catch { auth = { kind: "local-oauth" }; }
         } else auth = { kind: "vault" };
       }
-      if (!active || epoch !== generation) return;
+      if (!active || epoch !== generation || selectionEpoch !== providerSelectionEpoch) return;
       const source: UsageSource = { provider: id, sourceId: model.id, model: model.id, ...(variant ? { variant } : {}), baseUrl: model.baseUrl, auth };
       const identity = createHash("sha256").update(JSON.stringify(source)).digest("hex");
       if (providerIdentities.get(id) !== identity) {
@@ -1652,9 +1694,9 @@ export default function statusFooter(pi: ExtensionAPI): void {
         providerIdentities.set(id, identity);
       }
       providerVariants.set(id, variant);
-      const previous = cachedUsage(id, model.id);
+      const previous = cachedUsage(id, model.id, variant);
       const reading = await usageCollector.refresh(source);
-      if (!active || epoch !== generation || providerIdentities.get(id) !== identity) return;
+      if (!active || epoch !== generation || selectionEpoch !== providerSelectionEpoch || providerIdentities.get(id) !== identity) return;
       providerReadings.set(id, reading);
       if (JSON.stringify(previous) !== JSON.stringify(reading)) requestRender?.();
     }));
@@ -1677,7 +1719,7 @@ export default function statusFooter(pi: ExtensionAPI): void {
     }
     const usage = routed && !physicalModel
       ? { rows: [{ provider, source: "Waterfall", state: "unavailable" as const, windows: [], reason: "The verified physical model is no longer available." }], more: 0 }
-      : selectedUsage(provider, physicalModel?.id);
+      : selectedUsage(provider, physicalModel?.id, routed?.thinkingLevel ?? pi.getThinkingLevel());
     const absorbed = absorbStatuses(statuses, { claudeRow: quotas.some((q) => q.source === "Claude acct") });
     const controls: FooterControlState = {};
     for (const [id, descriptor] of Object.entries(discoveredActions)) {
@@ -1724,7 +1766,7 @@ export default function statusFooter(pi: ExtensionAPI): void {
     if (session.provider === "anthropic" || showAll) {
       if (claude) quotas.push(claude); else unavailableQuota = "Claude acct";
     }
-    const usage = selectedUsage(session.provider, session.model);
+    const usage = selectedUsage(session.provider, session.model, session.thinking);
     return {
       ...main,
       // Main's mutable controls and policy are not the viewed agent's state.
@@ -1878,7 +1920,7 @@ export default function statusFooter(pi: ExtensionAPI): void {
     workingClaims.clear();
     mcp = undefined; mcpBusy = false;
     usageCollector.dispose(); usageCollector = createProviderUsageCollector();
-    providerReadings.clear(); providerModels.clear(); providerIdentities.clear(); providerVariants.clear();
+    providerReadings.clear(); providerModels.clear(); providerIdentities.clear(); providerVariants.clear(); googleVariantMaps.clear(); providerSelectionEpoch++;
 
     releaseFooter = undefined; releaseEditor = undefined; footerControls = undefined;
     children.clear();
@@ -1941,10 +1983,15 @@ export default function statusFooter(pi: ExtensionAPI): void {
     if (!active) return;
     // Codex limits are per account, not per model; keep them across switches.
     ctx = context; phase = undefined;
-    providerReadings.delete("google"); providerVariants.delete("google");
+    invalidateGoogleUsage();
     account(); void updateQuota(true); void updateCodex(); void updateProviderUsage(); requestRender?.();
   });
-  pi.on("thinking_level_select", () => requestRender?.());
+  pi.on("thinking_level_select", (_event, context) => {
+    if (!active) return;
+    if (context) ctx = context;
+    invalidateGoogleUsage();
+    void updateProviderUsage(); requestRender?.();
+  });
   pi.on("session_info_changed", () => requestRender?.());
   pi.on("session_tree", (_event, context) => {
     if (!active) return;
@@ -1956,7 +2003,7 @@ export default function statusFooter(pi: ExtensionAPI): void {
     releaseInput = mainEditor && mainTui && typeof mainEditor.handleInput === "function"
       ? interactions.wrapEditor(mainEditor, mainTui) : undefined;
     ctx = context; phase = undefined;
-    providerReadings.delete("google"); providerVariants.delete("google");
+    invalidateGoogleUsage();
     restorePreferences(context); account(); attach(); void updateProviderUsage(); requestRender?.();
   });
   pi.on("message_end", (event, context) => {
@@ -2004,16 +2051,18 @@ export default function statusFooter(pi: ExtensionAPI): void {
       if (command === "details") {
         const usage = context.getContextUsage();
         const providerIds = new Set(orderedProviders());
-        const selectedPhysical = context.model?.provider === "waterfall" ? queryWaterfall(pi.events)?.physical : context.model;
+        const selectedRoute = context.model?.provider === "waterfall" ? queryWaterfall(pi.events)?.physical : undefined;
+        const selectedPhysical = context.model?.provider === "waterfall" ? selectedRoute : context.model;
+        const selectedThinking = selectedRoute?.thinkingLevel ?? pi.getThinkingLevel();
         if (selectedPhysical?.provider) providerIds.add(accountUsageProvider(selectedPhysical.provider));
         const accountDetails = [...providerIds].sort((a, b) => usageOrder(a) - usageOrder(b) || a.localeCompare(b)).flatMap((id) => {
           const selected = selectedPhysical && accountUsageProvider(selectedPhysical.provider) === id ? selectedPhysical.id : providerModels.get(id)?.id;
-          const cached = cachedUsage(id, selected);
+          const cached = cachedUsage(id, selected, expectedGoogleVariant(selected, selectedThinking));
           const reading = id === "google" && cached.state === "ready" && cached.windows.some((window) => window.model) && !selectGooglePool(cached, selected ?? "").length
             ? { ...cached, state: "unavailable" as const, windows: [], reason: "No quota has been observed for the selected Google model." } : cached;
           const prefix = `${id} (${reading.source}): `;
           const status = reading.state === "ready" ? reading.windows.map((window) =>
-            `${window.pool ? `${window.pool} ` : ""}${window.model ? `${window.model} ` : ""}${window.label} ${window.used === undefined ? "unknown" : `${percent(window.used)} used`}${window.reset === undefined ? "" : `; reset ${new Date(window.reset).toISOString()}`}`).join("; ") || "windows unknown" :
+            `${window.pool && !window.label.startsWith(window.pool) ? `${window.pool} ` : ""}${window.model && window.scope === undefined ? `${window.model} ` : ""}${window.label}${window.scope ? ` [${window.scope}${window.variant ? `; ${window.variant}` : ""}]` : ""} ${window.used === undefined ? "unknown" : `${percent(window.used)} used`}${window.reset === undefined ? "" : `; reset ${new Date(window.reset).toISOString()}`}`).join("; ") || "windows unknown" :
             reading.state === "not-applicable" ? "no account quota" : `limits unavailable${reading.reason ? `: ${clean(reading.reason)}` : ""}`;
           return [`${prefix}${status}${reading.observedAt === undefined ? "" : `; observed ${new Date(reading.observedAt).toISOString()}`}${reading.detailsUrl ? `; ${reading.detailsUrl}` : ""}`];
         });
@@ -2028,7 +2077,7 @@ export default function statusFooter(pi: ExtensionAPI): void {
           "OAuth identifies the authentication method, not guaranteed subscription billing. Git diff covers all uncommitted tracked changes, not just this agent.",
           "Claude acct comes from Anthropic's usage endpoint (as Claude Code /status) using Pi's own Claude login, refreshed every 5m and by each response's limit headers; without a Pi subscription login, from Claude Code's account (which can differ). Values are percent used; stale means >10m old or reset due.",
           "Codex account comes from ChatGPT's usage endpoint using Pi's separate openai-codex login; shared account readings refresh every 5m. OpenAI sessions use this account row without changing the selected inference provider.",
-          "Provider limits: subscription allowance is distinct from API throttles, balances and cost. Google local OAuth uses its internal read-only quota endpoint; vault custody has no quota capability. Muse CLI usage --json supplies signed-in subscription windows when the validated allowance schema is present.",
+          "Provider limits: subscription allowance is distinct from API throttles, balances and cost. Google local OAuth reads separate shared Gemini 5h/weekly, Argon weekly and exact reasoning-variant quotas; all bind Argon, the only automatic Google waterfall candidate. Vault custody has no quota capability. Muse CLI usage --json supplies signed-in subscription windows when the validated allowance schema is present.",
           ...accountDetails,
           `Working row: ${showWorking ? "on" : "off"} (streamed output tokens, estimated as chars/4 until the provider reports a count, and elapsed time after ${SHOW_TIMER_AFTER_MS / 1000}s). MCP chip: ${showMcp ? "on" : "off"} (built-in MCP servers with non-hidden tools over servers enabled in mcp.json; approximate, and absent when another extension publishes an mcp status).`,
           `Controls: ${JSON.stringify({ ...interactions.describe(), ...footerControls?.describe(), settingsCycle: cycles.snapshot() ? { phase: cycles.snapshot()!.phase, keys: cycles.snapshot()!.settings.map(setting => setting.key), input: cycles.inputStatus() } : undefined })}. This in-memory diagnostic records only the last pointer event, not text or account data.`,

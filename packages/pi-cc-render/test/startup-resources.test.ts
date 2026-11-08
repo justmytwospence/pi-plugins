@@ -1246,6 +1246,27 @@ describe("splash planning", () => {
 });
 
 describe("waterfall-ordered models", () => {
+	test("default three rungs show scoped Argon exhaustion and retain a manual Muse favorite", async () => {
+		const { buildModelsSection } = await import("../src/feature/shell/startup-resources.ts");
+		const now = 1_000_000;
+		const models = [
+			{ provider: "anthropic", id: "claude-opus-5-5" },
+			{ provider: "openai", id: "gpt-6.1-sol" },
+			{ provider: "google", id: "antigravity-gemini-4-argon" },
+			{ provider: "muse-code", id: "muse-wonder-1.0" },
+		];
+		const rungs = [
+			{ provider: "anthropic", model: models[0]!.id, state: "available" as const },
+			{ provider: "openai", model: models[1]!.id, state: "available" as const },
+			{ provider: "google", model: models[2]!.id, state: "exhausted" as const, resetAt: now + 3 * 3_600_000, blockingQuota: { scope: "model" as const, label: "Argon weekly" } },
+		];
+		const section = buildModelsSection(models, [{ provider: "muse-code", id: models[3]!.id }], undefined, { now, rungs })!;
+		expect(section.groups.map((group) => group.label)).toEqual(["1 anthropic", "2 openai", "3 google · Argon weekly · resets 3h", "muse-code"]);
+		expect(section.groups[3]!.items).toEqual(["muse-wonder-1.0"]);
+		const noReset = buildModelsSection(models, [], undefined, { now, rungs: [...rungs.slice(0, 2), { ...rungs[2]!, resetAt: Number.NaN }] })!;
+		expect(noReset.groups.map((group) => group.label)).toEqual(["1 anthropic", "2 openai", "3 google · Argon weekly"]);
+	});
+
 	test("routers are a line above providers, which follow the waterfall with skipped rungs dimmed and labeled", async () => {
 		const { buildModelsSection } = await import("../src/feature/shell/startup-resources.ts");
 		const now = 1_000_000;
@@ -1281,7 +1302,7 @@ describe("waterfall-ordered models", () => {
 		expect(section.groups[1]!.tones).toEqual(["dim"]);
 		expect(section.groups[3]!.tones).toBeUndefined();
 		expect(section.count).toBe(6);
-		// Before the first assessment the fixed order alone scopes and orders providers, without notes.
+		// Before the first assessment an explicitly configured four-rung order scopes providers, without notes.
 		const early = buildModelsSection([
 			{ provider: "waterfall", id: "auto", virtual: true },
 			{ provider: "openrouter", id: "openai/gpt-6.1-sol" },

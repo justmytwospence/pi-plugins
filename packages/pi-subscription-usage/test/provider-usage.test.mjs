@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { describe, it, vi, afterEach } from "vitest";
 import {
   antigravityUserAgent, createProviderUsageCollector, dispatchProviderUsage, isUsageStale,
+  ARGON_MODEL, argonQuotaIssue, argonQuotaVariant, isArgonQuotaWindow, isArgonVariantQuotaWindow, isSharedGeminiQuotaWindow,
   parseGoogleModels, parseGoogleSummary, parseMuseUsage, selectGooglePool,
 } from "../src/provider-usage.ts";
 
@@ -12,7 +13,7 @@ const muse = { provider: "muse-sdk", sourceId: "muse-account" };
 // Synthetic, sanitized native envelope: no account identifiers or real CLI output.
 const museEnvelope = { allowance: null, hint: "synthetic hint", reason: "synthetic reason", schemaVersion: 1 };
 const museAllowance = { asOfMs: now - 1_000, window: { usedPercent: 0, resetsAtMs: now + 60_000 }, weekly: { usedPercent: 100, resetsAtMs: now + 600_000 } };
-const argon = { ...google, model: "antigravity-gemini-4-argon" };
+const argon = { ...google, model: "antigravity-gemini-4-argon", variant: "gemini-4-argon-medium" };
 const json = (body, status = 200) => new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
 const project = () => json({ cloudaicompanionProject: { id: "synthetic-project" } });
 const summary = () => json({ groups: [{ buckets: [{ bucketId: "gemini-5h", remainingFraction: 0.5 }] }] });
@@ -32,8 +33,8 @@ describe("provider usage parsers", () => {
       { bucketId: "3p-weekly", remainingFraction: -1, resetTime: 42 }, null,
     ] }] }, now);
     assert.deepEqual(result, { provider: "google", source: "Google Antigravity subscription", state: "ready", observedAt: now, windows: [
-      { label: "5h", pool: "Gemini", used: 25, reset: Date.parse(reset) },
-      { label: "weekly", pool: "Gemini", used: 100 },
+      { label: "Gemini 5h", pool: "Gemini", scope: "shared", quotaId: "gemini-5h", used: 25, reset: Date.parse(reset) },
+      { label: "Gemini weekly", pool: "Gemini", scope: "shared", quotaId: "gemini-weekly", used: 100 },
     ] });
     assert.deepEqual(selectGooglePool(result, "antigravity-gemini-pro"), result.windows.slice(0, 2));
     assert.deepEqual(selectGooglePool(result, "antigravity-claude-sonnet"), result.windows.slice(2));
@@ -63,9 +64,9 @@ describe("provider usage parsers", () => {
 
   it("parses model fallback without inventing a window duration", () => {
     const payload = { models: { "claude-sonnet": { quotaInfo: { remainingFraction: 0.25, resetTime: reset } } } };
-    assert.deepEqual(parseGoogleModels(payload, "antigravity-claude-sonnet", now).windows, [{ label: "model", model: "antigravity-claude-sonnet", pool: "third-party", used: 75, reset: Date.parse(reset) }]);
+    assert.deepEqual(parseGoogleModels(payload, "antigravity-claude-sonnet", now).windows, [{ label: "model", model: "antigravity-claude-sonnet", pool: "third-party", scope: "model", quotaId: "model:claude-sonnet", used: 75, reset: Date.parse(reset) }]);
     const fallback = parseGoogleModels({ models: { "antigravity-gemini-pro": { quotaInfo: { resetTime: reset } } } }, google.model, now);
-    assert.deepEqual(fallback.windows, [{ label: "model", model: google.model, pool: "Gemini", reset: Date.parse(reset) }]);
+    assert.deepEqual(fallback.windows, [{ label: "model", model: google.model, pool: "Gemini", scope: "model", quotaId: `model:${google.model}`, reset: Date.parse(reset) }]);
     assert.deepEqual(selectGooglePool(fallback, google.model), fallback.windows);
     assert.deepEqual(selectGooglePool(fallback, "antigravity-gemini-flash"), [], "another model in the same pool cannot borrow a model-specific reading");
     for (const value of [null, {}, { models: { "gemini-pro": { quotaInfo: { remainingFraction: Infinity } } } }]) assert.equal(parseGoogleModels(value, google.model, now).state, "unavailable");
@@ -121,6 +122,55 @@ describe("provider usage parsers", () => {
   });
 });
 
+describe("scoped Argon identity", () => {
+  const complete = (variant = argon.variant) => {
+    const summary = parseGoogleSummary({ groups: [{ buckets: ["gemini-5h", "gemini-weekly", "gemini-argon-wtu-weekly", "3p-5h"].map(bucketId => ({ bucketId, remainingFraction: 0.5 })) }] }, now);
+    const model = parseGoogleModels({ models: { [variant]: { quotaInfo: { remainingFraction: 0.5 } } } }, ARGON_MODEL, now, variant);
+    return { ...summary, windows: [...summary.windows, ...model.windows] };
+  };
+  it("maps all supported levels, overrides and null/unknown maps without a default", () => {
+    for (const [levels, variant] of [[["off", "minimal", "low"], "low"], [["medium"], "medium"], [["high", "xhigh", "max"], "high"]]) {
+      for (const level of levels) assert.equal(argonQuotaVariant(level), `gemini-4-argon-${variant}`);
+    }
+    for (const target of ["low", "medium", "high"]) assert.equal(argonQuotaVariant("high", { high: target }), `gemini-4-argon-${target}`);
+    assert.equal(argonQuotaVariant("high", { high: undefined }), "gemini-4-argon-high");
+    assert.equal(argonQuotaVariant("high", { medium: "low" }), "gemini-4-argon-high");
+    for (const value of [null, "unknown", "gemini-4-argon-high", ""]) assert.equal(argonQuotaVariant("high", { high: value }), undefined);
+    assert.equal(argonQuotaVariant("unknown"), undefined);
+  });
+  it("checks stable scope identity, never labels or another model's shared pool", () => {
+    const usage = complete();
+    usage.windows.forEach(window => { window.label = "renamed"; });
+    assert.equal(argonQuotaIssue(usage, argon.variant), undefined);
+    assert.deepEqual(usage.windows.map(isSharedGeminiQuotaWindow), [true, true, false, false, false]);
+    assert.deepEqual(usage.windows.map(isArgonQuotaWindow), [false, false, true, false, true]);
+    assert.equal(isArgonVariantQuotaWindow(usage.windows[4]), true);
+    assert.equal(isArgonVariantQuotaWindow({ ...usage.windows[4], variant: "gemini-4-argon-high" }), false);
+    assert.deepEqual(selectGooglePool(usage, "antigravity-gemini-pro"), usage.windows.slice(0, 2));
+    assert.deepEqual(selectGooglePool(usage, "antigravity-claude-sonnet"), [usage.windows[3]]);
+    assert.deepEqual(selectGooglePool(usage, ARGON_MODEL), [...usage.windows.slice(0, 3), usage.windows[4]]);
+    assert.equal(usage.windows[3].scope, "shared");
+    assert.equal(usage.windows[3].quotaId, "3p-5h");
+  });
+  it("reports each missing binding scope in order", () => {
+    const usage = complete();
+    const required = ["gemini-5h", "gemini-weekly", "gemini-argon-wtu-weekly", `model:${argon.variant}`];
+    const reasons = ["Shared Gemini 5h quota is unknown.", "Shared Gemini weekly quota is unknown.", "Argon weekly quota is unknown.", "Argon medium quota is unknown."];
+    required.forEach((quotaId, index) => {
+      assert.equal(argonQuotaIssue({ ...usage, windows: usage.windows.filter(window => window.quotaId !== quotaId) }, argon.variant), reasons[index]);
+      assert.equal(argonQuotaIssue({ ...usage, windows: usage.windows.filter(window => !required.slice(index).includes(window.quotaId)) }, argon.variant), reasons[index]);
+    });
+    for (const [field, value] of [["scope", "model"], ["model", "antigravity-gemini-pro"], ["variant", "gemini-4-argon-high"], ["quotaId", "model:gemini-4-argon-high"], ["pool", "third-party"]]) {
+      const malformed = structuredClone(usage);
+      malformed.windows.at(-1)[field] = value;
+      assert.equal(argonQuotaIssue(malformed, argon.variant), reasons[3]);
+    }
+    assert.equal(argonQuotaIssue(complete("gemini-4-argon-high"), argon.variant), reasons[3]);
+    assert.equal(argonQuotaIssue({ ...usage, state: "unavailable", reason: "scope failed" }, argon.variant), "scope failed");
+    assert.equal(argonQuotaIssue({ ...usage, state: "unavailable" }, argon.variant), "Antigravity quota is unavailable.");
+  });
+});
+
 describe("dispatch", () => {
   it("routes only supported sources and safely describes unsupported authentication", () => {
     assert.equal(dispatchProviderUsage(google, now), undefined);
@@ -161,7 +211,7 @@ describe("collector", () => {
       calls.push({ url, init });
       return calls.length === 1 ? json({ cloudaicompanionProject: "synthetic-project" }) : calls.length === 2 ? json({}, status) : json({ models: { "gemini-pro": { quotaInfo: { remainingFraction: 0.5 } } } });
     } });
-    assert.deepEqual((await collector.refresh(google)).windows, [{ label: "model", model: google.model, pool: "Gemini", used: 50 }]);
+    assert.deepEqual((await collector.refresh(google)).windows, [{ label: "model", model: google.model, pool: "Gemini", scope: "model", quotaId: "model:gemini-pro", used: 50 }]);
     assert.match(calls[2].url, /fetchAvailableModels$/);
     assert.deepEqual(JSON.parse(calls[2].init.body), { project: "synthetic-project" });
     collector.dispose();
@@ -186,9 +236,10 @@ describe("collector", () => {
     const result = await collector.refresh(argon);
     assert.equal(result.state, "ready");
     assert.deepEqual(result.windows, [
-      { label: "5h", pool: "Gemini", used: 50 }, { label: "weekly", pool: "Gemini", used: 25 },
-      { label: "Argon weekly", pool: "Gemini", model: argon.model, used: 95 },
-      { label: "model", pool: "Gemini", model: argon.model, used: 75, reset: Date.parse(reset) },
+      { label: "Gemini 5h", pool: "Gemini", scope: "shared", quotaId: "gemini-5h", used: 50 },
+      { label: "Gemini weekly", pool: "Gemini", scope: "shared", quotaId: "gemini-weekly", used: 25 },
+      { label: "Argon weekly", pool: "Gemini", model: argon.model, scope: "model", quotaId: "gemini-argon-wtu-weekly", used: 95 },
+      { label: "Argon medium", pool: "Gemini", model: argon.model, scope: "variant", quotaId: "model:gemini-4-argon-medium", variant: argon.variant, used: 75, reset: Date.parse(reset) },
     ]);
     assert.equal(calls.length, 3);
     assert.deepEqual(new Set(calls.slice(1).map(call => new URL(call.url).pathname)), new Set(["/v1internal:retrieveUserQuotaSummary", "/v1internal:fetchAvailableModels"]));
@@ -205,13 +256,15 @@ describe("collector", () => {
         { bucketId: "gemini-argon-wtu-weekly", remainingFraction: 0.7 },
       ] }] });
       return json({ models: {
+        "gemini-4-argon-low": { quotaInfo: { remainingFraction: 0.9 } },
         "gemini-4-argon-high": { quotaInfo: { remainingFraction: 0.01 } },
         "gemini-4-argon-medium": { quotaInfo: { remainingFraction: 0.8 } },
       } });
     } });
+    const low = await collector.refresh({ ...argon, variant: "gemini-4-argon-low" });
     const medium = await collector.refresh({ ...argon, variant: "gemini-4-argon-medium" });
     const high = await collector.refresh({ ...argon, variant: "gemini-4-argon-high" });
-    for (const [result, expected] of [[medium, [20, 10, 30, 20]], [high, [20, 10, 30, 99]]]) {
+    for (const [result, expected] of [[low, [20, 10, 30, 10]], [medium, [20, 10, 30, 20]], [high, [20, 10, 30, 99]]]) {
       assert.equal(result.state, "ready", result.reason);
       assert.equal(result.windows.length, expected.length);
       result.windows.forEach((window, index) => assert.ok(Math.abs(window.used - expected[index]) < 1e-9));
@@ -235,6 +288,18 @@ describe("collector", () => {
     const result = await collector.refresh(argon);
     assert.equal(result.state, "unavailable");
     assert.deepEqual(result.windows, []);
+    assert.match(result.reason, new RegExp({ "5h": "Shared Gemini 5h quota is unknown", weekly: "Shared Gemini weekly quota is unknown", "Argon weekly": "Argon weekly quota is unknown", model: "Argon medium quota is unavailable" }[missing]));
+    collector.dispose();
+  });
+
+  it("requires a recognized explicit Argon variant before project discovery", async () => {
+    const fetch = vi.fn();
+    const collector = createProviderUsageCollector({ fetch });
+    assert.equal((await collector.refresh({ ...argon, variant: undefined })).reason, "The exact Argon reasoning variant is unknown.");
+    for (const variant of ["", "gemini-4-argon-unknown", "medium"]) {
+      assert.equal((await collector.refresh({ ...argon, variant })).reason, "Unknown Argon model variant.");
+    }
+    assert.equal(fetch.mock.calls.length, 0);
     collector.dispose();
   });
 
@@ -264,6 +329,7 @@ describe("collector", () => {
       const result = await collector.refresh(argon);
       assert.equal(result.state, "unavailable");
       assert.deepEqual(result.windows, []);
+      assert.match(result.reason, unavailableEndpoint === "summary" ? /Shared Gemini and Argon weekly quota/ : /Argon medium quota/);
       assert.equal(calls.length, 3); collector.dispose();
     }
   });
@@ -308,6 +374,23 @@ describe("collector", () => {
     assert.deepEqual(failed.windows, []);
     assert.strictEqual(await collector.refresh(argon), failed);
     assert.equal(attempts, 2);
+    collector.dispose();
+  });
+
+  it.each(["retrieveUserQuotaSummary", "fetchAvailableModels"])("bounds and scopes a timeout from %s without returning partial quota", async endpoint => {
+    const signals = [];
+    const collector = createProviderUsageCollector({ now: () => now, fetch: async (url, init) => {
+      signals.push(init.signal);
+      if (url.endsWith("loadCodeAssist")) return project();
+      if (url.endsWith(endpoint)) throw new DOMException("synthetic timeout detail", "TimeoutError");
+      if (url.endsWith("retrieveUserQuotaSummary")) return json({ groups: [{ buckets: ["gemini-5h", "gemini-weekly", "gemini-argon-wtu-weekly"].map(bucketId => ({ bucketId, remainingFraction: 0.5 })) }] });
+      return json({ models: { [argon.variant]: { quotaInfo: { remainingFraction: 0.5 } } } });
+    } });
+    const result = await collector.refresh(argon);
+    assert.equal(result.state, "unavailable"); assert.deepEqual(result.windows, []);
+    assert.match(result.reason, endpoint === "retrieveUserQuotaSummary" ? /Shared Gemini and Argon weekly quota request failed or timed out/ : /Argon medium quota request failed or timed out/);
+    assert.doesNotMatch(result.reason, /synthetic timeout detail/);
+    assert.equal(signals.length, 3); signals.forEach(signal => assert.ok(signal instanceof AbortSignal));
     collector.dispose();
   });
 

@@ -1,6 +1,6 @@
 // Package-local contract; optional consumers copy this file, never import a sibling runtime.
 export const WATERFALL_CHANNEL = "pi-plugins.model-waterfall.v1";
-/** One fixed waterfall rung, as last assessed in the background. Display-only. */
+/** One configured active waterfall rung, as last assessed in the background. Display-only. */
 export interface WaterfallRung {
   provider: string;
   model: string;
@@ -10,13 +10,15 @@ export interface WaterfallRung {
   reason?: string;
   /** When every exhausted window has reset (epoch ms). */
   resetAt?: number;
+  /** First applicable quota at the waterfall threshold, when its scope is known. */
+  blockingQuota?: { scope: "shared" | "model" | "variant"; label: string };
 }
 export interface WaterfallSnapshot {
   version: 1;
   physical?: { provider: string; id: string; thinkingLevel: string; quotaVariant?: string };
   skipped: Array<{ provider: string; reason: string }>;
   observedAt: number;
-  /** The fixed rungs in waterfall order, present from load, before any assessment. */
+  /** The configured active rungs in waterfall order, present from load, before any assessment. */
   order?: Array<{ provider: string; model: string }>;
   /** Rungs in waterfall order; absent until the first background assessment. */
   rungs?: WaterfallRung[];

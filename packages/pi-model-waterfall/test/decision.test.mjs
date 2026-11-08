@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "vitest";
-import { chooseWaterfall, evaluateAllowance, forPhysicalModel } from "../src/decision.ts";
+import { chooseWaterfall, evaluateAllowance, inspectAllowance, forPhysicalModel, DEFAULT_WATERFALL_ORDER, SUPPORTED_WATERFALL_MODELS, waterfallModels } from "../src/decision.ts";
+import { rungState } from "../src/index.ts";
 
 const now = 1_800_000_000_000;
 const reading = (windows, observedAt = now) => ({ provider: "anthropic", source: "subscription", state: "ready", observedAt, windows });
@@ -39,10 +40,49 @@ describe("subscription waterfall decision", () => {
   it("keeps only exact model-specific windows, plus shared ones", () => {
     assert.deepEqual(forPhysicalModel(reading([window(12), { ...window(99), model: "other" }, { ...window(13), model: "ours" }]), "ours").windows.map(w => w.used), [12, 13]);
   });
-  it("treats a blocked Codex account as exhausted even below 95%", () => {
+  it("treats a blocked Codex account as unknown even below 95%", () => {
     assert.match(evaluateAllowance({ ...reading([window(10)]), access: { allowed: true, limitReached: true } }, now), /limit reached/);
     assert.match(evaluateAllowance({ ...reading([window(10)]), access: { allowed: false } }, now), /limit reached/);
     assert.equal(evaluateAllowance({ ...reading([window(10)]), access: { allowed: true, limitReached: false } }, now), undefined);
+  });
+  it("separates the supported catalog from the three default active rungs", () => {
+    assert.deepEqual(DEFAULT_WATERFALL_ORDER, ["anthropic", "openai", "google"]);
+    assert.deepEqual(SUPPORTED_WATERFALL_MODELS.map(model => model.provider), [...DEFAULT_WATERFALL_ORDER, "muse-code"]);
+    assert.deepEqual(waterfallModels(["muse-code", "google"]), [SUPPORTED_WATERFALL_MODELS[3], SUPPORTED_WATERFALL_MODELS[2]]);
+    assert.deepEqual(waterfallModels([]), []);
+  });
+  it("excludes unrelated Google pools and model windows", () => {
+    const shared = { ...window(10), pool: "Gemini", scope: "shared", quotaId: "gemini-5h" };
+    const argon = { ...window(97), pool: "Gemini", model: "antigravity-gemini-4-argon" };
+    const usage = { ...reading([shared, argon, { ...window(100), pool: "third-party" }, { ...window(100), pool: "Gemini", model: "antigravity-gemini-pro" }]), provider: "google" };
+    assert.deepEqual(forPhysicalModel(usage, argon.model).windows, [shared, argon]);
+    assert.deepEqual(forPhysicalModel(usage, "antigravity-gemini-flash").windows, [shared]);
+  });
+  it("inspects every window before claiming exhaustion", () => {
+    const blocked = { ...window(100, "Argon weekly"), scope: "model", reset: now + 120_000 };
+    const valid = window(95, "Argon high");
+    const result = inspectAllowance(reading([blocked, valid]), now);
+    assert.deepEqual(result, { state: "exhausted", reason: "Argon weekly allowance is 100% used (95% waterfall threshold).", resetAt: now + 120_000, blockingQuota: { scope: "model", label: "Argon weekly" } });
+    for (const bad of [window(undefined), window(NaN), { ...valid, reset: undefined }, { ...valid, reset: NaN }, { ...valid, reset: now }, { ...valid, observedAt: now - 600_000 }]) {
+      const inspected = inspectAllowance(reading([blocked, bad]), now);
+      assert.equal(inspected.state, "unknown");
+      assert.equal(inspected.resetAt, undefined);
+      assert.equal(inspected.blockingQuota, undefined);
+      assert.equal(evaluateAllowance(reading([blocked, bad]), now), inspected.reason);
+    }
+    assert.deepEqual(inspectAllowance(reading([window(94.99)]), now), { state: "available" });
+    assert.equal(inspectAllowance({ ...reading([blocked]), access: { allowed: false } }, now).state, "unknown");
+  });
+  it("publishes only fresh, valid scoped exhaustion, never stale reset claims", () => {
+    const w = { ...window(95, "Argon high"), scope: "variant" };
+    const checked = { ...candidate("google", [w]), model: "antigravity-gemini-4-argon" };
+    assert.deepEqual(rungState(checked, now), { provider: "google", model: checked.model, ...inspectAllowance(checked.reading, now) });
+    for (const usage of [reading([w], now - 600_000), reading([{ ...w, reset: now }]), reading([w, window(undefined)])]) {
+      const state = rungState({ ...checked, reading: usage }, now);
+      assert.equal(state.state, "unknown"); assert.equal(state.resetAt, undefined); assert.equal(state.blockingQuota, undefined);
+    }
+    assert.equal(rungState({ ...checked, verified: false, reason: "unverified" }, now).state, "unknown");
+    assert.equal(rungState({ ...checked, reading: { ...checked.reading, access: { limitReached: true } } }, now).state, "unknown");
   });
   it("chooses a Muse rung that has no usage yet without windows", () => {
     const decision = chooseWaterfall([candidate("anthropic", [window(99)]), { provider: "muse-code", model: "m", verified: true, noUsage: true, reading: reading([]) }], now);

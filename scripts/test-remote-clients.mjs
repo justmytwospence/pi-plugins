@@ -39,6 +39,7 @@ const { SplitRoot, dividerLines } = await jiti.import('../packages/pi-sidebar/sr
 const { DEFAULT_MIN_COLUMNS, DEFAULT_RATIO } = await jiti.import('../packages/pi-sidebar/src/config.ts');
 const { sidebarScreen, sidebarFamilyScreens } = await import('./remote-clients/sidebar.mjs');
 const { startupSplashScreens } = await import('./remote-clients/startup-splash.mjs');
+const { buildModelsSection, renderSection } = await jiti.import('../packages/pi-cc-render/src/feature/shell/startup-resources.ts');
 const { gatePickerDialogs } = await import('./remote-clients/workflow-pickers.mjs');
 const { system1Dialogs } = await import('./remote-clients/system1.mjs');
 const { subagentScreens } = await import('./remote-clients/subagents.mjs');
@@ -706,7 +707,17 @@ for (const width of [46, 120, 180]) {
 // half focused): each client must read the last two as it reads the first.
 const editor = new CustomEditor({ ...tui, terminal: { rows: HEIGHT, columns: 180 } }, themeModule.getEditorTheme(), kb, { paddingX: 0 });
 editor.setText('next step');
-const usageReady = { provider: 'google', source: 'Google Antigravity subscription', state: 'ready', observedAt: NOW, windows: [{ label: '5h', used: 25, reset: NOW + 3_600_000 }] };
+const usageReady = { provider: 'google', source: 'Google Antigravity subscription', state: 'ready', observedAt: NOW, windows: [{ label: 'Gemini 5h', pool: 'Gemini', scope: 'shared', quotaId: 'gemini-5h', used: 25, reset: NOW + 3_600_000 }] };
+const scopedArgonUsage = label => ({
+  ...usageReady,
+  windows: [
+    usageReady.windows[0],
+    { label: 'Gemini weekly', pool: 'Gemini', scope: 'shared', quotaId: 'gemini-weekly', used: 20, reset: NOW + 3 * 86400_000 },
+    { label: 'Argon weekly', pool: 'Gemini', scope: 'model', quotaId: 'gemini-argon-wtu-weekly', model: 'antigravity-gemini-4-argon', used: label === 'Argon weekly' ? 100 : 30, reset: NOW + 3_600_000 },
+    { label: 'Argon high', pool: 'Gemini', scope: 'variant', quotaId: 'model:gemini-4-argon-high', model: 'antigravity-gemini-4-argon', variant: 'gemini-4-argon-high', used: label === 'Argon high' ? 100 : 35, reset: NOW + 3_600_000 },
+  ],
+});
+const scopedArgonFixtures = ['Argon weekly', 'Argon high'].map(label => ({ label, usage: scopedArgonUsage(label) }));
 const usageFable = used => ({ provider: 'anthropic', source: 'Anthropic subscription', state: 'ready', observedAt: NOW, windows: [{ label: 'Fable', used, reset: NOW + 3 * 86400_000 }] });
 const fable71 = usageFable(71);
 const fable100 = usageFable(100);
@@ -716,10 +727,11 @@ const usageLocal = { provider: 'ollama', source: 'Local inference', state: 'not-
 for (const width of [46, 120, 180]) {
   const blocked = statusFooter(width, modeStatuses('plan', 'auto'), { compact: true, providerUsage: [usageReady, usageUnavailable], providerUsageMore: 3 });
   assert.equal(blocked.length, 1);
-  assert.doesNotMatch(stripVTControlCharacters(blocked[0]), /Google|OpenAI|\+3 more/u);
-  for (const usage of [fable71, fable100]) {
-    const fableBlocked = statusFooter(width, modeStatuses('plan', 'auto'), { compact: true, providerUsage: [usage] });
-    assert.equal(fableBlocked.length, 1, 'Fable usage must not add a blocked footer row');
+  assert.doesNotMatch(stripVTControlCharacters(blocked[0]), /Google|Antigravity|OpenAI|\+3 more/u);
+  for (const usage of [fable71, fable100, ...scopedArgonFixtures.map(fixture => fixture.usage)]) {
+    const usageBlocked = statusFooter(width, modeStatuses('plan', 'auto'), { compact: true, providerUsage: [usage] });
+    assert.equal(usageBlocked.length, 1, 'account usage must not add a blocked footer row');
+    assert.doesNotMatch(usageBlocked.map(stripVTControlCharacters).join('\n'), /Antigravity|Argon/u);
   }
 }
 // Match the real helper's JSON-only snapshot contract. Rendering is delegated to its
@@ -792,6 +804,12 @@ const FOOTERS = [
   { name: 'high status count', statuses: modeStatuses('plan', 'yolo'), highStatus: true },
   { name: 'heads-up waiting', statuses: new Map([...modeStatuses('plan', 'auto'), ['sidebar-headsup', '\u2726 heads up (2) \u00b7 risk: Main skipped the failing integration tests and reported green']]) },
   { name: 'provider ready', statuses: modeStatuses('plan', 'auto'), providerUsage: [usageReady] },
+  ...scopedArgonFixtures.flatMap(({ label, usage }) => ['Independent', 'Linked', 'Exec'].flatMap(mode => [false, true].map(highStatus => ({
+    name: `${mode} ${label} 100%${highStatus ? ' high status' : ''}`,
+    statuses: modeStatuses(mode === 'Exec' ? 'exec' : 'plan', 'auto', mode === 'Exec' ? 'implementing' : undefined),
+    ...(mode === 'Independent' ? {} : { flow: flowSnapshot(mode === 'Exec' ? 'exec' : 'plan') }),
+    providerUsage: [usage], scopedQuota: label, highStatus,
+  })))),
   { name: 'Fable 71%', statuses: modeStatuses('plan', 'auto'), providerUsage: [fable71] },
   { name: 'Fable 100% high status', statuses: modeStatuses('plan', 'yolo'), providerUsage: [fable100], highStatus: true },
   { name: 'provider unavailable', statuses: modeStatuses('plan', 'auto'), providerUsage: [usageUnavailable] },
@@ -850,7 +868,11 @@ for (const width of [46, 120, 180]) {
       }
       if (fixture.providerUsage?.length) {
         assert.ok(fixture.providerUsage.length <= 2, 'at most two account rows');
-        if (fixture.providerUsage.includes(usageReady)) assert.match(rendered, /Google.*5h.*25%/u, 'ready usage keeps its measured percentage');
+        if (fixture.providerUsage.includes(usageReady)) assert.match(rendered, /Antigravity.*Gemini 5h.*25%/u, 'ready usage keeps its account, scoped label and measured percentage');
+        if (fixture.scopedQuota) {
+          assert.match(rendered, new RegExp(`Antigravity.*${fixture.scopedQuota} 100%`, 'u'), 'the exhausted Argon scope wins over healthy shared detail, even at 46 columns');
+          assert.equal(footerLines.length + (withActivity ? 2 : 0), fixture.highStatus ? 13 : (fixture.flow ? 5 : 6) + (withActivity ? 2 : 0), 'scoped quota stays within the existing row budget');
+        }
         if (fixture.providerUsage.includes(usageUnavailable)) assert.match(rendered, /OpenAI.*limits unavailable/u, 'unavailable usage is explicit');
         if (fixture.providerUsage.includes(usageLocal)) assert.match(rendered, /Local.*no account quota/u, 'local usage is not presented as a subscription');
         if (fixture.providerUsageMore && width >= 120) assert.match(rendered, /OpenAI.*\+3 more/u, 'additional sources are counted on the second account row');
@@ -867,6 +889,8 @@ for (const width of [46, 120, 180]) {
         const { lines: screen } = sidebarScreen({ width, height: HEIGHT,
           ...(fixture.history ? { transcript: fixture.history } : {}),
           dock: (w) => editor.render(w), footer: rows, ...options });
+        if (fixture.scopedQuota) assert.match(screen.map(stripVTControlCharacters).join('\n'),
+          new RegExp(`Antigravity.*${fixture.scopedQuota} 100%`, 'u'), 'Sidebar and activity rows retain the critical Argon scope');
         if (fixture.history) {
           const history = fixture.history.render(width);
           assert.equal(history.length, 1, 'settings history stays a single content row');
@@ -882,25 +906,63 @@ for (const width of [46, 120, 180]) {
 
 // The startup map/resources stay above the real editor and the native MCP manager dock.
 // Both parsers must find only the actual editor when idle, never a map tile or manager control.
-const splashStart = screens.length;
-screens.push(...(await startupSplashScreens({
-  theme, getEditorTheme: themeModule.getEditorTheme, kb, sidebarScreen,
-  idleFooter: width => idleFooter(width, { statuses: modeStatuses('plan', 'auto') }), height: 64,
-  footerVariants: [
-    ...FOOTERS.filter(fixture => ['plan/auto', 'exec/auto', 'high status count', 'Linked work', 'Linked plan', 'Linked exec', 'Linked unavailable', 'Linked high status count'].includes(fixture.name)).flatMap(fixture => [
-      { name: fixture.name, idleFooter: width => idleFooter(width, fixture) },
-      { name: `${fixture.name} + activity`, idleFooter: width => [...activity(width), ...idleFooter(width, fixture, 2)] },
-    ]),
-    ...[false, true].flatMap(linked => [false, true].map(withActivity => ({
-      name: `${linked ? 'Linked' : 'Independent'} blocked${withActivity ? ' + activity' : ''}`,
-      herdrModelCard: true,
-      idleFooter: width => [
-        ...(withActivity ? activity(width) : []),
-        ...statusFooter(width, modeStatuses('plan', 'auto'), { compact: true, phase: 'waiting', ...(linked ? { flow: flowSnapshot('plan') } : {}) }),
-      ],
-    }))),
-  ],
-})).map(screen => screen.idle === undefined ? screen : { ...screen, idle: screen.idle + splashStart }));
+const splashFooterVariants = [
+  ...FOOTERS.filter(fixture => ['plan/auto', 'exec/auto', 'high status count', 'Linked work', 'Linked plan', 'Linked exec', 'Linked unavailable', 'Linked high status count'].includes(fixture.name)).flatMap(fixture => [
+    { name: fixture.name, idleFooter: width => idleFooter(width, fixture) },
+    { name: `${fixture.name} + activity`, idleFooter: width => [...activity(width), ...idleFooter(width, fixture, 2)] },
+  ]),
+  ...[false, true].flatMap(linked => [false, true].map(withActivity => ({
+    name: `${linked ? 'Linked' : 'Independent'} blocked${withActivity ? ' + activity' : ''}`,
+    herdrModelCard: true,
+    idleFooter: width => [
+      ...(withActivity ? activity(width) : []),
+      ...statusFooter(width, modeStatuses('plan', 'auto'), { compact: true, phase: 'waiting', ...(linked ? { flow: flowSnapshot('plan') } : {}) }),
+    ],
+  }))),
+];
+const splashModels = [
+  { name: 'default' },
+  ...scopedArgonFixtures.map(({ label }) => {
+    // The default automatic order has exactly these three rungs. An installed Muse
+    // favorite remains a manual choice, never a numbered automatic fallback.
+    const order = [
+      { provider: 'anthropic', model: 'claude-opus-5-5' },
+      { provider: 'openai', model: 'gpt-6.1-sol' },
+      { provider: 'google', model: 'antigravity-gemini-4-argon' },
+    ];
+    const manual = { provider: 'muse-code', id: 'muse-wonder-1.0', contextWindow: 200_000 };
+    const available = [
+      ...order.map(({ provider, model }) => ({ provider, id: model, contextWindow: 200_000 })), manual,
+    ];
+    const modelSection = buildModelsSection(available, [available[0], manual], available[0], {
+      order, now: NOW,
+      rungs: order.map(rung => rung.provider === 'google' ? {
+        ...rung, state: 'exhausted', resetAt: NOW + 3_600_000,
+        reason: `${label} allowance is 100% used (95% waterfall threshold).`,
+        blockingQuota: { scope: label === 'Argon weekly' ? 'model' : 'variant', label },
+      } : { ...rung, state: 'available' }),
+    });
+    assert.ok(modelSection, 'the real builder produces scoped Google-blocked models');
+    for (const width of [46, 120, 180]) {
+      const rendered = renderSection(modelSection, width, theme).map(stripVTControlCharacters).join('\n');
+      assert.match(rendered, new RegExp(`3 google · ${label} · resets 1h`, 'u'), 'the splash names only the binding Google quota');
+      assert.match(rendered, /1 anthropic/u);
+      assert.match(rendered, /2 openai/u);
+      assert.match(rendered, /muse-code/u, 'the retained manual favorite remains visible');
+      assert.doesNotMatch(rendered, /\d muse-code/u, 'Muse is not in the default active order');
+    }
+    return { name: `${label} blocked`, modelSection };
+  }),
+];
+for (const { name, modelSection } of splashModels) {
+  const splashStart = screens.length;
+  screens.push(...(await startupSplashScreens({
+    theme, getEditorTheme: themeModule.getEditorTheme, kb, sidebarScreen,
+    idleFooter: width => idleFooter(width, { statuses: modeStatuses('plan', 'auto') }), height: 64,
+    ...(modelSection ? { modelSection } : {}),
+    footerVariants: splashFooterVariants.map(fixture => ({ ...fixture, name: `${fixture.name}, ${name} models` })),
+  })).map(screen => screen.idle === undefined ? screen : { ...screen, idle: screen.idle + splashStart }));
+}
 
 // Actual running/ended SessionViews, their native select, and the restored child/main composers.
 // Keep these alongside the synthetic family-host matrix: both clients read the full native frame.

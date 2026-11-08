@@ -907,12 +907,12 @@ test("waterfall footer reads only the routed Argon variant, never a generic medi
     let route = { version: 1, physical: { provider: "google", id: "antigravity-gemini-4-argon", thinkingLevel: "high", quotaVariant: "gemini-4-argon-high" }, skipped: [], observedAt: Date.now() };
     h.pi.events.on("pi-plugins.model-waterfall.v1", request => { if (request.kind === "query") request.snapshot = structuredClone(route); });
     await h.handlers.get("session_start")({}, h.ctx);
-    await vi.waitFor(() => assert.match(plain(h.footer.render(160).join("\n")), /Google.*model 99% used/));
+    await vi.waitFor(() => assert.match(plain(h.footer.render(160).join("\n")), /Antigravity.*Argon high 99% used/));
     assert.equal(called.filter(url => url.endsWith("fetchAvailableModels")).length, 1);
     route = { ...route, physical: { ...route.physical, thinkingLevel: "medium", quotaVariant: "gemini-4-argon-medium" } };
     await h.handlers.get("model_select")({}, h.ctx);
-    assert.doesNotMatch(plain(h.footer.render(160).join("\n")), /model 99% used/);
-    await vi.waitFor(() => assert.match(plain(h.footer.render(160).join("\n")), /Google.*model 20% used/));
+    assert.doesNotMatch(plain(h.footer.render(160).join("\n")), /Argon high 99% used/);
+    await vi.waitFor(() => assert.match(plain(h.footer.render(160).join("\n")), /Antigravity.*Argon medium 20% used/));
   } finally {
     await h?.handlers.get("session_shutdown")?.({}, h.ctx);
     globalThis.fetch = originalFetch;
@@ -2496,8 +2496,9 @@ test("provider usage layout preserves unknown windows and reset-due stale readin
     const rows = mod.renderFooter({ ...fixture(), quotas: [], providerUsage: [reading] }, width, theme).map(plain);
     assert.ok(rows.every((row) => visibleWidth(row) <= width));
     const quota = rows.at(-1);
-    assert.match(quota, /Google/);
-    assert.match(quota, /stale.*reset due/);
+    assert.match(quota, /Antigravity/);
+    assert.match(quota, /reset due/);
+    if (width >= 120) assert.match(quota, /stale/);
     if (width >= 120) {
       assert.match(quota, /5h 30% used/);
       assert.match(quota, /weekly unknown/);
@@ -2572,7 +2573,7 @@ test("provider snapshots select Google pools, child sources and invalidate chang
   h.ctx.modelRegistry.getApiKeyForProvider = async () => { assert.equal(rendering, false); return token; };
   try {
     await h.handlers.get("session_start")({}, h.ctx);
-    await vi.waitFor(() => assert.match(plain(h.footer.render(180).join("\n")), /Google\s+5h 30% used.*weekly unknown/));
+    await vi.waitFor(() => assert.match(plain(h.footer.render(180).join("\n")), /Antigravity\s+Gemini 5h 30% used.*Gemini weekly unknown/));
     const chrome = { version: 1 };
     h.pi.events.emit("pi-plugins.session-chrome.v1", chrome);
     const child = { cwd: h.ctx.cwd, provider: "google", model: claude.id,
@@ -2581,21 +2582,21 @@ test("provider snapshots select Google pools, child sources and invalidate chang
     rendering = true;
     try {
       for (let i = 0; i < 5; i++) {
-        assert.match(plain(h.footer.render(180).join("\n")), /5h 30% used/);
+        assert.match(plain(h.footer.render(180).join("\n")), /Gemini 5h 30% used/);
         const lines = chrome.service.footer(child, 180, theme).map(plain).join("\n");
-        assert.match(lines, /Google\s+5h 80% used/);
+        assert.match(lines, /Antigravity\s+5h 80% used/);
         assert.doesNotMatch(lines, /30% used|weekly unknown/);
       }
     } finally { rendering = false; }
     assert.equal(calls.length, before);
     await h.commands.get("status").handler("details", h.ctx);
-    assert.match(h.notices.at(-1), /Gemini 5h 30% used/);
-    assert.match(h.notices.at(-1), /third-party 5h 80% used/);
+    assert.match(h.notices.at(-1), /Gemini 5h \[shared\] 30% used/);
+    assert.match(h.notices.at(-1), /third-party 5h \[shared\] 80% used/);
     assert.doesNotMatch(h.notices.at(-1), /ya29\.firstToken/);
 
     oauth = false;
     await h.handlers.get("model_select")({}, h.ctx);
-    await vi.waitFor(() => assert.match(plain(h.footer.render(180).join("\n")), /Google · limits unavailable/));
+    await vi.waitFor(() => assert.match(plain(h.footer.render(180).join("\n")), /Antigravity · limits unavailable/));
     assert.doesNotMatch(plain(h.footer.render(180).join("\n")), /30% used|80% used/);
     await vi.waitFor(async () => {
       await h.commands.get("status").handler("details", h.ctx);
@@ -2605,7 +2606,7 @@ test("provider snapshots select Google pools, child sources and invalidate chang
 
     oauth = true; token = "ya29.secondToken"; h.ctx.model = claude;
     await h.handlers.get("model_select")({}, h.ctx);
-    await vi.waitFor(() => assert.match(plain(h.footer.render(180).join("\n")), /Google\s+5h 60% used/));
+    await vi.waitFor(() => assert.match(plain(h.footer.render(180).join("\n")), /Antigravity\s+5h 60% used/));
     assert.ok(calls.some((call) => call.authorization === "Bearer ya29.secondToken"));
     assert.doesNotMatch(plain(h.footer.render(180).join("\n")), /30% used|80% used|weekly unknown/);
     await h.commands.get("status").handler("details", h.ctx);
@@ -2640,27 +2641,27 @@ test("Google model fallback never borrows another model's quota in child chrome 
   h.ctx.modelRegistry.getApiKeyForProvider = async () => "ya29.syntheticToken";
   try {
     await h.handlers.get("session_start")({}, h.ctx);
-    await vi.waitFor(() => assert.match(plain(h.footer.render(180).join("\n")), /Google\s+model 50% used/));
+    await vi.waitFor(() => assert.match(plain(h.footer.render(180).join("\n")), /Antigravity\s+model 50% used/));
     const chrome = { version: 1 };
     h.pi.events.emit("pi-plugins.session-chrome.v1", chrome);
     const child = { cwd: h.ctx.cwd, provider: "google", model: flash.id,
       context: { tokens: 10, contextWindow: 1000, percent: 1 }, totals: fixture().totals };
-    assert.match(plain(chrome.service.footer(child, 180, theme).join("\n")), /Google · limits unavailable/);
+    assert.match(plain(chrome.service.footer(child, 180, theme).join("\n")), /Antigravity · limits unavailable/);
     assert.doesNotMatch(plain(chrome.service.footer(child, 180, theme).join("\n")), /50% used/);
     h.ctx.model = flash;
     await h.handlers.get("model_select")({}, h.ctx);
     await vi.waitFor(() => assert.equal(modelRequests, 2));
-    assert.match(plain(h.footer.render(180).join("\n")), /Google · limits unavailable/);
+    assert.match(plain(h.footer.render(180).join("\n")), /Antigravity · limits unavailable/);
     assert.doesNotMatch(plain(h.footer.render(180).join("\n")), /50% used/);
     await h.commands.get("status").handler("details", h.ctx);
     assert.match(h.notices.at(-1), /google \(Google Antigravity subscription\): limits unavailable: Google quota has not been observed for the selected model/);
     assert.doesNotMatch(h.notices.at(-1), /50% used/);
     releaseSecond(new Response(JSON.stringify({ models: { "gemini-flash": { quotaInfo: { remainingFraction: 0.25 } } } })));
-    await vi.waitFor(() => assert.match(plain(h.footer.render(180).join("\n")), /Google\s+model 75% used/));
-    assert.match(plain(chrome.service.footer({ ...child, model: gemini.id }, 180, theme).join("\n")), /Google · limits unavailable/);
-    assert.match(plain(chrome.service.footer(child, 180, theme).join("\n")), /Google\s+model 75% used/);
+    await vi.waitFor(() => assert.match(plain(h.footer.render(180).join("\n")), /Antigravity\s+model 75% used/));
+    assert.match(plain(chrome.service.footer({ ...child, model: gemini.id }, 180, theme).join("\n")), /Antigravity · limits unavailable/);
+    assert.match(plain(chrome.service.footer(child, 180, theme).join("\n")), /Antigravity\s+model 75% used/);
     await h.commands.get("status").handler("details", h.ctx);
-    assert.match(h.notices.at(-1), /Gemini antigravity-gemini-flash model 75% used/);
+    assert.match(h.notices.at(-1), /Gemini model \[model\] 75% used/);
   } finally {
     await h.handlers.get("session_shutdown")({}, h.ctx);
     globalThis.fetch = realFetch;
@@ -2987,6 +2988,172 @@ test("child chrome clears main flow, mutable workflow, auto-effort and key metad
       assert.ok(lines.every((line) => visibleWidth(line) <= width));
     }
   } finally { await h.handlers.get("session_shutdown")({}, h.ctx); }
+});
+
+const argonId = "antigravity-gemini-4-argon";
+const scopedGoogleReading = (values = [10, 20, 30, 40]) => ({
+  provider: "google", source: "Google Antigravity subscription", state: "ready", observedAt: now,
+  windows: [
+    { label: "Gemini 5h", pool: "Gemini", scope: "shared", quotaId: "gemini-5h" },
+    { label: "Gemini weekly", pool: "Gemini", scope: "shared", quotaId: "gemini-weekly" },
+    { label: "Argon weekly", pool: "Gemini", scope: "model", quotaId: "gemini-argon-wtu-weekly", model: argonId },
+    { label: "Argon high", pool: "Gemini", scope: "variant", quotaId: "model:gemini-4-argon-high", model: argonId, variant: "gemini-4-argon-high" },
+  ].map((window, i) => ({ ...window, used: values[i], reset: now + 3600_000 })),
+});
+
+test("scoped Antigravity rows retain the binding limit without adding rows or inferring an overall quota", () => {
+  for (const [values, binding] of [
+    [[10, 20, 100, 30], "Argon weekly 100%"],
+    [[10, 20, 30, 100], "Argon high 100%"],
+    [[100, 20, 30, 40], "Gemini 5h 100%"],
+    [[10, 100, 30, 40], "Gemini weekly 100%"],
+    [[100, 100, 100, 100], "Argon high 100%"],
+    [[10, 20, 95, 30], "Argon weekly 95%"],
+  ]) for (const width of [46, 120, 180]) {
+    for (const flow of [undefined, flowState("plan"), flowState("exec")]) {
+      const base = { ...fixture(), quotas: [], providerUsage: [scopedGoogleReading(values)], flow };
+      const rows = mod.renderFooter(base, width, theme).map(plain);
+      const withoutQuota = mod.renderFooter({ ...base, providerUsage: [] }, width, theme);
+      assert.equal(rows.length, withoutQuota.length + 1);
+      assert.ok(rows.every(row => visibleWidth(row) <= width));
+      assert.match(rows.at(-1), /Antigravity/);
+      assert.ok(rows.at(-1).includes(binding), rows.at(-1));
+      assert.doesNotMatch(rows.at(-1), /overall|Google exhausted|limit reached/);
+      if (width === 180) for (const label of ["Gemini 5h", "Gemini weekly", "Argon weekly", "Argon high"]) assert.ok(rows.at(-1).includes(label));
+      const blocked = mod.renderFooter({ ...base, compact: true }, width, theme);
+      assert.equal(blocked.length, 1);
+      assert.doesNotMatch(plain(blocked[0]), /Antigravity|Argon weekly/);
+    }
+  }
+  for (const resetDue of [false, true]) {
+    const reading = scopedGoogleReading([10, 20, 100, 30]);
+    reading.observedAt = now - 600_001;
+    if (resetDue) reading.windows[2].reset = now - 1;
+    const rows = overageRows(reading, 46);
+    assert.match(rows.at(-1), resetDue ? /reset due/ : /stale/);
+    assert.match(rows.at(-1), /Argon weekly 100%/);
+  }
+  const colors = [];
+  const paint = { ...theme, fg: (color, text) => { colors.push([color, text]); return text; } };
+  const full = scopedGoogleReading([10, 20, 100, 30]);
+  mod.renderFooter({ ...fixture(), quotas: [], providerUsage: [full] }, 180, paint);
+  assert.ok(colors.some(([color, text]) => color === "error" && text === "100%"));
+  colors.length = 0;
+  mod.renderFooter({ ...fixture(), quotas: [], providerUsage: [{ ...full, observedAt: now - 600_001 }] }, 180, paint);
+  assert.ok(colors.some(([color, text]) => color === "muted" && text === "100%"));
+  assert.ok(!colors.some(([color, text]) => color === "error" && text === "100%"));
+  const unavailable = overageRows({ ...scopedGoogleReading(), state: "unavailable", windows: [] }, 46);
+  assert.match(unavailable.at(-1), /Antigravity · limits unavailable/);
+  assert.doesNotMatch(unavailable.at(-1), /0%/);
+});
+
+function argonResponses(url, fractions = { low: 0.7, medium: 0.8, high: 0.01 }) {
+  const resetTime = new Date(Date.now() + 3600_000).toISOString();
+  if (String(url).endsWith("loadCodeAssist")) return new Response(JSON.stringify({ cloudaicompanionProject: "synthetic-project" }));
+  if (String(url).endsWith("retrieveUserQuotaSummary")) return new Response(JSON.stringify({ groups: [{ buckets: [
+    { bucketId: "gemini-5h", remainingFraction: 0.9, resetTime },
+    { bucketId: "gemini-weekly", remainingFraction: 0.8, resetTime },
+    { bucketId: "gemini-argon-wtu-weekly", remainingFraction: 0.7, resetTime },
+  ] }] }));
+  return new Response(JSON.stringify({ models: Object.fromEntries(Object.entries(fractions).map(([level, remainingFraction]) =>
+    [`gemini-4-argon-${level}`, { quotaInfo: { remainingFraction, resetTime } }])) }));
+}
+
+function physicalArgonHost() {
+  const h = host();
+  h.ctx.model = { provider: "google", id: argonId, api: "google", baseUrl: "https://cloudcode-pa.googleapis.com", contextWindow: 200000, reasoning: true };
+  h.ctx.modelRegistry.find = () => h.ctx.model;
+  h.ctx.modelRegistry.getApiKeyForProvider = async provider => provider === "google" ? "ya29.synthetic" : undefined;
+  return h;
+}
+
+test("physical Argon quota follows thinking changes and child chrome never borrows another variant", async () => {
+  const originalFetch = globalThis.fetch;
+  const calls = [];
+  let rendering = false, level = "high";
+  globalThis.fetch = async url => { assert.equal(rendering, false); calls.push(String(url)); return argonResponses(url); };
+  const h = physicalArgonHost();
+  h.pi.getThinkingLevel = () => level;
+  h.ctx.modelRegistry.find = () => { assert.equal(rendering, false, "child render must not resolve models"); return h.ctx.model; };
+  h.ctx.modelRegistry.getApiKeyForProvider = async provider => { assert.equal(rendering, false, "render must not read credentials"); return provider === "google" ? "ya29.synthetic" : undefined; };
+  try {
+    await h.handlers.get("session_start")({}, h.ctx);
+    await vi.waitFor(() => assert.match(footerText(h), /Argon high 99% used/));
+    const request = { version: 1 };
+    h.pi.events.emit("pi-plugins.session-chrome.v1", request);
+    const child = { cwd: h.ctx.cwd, provider: "google", model: argonId, thinking: "medium", context: { tokens: 0, contextWindow: 200000, percent: 0 }, totals: fixture().totals };
+    const before = calls.length;
+    rendering = true;
+    try {
+      for (const width of [46, 120, 180]) {
+        assert.match(plain(request.service.footer(child, width, theme).join("\n")), /Antigravity · limits unavailable/);
+        assert.doesNotMatch(plain(request.service.footer({ ...child, thinking: undefined }, width, theme).join("\n")), /Argon high 99%/);
+      }
+    } finally { rendering = false; }
+    assert.equal(calls.length, before);
+    for (const [next, expected] of [["medium", "20%"], ["low", "30%"]]) {
+      level = next;
+      await h.handlers.get("thinking_level_select")({ level: next }, h.ctx);
+      assert.doesNotMatch(footerText(h), /Argon high 99%/);
+      await vi.waitFor(() => assert.ok(footerText(h).includes(`Argon ${next} ${expected} used`), footerText(h)));
+      const own = plain(request.service.footer({ ...child, thinking: next }, 180, theme).join("\n"));
+      assert.ok(own.includes(`Argon ${next} ${expected} used`));
+    }
+    assert.equal(calls.filter(url => url.endsWith("fetchAvailableModels")).length, 3);
+    await h.commands.get("status").handler("details", h.ctx);
+    assert.match(h.notices.at(-1), /Argon low \[variant; gemini-4-argon-low\] 30% used/);
+    assert.doesNotMatch(h.notices.at(-1), /Gemini Gemini|ya29\.synthetic/);
+  } finally { await h.handlers.get("session_shutdown")({}, h.ctx); globalThis.fetch = originalFetch; }
+});
+
+test("physical Argon rejects unknown, unsupported and non-reasoning mappings instead of reading medium", async () => {
+  const originalFetch = globalThis.fetch;
+  let requests = 0;
+  globalThis.fetch = async () => { requests++; throw new Error("unknown variant must not request quota"); };
+  try {
+    for (const overrides of [
+      { thinkingLevelMap: { high: "unrecognized" } },
+      { thinkingLevelMap: Object.fromEntries(["off", "minimal", "low", "medium", "high", "xhigh", "max"].map(level => [level, null])) },
+      { reasoning: false },
+    ]) {
+      const h = physicalArgonHost();
+      h.pi.getThinkingLevel = () => "high";
+      Object.assign(h.ctx.model, overrides);
+      try {
+        await h.handlers.get("session_start")({}, h.ctx);
+        await vi.waitFor(() => assert.match(footerText(h), /Antigravity · limits unavailable/));
+        await h.commands.get("status").handler("details", h.ctx);
+        assert.match(h.notices.at(-1), /exact Argon reasoning/);
+        assert.doesNotMatch(footerText(h), /Argon medium|0% used/);
+      } finally { await h.handlers.get("session_shutdown")({}, h.ctx); }
+    }
+    assert.equal(requests, 0);
+  } finally { globalThis.fetch = originalFetch; }
+});
+
+test("a late old Argon variant response cannot republish after a thinking change", async () => {
+  const originalFetch = globalThis.fetch;
+  let releaseHigh, startedHigh;
+  const highStarted = new Promise(resolve => { startedHigh = resolve; });
+  const pendingHigh = new Promise(resolve => { releaseHigh = resolve; });
+  let modelReads = 0, level = "high";
+  globalThis.fetch = async url => {
+    if (String(url).endsWith("fetchAvailableModels") && modelReads++ === 0) { startedHigh(); return pendingHigh; }
+    return argonResponses(url);
+  };
+  const h = physicalArgonHost();
+  h.pi.getThinkingLevel = () => level;
+  try {
+    await h.handlers.get("session_start")({}, h.ctx);
+    await highStarted;
+    level = "medium";
+    await h.handlers.get("thinking_level_select")({ level }, h.ctx);
+    await vi.waitFor(() => assert.match(footerText(h), /Argon medium 20% used/));
+    releaseHigh(argonResponses("fetchAvailableModels"));
+    await settle(); await settle();
+    assert.match(footerText(h), /Argon medium 20% used/);
+    assert.doesNotMatch(footerText(h), /Argon high 99%/);
+  } finally { releaseHigh(argonResponses("fetchAvailableModels")); await h.handlers.get("session_shutdown")({}, h.ctx); globalThis.fetch = originalFetch; }
 });
 
 test("model row hint falls back to the effort-cycle key when the model picker has none", () => {

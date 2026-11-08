@@ -66,6 +66,7 @@ const resources = [
  */
 export async function startupSplashScreens({
   theme, getEditorTheme, kb, sidebarScreen, idleFooter, height,
+  modelSection = models,
   footerVariants = [{ name: 'default', idleFooter }],
 }) {
   const screens = [];
@@ -80,7 +81,7 @@ export async function startupSplashScreens({
     '',
     ...renderHeaderLines(width, theme, snapshot),
     '',
-    ...renderSection(models, width, theme),
+    ...renderSection(modelSection, width, theme),
   ], invalidate() {} };
   for (const width of [46, 120, 180]) {
     const lines = transcript.render(width).map(stripVTControlCharacters);

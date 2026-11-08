@@ -12,7 +12,7 @@ const muse = { provider: "muse-sdk", sourceId: "muse-account" };
 // Synthetic, sanitized native envelope: no account identifiers or real CLI output.
 const museEnvelope = { allowance: null, hint: "synthetic hint", reason: "synthetic reason", schemaVersion: 1 };
 const museAllowance = { asOfMs: now - 1_000, window: { usedPercent: 0, resetsAtMs: now + 60_000 }, weekly: { usedPercent: 100, resetsAtMs: now + 600_000 } };
-const argon = { ...google, model: "antigravity-gemini-4-argon" };
+const argon = { ...google, model: "antigravity-gemini-4-argon", variant: "gemini-4-argon-medium" };
 const json = (body, status = 200) => new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
 const project = () => json({ cloudaicompanionProject: { id: "synthetic-project" } });
 const summary = () => json({ groups: [{ buckets: [{ bucketId: "gemini-5h", remainingFraction: 0.5 }] }] });
@@ -32,8 +32,8 @@ describe("provider usage parsers", () => {
       { bucketId: "3p-weekly", remainingFraction: -1, resetTime: 42 }, null,
     ] }] }, now);
     assert.deepEqual(result, { provider: "google", source: "Google Antigravity subscription", state: "ready", observedAt: now, windows: [
-      { label: "5h", pool: "Gemini", used: 25, reset: Date.parse(reset) },
-      { label: "weekly", pool: "Gemini", used: 100 },
+      { label: "Gemini 5h", pool: "Gemini", scope: "shared", quotaId: "gemini-5h", used: 25, reset: Date.parse(reset) },
+      { label: "Gemini weekly", pool: "Gemini", scope: "shared", quotaId: "gemini-weekly", used: 100 },
     ] });
     assert.deepEqual(selectGooglePool(result, "antigravity-gemini-pro"), result.windows.slice(0, 2));
     assert.deepEqual(selectGooglePool(result, "antigravity-claude-sonnet"), result.windows.slice(2));
@@ -63,9 +63,9 @@ describe("provider usage parsers", () => {
 
   it("parses model fallback without inventing a window duration", () => {
     const payload = { models: { "claude-sonnet": { quotaInfo: { remainingFraction: 0.25, resetTime: reset } } } };
-    assert.deepEqual(parseGoogleModels(payload, "antigravity-claude-sonnet", now).windows, [{ label: "model", model: "antigravity-claude-sonnet", pool: "third-party", used: 75, reset: Date.parse(reset) }]);
+    assert.deepEqual(parseGoogleModels(payload, "antigravity-claude-sonnet", now).windows, [{ label: "model", model: "antigravity-claude-sonnet", pool: "third-party", scope: "model", quotaId: "model:claude-sonnet", used: 75, reset: Date.parse(reset) }]);
     const fallback = parseGoogleModels({ models: { "antigravity-gemini-pro": { quotaInfo: { resetTime: reset } } } }, google.model, now);
-    assert.deepEqual(fallback.windows, [{ label: "model", model: google.model, pool: "Gemini", reset: Date.parse(reset) }]);
+    assert.deepEqual(fallback.windows, [{ label: "model", model: google.model, pool: "Gemini", scope: "model", quotaId: `model:${google.model}`, reset: Date.parse(reset) }]);
     assert.deepEqual(selectGooglePool(fallback, google.model), fallback.windows);
     assert.deepEqual(selectGooglePool(fallback, "antigravity-gemini-flash"), [], "another model in the same pool cannot borrow a model-specific reading");
     for (const value of [null, {}, { models: { "gemini-pro": { quotaInfo: { remainingFraction: Infinity } } } }]) assert.equal(parseGoogleModels(value, google.model, now).state, "unavailable");
@@ -160,7 +160,7 @@ describe("collector", () => {
       calls.push({ url, init });
       return calls.length === 1 ? json({ cloudaicompanionProject: "synthetic-project" }) : calls.length === 2 ? json({}, status) : json({ models: { "gemini-pro": { quotaInfo: { remainingFraction: 0.5 } } } });
     } });
-    assert.deepEqual((await collector.refresh(google)).windows, [{ label: "model", model: google.model, pool: "Gemini", used: 50 }]);
+    assert.deepEqual((await collector.refresh(google)).windows, [{ label: "model", model: google.model, pool: "Gemini", scope: "model", quotaId: "model:gemini-pro", used: 50 }]);
     assert.match(calls[2].url, /fetchAvailableModels$/);
     assert.deepEqual(JSON.parse(calls[2].init.body), { project: "synthetic-project" });
     collector.dispose();
@@ -185,9 +185,10 @@ describe("collector", () => {
     const result = await collector.refresh(argon);
     assert.equal(result.state, "ready");
     assert.deepEqual(result.windows, [
-      { label: "5h", pool: "Gemini", used: 50 }, { label: "weekly", pool: "Gemini", used: 25 },
-      { label: "Argon weekly", pool: "Gemini", model: argon.model, used: 95 },
-      { label: "model", pool: "Gemini", model: argon.model, used: 75, reset: Date.parse(reset) },
+      { label: "Gemini 5h", pool: "Gemini", scope: "shared", quotaId: "gemini-5h", used: 50 },
+      { label: "Gemini weekly", pool: "Gemini", scope: "shared", quotaId: "gemini-weekly", used: 25 },
+      { label: "Argon weekly", pool: "Gemini", model: argon.model, scope: "model", quotaId: "gemini-argon-wtu-weekly", used: 95 },
+      { label: "Argon medium", pool: "Gemini", model: argon.model, scope: "variant", quotaId: "model:gemini-4-argon-medium", variant: argon.variant, used: 75, reset: Date.parse(reset) },
     ]);
     assert.equal(calls.length, 3);
     assert.deepEqual(new Set(calls.slice(1).map(call => new URL(call.url).pathname)), new Set(["/v1internal:retrieveUserQuotaSummary", "/v1internal:fetchAvailableModels"]));
@@ -216,6 +217,17 @@ describe("collector", () => {
       result.windows.forEach((window, index) => assert.ok(Math.abs(window.used - expected[index]) < 1e-9));
     }
     assert.equal((await collector.refresh({ ...argon, variant: "gemini-4-argon-unknown" })).state, "unavailable");
+    collector.dispose();
+  });
+
+  it("requires a recognized explicit Argon variant before project discovery", async () => {
+    const fetch = vi.fn();
+    const collector = createProviderUsageCollector({ fetch });
+    assert.equal((await collector.refresh({ ...argon, variant: undefined })).reason, "The exact Argon reasoning variant is unknown.");
+    for (const variant of ["", "gemini-4-argon-unknown", "medium"]) {
+      assert.equal((await collector.refresh({ ...argon, variant })).reason, "Unknown Argon model variant.");
+    }
+    assert.equal(fetch.mock.calls.length, 0);
     collector.dispose();
   });
 
