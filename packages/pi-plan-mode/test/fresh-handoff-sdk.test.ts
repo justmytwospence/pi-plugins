@@ -21,7 +21,7 @@ import {
   type ToolResultEvent,
 } from "@earendil-works/pi-coding-agent";
 import { onTestFinished, test, vi } from "vitest";
-import { LINKED_FRESH } from "../src/approval-picker.js";
+import { APPROVE } from "../src/approval-picker.js";
 import { EXEC_ENTRY, type ExecState } from "../src/exec.js";
 import { FLOW_CHANNEL, FLOW_ENTRY, type FlowRequest, type FlowSnapshot, type FlowState } from "../src/flow-contract.js";
 import { FRESH_HANDOFF_CHANNEL, type FreshHandoffRequest } from "../src/fresh-handoff.js";
@@ -464,7 +464,7 @@ async function fixture(options: { effort?: "high" | "off"; cancelReplacement?: b
     // Attach a rejection handler immediately; bounded() below still reports failure.
     void turn.catch(() => {});
     const picker = await bounded(dialog.promise, "actual tool-opened approval dialog");
-    assert.match(picker.render().join("\n"), new RegExp(LINKED_FRESH));
+    assert.match(picker.render().join("\n"), new RegExp(APPROVE));
     assert.deepEqual(
       discoveries.map((item) => item.current),
       [false],
@@ -473,9 +473,12 @@ async function fixture(options: { effort?: "high" | "off"; cancelReplacement?: b
     if (cancel) picker.handleInput("tui.select.cancel");
     else {
       picker.handleInput("tui.select.down");
+      picker.handleInput("tui.select.confirm");
+      picker.handleInput("tui.select.down");
       const selected = picker.handleInput("tui.select.down").join("\n");
-      assert.match(selected, /→ Execute in a fresh conversation/u);
-      assert.match(selected, /effort: medium/u);
+      assert.match(selected, /→ Fresh conversation/u);
+      picker.handleInput("tui.select.confirm");
+      assert.match(picker.render().join("\n"), /effort: medium/u);
       picker.handleInput("tui.select.confirm");
     }
     const result = await bounded(toolResult.promise, "actual held tool result");

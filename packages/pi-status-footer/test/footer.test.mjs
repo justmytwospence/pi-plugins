@@ -2409,6 +2409,51 @@ test("Linked combines model/workflow while reasoning, auto-off and approvals sta
   assert.ok(!pinned.hits.some((hit) => hit.action === "effort.toggle"));
 });
 
+test("Linked replanning keeps Plan, physical model and task action across widths and failure states", () => {
+  for (const extra of [{}, { blocked: "Activation failed" }, { ready: false }, { guardAvailable: false }]) {
+    for (const width of [46, 120, 180]) {
+      const s = { ...controlledFixture(), model: "actual-worker", flow: flowState("plan", { replanning: true, ...extra }),
+        exec: "implementing · 3 consultations · $0.42 review",
+        settingsCycle: { id: "stale", phase: "pending", settings: [{ key: "workflow", target: "work" }] } };
+      const layout = mod.layoutFooter(s, width, theme);
+      const row = plain(layout.lines[1]);
+      assert.match(row, /plan/); assert.match(row, /replanning/);
+      assert.doesNotMatch(row, /implementing|\bexec\b|\bwork\b/);
+      assert.equal(layout.hits.find(hit => hitText(layout, hit) === "plan")?.action, "execution.status");
+      assert.ok(!layout.hits.some(hit => hit.action === "workflow.cycle"));
+      if (width >= 120) {
+        assert.match(row, /actual-worker/); assert.doesNotMatch(row, /opus-5\.5/);
+        assert.ok(layout.hits.some(hit => hit.action === "reasoning.cycle"));
+      }
+      if (width === 180) {
+        assert.match(row, /3 consultations/);
+        const published = mod.layoutFooter({ ...s, exec: "replanning · 3 consultations · $0.42 review" }, width, theme);
+        assert.match(plain(published.lines[1]), /replanning · 3 consultations/);
+        assert.equal((plain(published.lines[1]).match(/replanning/g) ?? []).length, 1);
+      }
+      assert.ok(layout.hits.some(hit => hit.action === "approvals.open"));
+      const compact = mod.layoutFooter({ ...s, compact: true }, width, theme);
+      assert.equal(compact.lines.length, 1); assert.deepEqual(compact.hits, []);
+      assert.match(plain(compact.lines[0]), /plan/); assert.match(plain(compact.lines[0]), /replanning/);
+      assert.doesNotMatch(plain(compact.lines[0]), /implementing|\bexec\b/);
+      const absent = mod.layoutFooter({ ...s, actions: undefined }, width, theme);
+      assert.deepEqual(absent.hits, []);
+    }
+  }
+});
+
+test("unlinking a suspended Linked task retains Plan and its task-status control", () => {
+  for (const width of [46, 120, 180]) {
+    const s = { ...controlledFixture(), flow: { ...flowState("plan", { replanning: true }), operatingMode: "independent" },
+      exec: "replanning · 3 consultations · $0.42 review" };
+    const layout = mod.layoutFooter(s, width, theme);
+    const workflow = layout.lines.map(plain).find(line => /\bplan\b/.test(line));
+    assert.ok(workflow); assert.match(workflow, /replanning/); assert.match(workflow, /\/plan-exec/);
+    assert.equal(layout.hits.find(hit => hitText(layout, hit) === "plan")?.action, "execution.status");
+    assert.ok(!layout.hits.some(hit => hit.action === "workflow.cycle"));
+  }
+});
+
 test("context owns cold/unknown/timed cache, telemetry actions and no speculative controls", () => {
   for (const [cache, expected] of [["cold", "cold"], ["cold (model)", "cold"], ["cold?", "unknown"], ["4:12", "4:12"], [undefined, "unknown"]]) {
     const s = { ...controlledFixture(), cache };

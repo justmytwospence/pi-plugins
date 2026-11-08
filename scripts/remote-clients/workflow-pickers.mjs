@@ -16,7 +16,8 @@ const model = (provider, id) => ({ provider, id, name: id, api: provider === 'an
 const models = [model('anthropic', 'claude-opus-5-5'), model('openai', 'gpt-6.1')];
 const linkedLabels = ['Work', 'Chat', 'Plan'].map(label => `${label} · claude-opus-5-5`);
 const flowLabels = ['Independent', 'Linked · anthropic', 'Linked · openai'];
-const execLabels = ['Execution status', 'Use Independent mode'];
+const execLabels = ['Revisit plan', 'Execution status', 'Use Independent mode'];
+const replanLabels = ['Keep planning', 'Execution status', 'Stop implementation', 'Use Independent mode'];
 const specs = [
   { name: '/mode picker', command: 'mode', question: 'Workflow', labels: ['Work', 'Chat', 'Plan', 'Operating mode...'] },
   { name: '/approvals picker', command: 'approvals', question: 'Approvals', labels: ['Auto', 'Yolo'] },
@@ -25,6 +26,8 @@ const specs = [
   { name: 'linked /mode picker', command: 'mode', linked: true, question: 'Workflow · Linked anthropic', labels: [...linkedLabels, 'Change provider...', 'Use Independent mode'] },
   { name: 'linked Exec /mode picker', command: 'mode', linked: true, exec: true, question: 'Workflow · Exec active', labels: execLabels },
   { name: 'linked Exec /flow picker', command: 'flow', linked: true, exec: true, question: 'Operating mode · Exec active', labels: execLabels },
+  ...['mode', 'flow'].map(command => ({ name: `linked replanning /${command} picker`, command, linked: true, exec: true, replanning: true,
+    question: `${command === 'mode' ? 'Workflow' : 'Operating mode'} · Revisiting plan`, labels: replanLabels })),
   ...['roles', 'guard'].flatMap(unavailable => [
     { name: `/flow picker (unavailable ${unavailable})`, command: 'flow', unavailable, question: 'Operating mode', labels: unavailable === 'roles' ? ['Independent', 'Flow status'] : flowLabels },
     { name: `/mode picker (unavailable ${unavailable})`, command: 'mode', unavailable, question: 'Workflow', labels: ['Work', 'Chat', 'Plan', 'Operating mode...'] },
@@ -61,7 +64,7 @@ export async function gatePickerDialogs({ toolGate, ExtensionSelectorComponent }
             }])),
           },
         } }] : []),
-        ...(spec.exec ? [{ type: 'custom', id: 'exec', customType: 'plan-mode:exec', data: { active: true, planFile: '/tmp/client-plan.md' } }] : []),
+        ...(spec.exec ? [{ type: 'custom', id: 'exec', customType: 'plan-mode:exec', data: { active: true, planFile: '/tmp/client-plan.md', ...(spec.replanning ? { replanning: { version: 1, draftFile: '/tmp/client-revision.md' } } : {}) } }] : []),
       ];
       let blocked = false, thinking = 'high', captured;
       const notifications = [];
@@ -120,6 +123,8 @@ export async function gatePickerDialogs({ toolGate, ExtensionSelectorComponent }
         const before = snapshot();
         assert.ok(before?.ready, 'gate fixture must run the real startup lifecycle');
         assert.equal(before.operatingMode, spec.linked ? 'linked' : 'independent');
+        assert.equal(before.replanning, spec.replanning ? true : undefined);
+        assert.equal(before.workflow, spec.replanning ? 'plan' : spec.exec ? 'exec' : 'work');
         assert.equal(before.guardAvailable, spec.unavailable !== 'guard', 'fixture exercises the actual guard adapter availability');
         if (spec.linked && spec.unavailable) {
           assert.match(before.blocked, spec.unavailable === 'guard' ? /model guard/iu : spec.unavailable === 'roles' ? /Role defaults unavailable/u : /unavailable-model/u);

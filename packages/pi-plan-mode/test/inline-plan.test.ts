@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { existsSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { stripVTControlCharacters } from "node:util";
@@ -9,7 +9,9 @@ import {
   initTheme,
   type ToolDefinition,
 } from "@earendil-works/pi-coding-agent";
-import { test, vi } from "vitest";
+import { onTestFinished, test, vi } from "vitest";
+import { EXEC_ENTRY } from "../src/exec.js";
+import { FLOW_CHANNEL, type FlowRequest, type FlowSnapshot } from "../src/flow-contract.js";
 import type { pickImplementationEffort } from "../src/implementation-effort.js";
 import planMode from "../src/index.js";
 import {
@@ -17,6 +19,7 @@ import {
   EXEC_GUIDANCE,
   EXIT_TOOL,
   INLINE_ENTRY,
+  type InlineHost,
   MODE_CHANGED,
   MODE_CYCLE,
   MODE_SET,
@@ -749,6 +752,205 @@ function transition(previous: string, mode: string, explanation: string) {
     },
     options: { triggerTurn: false },
   };
+}
+
+async function inlineReplanFixture(options: { replanning?: boolean; marker?: unknown } = {}) {
+  const mock = createMockPi({ activeTools: ["read", "write", "edit", "bash"] });
+  const directory = mkdtempSync(join(tmpdir(), "inline-replan-"));
+  onTestFinished(() => rmSync(directory, { recursive: true, force: true }));
+  const approvedFile = join(directory, "approved.md");
+  const draftFile = join(directory, "revision.md");
+  writeFileSync(approvedFile, "# Approved\n\nKeep the original scope.\n");
+  writeFileSync(draftFile, "# Revised\n\nRetain the unfinished implementation.\n");
+  let replanning = options.replanning === true;
+  mock.entries.push({
+    customType: EXEC_ENTRY,
+    data: {
+      active: true,
+      planFile: approvedFile,
+      ...(replanning ? { replanning: options.marker ?? { version: 1, draftFile } } : {}),
+    },
+  });
+  const context = createMockContext({
+    cwd: directory,
+    mode: "rpc",
+    hasUI: true,
+    select: async () => "No, keep planning",
+    sessionManager: {
+      getBranch: () => mock.entries.map((entry, index) => ({ type: "custom", id: `entry-${index}`, ...entry })),
+      getLeafId: () => "entry-0",
+    },
+  });
+  const ctx = context.ctx as ExtensionContext;
+  const requests: FlowRequest[] = [];
+  mock.eventBus.on(FLOW_CHANNEL, (data) => {
+    const request = data as FlowRequest;
+    if (request.kind === "query") {
+      request.snapshot = {
+        version: 1,
+        operatingMode: "linked",
+        revision: 1,
+        workflow: replanning ? "plan" : "exec",
+        ready: true,
+        guardAvailable: true,
+        transitioning: false,
+        ...(replanning ? { replanning: true } : {}),
+      } satisfies FlowSnapshot;
+    } else requests.push(request);
+  });
+  const host = {
+    plansDirectory: vi.fn(() => directory),
+    safeSubcommands: () => undefined,
+    executing: () => true,
+    replanning: () => replanning,
+    requestReplan: vi.fn(async () => true),
+    approvalRefusal: (): string | undefined => undefined,
+    executionMenu: vi.fn(async () => "kept" as const),
+    toggleKey: () => undefined,
+    implementationChoices: () => undefined,
+    approved: vi.fn(),
+    compactHere: vi.fn(),
+    handoff: vi.fn(),
+    implementHere: vi.fn(() => ""),
+  } satisfies InlineHost;
+  const inline = registerInlinePlanMode(mock.pi, host);
+  const emit = async (name: string, payload: Record<string, unknown> = {}) => {
+    let result: unknown;
+    for (const handler of mock.events.get(name) ?? [])
+      result = (await handler({ type: name, ...payload }, ctx)) ?? result;
+    return result;
+  };
+  const tool = (name: string) => mock.tools.find((candidate) => candidate.name === name) as unknown as Tool;
+  await emit("session_start");
+  return {
+    mock,
+    context,
+    ctx,
+    host,
+    inline,
+    requests,
+    emit,
+    tool,
+    approvedFile,
+    draftFile,
+    suspend: () => {
+      replanning = true;
+    },
+  };
+}
+
+for (const via of ["enter", "toggle", "tool"] as const) {
+  test(`Linked inline ${via} delegates replanning without allocating a plan or selecting Work`, async () => {
+    const h = await inlineReplanFixture();
+    const before = structuredClone(h.mock.entries);
+    if (via === "enter") await h.inline.enter(h.ctx);
+    else if (via === "toggle") assert.equal(await h.inline.toggle(h.ctx), true);
+    else {
+      const result = await h.tool(ENTER_TOOL).execute("replan", {}, undefined, undefined, h.ctx);
+      assert.equal(result.terminate, true);
+      assert.match(result.content[0].text, /Stop implementing.*after this turn settles/u);
+    }
+    assert.deepEqual(vi.mocked(h.host.requestReplan).mock.calls, [[h.ctx, via === "tool" ? "tool" : "command"]]);
+    assert.deepEqual(h.mock.entries, before);
+    assert.deepEqual(h.requests, []);
+    assert.equal(h.inline.active, false);
+    assert.equal(h.inline.planFile, undefined);
+    assert.equal(vi.mocked(h.host.plansDirectory).mock.calls.length, 0);
+  });
+}
+
+test("a refused tool replan is non-terminating and cannot enter local Plan", async () => {
+  const h = await inlineReplanFixture();
+  vi.mocked(h.host.requestReplan).mockResolvedValue(false);
+  const result = await h.tool(ENTER_TOOL).execute("refused", {}, undefined, undefined, h.ctx);
+  assert.notEqual(result.terminate, true);
+  assert.match(result.content[0].text, /not available.*no workflow changed/u);
+  assert.equal(h.inline.active, false);
+  assert.equal(h.inline.planFile, undefined);
+  assert.deepEqual(h.requests, []);
+});
+
+test("commitReplan adopts only the host's draft and compares review against the approved file", async () => {
+  const h = await inlineReplanFixture();
+  h.suspend();
+  h.inline.commitReplan(h.ctx, h.draftFile);
+  assert.equal(h.inline.active, true);
+  assert.equal(h.inline.planFile, h.draftFile);
+  assert.deepEqual(h.requests, [], "commit must not allocate a second flow transition");
+  const before = structuredClone(h.mock.entries);
+  const already = await h.tool(ENTER_TOOL).execute("already", {}, undefined, undefined, h.ctx);
+  assert.match(already.content[0].text, /already in plan mode/iu);
+  assert.equal(vi.mocked(h.host.requestReplan).mock.calls.length, 0);
+  assert.deepEqual(h.mock.entries, before);
+  const review = await h.tool(EXIT_TOOL).execute("review", {}, undefined, undefined, h.ctx);
+  assert.equal(review.details.outcome, "kept");
+  assert.equal(review.details.planFile, h.draftFile);
+  assert.equal(review.details.previous, readFileSync(h.approvedFile, "utf8").trim());
+  assert.equal(h.inline.active, true, "an active suspended execution must not expire legitimate Plan review");
+  assert.equal(vi.mocked(h.host.plansDirectory).mock.calls.length, 0);
+});
+
+for (const lifecycle of ["session_start", "session_tree"] as const) {
+  test(`inline ${lifecycle} restores a suspended draft without an inline entry or host lifecycle ordering`, async () => {
+    const h = await inlineReplanFixture({ replanning: true });
+    await h.emit(lifecycle);
+    assert.equal(h.inline.active, true);
+    assert.equal(h.inline.planFile, h.draftFile);
+    assert.equal(h.mock.entries.filter((entry) => entry.customType === INLINE_ENTRY).length, 0);
+    assert.equal(vi.mocked(h.host.plansDirectory).mock.calls.length, 0);
+    const result = await h.tool(EXIT_TOOL).execute("restored", {}, undefined, undefined, h.ctx);
+    assert.equal(result.details.outcome, "kept");
+    assert.equal(result.details.previous, readFileSync(h.approvedFile, "utf8").trim());
+    assert.deepEqual(h.requests, []);
+  });
+}
+
+for (const marker of [{ version: 2, draftFile: "wrong" }, { version: 1, draftFile: "" }, { version: 1 }]) {
+  test(`invalid suspension marker ${JSON.stringify(marker)} stays read-only without allocating a replacement`, async () => {
+    const h = await inlineReplanFixture({ replanning: true, marker });
+    assert.equal(h.inline.active, true);
+    assert.equal(h.inline.planFile, undefined);
+    const before = readdirSync(join(h.ctx.cwd));
+    await h.inline.enter(h.ctx);
+    await h.emit("before_agent_start", { systemPrompt: "Base prompt" });
+    assert.equal(h.inline.planFile, undefined);
+    assert.deepEqual(readdirSync(join(h.ctx.cwd)), before);
+    assert.equal(vi.mocked(h.host.plansDirectory).mock.calls.length, 0);
+    for (const path of [h.approvedFile, h.draftFile]) {
+      const guard = (await h.emit("tool_call", { toolName: "write", input: { path, content: "unapproved" } })) as {
+        block?: boolean;
+      };
+      assert.equal(guard?.block, true);
+    }
+    const review = await h.tool(EXIT_TOOL).execute("invalid", {}, undefined, undefined, h.ctx);
+    assert.notEqual(review.details?.outcome, "approved");
+    assert.deepEqual(h.requests, []);
+  });
+}
+
+test("suspended Independent approval refusal runs before any review UI or host approval side effect", async () => {
+  const h = await inlineReplanFixture({ replanning: true });
+  h.host.approvalRefusal = () =>
+    "This suspended Linked task is now Independent. Stop implementation before approving another plan.";
+  const select = vi.spyOn(h.ctx.ui, "select");
+  const result = await h.tool(EXIT_TOOL).execute("independent", {}, undefined, undefined, h.ctx);
+  assert.match(result.content[0].text, /Stop implementation before approving another plan/u);
+  assert.equal(select.mock.calls.length, 0);
+  assert.equal(vi.mocked(h.host.approved).mock.calls.length, 0);
+  assert.equal(vi.mocked(h.host.handoff).mock.calls.length, 0);
+  assert.equal(h.inline.active, true);
+  assert.equal(h.inline.planFile, h.draftFile);
+});
+
+for (const action of ["toggle", "work"] as const) {
+  test(`replanning ${action} opens the task menu rather than escaping the unfinished task`, async () => {
+    const h = await inlineReplanFixture({ replanning: true });
+    assert.equal(await h.inline[action](h.ctx), false);
+    assert.equal(vi.mocked(h.host.executionMenu).mock.calls.length, 1);
+    assert.equal(h.inline.active, true);
+    assert.equal(h.inline.planFile, h.draftFile);
+    assert.deepEqual(h.requests, []);
+  });
 }
 
 function setupWorkflowLifecycle() {

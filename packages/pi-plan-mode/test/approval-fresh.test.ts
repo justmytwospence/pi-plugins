@@ -7,7 +7,6 @@ import {
   ApprovalPicker,
   type ApprovalResult,
   createApprovalState,
-  LINKED_FRESH,
 } from "../src/approval-picker.js";
 import type { ModelSpecThinkingLevel } from "../src/implementation-models.js";
 
@@ -36,99 +35,81 @@ function fixture(state = createApprovalState(), approvalInput: ApprovalInput = i
   return { component, state, done };
 }
 
-test("fresh worker effort is separate from retained in-place/compact effort, including after Edit", () => {
+function choose(component: ApprovalPicker, context: "keep" | "compact" | "clear") {
+  component.handleInput(down);
+  component.handleInput("\r");
+  const lines = component.render(120).join("\n");
+  const labels = ["Keep history", "Compact to approved plan", "Fresh conversation"] as const;
+  const desired = context === "keep" ? labels[0] : context === "compact" ? labels[1] : labels[2];
+  for (let i = 0; i < 3 && !component.render(120).join("\n").includes(`→ ${desired}`); i++) component.handleInput(down);
+  assert.ok(lines.includes(desired));
+  component.handleInput("\r");
+}
+
+test("fresh effort is isolated and retained across Edit and revised recommendations", () => {
+  const first = fixture(createApprovalState(), { ...input, effortDefaultKey: "one", recommendedThinkingLevel: "low" });
+  first.component.handleInput(right); // keep medium
+  choose(first.component, "clear");
+  assert.match(first.component.render(120).join("\n"), /effort: low/u);
+  first.component.handleInput(right); // fresh medium
+  first.component.handleInput(down);
+  first.component.handleInput(down);
+  first.component.handleInput("\r");
+  assert.equal(first.done.mock.calls[0]?.[0]?.choice.kind, "edit");
+  const next = fixture(first.state, { ...input, effortDefaultKey: "two", recommendedThinkingLevel: "high" });
+  assert.match(next.component.render(120).join("\n"), /effort: medium/u);
+  next.component.handleInput(up);
+  next.component.handleInput(up);
+  choose(next.component, "compact");
+  assert.match(next.component.render(120).join("\n"), /effort: medium/u);
+  choose(next.component, "clear");
+  next.component.handleInput("\r");
+  assert.equal(next.done.mock.calls[0]?.[0]?.thinkingLevel, "medium");
+  assert.equal(
+    next.done.mock.calls[0]?.[0]?.choice.kind === "handoff" && next.done.mock.calls[0]?.[0]?.choice.context,
+    "clear",
+  );
+});
+
+test("fresh effort precedence preserves setting, recommendation and worker fallback", () => {
+  for (const [setting, recommendation, expected] of [
+    ["off", "low", "off"],
+    [undefined, "low", "low"],
+    ["off", undefined, "medium"],
+  ] as const) {
+    const current = fixture(createApprovalState(), {
+      ...input,
+      defaultThinkingLevel: setting,
+      recommendedThinkingLevel: recommendation,
+      effortDefaultKey: "plan",
+    });
+    choose(current.component, "clear");
+    assert.match(current.component.render(120).join("\n"), new RegExp(`effort: ${expected}`));
+    current.component.handleInput("\r");
+    assert.equal(current.done.mock.calls[0]?.[0]?.thinkingLevel, expected);
+  }
+});
+
+test("stale fresh capability resets to keep and requires approval", () => {
   const first = fixture();
-  first.component.handleInput(down);
-  assert.match(first.component.render(120).join("\n"), /effort: high/u);
-  first.component.handleInput(down);
-  assert.match(first.component.render(120).join("\n"), /effort: medium/u);
-  first.component.handleInput(right);
-  first.component.handleInput(right); // explicit fresh off
-  first.component.handleInput(up);
-  assert.match(first.component.render(120).join("\n"), /effort: high/u);
-  first.component.handleInput(down);
+  choose(first.component, "clear");
   first.component.dispose();
-  const reopened = fixture(first.state);
-  assert.match(reopened.component.render(120).join("\n"), /effort: off/u);
-  reopened.component.handleInput("\r");
-  const result = reopened.done.mock.calls[0]?.[0];
-  assert.equal(result?.thinkingLevel, "off");
-  assert.equal(result?.choice.kind, "handoff");
-  if (result?.choice.kind === "handoff") assert.equal(result.choice.context, "clear");
-});
-
-test("recommendation replaces the untouched fresh worker baseline and is approved", () => {
-  const recommended = { ...input, effortDefaultKey: "plan-1", recommendedThinkingLevel: "low" as const };
-  const { component, done } = fixture(createApprovalState(), recommended);
-  component.handleInput(down);
-  component.handleInput(down);
-  assert.match(component.render(120).join("\n"), /effort: low/u);
-  component.handleInput("\r");
-  assert.equal(done.mock.calls[0]?.[0]?.thinkingLevel, "low");
-  assert.equal(done.mock.calls[0]?.[0]?.choice.kind, "handoff");
-  const choice = done.mock.calls[0]?.[0]?.choice;
-  if (choice?.kind === "handoff") assert.equal(choice.context, "clear");
-});
-
-test("manual fresh effort survives revised defaults while untouched in-place effort updates", () => {
-  const firstInput = { ...input, effortDefaultKey: "plan-1", recommendedThinkingLevel: "low" as const };
-  const first = fixture(createApprovalState(), firstInput);
-  first.component.handleInput(down);
-  first.component.handleInput(down);
-  first.component.handleInput(right); // fresh low -> medium
-  first.component.dispose();
-
-  const revised = { ...input, effortDefaultKey: "plan-2", recommendedThinkingLevel: "high" as const };
-  const reopened = fixture(first.state, revised);
-  assert.match(reopened.component.render(120).join("\n"), /effort: medium/u);
-  reopened.component.handleInput(up); // compact shares in-place with keep
-  assert.match(reopened.component.render(120).join("\n"), /effort: high/u);
-  reopened.component.handleInput(up);
-  assert.match(reopened.component.render(120).join("\n"), /effort: high/u);
-  reopened.component.dispose();
-});
-
-test("manual in-place effort survives revised defaults without contaminating fresh effort", () => {
-  const firstInput = { ...input, effortDefaultKey: "plan-1", recommendedThinkingLevel: "low" as const };
-  const first = fixture(createApprovalState(), firstInput);
-  first.component.handleInput(right); // keep low -> medium
-  first.component.handleInput(down); // compact shares the manual choice
-  assert.match(first.component.render(120).join("\n"), /effort: medium/u);
-  first.component.dispose();
-
-  const revised = { ...input, effortDefaultKey: "plan-2", recommendedThinkingLevel: "high" as const };
-  const reopened = fixture(first.state, revised);
-  assert.match(reopened.component.render(120).join("\n"), /effort: medium/u);
-  reopened.component.handleInput(down);
-  assert.match(reopened.component.render(120).join("\n"), /effort: high/u);
-  reopened.component.dispose();
-});
-
-test("explicit fresh setting takes precedence over recommendation but not an in-place default", () => {
-  const configured = {
-    ...input,
-    defaultThinkingLevel: "off" as const,
-    effortDefaultKey: "plan-1",
-    recommendedThinkingLevel: "low" as const,
-  };
-  const { component, done } = fixture(createApprovalState(), configured);
-  assert.match(component.render(120).join("\n"), /effort: low/u);
-  component.handleInput(down);
-  assert.match(component.render(120).join("\n"), /effort: low/u);
-  component.handleInput(down);
-  assert.match(component.render(120).join("\n"), /effort: off/u);
-  component.handleInput("\r");
-  assert.equal(done.mock.calls[0]?.[0]?.thinkingLevel, "off");
+  const next = fixture(first.state, { ...input, freshTarget: undefined });
+  assert.equal(first.state.context, "keep");
+  assert.equal(next.done.mock.calls.length, 0);
+  next.component.handleInput("\r");
+  const choice = next.done.mock.calls[0]?.[0]?.choice;
+  assert.equal(choice?.kind === "handoff" && choice.context, "keep");
 });
 
 for (const width of [46, 120, 180]) {
-  test(`fresh option is a plain short label at ${width} columns`, () => {
+  test(`fresh stage is short at ${width} columns`, () => {
     const { component } = fixture();
+    component.handleInput(down);
+    component.handleInput("\r");
     const lines = component.render(width);
     assert.ok(lines.every((line) => visibleWidth(line) === width));
-    assert.ok(lines.some((line) => line.trim() === LINKED_FRESH));
-    assert.ok(visibleWidth(LINKED_FRESH) <= 42);
-    assert.ok(!lines.join(" ").includes("use /planners"));
+    assert.ok(lines.some((line) => line.trim() === "Fresh conversation"));
     component.dispose();
   });
 }

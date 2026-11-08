@@ -69,6 +69,8 @@ Both modes retain a separate Approvals row, for example:
 auto · alt+a
 ```
 
+During Linked replanning the combined row shows effective Plan, the actual physical model and `replanning` detail, not implementing/Exec; the task remains unfinished. The badge opens task status/choices, not an unrestricted workflow cycle. No extra footer row is added.
+
 Linked uses one flow per available provider: Work/Chat use `general`, Plan uses `planner`, and approved Exec uses `worker`. Assignments are captured when selected; reselecting the same provider explicitly refreshes them. Reasoning stays independent: `reasoning auto → high` means auto effort is active; `reasoning high` is the manual form. When a toggle provider is available but off, `auto off` stays visible so it can be enabled again. A pinned or absent auto-effort provider supplies no toggle.
 
 With the custom footer enabled, the configured model-selection action opens the native picker in Independent and the combined workflow/flow picker in Linked. Native `/model` and cycle attempts outside that picker remain centrally guarded; they do not silently unlink. Use `/flow independent` to regain free model selection. Exec is approved-plan execution, including when planner and worker are the same physical model—not an item the picker or cycle can start.
@@ -82,7 +84,7 @@ With the actual main editor focused in fullscreen Pi, a plain single left click 
 | Model or provider; model-row trailing hint (the effort-cycle key's hint cycles effort instead) | Native model picker in Independent; combined flow/workflow picker in Linked. |
 | Reasoning level | Stage the next reasoning level, using the same cycle as the configured native key in either operating mode. |
 | `auto` or `auto off` | Toggle auto effort, when its provider offers the action. |
-| Work/Chat/Plan badge | Cycle base workflow; in Linked, stay in the selected provider. |
+| Work/Chat/Plan badge | Cycle base workflow; in Linked, stay in the selected provider. While replanning an unfinished task, open its status/task choices instead. |
 | Exec badge or `/plan-exec` hint | Inspect execution status/recovery, never launch, stop or silently complete it. |
 | Approval value (`auto`, `yolo`, etc.) or its trailing hint | Open the approvals picker; do not silently enable Yolo. |
 | Context percentage | Open the context breakdown. |

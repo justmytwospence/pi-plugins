@@ -115,6 +115,7 @@ import {
   MODE_STATUS_KEY,
   modeStatus,
   PLAN_PROVIDER,
+  executionReplanning, INVALID_REPLANNING, latestExecution,
 } from "./modes.ts";
 import { answerSubagentEnv, inheritedModes, SUBAGENT_ENV_CHANNEL, subagentEnv, subagentEnvHonored } from "./subagent-env.ts";
 import { loadRules } from "./rules.ts";
@@ -122,7 +123,7 @@ import { agentBeforeLatestUser, approvedPlanOf, callerText, clip, clipTail, rece
 import { offerUserWords, resultText } from "./user-words.ts";
 import { callView, describeCallPresentation } from "./view.ts";
 import { registerWorkflowRenderer, sendWorkflowTransition } from "./workflow-ui.ts";
-import { FLOW_CHANNEL, FLOW_ENTRY, type FlowRequest, type FlowTransitionResult } from "./flow-contract.ts";
+import { FLOW_CHANNEL, FLOW_ENTRY, requestReplan, type FlowRequest, type FlowTransitionResult } from "./flow-contract.ts";
 import { FLOW_BUSY, FLOW_RECOVERY, FLOW_TRANSITION, ROLE_MODEL_READY, ProviderFlowController } from "./provider-flows.ts";
 import { FOOTER_ACTIONS_CHANNEL, queryFooterActions, type FooterActionsRequest } from "./footer-actions.ts";
 import { installModelGuard } from "./model-guard.ts";
@@ -489,8 +490,10 @@ export default function toolGate(pi: ExtensionAPI) {
   let workflow: BaseWorkflowMode = "work";
   let approval: ApprovalMode = "auto";
   let execActive = false;
+  let execReplanning = false;
+  let execReplanningInvalid = false;
   let revision = 0;
-  const effectiveWorkflow = (): WorkflowMode => execActive ? "exec" : workflow;
+  const effectiveWorkflow = (): WorkflowMode => execActive ? execReplanning ? "plan" : "exec" : workflow;
   // Mode and classifier changes cancel decisions, not usage of tools already running on this branch.
   const invalidate = () => { revision++; pushedBackThisTurn.clear(); classifierFailures.clear(); };
   const staleResult = () => ({ block: true, reason: "tool-gate blocked this call: modes changed or System 1 changed; the call must be reevaluated." });
@@ -521,7 +524,7 @@ export default function toolGate(pi: ExtensionAPI) {
   let flowDisplayClaimed = false;
   let sessionGeneration = 0;
   let sessionReady = false;
-  let executionCommitting = false;
+  let executionCommitting: { active: boolean; replanning: boolean } | undefined;
   let flowRecordSeen: string | undefined;
   const branchFlowRecord = (ctx: ExtensionContext) => {
     const entry = [...ctx.sessionManager.getBranch()].reverse().find(entry => entry.type === "custom" && entry.customType === FLOW_ENTRY);
@@ -630,6 +633,7 @@ export default function toolGate(pi: ExtensionAPI) {
   const flows = new ProviderFlowController({
     events: pi.events,
     workflow: effectiveWorkflow,
+    replanning: () => execReplanning,
     lease: () => flowLease,
     roleReady: () => roleReady,
     setModel: model => pi.setModel(model),
@@ -656,6 +660,7 @@ export default function toolGate(pi: ExtensionAPI) {
       workflow: inherited.workflow ?? parseWorkflow(config.defaultWorkflow) ?? (legacy === "chat" || legacy === "plan" ? legacy : "work"),
       approval: inherited.approval ?? parseApproval(config.defaultApproval) ?? (!config.enabled ? "bypassPermissions" : parseApproval(legacy) ?? "auto"),
       execActive: false,
+      execReplanning: false,
     } as const;
   };
   pi.events.on(SUBAGENT_ENV_CHANNEL, (data: unknown) => answerSubagentEnv(data, () => subagentEnv(approval, effectiveWorkflow())));
@@ -675,7 +680,7 @@ export default function toolGate(pi: ExtensionAPI) {
     if (!Array.isArray(query?.entries) || typeof query.cwd !== "string" || typeof query.reply !== "function") return;
     const restored = restoreBranchModes(query.entries, defaults(loadConfig("tool-gate", DEFAULT_CONFIG, query.cwd)));
     const snapshot: WorkflowSnapshot = {
-      mode: restored.execActive ? "exec" : restored.workflow,
+      mode: restored.execActive ? restored.execReplanning ? "plan" : "exec" : restored.workflow,
       cycle: cycle(), ...(shortcut ? { key: shortcut } : {}), source: "restore",
     };
     query.reply(snapshot);
@@ -690,7 +695,15 @@ export default function toolGate(pi: ExtensionAPI) {
     if (!fromCycle) settings.cancel("Workflow selected explicitly.");
     const result = (error?: string) => Promise.resolve({ ok: !error, snapshot: flows.snapshot(), ...(error ? { error } : {}) });
     const refused = (error: string) => { ctx?.ui.notify(error, "warning"); return result(error); };
-    if (execActive) return refused(EXEC_GUIDANCE);
+    if (execActive) {
+      if (execReplanningInvalid) return refused(INVALID_REPLANNING);
+      if (!ctx) return refused(EXEC_GUIDANCE);
+      const linked = flows.snapshot().operatingMode === "linked";
+      if (linked && !execReplanning && next === "plan") return revisitPlan(ctx);
+      if (execReplanning && next === "plan") return result();
+      if (ctx.hasUI && (linked || execReplanning || userInitiated)) return showModePicker(ctx).then(() => ({ ok: false, snapshot: flows.snapshot(), error: EXEC_GUIDANCE }));
+      return refused(EXEC_GUIDANCE);
+    }
     if (next === "plan" && !planProvider) return refused("Plan mode needs pi-plan-mode.");
     const flow = flows.snapshot();
     if (flow.blocked) return refused(flow.blocked);
@@ -767,6 +780,7 @@ export default function toolGate(pi: ExtensionAPI) {
     return undefined;
   };
   const stageWorkflow = (ctx: ExtensionContext | undefined = hostCtx, userInitiated = false, trigger?: SettingCycleTrigger): Promise<boolean> => {
+    if (execActive && ctx) return executionWorkflowAction(ctx).then(() => false);
     if (!ctx || ctx.mode !== "tui" || !ctx.hasUI)
       return setWorkflow(nextWorkflow(workflow, planProvider) as BaseWorkflowMode, ctx, userInitiated);
     return settings.stage(ctx, {
@@ -810,11 +824,15 @@ export default function toolGate(pi: ExtensionAPI) {
     const result = stageApproval(hostCtx, (data as { cycleTrigger?: SettingCycleTrigger } | undefined)?.cycleTrigger);
     if (data && typeof data === "object") (data as { result?: Promise<boolean> }).result = result;
   });
-  const commitExecution = (active: boolean) => {
-    if (active === execActive) return;
+  const commitExecution = (active: boolean, replanning = false) => {
+    replanning = active && replanning;
+    if (active === execActive && replanning === execReplanning) return;
     settings.cancel("Execution changed.");
     const previous = effectiveWorkflow();
     execActive = active;
+    execReplanning = replanning;
+    execReplanningInvalid = active && executionReplanning(latestExecution(hostCtx?.sessionManager.getBranch() ?? [])).invalid;
+    if (execReplanningInvalid) planFile = undefined;
     if (!active) {
       workflow = "work";
       if (flows.snapshot().operatingMode === "linked") pi.appendEntry(WORKFLOW_ENTRY, { version: 1, mode: workflow });
@@ -826,18 +844,26 @@ export default function toolGate(pi: ExtensionAPI) {
     tellChatNow(hostCtx);
   };
   pi.events.on(EXEC_CHANGED, (data) => {
-    const event = data as { active?: unknown; source?: unknown } | undefined;
+    const event = data as { active?: unknown; replanning?: unknown; source?: unknown } | undefined;
     // Reconstruction is only a snapshot. Our lifecycle hook owns destination branch restoration.
     if (event?.source !== "transition") return;
     if (flows.snapshot().operatingMode === "linked" && !executionCommitting) {
       hostCtx?.ui.notify("Linked execution requires an awaited approved-plan flow transition.", "warning");
       return;
     }
-    if (typeof event.active === "boolean") commitExecution(event.active);
+    if (executionCommitting) {
+      commitExecution(executionCommitting.active, executionCommitting.replanning);
+    } else if (typeof event.active === "boolean") {
+      if (execActive && execReplanning && event.active && event.replanning !== true) {
+        hostCtx?.ui.notify("This suspended Linked task is now Independent. Stop implementation before approving another plan.", "warning");
+        return;
+      }
+      commitExecution(event.active, event.replanning === true);
+    }
   });
   pi.events.on(PLAN_PROVIDER, (data) => {
     const file = (data as { planFile?: unknown } | undefined)?.planFile;
-    const nextFile = typeof file === "string" && file ? path.resolve(file) : undefined;
+    const nextFile = !execReplanningInvalid && typeof file === "string" && file ? path.resolve(file) : undefined;
     if (nextFile !== planFile) { planFile = nextFile; invalidate(); }
     const available = planProvider;
     planProvider = true;
@@ -848,8 +874,7 @@ export default function toolGate(pi: ExtensionAPI) {
     pi.registerShortcut(shortcut as never, {
       description: "Cycle workflow (work, chat, plan)",
       handler: async (ctx) => {
-        // During exec the cycle opens the execution menu instead of refusing.
-        if (execActive && ctx.hasUI) { await executionStatus(ctx); return; }
+        if (execActive) { await executionWorkflowAction(ctx); return; }
         void stageWorkflow(ctx, true);
       },
     });
@@ -889,17 +914,20 @@ export default function toolGate(pi: ExtensionAPI) {
         return { ok: false, snapshot: flows.snapshot(), error: message };
       });
     } else if (request.kind === "execution") {
-      if (!["begin", "finish", "stop"].includes(request.phase) || typeof request.commit !== "function" || typeof request.planFile !== "string" || !Number.isSafeInteger(request.expectedRevision)) return;
+      if (!["begin", "replan", "resume", "finish", "stop"].includes(request.phase) || typeof request.commit !== "function" || typeof request.planFile !== "string" || !Number.isSafeInteger(request.expectedRevision)) return;
       settings.cancel("Execution requested.");
       invalidate();
       request.result = flowResult(flows.runExecutionTransition(request, ctx, () => {
-        executionCommitting = true;
+        executionCommitting = {
+          active: request.phase === "begin" || request.phase === "replan" || request.phase === "resume",
+          replanning: request.phase === "replan",
+        };
         try {
           request.commit();
           // The lifecycle owner owns its durable Exec record; the gate owns its overlay.
           // Existing owners also publish EXEC_CHANGED synchronously, making this a no-op.
-          commitExecution(request.phase === "begin");
-        } finally { executionCommitting = false; }
+          commitExecution(executionCommitting.active, executionCommitting.replanning);
+        } finally { executionCommitting = undefined; }
       }), ctx);
     }
   });
@@ -1334,6 +1362,12 @@ export default function toolGate(pi: ExtensionAPI) {
     workflow = restored.workflow;
     approval = restored.approval;
     execActive = restored.execActive;
+    execReplanning = restored.execReplanning;
+    execReplanningInvalid = executionReplanning(latestExecution(entries)).invalid;
+    if (execReplanning) {
+      const draft = executionReplanning(latestExecution(entries)).draftFile;
+      if (!draft || planFile !== path.resolve(draft)) planFile = undefined;
+    }
     const told = [...entries].reverse().find((entry) => entry.type === "custom" && entry.customType === CHAT_ENTRY);
     chatTold = told?.type === "custom" && (told.data as { told?: unknown } | undefined)?.told === true;
     await flows.reconcile(ctx);
@@ -1369,6 +1403,12 @@ export default function toolGate(pi: ExtensionAPI) {
       workflow = restored.workflow;
       approval = restored.approval;
       execActive = restored.execActive;
+      execReplanning = restored.execReplanning;
+      execReplanningInvalid = executionReplanning(latestExecution(ctx.sessionManager.getBranch())).invalid;
+      if (execReplanning) {
+        const draft = executionReplanning(latestExecution(ctx.sessionManager.getBranch())).draftFile;
+        if (!draft || planFile !== path.resolve(draft)) planFile = undefined;
+      }
       flows.restoreState(ctx.sessionManager.getBranch());
       flowRecordSeen = record;
       broadcastWorkflow("restore");
@@ -1520,7 +1560,7 @@ export default function toolGate(pi: ExtensionAPI) {
         if (current === "plan" && (tool === "edit" || tool === "write")) {
           const file = path.resolve(ctx.cwd, expandHome(String(input.path ?? "")));
           // The plan file is the workflow's own artifact: no approval applies to it.
-          if (planFile && file === planFile) return allow(ctx);
+          if (!execReplanningInvalid && planFile && file === planFile) return allow(ctx);
           return {
             block: true,
             reason: `Plan mode is on: nothing may be edited until the user approves a plan.${planFile ? ` The only file you may write is the plan file, ${planFile}.` : ""}`,
@@ -1759,6 +1799,32 @@ export default function toolGate(pi: ExtensionAPI) {
     if (action) await action.run();
     else ctx.ui.notify(EXEC_GUIDANCE, "info");
   };
+  const revisitPlan = (ctx: ExtensionContext): Promise<FlowTransitionResult> => {
+    const refuse = (error: string) => {
+      ctx.ui.notify(error, "warning");
+      return Promise.resolve({ ok: false, snapshot: flows.snapshot(), error });
+    };
+    if (execReplanningInvalid) return refuse(INVALID_REPLANNING);
+    if (!ctx.isIdle()) return refuse("Implementation is running. Interrupt it, then revisit the plan.");
+    if (flows.inFlight) return refuse(FLOW_TRANSITION);
+    const result = requestReplan(pi.events);
+    if (!result) return refuse("Revisiting this plan is unavailable; no workflow changed.");
+    return flowResult(result, ctx);
+  };
+  const executionWorkflowAction = async (ctx: ExtensionContext) => {
+    if (flows.snapshot().operatingMode === "linked" && !execReplanning) await revisitPlan(ctx);
+    else if (execReplanning) await showModePicker(ctx);
+    else await executionStatus(ctx);
+  };
+  const executionChoices = (ctx: ExtensionContext, linked: boolean): ControlChoice[] => [
+    ...(execReplanning
+      ? [{ label: "Keep planning", run: () => {} }]
+      : linked ? [{ label: "Revisit plan", run: () => revisitPlan(ctx) }] : []),
+    { label: "Execution status", run: () => executionStatus(ctx) },
+    // The execution owner retains its stop confirmation and lifecycle semantics.
+    ...(execReplanning ? [{ label: "Stop implementation", run: () => executionStatus(ctx) }] : []),
+    { label: "Use Independent mode", run: () => independent(ctx) },
+  ];
   const selectProvider = async (provider: string, ctx: ExtensionContext) => {
     settings.cancel("Provider selected.");
     if (!ctx.isIdle()) { ctx.ui.notify(FLOW_BUSY, "warning"); return; }
@@ -1795,10 +1861,7 @@ export default function toolGate(pi: ExtensionAPI) {
     const blockedQuestion = snapshot.operatingMode === "linked" && snapshot.blocked
       ? `Linked blocked: ${snapshot.blocked}\nUse /flow independent or select a valid provider.` : undefined;
     if (execActive) {
-      await pickControl(ctx, blockedQuestion ?? "Operating mode · Exec active", [
-        { label: "Execution status", run: () => executionStatus(ctx) },
-        { label: "Use Independent mode", run: () => independent(ctx) },
-      ]);
+      await pickControl(ctx, blockedQuestion ?? (execReplanning ? "Operating mode · Revisiting plan" : "Operating mode · Exec active"), executionChoices(ctx, snapshot.operatingMode === "linked"));
       return;
     }
     if (!ctx.isIdle()) { ctx.ui.notify(FLOW_BUSY, "warning"); return; }
@@ -1822,11 +1885,8 @@ export default function toolGate(pi: ExtensionAPI) {
     }
     const blockedQuestion = linked && flow.blocked ? `Linked blocked: ${flow.blocked}\nUse /flow independent or select a valid provider.` : undefined;
     if (execActive) {
-      if (!linked) { await executionStatus(ctx); return; }
-      await pickControl(ctx, blockedQuestion ?? "Workflow · Exec active", [
-        { label: "Execution status", run: () => executionStatus(ctx) },
-        { label: "Use Independent mode", run: () => independent(ctx) },
-      ]);
+      if (!linked && !execReplanning) { await executionStatus(ctx); return; }
+      await pickControl(ctx, blockedQuestion ?? (execReplanning ? "Workflow · Revisiting plan" : "Workflow · Exec active"), executionChoices(ctx, linked));
       return;
     }
     if (linked && !ctx.isIdle()) { ctx.ui.notify(FLOW_BUSY, "warning"); return; }
@@ -1877,7 +1937,6 @@ export default function toolGate(pi: ExtensionAPI) {
       if (legacyApproval) { setApproval(legacyApproval, ctx); return; }
       if (arg) {
         const next = parseWorkflow(arg);
-        if (next && execActive && ctx.hasUI) { await executionStatus(ctx); return; }
         if (next) await setWorkflow(next, ctx, true);
         else ctx.ui.notify("Usage: /mode [work|chat|plan].", "warning");
         return;
@@ -1910,7 +1969,7 @@ export default function toolGate(pi: ExtensionAPI) {
       if (!sessionReady || generation !== sessionGeneration || ctx.sessionManager !== hostCtx?.sessionManager || session !== ctx.sessionManager.getSessionId?.()) return;
       await run();
     };
-    request.actions["workflow.cycle"] = { label: execActive ? "Execution status" : "Cycle workflow", ...(shortcut && !execActive ? { key: shortcut } : {}), run: guarded(async () => { if (execActive) await executionStatus(ctx); else void stageWorkflow(ctx, true); }) };
+    request.actions["workflow.cycle"] = { label: execActive ? execReplanning ? "Execution status" : flows.snapshot().operatingMode === "linked" ? "Revisit plan" : "Execution status" : "Cycle workflow", ...(shortcut && (!execActive || (flows.snapshot().operatingMode === "linked" && !execReplanning)) ? { key: shortcut } : {}), run: guarded(async () => { if (execActive) await executionWorkflowAction(ctx); else void stageWorkflow(ctx, true); }) };
     request.actions["workflow.open"] = { label: "Workflow", run: guarded(() => showModePicker(ctx)) };
     request.actions["flow.open"] = { label: "Operating mode", run: guarded(() => openFlowControl(ctx)) };
     request.actions["approvals.open"] = { label: "Approvals", ...(!duplicateShortcut && approvalShortcut ? { key: approvalShortcut } : {}), run: guarded(() => showApprovals(ctx)) };

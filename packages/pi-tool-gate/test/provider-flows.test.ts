@@ -67,6 +67,7 @@ function harness() {
     model: model("alpha", "start") as ChatModel | undefined,
     thinking: "high",
     workflow: "work" as FlowWorkflow,
+    replanning: false,
     idle: true,
     roleReady: true as boolean | undefined,
     roleListener: true,
@@ -158,7 +159,7 @@ function harness() {
   });
   const changed = vi.fn();
   const host: FlowHost = {
-    events, workflow: () => runtime.workflow, lease: () => runtime.guardPresent ? lease : undefined,
+    events, workflow: () => runtime.workflow, replanning: () => runtime.replanning, lease: () => runtime.guardPresent ? lease : undefined,
     setModel, getThinking: () => runtime.thinking, setThinking, persist, changed,
     roleReady: () => runtime.roleReady,
   };
@@ -209,6 +210,192 @@ async function executing() {
   expect(begin).toHaveBeenCalledOnce();
   return h;
 }
+
+describe("same-task replanning lifecycle", () => {
+  const DRAFT = "/project/plans/revised.md";
+  const task = (h: Harness, suspended = false) => ({
+    active: true, planFile: PLAN, linkedFlow: h.controller.snapshot(),
+    negotiation: { executionId: "task-1", planRevision: 1 },
+    ...(suspended ? { replanning: { version: 1, draftFile: DRAFT } } : {}),
+  });
+  const request = (h: Harness, phase: "replan" | "resume" | "stop" | "finish") => ({
+    ...execution(h, phase, phase === "resume" ? DRAFT : PLAN),
+    expectedExecutionId: "task-1", expectedPlanRevision: 1,
+  });
+  const setupTask = async (suspended = false) => {
+    const h = await executing();
+    h.append("custom", task(h, suspended), "plan-mode:exec");
+    if (suspended) { h.runtime.workflow = "plan"; h.runtime.replanning = true; h.runtime.model = model("alpha", "planner"); }
+    return h;
+  };
+  test("replan and resume activate planner/worker before commit without replacing the task flow", async () => {
+    const h = await setupTask();
+    const captured = structuredClone(h.controller.snapshot().selectedFlow);
+    const suspend = vi.fn(() => {
+      expect(h.runtime.model?.id).toBe("planner");
+      h.runtime.workflow = "plan";
+      h.runtime.replanning = true;
+      h.append("custom", task(h, true), "plan-mode:exec");
+    });
+    expect((await h.controller.runExecutionTransition(request(h, "replan"), h.ctx, suspend)).ok).toBe(true);
+    expect(h.controller.snapshot()).toMatchObject({ workflow: "plan", replanning: true });
+    const resume = vi.fn(() => {
+      expect(h.runtime.model?.id).toBe("worker");
+      h.runtime.workflow = "exec";
+      h.runtime.replanning = false;
+      h.append("custom", { ...task(h), planFile: DRAFT, negotiation: { executionId: "task-1", planRevision: 2 } }, "plan-mode:exec");
+    });
+    expect((await h.controller.runExecutionTransition(request(h, "resume"), h.ctx, resume)).ok).toBe(true);
+    expect(h.controller.snapshot().selectedFlow).toEqual(captured);
+    expect(h.controller.snapshot()).not.toHaveProperty("replanning");
+    expect(h.persist).toHaveBeenCalledOnce(); // Lifecycle cannot rewrite the provider selection.
+    expect(suspend).toHaveBeenCalledOnce();
+    expect(resume).toHaveBeenCalledOnce();
+  });
+  test("stop from suspended Plan activates Work and legacy optional completion fences still work", async () => {
+    const h = await setupTask(true);
+    const stop = vi.fn(() => {
+      expect(h.runtime.model?.id).toBe("general");
+      h.runtime.workflow = "work";
+      h.runtime.replanning = false;
+      h.append("custom", { active: false }, "plan-mode:exec");
+    });
+    expect((await h.controller.runExecutionTransition(execution(h, "stop"), h.ctx, stop)).ok).toBe(true);
+    expect(stop).toHaveBeenCalledOnce();
+  });
+  test.each(["begin", "finish", "replan"] as const)("%s cannot bypass suspended Plan, even on the same physical model", async phase => {
+    const h = await setupTask(true);
+    h.runtime.model = model("alpha", "worker");
+    const before = h.setModel.mock.calls.length;
+    const commit = vi.fn();
+    expect((await h.controller.runExecutionTransition({ ...request(h, "replan"), phase }, h.ctx, commit)).ok).toBe(false);
+    expect(commit).not.toHaveBeenCalled();
+    expect(h.setModel).toHaveBeenCalledTimes(before);
+  });
+  test.each(["replan", "resume"] as const)("%s validates required identity, safe revision, plan file and immutable assignments before activation", async phase => {
+    for (const invalid of ["missing-id", "wrong-id", "missing-revision", "zero", "fraction", "unsafe", "wrong-revision", "file", "flow"]) {
+      const h = await setupTask(phase === "resume");
+      const input = request(h, phase);
+      if (invalid === "missing-id") delete (input as Partial<typeof input>).expectedExecutionId;
+      if (invalid === "wrong-id") input.expectedExecutionId = "another-task";
+      if (invalid === "missing-revision") delete (input as Partial<typeof input>).expectedPlanRevision;
+      if (invalid === "zero") input.expectedPlanRevision = 0;
+      if (invalid === "fraction") input.expectedPlanRevision = 1.5;
+      if (invalid === "unsafe") input.expectedPlanRevision = Number.MAX_SAFE_INTEGER + 1;
+      if (invalid === "wrong-revision") input.expectedPlanRevision = 2;
+      if (invalid === "file") input.planFile = phase === "resume" ? PLAN : DRAFT;
+      if (invalid === "flow") h.append("custom", { ...task(h, phase === "resume"), linkedFlow: linked(flow("beta")) }, "plan-mode:exec");
+      const calls = h.setModel.mock.calls.length;
+      const commit = vi.fn();
+      const result = await h.controller.runExecutionTransition(input, h.ctx, commit);
+      expect(result.ok, invalid).toBe(false);
+      expect(commit).not.toHaveBeenCalled();
+      expect(h.setModel).toHaveBeenCalledTimes(calls);
+    }
+  });
+  test("legacy execution revision defaults to one, but malformed durable revisions cannot resume", async () => {
+    const h = await setupTask();
+    h.append("custom", { ...task(h), negotiation: { executionId: "task-1" } }, "plan-mode:exec");
+    expect((await h.controller.runExecutionTransition(request(h, "replan"), h.ctx, h.commitWorkflow("plan"))).ok).toBe(true);
+    for (const revision of [0, null, 1.5, Number.MAX_SAFE_INTEGER + 1]) {
+      const invalid = await setupTask(true);
+      invalid.append("custom", { ...task(invalid, true), negotiation: { executionId: "task-1", planRevision: revision } }, "plan-mode:exec");
+      expect((await invalid.controller.runExecutionTransition(request(invalid, "resume"), invalid.ctx, vi.fn())).ok).toBe(false);
+    }
+  });
+  test("a bus caller cannot retarget expected task identity during an awaited activation", async () => {
+    const h = await setupTask();
+    const entered = deferred();
+    const release = deferred();
+    h.getAvailable.mockImplementationOnce(async () => { entered.resolve(); await release.promise; return h.runtime.available; });
+    const input = request(h, "replan");
+    const commit = vi.fn();
+    const pending = h.controller.runExecutionTransition(input, h.ctx, commit);
+    await entered.promise;
+    input.expectedExecutionId = "replacement";
+    h.append("custom", { ...task(h), negotiation: { executionId: "replacement", planRevision: 1 } }, "plan-mode:exec");
+    release.resolve();
+    expect((await pending).ok).toBe(false);
+    expect(commit).not.toHaveBeenCalled();
+  });
+  test.each(["replan", "resume"] as const)("%s is one-shot even when queued twice", async phase => {
+    const h = await setupTask(phase === "resume");
+    const commit = vi.fn(() => {
+      h.runtime.workflow = phase === "replan" ? "plan" : "exec";
+      h.runtime.replanning = phase === "replan";
+      h.append("custom", task(h, phase === "replan"), "plan-mode:exec");
+    });
+    const input = request(h, phase);
+    const results = await Promise.all([
+      h.controller.runExecutionTransition(input, h.ctx, commit),
+      h.controller.runExecutionTransition(input, h.ctx, commit),
+    ]);
+    expect(results.map(result => result.ok)).toEqual([true, false]);
+    expect(commit).toHaveBeenCalledOnce();
+  });
+  test.each(["replan", "resume"] as const)("%s rechecks identity/revision/draft/assignments across catalog and model awaits", async phase => {
+    for (const boundary of ["catalog", "model"]) for (const change of ["id", "revision", "draft", "flow", "inactive"]) {
+      const h = await setupTask(phase === "resume");
+      if (change === "draft" && phase === "replan") continue;
+      const entered = deferred();
+      const release = deferred();
+      if (boundary === "catalog") h.getAvailable.mockImplementationOnce(async () => { entered.resolve(); await release.promise; return h.runtime.available; });
+      else h.runtime.beforeSet = async () => { entered.resolve(); await release.promise; };
+      const commit = vi.fn();
+      const pending = h.controller.runExecutionTransition(request(h, phase), h.ctx, commit);
+      await entered.promise;
+      const next = task(h, phase === "resume");
+      if (change === "id") next.negotiation.executionId = "replacement";
+      if (change === "revision") next.negotiation.planRevision++;
+      if (change === "draft") next.replanning = { version: 1, draftFile: "/other.md" };
+      if (change === "flow") next.linkedFlow = { ...next.linkedFlow, selectedFlow: flow("beta") };
+      if (change === "inactive") next.active = false;
+      h.append("custom", next, "plan-mode:exec");
+      release.resolve();
+      expect((await pending).ok, boundary + change).toBe(false);
+      expect(commit).not.toHaveBeenCalled();
+      if (boundary === "model") expect(h.controller.snapshot().blocked).toMatch(/after model mutation/u);
+    }
+  });
+  test.each([null, false, true, {}, [], { version: 2, draftFile: DRAFT }, { version: 1, draftFile: "" }, { version: 1, draftFile: PLAN }])("corrupt suspension %j never authorizes implementation or a replacement begin", async marker => {
+    const h = await setupTask(true);
+    h.append("custom", { ...task(h), replanning: marker }, "plan-mode:exec");
+    for (const phase of ["begin", "resume", "stop"] as const) {
+      const commit = vi.fn();
+      const result = await h.controller.runExecutionTransition({ ...request(h, "resume"), phase }, h.ctx, commit);
+      expect(result.error).toBe("Replanning state is invalid; no implementation was resumed.");
+      expect(commit).not.toHaveBeenCalled();
+    }
+  });
+  test("restored suspended task reconciles onto planner; explicit Independent preserves suspension and rejects provider/base-workflow bypasses", async () => {
+    const h = await setupTask(true);
+    expect((await h.controller.restore(h.runtime.entries, h.ctx)).ok).toBe(true);
+    expect(h.runtime.model?.id).toBe("planner");
+    expect(h.controller.snapshot()).toMatchObject({ workflow: "plan", replanning: true });
+    expect((await h.controller.selectProvider("beta", h.ctx)).ok).toBe(false);
+    expect((await h.controller.prepareWorkflow("work", h.ctx)).ok).toBe(false);
+    expect((await h.controller.setIndependent(h.ctx)).ok).toBe(true);
+    expect(h.controller.snapshot()).toMatchObject({ operatingMode: "independent", workflow: "plan", replanning: true });
+    expect((await h.controller.selectProvider("alpha", h.ctx)).ok).toBe(false);
+    expect((await h.controller.prepareWorkflow("chat", h.ctx)).ok).toBe(false);
+    expect((await h.controller.runExecutionTransition(request(h, "resume"), h.ctx, vi.fn())).ok).toBe(false);
+    expect(h.runtime.entries.filter(entry => entry.customType === "plan-mode:exec").at(-1)?.data).toMatchObject({ active: true, replanning: { draftFile: DRAFT } });
+  });
+  test.each(["discovery", "activation"] as const)("provider selection fences replanning appearing during %s even when workflow remains Plan", async boundary => {
+    const h = await selected("plan");
+    const entered = deferred();
+    const release = deferred();
+    if (boundary === "discovery") h.getAvailable.mockImplementationOnce(async () => { entered.resolve(); await release.promise; return h.runtime.available; });
+    else h.runtime.beforeSet = async () => { entered.resolve(); await release.promise; };
+    const pending = h.controller.selectProvider("beta", h.ctx);
+    await entered.promise;
+    h.runtime.replanning = true;
+    release.resolve();
+    expect((await pending).ok).toBe(false);
+    expect(h.persist).toHaveBeenCalledOnce();
+    expect(h.controller.snapshot().selectedFlow?.provider).toBe("alpha");
+  });
+});
 
 // These helpers validate durable plain data independently of any controller lifecycle.
 describe("pure flow parsing and restoration", () => {

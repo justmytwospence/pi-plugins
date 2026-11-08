@@ -26,6 +26,8 @@ export interface Submission {
 }
 export interface ReviewAttempt {
   id: string;
+  /** Absent in legacy records means revision 1. */
+  planRevision?: number;
   report: Submission;
   responses: FindingResponse[];
   decision?: ReviewDecision;
@@ -35,6 +37,8 @@ export interface ReviewAttempt {
 export interface NegotiationState {
   version: 1;
   executionId: string;
+  /** Absent in legacy records means revision 1. */
+  planRevision?: number;
   phase: "implementing" | "consulting" | "reviewing" | "revising" | "paused";
   attempts: number;
   revisionsUsed: number;
@@ -51,6 +55,7 @@ const nonempty = (v: unknown): v is string => typeof v === "string" && v.trim().
 const object = (v: unknown): v is Record<string, unknown> => !!v && typeof v === "object" && !Array.isArray(v);
 const enumValue = (v: unknown, values: string[]) => typeof v === "string" && values.includes(v);
 const strings = (v: unknown): v is string[] => Array.isArray(v) && v.every(nonempty);
+const validPlanRevision = (v: unknown): v is number => Number.isSafeInteger(v) && (v as number) >= 1;
 const fail = (message: string): never => {
   throw new Error(message);
 };
@@ -61,6 +66,7 @@ export function createNegotiation(executionId: string, maximum: number): Negotia
   return {
     version: 1,
     executionId,
+    planRevision: 1,
     phase: "implementing",
     attempts: 0,
     revisionsUsed: 0,
@@ -69,6 +75,18 @@ export function createNegotiation(executionId: string, maximum: number): Negotia
     history: [],
     revisionAuthorized: false,
   };
+}
+/** A revised plan retains the task's supervision budget and recovery requirements. */
+export function reviseNegotiationPlan(state: NegotiationState): NegotiationState {
+  if (state.phase === "reviewing" || state.phase === "consulting")
+    fail("Cannot revise the plan while a review or consultation is in progress.");
+  const revision = state.planRevision ?? 1;
+  if (!validPlanRevision(revision) || !validPlanRevision(revision + 1)) fail("Invalid plan revision.");
+  const next = structuredClone(state);
+  next.planRevision = revision + 1;
+  delete next.latestReport;
+  delete next.latestExchangeId;
+  return next;
 }
 export function parseReviewDecision(reply: string): ReviewDecision {
   if (new TextEncoder().encode(reply).length > 64 * 1024) fail("Review exceeds 64 KiB.");
@@ -139,10 +157,13 @@ export function startReview(
   next.phase = "reviewing";
   next.revisionAuthorized = false;
   next.attempts++;
-  next.latestExchangeId = `${next.executionId}:review:${next.attempts}`;
+  const revision = next.planRevision ?? 1;
+  const prefix = revision === 1 ? next.executionId : `${next.executionId}:plan:${revision}`;
+  next.latestExchangeId = `${prefix}:review:${next.attempts}`;
   next.latestReport = structuredClone(report);
   next.history.push({
     id: next.latestExchangeId,
+    planRevision: revision,
     report: structuredClone(report),
     responses: structuredClone(responses),
     costUsd: 0,
@@ -204,6 +225,8 @@ export function recoverNegotiation(state: NegotiationState, action: "retry" | "r
 /** Reject corrupt versioned records instead of silently resetting a spent budget. */
 export function restoreNegotiation(value: unknown): NegotiationState | undefined {
   if (!object(value) || value.version !== 1 || !nonempty(value.executionId)) return undefined;
+  if (value.planRevision !== undefined && !validPlanRevision(value.planRevision)) return undefined;
+  const revision = value.planRevision ?? 1;
   if (!enumValue(value.phase, ["implementing", "consulting", "reviewing", "revising", "paused"])) return undefined;
   for (const key of ["attempts", "revisionsUsed", "maxRevisions"])
     if (!Number.isSafeInteger(value[key]) || (value[key] as number) < 0) return undefined;
@@ -232,6 +255,8 @@ export function restoreNegotiation(value: unknown): NegotiationState | undefined
     for (const a of value.history) {
       if (
         !object(a) ||
+        (a.planRevision !== undefined && !validPlanRevision(a.planRevision)) ||
+        (a.planRevision ?? 1) > revision ||
         !nonempty(a.id) ||
         !object(a.report) ||
         ![a.report.report, a.report.verification, a.report.concerns].every(nonempty) ||

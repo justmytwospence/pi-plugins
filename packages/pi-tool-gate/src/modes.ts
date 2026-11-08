@@ -7,7 +7,7 @@
 //   workflow-mode:changed       gate -> all { mode: work|chat|plan|exec, previous?, cycle: BaseWorkflowMode[], key?, source: transition|restore }
 //     Restore/capability announcements are snapshots, never user transitions.
 //   workflow-mode:plan-provider plan -> gate { planFile? } announces plan support and its file
-//   workflow-mode:exec          plan -> gate { active: boolean, source: transition|restore } publishes the exec lifecycle
+//   workflow-mode:exec          plan -> gate { active: boolean, replanning?: boolean, source: transition|restore } publishes the exec lifecycle
 //     Gate ignores restore publications; its own lifecycle hook folds the destination branch.
 //   workflow-mode:query         any -> gate { entries: readonly unknown[], cwd: string, reply(snapshot): void }
 //     Synchronously replies with { mode, cycle, key?, source: restore } using destination entries/cwd defaults.
@@ -96,7 +96,29 @@ export function modeStatus(mode: ApprovalMode, shortcut: string | undefined): st
 export function workflowStatus(mode: WorkflowMode, shortcut: string | undefined): string {
   return `workflow: ${mode}${shortcut && mode !== "exec" ? ` (${shortcut} to cycle)` : ""}`;
 }
-export interface BranchModes { workflow: BaseWorkflowMode; approval: ApprovalMode; execActive: boolean }
+export interface BranchModes { workflow: BaseWorkflowMode; approval: ApprovalMode; execActive: boolean; execReplanning: boolean }
+export const INVALID_REPLANNING = "Replanning state is invalid; no implementation was resumed.";
+/** Presence of a corrupt suspension marker is still Plan, never permission to implement. */
+export function executionReplanning(data: unknown): { replanning: boolean; invalid: boolean; draftFile?: string } {
+  if (!data || typeof data !== "object") return { replanning: false, invalid: false };
+  const execution = data as Record<string, unknown>;
+  if (execution.active !== true || !Object.hasOwn(execution, "replanning")) return { replanning: false, invalid: false };
+  const marker = execution.replanning as Record<string, unknown> | null;
+  if (!marker || typeof marker !== "object" || Array.isArray(marker) || marker.version !== 1 ||
+      typeof marker.draftFile !== "string" || !marker.draftFile.trim() || marker.draftFile === execution.planFile) {
+    return { replanning: true, invalid: true };
+  }
+  return { replanning: true, invalid: false, draftFile: marker.draftFile };
+}
+export function latestExecution(entries: readonly unknown[]): Record<string, unknown> | undefined {
+  for (let i = entries.length - 1; i >= 0; i--) {
+    const entry = entries[i] as { type?: unknown; customType?: unknown; data?: unknown } | null;
+    if (entry?.type === "custom" && entry.customType === "plan-mode:exec") {
+      return entry.data && typeof entry.data === "object" && !Array.isArray(entry.data)
+        ? entry.data as Record<string, unknown> : undefined;
+    }
+  }
+}
 
 /** Fold only the active branch, in chronological order. Invalid records never escalate permissions. */
 export function restoreBranchModes(entries: readonly unknown[], defaults: BranchModes): BranchModes {
@@ -121,6 +143,7 @@ export function restoreBranchModes(entries: readonly unknown[], defaults: Branch
     } else if (customType === "plan-mode:exec" && typeof data.active === "boolean") {
       if (state.execActive && !data.active) state.workflow = "work";
       state.execActive = data.active;
+      state.execReplanning = executionReplanning(data).replanning;
     }
   }
   return state;

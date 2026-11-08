@@ -23,6 +23,10 @@ export const COMPACT_HERE = "Yes, compact plan and implement here";
 export const LINKED_EXECUTE = "Execute with linked worker";
 export const LINKED_COMPACT = "Compact first, then execute";
 export const LINKED_FRESH = "Execute in a fresh conversation";
+export const APPROVE = "Approve and implement";
+export const CONTEXT_KEEP = "Keep history";
+export const CONTEXT_COMPACT = "Compact to approved plan";
+export const CONTEXT_FRESH = "Fresh conversation";
 export const EDIT = "Edit the plan";
 export const SAVE = "Save for later";
 export const KEEP = "No, keep planning";
@@ -64,6 +68,7 @@ export interface ApprovalInput {
   flow?: FlowState;
   /** Only advertised when the optional approved-plan host handoff is available. */
   freshTarget?: { target: ModelSpec; targetName: string };
+  contextNote?: string;
 }
 
 export interface ApprovalResult {
@@ -74,13 +79,15 @@ export interface ApprovalResult {
 /** Keep this object for one approval, including returns from Edit; not across approvals. */
 export interface ApprovalState {
   selectedId: string;
+  context: "keep" | "compact" | "clear";
+  stage: "main" | "context";
   efforts: Map<string, ModelSpecThinkingLevel | undefined>;
   manuallyAdjusted: Set<string>;
   effortDefaultKey?: string;
 }
 
 export function createApprovalState(): ApprovalState {
-  return { selectedId: "here", efforts: new Map(), manuallyAdjusted: new Set() };
+  return { selectedId: "here", context: "keep", stage: "main", efforts: new Map(), manuallyAdjusted: new Set() };
 }
 
 const modelId = (spec: ModelSpec) => JSON.stringify([spec.provider, spec.modelId]);
@@ -108,6 +115,9 @@ function initialEffort(row: Row, input: ApprovalInput, linked: boolean): ModelSp
 export class ApprovalPicker implements Component {
   private readonly rows: [Row, ...Row[]];
   private readonly question: string;
+  private readonly linked: boolean;
+  private readonly linkedRows: Row[];
+  private contextSelected = "keep";
   private finished = false;
   private readonly onAbort = () => this.finish(undefined);
 
@@ -122,11 +132,13 @@ export class ApprovalPicker implements Component {
     private readonly signal?: AbortSignal,
   ) {
     const linked = input.intent === "linked-execution";
+    this.linked = linked;
+    if (state.context === "clear" && !input.freshTarget) state.context = "keep";
+    state.stage = "main";
     const worker = linked ? input.targets[0] : undefined;
-    this.question = linked
-      ? `${APPROVAL_QUESTION} ${worker ? `Linked worker: ${clean(formatModelKey(worker.target))}.` : "Linked worker unavailable."}`
-      : APPROVAL_QUESTION;
-    const executionRows: Row[] = linked
+    this.question = APPROVAL_QUESTION;
+    if (linked && input.contextNote) this.question += ` ${clean(input.contextNote)}`;
+    this.linkedRows = linked
       ? worker
         ? (["keep", "compact", ...(input.freshTarget ? ["clear" as const] : [])] as const).map((context) => ({
             id: `linked:${context}:${modelId(worker.target)}`,
@@ -140,6 +152,11 @@ export class ApprovalPicker implements Component {
             label: context === "keep" ? LINKED_EXECUTE : context === "compact" ? LINKED_COMPACT : LINKED_FRESH,
             model: context === "clear" ? input.freshTarget?.target : worker.target,
           }))
+        : []
+      : [];
+    const executionRows: Row[] = linked
+      ? this.linkedRows.length
+        ? [this.linkedRows[0] as Row, { id: "context", choice: { kind: "keep" }, label: "" }]
         : []
       : [
           { id: "here", choice: { kind: "here" }, label: HERE, model: input.planning },
@@ -164,7 +181,7 @@ export class ApprovalPicker implements Component {
       }
       state.effortDefaultKey = input.effortDefaultKey;
     }
-    for (const row of this.rows) {
+    for (const row of linked ? this.linkedRows : this.rows) {
       if (!row.model) continue;
       const id = effortId(row);
       const levels = this.levels(row);
@@ -179,23 +196,57 @@ export class ApprovalPicker implements Component {
     return row.model ? this.catalog.efforts(row.model).filter((level) => level !== undefined) : [];
   }
 
+  private get activeWorker(): Row | undefined {
+    return this.linkedRows.find((row) => row.choice.kind === "handoff" && row.choice.context === this.state.context);
+  }
+
+  private get currentRows(): [Row, ...Row[]] {
+    if (this.linked && this.state.stage === "context") {
+      const ordered = [
+        this.state.context,
+        ...(["keep", "compact", "clear"] as const).filter((c) => c !== this.state.context),
+      ];
+      return ordered
+        .filter((c) => this.linkedRows.some((row) => row.choice.kind === "handoff" && row.choice.context === c))
+        .map((c) => ({
+          id: c,
+          choice: { kind: "keep" } as ApprovalChoice,
+          label: c === "keep" ? CONTEXT_KEEP : c === "compact" ? CONTEXT_COMPACT : CONTEXT_FRESH,
+        })) as [Row, ...Row[]];
+    }
+    return this.rows;
+  }
+
   private get selected(): Row {
-    return this.rows.find((row) => row.id === this.state.selectedId) ?? this.rows[0];
+    const id = this.state.stage === "context" ? this.contextSelected : this.state.selectedId;
+    return this.currentRows.find((row) => row.id === id) ?? this.currentRows[0];
   }
 
   private effort(row: Row) {
     return row.model ? this.state.efforts.get(effortId(row)) : undefined;
   }
 
+  private get questionWithWorker(): string {
+    if (!this.linked) return this.question;
+    const worker = this.activeWorker?.model;
+    return `${this.question} ${worker ? `Linked worker: ${clean(formatModelKey(worker))}.` : "Linked worker unavailable."}`;
+  }
+
   private label(row: Row): string {
+    if (this.linked && this.state.stage === "main") {
+      if (row.id === "context")
+        return `Context: ${this.state.context === "keep" ? CONTEXT_KEEP : this.state.context === "compact" ? "Compact to plan" : CONTEXT_FRESH}`;
+      if (row.choice.kind === "handoff") return APPROVE;
+    }
     return row.choice.kind === "handoff" && row.choice.intent !== "linked-execution"
       ? handoffLabel(row.choice.targetName, this.effort(row))
       : row.label;
   }
 
   private result(row: Row): ApprovalResult {
-    const thinkingLevel = this.effort(row);
-    return { choice: row.choice, ...(thinkingLevel !== undefined ? { thinkingLevel } : {}) };
+    const actual = this.linked && row.choice.kind === "handoff" ? (this.activeWorker ?? row) : row;
+    const thinkingLevel = this.effort(actual);
+    return { choice: actual.choice, ...(thinkingLevel !== undefined ? { thinkingLevel } : {}) };
   }
 
   private finish(result: ApprovalResult | undefined): void {
@@ -213,26 +264,28 @@ export class ApprovalPicker implements Component {
 
   render(width: number): string[] {
     const row = this.selected;
+    const effortRow = this.linked ? this.activeWorker : row;
     const effort =
-      row.choice.kind === "edit" || row.choice.kind === "save" || row.choice.kind === "keep"
+      !this.linked && (row.choice.kind === "edit" || row.choice.kind === "save" || row.choice.kind === "keep")
         ? "Select an implementation choice to adjust effort"
-        : !this.levels(row).length
+        : !effortRow || !this.levels(effortRow).length
           ? "Effort: not supported"
-          : `←/→ effort: ${this.effort(row) ?? "default"}`;
+          : `←/→ effort: ${this.effort(effortRow) ?? "default"}`;
     const rule = this.theme.fg("border", "─".repeat(Math.max(0, width)));
     const contentWidth = Math.max(1, width - 2);
     // A separate arrow-prefixed effort row looks like an option to Collie's screen reader.
-    const question = wrapTextWithAnsi(`${this.question} ${effort}`, contentWidth).map(
-      (line) => ` ${this.theme.fg("accent", this.theme.bold(line))}`,
-    );
+    const question = wrapTextWithAnsi(
+      `${this.questionWithWorker} ${this.linked ? `Context: ${this.state.context === "keep" ? CONTEXT_KEEP : this.state.context === "compact" ? CONTEXT_COMPACT : CONTEXT_FRESH}. ` : ""}${effort}`,
+      contentWidth,
+    ).map((line) => ` ${this.theme.fg("accent", this.theme.bold(line))}`);
     return [
       rule,
       "",
       ...question,
       "",
-      ...this.rows.map((option) => {
+      ...this.currentRows.map((option) => {
         const label = truncateToWidth(this.label(option), Math.min(OPTION_MAX, Math.max(0, width - 4)), "…");
-        return ` ${this.theme.fg(option === row ? "accent" : "text", `${option === row ? "→" : " "} ${label}`)}`;
+        return ` ${this.theme.fg(option.id === row.id ? "accent" : "text", `${option.id === row.id ? "→" : " "} ${label}`)}`;
       }),
       "",
       ...wrapTextWithAnsi(
@@ -257,36 +310,67 @@ export class ApprovalPicker implements Component {
   handleInput(data: string): void {
     if (this.finished) return;
     const row = this.selected;
-    const index = this.rows.indexOf(row);
+    const rows = this.currentRows;
+    const index = rows.findIndex((item) => item.id === row.id);
     if (
       this.keybindings.matches(data, "tui.select.cancel") ||
       matchesKey(data, "ctrl+c") ||
       matchesKey(data, "escape")
     ) {
-      this.finish(undefined);
+      if (this.state.stage === "context") {
+        this.state.stage = "main";
+        this.invalidate();
+        this.requestRender();
+      } else this.finish(undefined);
       return;
     }
     if (this.keybindings.matches(data, "tui.select.confirm")) {
+      if (this.state.stage === "context") {
+        this.state.context = row.id as ApprovalState["context"];
+        this.state.stage = "main";
+        this.state.selectedId = this.rows[0].id;
+        this.invalidate();
+        this.requestRender();
+        return;
+      }
+      if (this.linked && row.id === "context") {
+        this.state.stage = "context";
+        this.contextSelected = this.state.context;
+        this.invalidate();
+        this.requestRender();
+        return;
+      }
       this.finish(this.result(row));
       return;
     }
     if (this.keybindings.matches(data, "tui.select.up")) {
-      this.state.selectedId = this.rows[(index - 1 + this.rows.length) % this.rows.length]?.id ?? row.id;
+      const id = rows[(index - 1 + rows.length) % rows.length]?.id ?? row.id;
+      if (this.state.stage === "context") this.contextSelected = id;
+      else this.state.selectedId = id;
     } else if (this.keybindings.matches(data, "tui.select.down")) {
-      this.state.selectedId = this.rows[(index + 1) % this.rows.length]?.id ?? row.id;
+      const id = rows[(index + 1) % rows.length]?.id ?? row.id;
+      if (this.state.stage === "context") this.contextSelected = id;
+      else this.state.selectedId = id;
     } else if (matchesKey(data, "left") || matchesKey(data, "right")) {
-      const levels = this.levels(row);
-      if (!row.model || !levels.length) return;
-      const current = levels.indexOf(this.effort(row) as ModelSpecThinkingLevel);
+      if (this.state.stage === "context") return;
+      const effortRow = this.linked
+        ? row.id === "context" || row.choice.kind === "handoff"
+          ? this.activeWorker
+          : undefined
+        : row;
+      if (!effortRow) return;
+      const levels = this.levels(effortRow);
+      if (!effortRow.model || !levels.length) return;
+      const current = levels.indexOf(this.effort(effortRow) as ModelSpecThinkingLevel);
       const next =
         current < 0
           ? matchesKey(data, "right")
             ? 0
             : levels.length - 1
           : (current + (matchesKey(data, "right") ? 1 : -1) + levels.length) % levels.length;
-      if (levels[next] !== this.effort(row)) {
-        this.state.efforts.set(effortId(row), levels[next]);
-        this.state.manuallyAdjusted.add(effortId(row));
+      if (levels[next] !== this.effort(effortRow)) {
+        this.state.efforts.set(effortId(effortRow), levels[next]);
+        this.state.manuallyAdjusted.add(effortId(effortRow));
       }
     } else {
       return; // The review viewport's independent Ctrl+U/D listener remains in charge.
@@ -298,33 +382,57 @@ export class ApprovalPicker implements Component {
   /** RPC selects by unique labels, never by a possibly colliding truncated model name. */
   async selectRPC(ui: Pick<ExtensionUIContext, "select">): Promise<ApprovalResult | undefined> {
     while (!this.signal?.aborted) {
-      const currentLabels = this.rows.map((row) => this.label(row));
+      const rows = this.currentRows;
+      const currentLabels = rows.map((row) => this.label(row));
       const labels = currentLabels.map((label, index) =>
         currentLabels.some((other, otherIndex) => otherIndex !== index && other === label)
           ? `${truncateToWidth(label, OPTION_MAX - String(index + 1).length - 3, "…")} [${index + 1}]`
           : label,
       );
-      // RPC has no initial-selection option; put the retained action first for Enter.
-      const currentLabel = labels[this.rows.indexOf(this.selected)] as string;
+      const selectedIndex = rows.findIndex((row) => row.id === this.selected.id);
+      const currentLabel = labels[selectedIndex] as string;
       const actions = [currentLabel, ...labels.filter((label) => label !== currentLabel)];
-      const selected = await ui.select(this.question, actions, { signal: this.signal });
-      if (this.signal?.aborted || selected === undefined) return undefined;
-      const row = this.rows[labels.indexOf(selected)];
+      const worker = this.activeWorker;
+      const details = this.linked
+        ? ` Context: ${this.state.context === "keep" ? CONTEXT_KEEP : this.state.context === "compact" ? CONTEXT_COMPACT : CONTEXT_FRESH}. ${worker && this.levels(worker).length ? `Effort: ${this.effort(worker) ?? "default"}` : "Effort: not supported"}`
+        : "";
+      const selected = await ui.select(this.questionWithWorker + details, actions, { signal: this.signal });
+      if (this.signal?.aborted) return undefined;
+      if (selected === undefined) {
+        if (this.state.stage === "context") {
+          this.state.stage = "main";
+          continue;
+        }
+        return undefined;
+      }
+      const row = rows[labels.indexOf(selected)];
       if (!row) return undefined;
+      if (this.state.stage === "context") {
+        this.state.context = row.id as ApprovalState["context"];
+        this.state.stage = "main";
+        this.state.selectedId = this.rows[0].id;
+        continue;
+      }
       this.state.selectedId = row.id;
-      const levels = this.levels(row);
-      if (row.model && levels.length) {
-        const current = this.effort(row);
+      if (this.linked && row.id === "context") {
+        this.state.stage = "context";
+        this.contextSelected = this.state.context;
+        continue;
+      }
+      const effortRow = this.linked && row.choice.kind === "handoff" ? (this.activeWorker ?? row) : row;
+      const levels = this.levels(effortRow);
+      if (effortRow.model && levels.length) {
+        const current = this.effort(effortRow);
         const options = [current ?? "Model default", ...levels.filter((level) => level !== current)];
         const selectedEffort = await ui.select("Implementation effort", options, { signal: this.signal });
         if (this.signal?.aborted) return undefined;
         if (selectedEffort === undefined) continue;
         if (!options.includes(selectedEffort)) return undefined;
         this.state.efforts.set(
-          effortId(row),
+          effortId(effortRow),
           selectedEffort === "Model default" ? undefined : (selectedEffort as ModelSpecThinkingLevel),
         );
-        this.state.manuallyAdjusted.add(effortId(row));
+        this.state.manuallyAdjusted.add(effortId(effortRow));
       }
       return this.result(row);
     }
@@ -371,13 +479,20 @@ export async function pickApproval(
   try {
     if (ctx.mode === "tui") {
       if (!remote) return await terminal(signal);
+      // Both UIs can be live at once. Never let one side's intermediate stage or
+      // context change turn the other side's visible selection into approval.
+      const remoteState: ApprovalState = {
+        ...state,
+        efforts: new Map(state.efforts),
+        manuallyAdjusted: new Set(state.manuallyAdjusted),
+      };
       const { value, from } = await raceRemote<ApprovalResult>(
         (sig) => terminal(sig),
         (sig) => {
           // RPC-style dialogs for the web: rendering and keyboard dependencies are unused.
           const component = new ApprovalPicker(
             resolved,
-            state,
+            remoteState,
             catalog,
             ctx.ui.theme,
             { matches: () => false },
@@ -390,6 +505,14 @@ export async function pickApproval(
         },
         signal,
       );
+      if (value && from === "remote") {
+        state.selectedId = remoteState.selectedId;
+        state.context = remoteState.context;
+        state.stage = remoteState.stage;
+        state.efforts = remoteState.efforts;
+        state.manuallyAdjusted = remoteState.manuallyAdjusted;
+        state.effortDefaultKey = remoteState.effortDefaultKey;
+      }
       return value ? { ...value, remote: from === "remote" } : undefined;
     }
     // RPC cannot render custom components. Rendering and keyboard dependencies are unused here.

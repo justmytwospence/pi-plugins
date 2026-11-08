@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Linked inline approval now separates **Approve and implement** from its Context selector, retaining history by default and limiting fresh conversation to supported initial handoffs.
+- Idle Linked execution can revisit a separate plan draft and resume the same supervised task without resetting findings, review limits or pauses. Busy requests do not cancel work; explicit stop ends the task without claiming completion.
+
 ### Minor Changes
 
 - Exec handoffs are one dialog. The planner on call is the only agent that asks you (the implementer asks it with `ask_planner`; its own `ask_user_question` is blocked). Pauses, postponed planner questions and an implementer that stopped early open as `ask_user_question` dialogs, reopened when a turn ends with an empty editor and from the footer badge, `/plan-exec`, Shift+Tab and `/plan`. Chat-text answer capture (`replyId`) is gone; a review that fails with a provider error is retried once; consultation cards show cache hit rates; exec phase words are `planner asks you`, `needs your answer`, `needs your decision`, `review failed`, `implementing`, `idle`.

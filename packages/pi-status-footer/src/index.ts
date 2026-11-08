@@ -919,11 +919,12 @@ export function layoutFooter(snapshot: Snapshot, width: number, theme: Paint): F
   // A defined exec detail (even empty) takes precedence over explicit and legacy workflow status.
   const legacyWorkflow = s.mode?.kind === "chat" || s.mode?.kind === "plan" ? { kind: s.mode.kind, key: s.mode.key } : undefined;
   const linked = !s.readOnly && s.flow?.operatingMode === "linked";
+  const replanning = !s.readOnly && s.flow?.replanning === true;
   const flowState = linked ? s.flow!.blocked ? "Linked blocked" : !s.flow!.ready || !s.flow!.guardAvailable ? "Linked unavailable" : s.flow!.transitioning ? "Linked changing" : "" : "";
   const flowStateText = flowState ? theme.fg(s.flow!.blocked || !s.flow!.guardAvailable ? "error" : "warning", flowState) : "";
-  const effectiveWorkflow: WorkflowStatus | undefined = linked ? { kind: s.flow!.workflow } : s.exec !== undefined ? { kind: "exec" } : s.workflow ?? legacyWorkflow;
+  const effectiveWorkflow: WorkflowStatus | undefined = replanning ? { kind: "plan" } : linked ? { kind: s.flow!.workflow } : s.exec !== undefined ? { kind: "exec" } : s.workflow ?? legacyWorkflow;
   const workflowTarget = pending("workflow")?.target;
-  const workflow: WorkflowStatus | undefined = effectiveWorkflow && effectiveWorkflow.kind !== "exec" && (workflowTarget === "work" || workflowTarget === "chat" || workflowTarget === "plan")
+  const workflow: WorkflowStatus | undefined = effectiveWorkflow && !replanning && effectiveWorkflow.kind !== "exec" && (workflowTarget === "work" || workflowTarget === "chat" || workflowTarget === "plan")
     ? { ...effectiveWorkflow, kind: workflowTarget } : effectiveWorkflow;
   rows.push(row(ICONS.project, (w) => fitSegments([
     { text: project, priority: 60 },
@@ -942,7 +943,7 @@ export function layoutFooter(snapshot: Snapshot, width: number, theme: Paint): F
       { text: branch, short: branchShort, priority: 40 },
       { text: identity, short: model, priority: 100 },
       { text: ctx, priority: 90 },
-      { text: phaseText, priority: 120 },
+      { text: replanning ? theme.fg("muted", "replanning") : phaseText, priority: 120 },
     ], w, theme));
     return { lines: [" ".repeat(inset) + truncateToWidth(compact, width)], hits: [] };
   }
@@ -951,9 +952,9 @@ export function layoutFooter(snapshot: Snapshot, width: number, theme: Paint): F
   const gateStatus = approval ? s.statuses.find((status) => /^Gate /.test(stripVTControlCharacters(status))) : undefined;
   const statuses = gateStatus ? s.statuses.filter((status) => status !== gateStatus) : s.statuses;
   const negotiation = s.exec ? /^(implementing|consulting|review \d+|revising(?: · \d+ findings)?|paused(?: · (?:user needed|review unavailable))?)(?: · (.*))?$/u.exec(clean(s.exec)) : null;
-  const execPhase = negotiation?.[1] ?? (s.exec ? clean(s.exec).split(" · ")[0] : "");
+  const execPhase = replanning ? "replanning" : negotiation?.[1] ?? (s.exec ? clean(s.exec).split(" · ")[0] : "");
   const execDetail = negotiation ? negotiation[2] : s.exec ? clean(s.exec).split(" · ").slice(1).join(" · ") : "";
-  const workflowAction = action(workflow?.kind === "exec" ? "execution.status" : "workflow.cycle");
+  const workflowAction = action(replanning || workflow?.kind === "exec" ? "execution.status" : "workflow.cycle");
   const identitySegments = [
     partsSegment([{ text: model, action: action("model.open") }], 100),
     { ...partsSegment(reasoningParts, 65), atomic: !!pending("reasoning") || !!pending("auto-effort") },
@@ -977,14 +978,14 @@ export function layoutFooter(snapshot: Snapshot, width: number, theme: Paint): F
       { text: execPhase ? theme.fg("muted", execPhase) : "", short: theme.fg("muted", execPhase.split(" · ")[0]), priority: 120 },
       { text: execDetail ? theme.fg("muted", execDetail) : "", priority: 60 },
       { text: flow.blocked ? theme.fg("error", clean(flow.blocked)) : "", priority: 20 },
-    ], modelKey, modelKeyAction);
+    ], replanning && width < 60 ? undefined : modelKey, modelKeyAction);
   } else {
     controlRow(ICONS.model, identitySegments, modelKey, modelKeyAction);
     if (workflow) controlRow(ICONS.workflow, [
       { ...partsSegment([{ text: workflowBadge(theme, workflow.kind), action: workflowAction }], 130), atomic: !!pending("workflow") },
       { text: execPhase ? theme.fg("muted", execPhase) : "", short: theme.fg("muted", execPhase.split(" · ")[0]), priority: 120 },
       { text: theme.fg("muted", execDetail || (execPhase ? "" : WORKFLOW_EXPLANATIONS[workflow.kind])), priority: 70 },
-    ], workflow.kind === "exec" ? "/plan-exec" : s.primaryKeys?.workflow ?? workflow.key, workflowAction);
+    ], replanning || workflow.kind === "exec" ? "/plan-exec" : s.primaryKeys?.workflow ?? workflow.key, workflowAction);
   }
   if (approval) controlRow(ICONS.gate, [
     { ...partsSegment([

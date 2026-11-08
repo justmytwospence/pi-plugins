@@ -110,13 +110,14 @@ export function pauseQuestion(
 
 const CONTINUE = { label: "Continue", description: "Keep implementing the plan" };
 const SUBMIT = { label: "Submit for review", description: "Ask it to call finish_plan now" };
+const REPLAN = { label: "Revisit plan", description: "Pause implementation and revise the plan" };
 
 /** The implementer ended its turn before finishing. */
-export function stalledQuestion(title: string): AskQuestion {
+export function stalledQuestion(title: string, canReplan = false): AskQuestion {
   return {
     header: "Implementing",
     question: `The implementer stopped before finishing "${title}".`,
-    options: [CONTINUE, SUBMIT, STOP],
+    options: canReplan ? [CONTINUE, SUBMIT, REPLAN, STOP] : [CONTINUE, SUBMIT, STOP],
   };
 }
 
@@ -126,6 +127,7 @@ export function statusQuestion(
   implementer: string,
   planner: string | undefined,
   busy: boolean,
+  canReplan = false,
 ): AskQuestion {
   return {
     header: "Implementing",
@@ -135,6 +137,17 @@ export function statusQuestion(
           { label: "Keep going", description: "Close this" },
           { ...STOP, description: "Interrupt and end without claiming completion" },
         ]
-      : [CONTINUE, SUBMIT, STOP],
+      : canReplan
+        ? [CONTINUE, SUBMIT, REPLAN, STOP]
+        : [CONTINUE, SUBMIT, STOP],
+  };
+}
+
+/** An unfinished task in Plan can only stay suspended or be stopped, never implicitly resumed. */
+export function replanningQuestion(title: string): AskQuestion {
+  return {
+    header: "Replanning",
+    question: `Implementation of "${title}" is paused while its plan is revised. Approve the revised plan to resume.`,
+    options: [{ label: "Keep planning", description: "Leave implementation paused in Plan" }, STOP],
   };
 }

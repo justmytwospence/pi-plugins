@@ -3,6 +3,7 @@ import { stripVTControlCharacters } from "node:util";
 import { initTheme } from "@earendil-works/pi-coding-agent";
 import { visibleWidth } from "@earendil-works/pi-tui";
 import { test } from "vitest";
+import { EXEC_ENTRY, type ExecState, FINISH_TOOL, registerExec } from "../src/exec.js";
 import {
   type AskDetails,
   completionPreview,
@@ -15,8 +16,10 @@ import {
   renderAsk,
   renderFinish,
 } from "../src/exec-cards.js";
+import { createNegotiation, finishReview, outstanding, startReview } from "../src/negotiation.js";
 import { planDiff } from "../src/plan-diff.js";
 import { type ReviewTone, reviewCard, reviewStatusLine } from "../src/review-card.js";
+import { createMockContext, createMockPi } from "./shared/support.js";
 
 initTheme("dark");
 const theme = {
@@ -473,6 +476,93 @@ test("confirmed override is amber even when the preceding review failed", () => 
   assert.equal(finishTone({ ...base, decision: undefined, error: "Timed out" }), "error");
   assert.equal(finishTone({ ...base, completion: "no_review" }), "warning");
   assert.equal(finishTone({ ...base, completion: "accepted" }), "success");
+});
+
+test("replanning and a new plan revision never make retained historical findings a current review", async () => {
+  const mock = createMockPi();
+  const flow = {
+    version: 1 as const,
+    operatingMode: "linked" as const,
+    revision: 4,
+    selectedFlow: {
+      provider: "test",
+      anchorModel: "planner",
+      roles: {
+        work: { provider: "test", modelId: "work" },
+        chat: { provider: "test", modelId: "work" },
+        plan: { provider: "test", modelId: "planner" },
+        exec: { provider: "test", modelId: "worker" },
+      },
+    },
+  };
+  const n = finishReview(
+    startReview(
+      createNegotiation("exec", 0),
+      { report: base.report, verification: base.verification!, concerns: base.concerns! },
+      [],
+    ),
+    { decision, costUsd: 0.15 },
+  );
+  const state: ExecState = {
+    active: true,
+    planFile: "/plans/approved.md",
+    implementer: "Worker",
+    implementerModel: "test/worker",
+    planner: { spec: "test/planner", name: "Planner", sessionFile: "/old-planner.jsonl" },
+    asks: 2,
+    costUsd: 0.2,
+    negotiation: n,
+    linkedFlow: flow,
+  };
+  mock.entries.push({ customType: EXEC_ENTRY, data: state });
+  const ctx = createMockContext({
+    mode: "tui",
+    sessionManager: {
+      getSessionId: () => "session",
+      getBranch: () => mock.entries.map((e) => ({ type: "custom", ...e })),
+    },
+  }).ctx;
+  const exec = registerExec(mock.pi, {
+    consultantAccess: () => ({}) as never,
+    restoreModel: async () => true,
+    completionReview: () => true,
+    completionMaxRevisions: () => 0,
+  });
+  for (const handler of mock.events.get("session_start") ?? []) await handler({}, ctx);
+  const details = {
+    ...base,
+    executionId: n.executionId,
+    exchangeId: n.latestExchangeId,
+    negotiation: structuredClone(n),
+  };
+  const before = structuredClone(details);
+  const tool = mock.tools.find((tool) => tool.name === FINISH_TOOL) as unknown as {
+    renderResult(result: unknown, options: unknown, theme: unknown): { render(width: number): string[] };
+  };
+  const card = tool.renderResult({ details }, options, theme);
+  assert.ok(!plain(card.render(120)).includes("Previous review"));
+  exec.suspendForReplan(ctx, "/plans/draft.md");
+  for (const width of [46, 120, 180]) assert.ok(plain(card.render(width)).includes("Previous review"));
+  exec.resumeReplan(
+    ctx,
+    {
+      planFile: "/plans/draft.md",
+      implementer: "Worker",
+      implementerModel: "test/worker",
+      planner: { ...state.planner!, sessionFile: "/new-planner.jsonl" },
+      linkedFlow: flow,
+    },
+    { record: true },
+  );
+  assert.equal(exec.state?.negotiation?.phase, "paused");
+  assert.deepEqual(outstanding(exec.state!.negotiation!), [finding]);
+  for (const width of [46, 120, 180]) {
+    assert.ok(plain(card.render(width)).includes("Previous review"));
+    const expanded = plain(tool.renderResult({ details }, { ...options, expanded: true }, theme).render(width));
+    assert.ok(expanded.includes("Readiness handshake"));
+    assert.ok(expanded.includes("$0.15"));
+  }
+  assert.deepEqual(details, before, "rendering and revision preserve immutable historical evidence and cost");
 });
 
 test("zero-row card refresh proxy requests frames and disposes on end", () => {

@@ -11,7 +11,7 @@ import {
   WORKFLOW_ENTRY, WORKFLOW_QUERY, WORKFLOW_SET, WORKFLOW_STATUS_KEY,
   type WorkflowSetRequest, type WorkflowCycleRequest,
 } from "../src/modes.ts";
-import { FLOW_ENTRY, queryFlow, requestWorkflow } from "../src/flow-contract.ts";
+import { FLOW_CHANNEL, FLOW_ENTRY, queryFlow, requestExecution, requestReplan, requestWorkflow } from "../src/flow-contract.ts";
 import { queryFooterActions } from "../src/footer-actions.ts";
 import { SETTINGS_CYCLE_CHANNEL, settingsCycles } from "../src/settings-cycle.ts";
 import { ProviderFlowController } from "../src/provider-flows.ts";
@@ -38,7 +38,7 @@ const safe = {
 };
 const call = (toolName: string, input: Record<string, unknown>, id = "t1") => ({ type: "tool_call", toolCallId: id, toolName, input });
 const entry = (customType: string, data: Record<string, unknown>) => ({ type: "custom", customType, data });
-const defaults = { workflow: "work", approval: "auto", execActive: false } as const;
+const defaults = { workflow: "work", approval: "auto", execActive: false, execReplanning: false } as const;
 function configure(config: Record<string, unknown>) {
   mkdirSync(path.join(configDir, "xdg", "agents"), { recursive: true });
   writeFileSync(path.join(configDir, "xdg", "agents", "tool-gate.json"), JSON.stringify(config));
@@ -135,8 +135,8 @@ describe("chronological branch migration", () => {
   });
   test("exec is an overlay from the latest lifecycle record, not a persisted base workflow", () => {
     const records = [entry(WORKFLOW_ENTRY, { version: 1, mode: "plan" }), entry(APPROVAL_ENTRY, { version: 1, mode: "bypassPermissions" }), entry("plan-mode:exec", { active: true })];
-    expect(restoreBranchModes(records, defaults)).toEqual({ workflow: "plan", approval: "bypassPermissions", execActive: true });
-    expect(restoreBranchModes([...records, entry("plan-mode:exec", { active: false })], defaults)).toEqual({ workflow: "work", approval: "bypassPermissions", execActive: false });
+    expect(restoreBranchModes(records, defaults)).toEqual({ workflow: "plan", approval: "bypassPermissions", execActive: true, execReplanning: false });
+    expect(restoreBranchModes([...records, entry("plan-mode:exec", { active: false })], defaults)).toEqual({ workflow: "work", approval: "bypassPermissions", execActive: false, execReplanning: false });
   });
   test.each(["chat", "plan"] as const)("inactive exec snapshots preserve %s unless exec was active", (workflow) => {
     const inactive = entry("plan-mode:exec", { active: false });
@@ -148,7 +148,7 @@ describe("chronological branch migration", () => {
     expect(restoreBranchModes([...stopped, selected, inactive], defaults)).toEqual({ ...defaults, workflow });
   });
   test("invalid records cannot escalate permissions and supplied defaults are not mutated", () => {
-    const restrictive = { workflow: "chat", approval: "default", execActive: false } as const;
+    const restrictive = { workflow: "chat", approval: "default", execActive: false, execReplanning: false } as const;
     const records = [null, {}, entry(MODE_ENTRY, { mode: "invalid" }), entry(WORKFLOW_ENTRY, { version: 1, mode: "exec" }), entry(APPROVAL_ENTRY, { version: 2, mode: "bypassPermissions" }), entry(APPROVAL_ENTRY, { version: 1, mode: "yolo" }), entry("plan-mode:exec", { active: "true" })];
     expect(restoreBranchModes(records, restrictive)).toEqual(restrictive);
     expect(restoreBranchModes([], restrictive)).not.toBe(restrictive);
@@ -962,7 +962,7 @@ describe("flow commands, protocol and optional footer actions", () => {
     expect(s.ctx.ui.status.get(MODE_STATUS_KEY)).toContain("yolo");
     expect(s.h.entries.filter(e => e.customType === WORKFLOW_ENTRY || e.customType === APPROVAL_ENTRY)).toEqual([]);
   });
-  test("Linked Exec pickers offer status and Independent, not new workflows or providers", async () => {
+  test("Linked Exec pickers offer replan, status and Independent, not new workflows or providers", async () => {
     const s = await start(setup([
       entry("plan-mode:exec", { active: true, planFile: "/tmp/approved.md" }),
       entry(FLOW_ENTRY, { version: 1, operatingMode: "linked", revision: 1 }),
@@ -971,15 +971,168 @@ describe("flow commands, protocol and optional footer actions", () => {
     const status = vi.fn();
     s.h.pi.events.on("pi-plugins.footer-actions.v1", (request: any) => { request.actions["execution.status"] = { label: "Execution status", run: status }; });
     const actions = queryFooterActions(s.h.pi.events);
-    expect(actions["workflow.cycle"]?.key).toBeUndefined();
+    expect(actions["workflow.cycle"]?.key).toBe("shift+tab");
     await actions["workflow.cycle"]!.run();
-    expect(status).toHaveBeenCalledTimes(1);
+    expect(status).not.toHaveBeenCalled();
+    expect(s.ctx.ui.notes.at(-1)?.message).toBe("Revisiting this plan is unavailable; no workflow changed.");
     for (const command of ["mode", "flow"]) {
       await s.h.commands.get(command).handler("", s.ctx);
-      expect(s.ctx.ui.selects.at(-1)?.options).toEqual(["Execution status", "Use Independent mode"]);
+      expect(s.ctx.ui.selects.at(-1)?.options).toEqual(["Revisit plan", "Execution status", "Use Independent mode"]);
     }
     await s.h.commands.get("flow").handler("independent", s.ctx);
     expect(queryFlow(s.h.pi.events)).toMatchObject({ operatingMode: "independent", workflow: "exec" });
+  });
+});
+
+describe("unfinished task restoration and replan routing", () => {
+  const APPROVED = "/tmp/replan-approved.md";
+  const DRAFT = "/tmp/replan-draft.md";
+  const suspended = (marker: unknown = { version: 1, draftFile: DRAFT }) => entry("plan-mode:exec", {
+    active: true, planFile: APPROVED, replanning: marker,
+    negotiation: { executionId: "task-1", planRevision: 1 },
+  });
+  const linked = entry(FLOW_ENTRY, { version: 1, operatingMode: "linked", revision: 1 });
+  test("optional requestReplan uses the unchanged synchronous result bus and has no gate fallback", async () => {
+    const s = await start(setup());
+    expect(requestReplan(s.h.pi.events)).toBeUndefined();
+    const result = { ok: true, snapshot: queryFlow(s.h.pi.events)! };
+    const reply = Promise.resolve(result);
+    s.h.pi.events.on(FLOW_CHANNEL, (request: any) => {
+      if (request.kind === "replan") request.result = reply;
+    });
+    expect(requestReplan(s.h.pi.events)).toBe(reply);
+    expect(await requestReplan(s.h.pi.events)).toBe(result);
+  });
+  test.each(["command", "shortcut", "cycle-event", "workflow-request", "footer"] as const)("%s requests the optional owner directly for idle Linked Exec", async source => {
+    const s = await start(setup([entry("plan-mode:exec", { active: true, planFile: APPROVED }), linked]));
+    s.ctx.isIdle = () => true;
+    const owner = vi.fn(() => Promise.resolve({ ok: true, snapshot: queryFlow(s.h.pi.events)! }));
+    s.h.pi.events.on(FLOW_CHANNEL, (request: any) => {
+      if (request.kind === "replan") request.result = owner();
+    });
+    if (source === "command") await s.h.commands.get("mode").handler("plan", s.ctx);
+    if (source === "shortcut") await s.h.shortcuts.get("shift+tab").handler(s.ctx);
+    if (source === "cycle-event") {
+      const request: WorkflowCycleRequest = {};
+      s.h.pi.events.emit(WORKFLOW_CYCLE, request);
+      await request.result;
+    }
+    if (source === "workflow-request") await requestWorkflow(s.h.pi.events, "plan");
+    if (source === "footer") await queryFooterActions(s.h.pi.events)["workflow.cycle"]!.run();
+    expect(owner).toHaveBeenCalledOnce();
+    expect(s.ctx.ui.selects).toHaveLength(0);
+    // Merely accepting an owner request is not permission to switch the base workflow.
+    expect(queryFlow(s.h.pi.events)?.workflow).toBe("exec");
+  });
+  test.each(["command", "shortcut", "picker"] as const)("%s while busy refuses immediately, without scheduling a later owner request", async source => {
+    const s = await start(setup([entry("plan-mode:exec", { active: true, planFile: APPROVED }), linked]));
+    s.ctx.isIdle = () => false;
+    const owner = vi.fn();
+    s.h.pi.events.on(FLOW_CHANNEL, (request: any) => { if (request.kind === "replan") owner(); });
+    if (source === "command") await s.h.commands.get("mode").handler("plan", s.ctx);
+    if (source === "shortcut") await s.h.shortcuts.get("shift+tab").handler(s.ctx);
+    if (source === "picker") {
+      s.ctx.ui.selectAnswers.push("Revisit plan");
+      await s.h.commands.get("mode").handler("", s.ctx);
+    }
+    expect(owner).not.toHaveBeenCalled();
+    expect(s.ctx.ui.notes.at(-1)?.message).toBe("Implementation is running. Interrupt it, then revisit the plan.");
+    s.ctx.isIdle = () => true;
+    await settingsCycles(s.h.pi).flush();
+    expect(owner).not.toHaveBeenCalled();
+  });
+  test("latest active suspension is authoritative over supplementary records, for query and every lifecycle restore", async () => {
+    const branch = [
+      suspended(), entry("plan-mode:inline", { active: false }),
+      entry(WORKFLOW_ENTRY, { version: 1, mode: "work" }),
+    ];
+    expect(restoreBranchModes(branch, defaults)).toMatchObject({ execActive: true, execReplanning: true });
+    const s = setup(branch);
+    const query: any = { entries: branch, cwd: s.ctx.cwd, reply: vi.fn() };
+    s.h.pi.events.emit(WORKFLOW_QUERY, query);
+    expect(query.reply).toHaveBeenCalledWith(expect.objectContaining({ mode: "plan", source: "restore" }));
+    await start(s);
+    expect(queryFlow(s.h.pi.events)).toMatchObject({ workflow: "plan", replanning: true });
+    for (const event of ["session_tree", "session_start"]) {
+      await s.h.emit(event, {}, s.ctx);
+      expect(queryFlow(s.h.pi.events)).toMatchObject({ workflow: "plan", replanning: true });
+    }
+    branch.push(entry("plan-mode:exec", { active: true, planFile: DRAFT }));
+    await s.h.emit("session_tree", {}, s.ctx);
+    expect(queryFlow(s.h.pi.events)).toMatchObject({ workflow: "exec" });
+    expect(queryFlow(s.h.pi.events)).not.toHaveProperty("replanning");
+    branch.push(entry("plan-mode:exec", { active: false }));
+    await s.h.emit("session_tree", {}, s.ctx);
+    expect(queryFlow(s.h.pi.events)?.workflow).toBe("work");
+  });
+  test.each([undefined, null, false, true, {}, [], { version: 2, draftFile: DRAFT }, { version: 1, draftFile: "" }, { version: 1, draftFile: APPROVED }])("malformed marker %j remains read-only Plan and refuses transitions", async marker => {
+    // Passing undefined explicitly must still represent a present corrupt marker.
+    const execution = suspended(marker);
+    if (marker === undefined) (execution.data as any).replanning = undefined;
+    const s = await start(setup([execution, entry(APPROVAL_ENTRY, { version: 1, mode: "bypassPermissions" })]));
+    s.ctx.isIdle = () => true;
+    s.h.pi.events.emit(PLAN_PROVIDER, { planFile: DRAFT });
+    expect(queryFlow(s.h.pi.events)).toMatchObject({ workflow: "plan", replanning: true });
+    expect(await s.h.emit("tool_call", call("write", { path: DRAFT, content: "bad" }), s.ctx)).toMatchObject({ block: true });
+    expect(await requestWorkflow(s.h.pi.events, "work")).toMatchObject({ ok: false, error: "Replanning state is invalid; no implementation was resumed." });
+    expect(await requestWorkflow(s.h.pi.events, "plan")).toMatchObject({ ok: false, error: "Replanning state is invalid; no implementation was resumed." });
+  });
+  test("suspended task picker cannot escape to Work/Chat; Independent recovery preserves Plan restrictions until explicit stop", async () => {
+    const s = await start(setup([suspended(), linked, entry(APPROVAL_ENTRY, { version: 1, mode: "bypassPermissions" })]));
+    s.ctx.isIdle = () => true;
+    const status = vi.fn();
+    s.h.pi.events.on("pi-plugins.footer-actions.v1", (request: any) => {
+      request.actions["execution.status"] = { label: "Execution status", run: status };
+    });
+    const options = ["Keep planning", "Execution status", "Stop implementation", "Use Independent mode"];
+    for (const command of ["mode", "flow"]) {
+      await s.h.commands.get(command).handler("", s.ctx);
+      expect(s.ctx.ui.selects.at(-1)?.options).toEqual(options);
+      expect(options.every(label => label.length <= 42)).toBe(true);
+    }
+    for (const next of ["work", "chat"] as const) {
+      await s.h.commands.get("mode").handler(next, s.ctx);
+      expect(s.ctx.ui.selects.at(-1)?.options).toEqual(options);
+      expect(queryFlow(s.h.pi.events)?.workflow).toBe("plan");
+    }
+    await s.h.commands.get("flow").handler("independent", s.ctx);
+    expect(queryFlow(s.h.pi.events)).toMatchObject({ workflow: "plan", replanning: true, operatingMode: "independent" });
+    s.h.pi.events.emit(PLAN_PROVIDER, { planFile: DRAFT });
+    expect(await s.h.emit("tool_call", call("write", { path: DRAFT, content: "draft" }), s.ctx)).toBeUndefined();
+    expect(await s.h.emit("tool_call", call("edit", { path: "src/a.ts", oldText: "a", newText: "b" }), s.ctx)).toMatchObject({ block: true });
+    s.h.pi.events.emit(EXEC_CHANGED, { active: true, replanning: false, source: "transition" });
+    expect(s.ctx.ui.notes.at(-1)?.message).toBe("This suspended Linked task is now Independent. Stop implementation before approving another plan.");
+    expect(queryFlow(s.h.pi.events)?.workflow).toBe("plan");
+    await s.h.commands.get("flow").handler("linked alpha", s.ctx);
+    expect(queryFlow(s.h.pi.events)?.operatingMode).toBe("independent");
+    // The existing Independent stop publication needs no Linked model transition.
+    s.h.pi.events.emit(EXEC_CHANGED, { active: false, source: "transition" });
+    expect(queryFlow(s.h.pi.events)).toMatchObject({ workflow: "work", operatingMode: "independent" });
+    expect(queryFlow(s.h.pi.events)).not.toHaveProperty("replanning");
+    s.h.pi.events.emit(EXEC_CHANGED, { active: true, source: "transition" });
+    expect(queryFlow(s.h.pi.events)?.workflow).toBe("exec");
+  });
+  test.each(["replan", "resume", "stop"] as const)("%s computes the authorized destination before synchronous owner publications", async phase => {
+    const s = await start(setup([phase === "replan" ? entry("plan-mode:exec", { active: true, planFile: APPROVED }) : suspended(), linked]));
+    const run = vi.spyOn(ProviderFlowController.prototype, "runExecutionTransition").mockImplementation(async (_input, _ctx, commit) => {
+      commit();
+      return { ok: true, snapshot: queryFlow(s.h.pi.events)! };
+    });
+    try {
+      const prior = s.h.events.length;
+      const result = await requestExecution(s.h.pi.events, {
+        phase, expectedRevision: 1, expectedExecutionId: "task-1", expectedPlanRevision: 1,
+        planFile: phase === "resume" ? DRAFT : APPROVED,
+        commit() {
+          // The owner's active=true marker does not mean a new begin.
+          s.h.pi.events.emit(EXEC_CHANGED, { active: phase !== "stop", replanning: phase === "replan", source: "transition" });
+          expect(queryFlow(s.h.pi.events)?.workflow).toBe(phase === "replan" ? "plan" : phase === "resume" ? "exec" : "work");
+        },
+      });
+      expect(result?.ok).toBe(true);
+      const modes = s.h.events.slice(prior).filter(e => e.channel === WORKFLOW_CHANGED).map(e => e.data.mode);
+      expect(modes).toEqual([phase === "replan" ? "plan" : phase === "resume" ? "exec" : "work"]);
+    } finally { run.mockRestore(); }
   });
 });
 

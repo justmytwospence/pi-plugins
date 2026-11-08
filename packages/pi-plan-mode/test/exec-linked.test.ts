@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { type ExtensionContext, initTheme } from "@earendil-works/pi-coding-agent";
 import { onTestFinished, test, vi } from "vitest";
 import {
+  ASK_TOOL,
   CONTINUE_TOOL,
   EXEC_ENTRY,
   EXEC_STATUS_KEY,
@@ -18,7 +19,8 @@ import {
 import { FLOW_CHANNEL, type FlowRequest, type FlowSnapshot, type FlowState } from "../src/flow-contract.js";
 import { queryFooterActions } from "../src/footer-actions.js";
 import planMode from "../src/index.js";
-import type { PlannerSessionFactory } from "../src/planner/session.js";
+import { outstanding } from "../src/negotiation.js";
+import type { PlannerSessionFactory, PlannerSessionOptions } from "../src/planner/session.js";
 import { createMockContext, createMockPi } from "./shared/support.js";
 
 initTheme("dark");
@@ -61,7 +63,16 @@ type Result = {
   usage?: { cost: { total: number } };
 };
 
-function fixture(options: { linked?: boolean; hook?: Hook | false; review?: boolean; replies?: string[] } = {}) {
+function fixture(
+  options: {
+    linked?: boolean;
+    hook?: Hook | false;
+    review?: boolean;
+    replies?: string[];
+    replan?: ExecHost["replan"];
+    beforeReply?: () => Promise<void>;
+  } = {},
+) {
   const mock = createMockPi();
   const dir = mkdtempSync(join(tmpdir(), "exec-linked-"));
   onTestFinished(() => rmSync(dir, { recursive: true, force: true }));
@@ -106,15 +117,19 @@ function fixture(options: { linked?: boolean; hook?: Hook | false; review?: bool
   const ctx = context.ctx as ExtensionContext;
   const prompts: string[] = [];
   const replies = [...(options.replies ?? [decision()])];
-  const createSession: PlannerSessionFactory = async () => {
+  const storages: PlannerSessionOptions["storage"][] = [];
+  let disposals = 0;
+  const createSession: PlannerSessionFactory = async (_ctx, sessionOptions) => {
+    storages.push(structuredClone(sessionOptions.storage));
     const listeners = new Set<(event: unknown) => void>();
     return {
-      file: join(dir, "planner.jsonl"),
+      file: sessionOptions.storage.kind === "open" ? sessionOptions.storage.file : join(dir, "planner.jsonl"),
       session: {
         isStreaming: false,
         prompt: async (text: string) => {
           prompts.push(text);
           for (const listener of listeners) listener({ type: "agent_start" });
+          await options.beforeReply?.();
           const message = {
             role: "assistant",
             content: [{ type: "text", text: replies.shift() ?? decision() }],
@@ -132,7 +147,9 @@ function fixture(options: { linked?: boolean; hook?: Hook | false; review?: bool
           listeners.delete(listener as never);
         };
       },
-      dispose: () => {},
+      dispose: () => {
+        disposals++;
+      },
     };
   };
   const restoreModel = vi.fn(async () => true);
@@ -148,6 +165,7 @@ function fixture(options: { linked?: boolean; hook?: Hook | false; review?: bool
     createSession,
     restoreModel,
     ...(options.hook === false ? {} : { finishLinked }),
+    ...(options.replan ? { replan: options.replan } : {}),
     completionReview: () => options.review !== false,
     completionMaxRevisions: () => 2,
   });
@@ -170,8 +188,10 @@ function fixture(options: { linked?: boolean; hook?: Hook | false; review?: bool
     };
     return registered.execute("call", params, signal, undefined, ctx);
   };
-  const event = async (name: string) => {
-    for (const handler of mock.events.get(name) ?? []) await handler({}, ctx);
+  const event = async (name: string, payload: unknown = {}) => {
+    let result: unknown;
+    for (const handler of mock.events.get(name) ?? []) result = (await handler(payload, ctx)) ?? result;
+    return result;
   };
   const command = (args: string) => {
     const registered = mock.commands.get("plan-exec");
@@ -188,6 +208,10 @@ function fixture(options: { linked?: boolean; hook?: Hook | false; review?: bool
     coordinator,
     publications,
     prompts,
+    storages,
+    get disposals() {
+      return disposals;
+    },
     exec,
     state,
     begin,
@@ -202,6 +226,468 @@ function fixture(options: { linked?: boolean; hook?: Hook | false; review?: bool
       hook = next;
     },
   };
+}
+
+function revision(f: ReturnType<typeof fixture>) {
+  const draftFile = join(f.ctx.cwd, "revision.md");
+  writeFileSync(draftFile, "# Revised plan\n\nChange `src/a.ts` and keep existing work.\n");
+  return {
+    planFile: draftFile,
+    implementer: "Worker",
+    implementerModel: "test/worker",
+    planner: { spec: "test/planner:high", name: "Planner", sessionFile: join(f.ctx.cwd, "refreshed.jsonl") },
+    linkedFlow: linkedFlow(),
+  };
+}
+
+const pausedMessage = /Implementation is paused while the plan is revised/u;
+
+test("suspension is durable, active, read-only supervision with no implementation mediation", async () => {
+  const f = fixture();
+  f.begin();
+  await f.event("tool_result", { toolName: "write", input: { path: "src/a.ts" }, content: [], isError: false });
+  f.latest().pendingQuestion = {
+    id: "postponed",
+    questions: [
+      {
+        id: "account",
+        header: "Account",
+        question: "Which account?",
+        options: [
+          { label: "Staging", description: "Use staging." },
+          { label: "Production", description: "Use production." },
+        ],
+      },
+    ],
+    implementerMessage: "Need an account.",
+  };
+  await f.event("session_tree");
+  const before = f.exec.state;
+  assert.ok(before);
+  assert.ok(before.pendingQuestion);
+  assert.equal(f.exec.replanRefusal(), undefined, "a postponed question does not prevent replanning");
+  const next = revision(f);
+  f.exec.prepareReplan();
+  f.exec.suspendForReplan(f.ctx, next.planFile);
+  assert.equal(f.exec.active, true);
+  assert.equal(f.exec.replanning, true);
+  assert.deepEqual(f.exec.state, { ...before, replanning: { version: 1, draftFile: next.planFile } });
+  assert.deepEqual(f.latest(), f.exec.state);
+  assert.deepEqual(f.publications.at(-1), { active: true, replanning: true, source: "transition" });
+  assert.match(f.context.statuses.get(EXEC_STATUS_KEY) ?? "", /exec mode on · replanning · 2 consultations/u);
+  for (const name of [ASK_TOOL, FINISH_TOOL, CONTINUE_TOOL]) {
+    assert.ok(!f.mock.rawPi.getActiveTools().includes(name));
+    const result = await f.tool(name, name === ASK_TOOL ? { message: "question" } : { action: "stop", ...report });
+    assert.match(result.content[0]?.text ?? "", pausedMessage);
+    assert.equal(result.terminate, true);
+  }
+  assert.equal(await f.event("tool_call", { toolName: "ask_user_question", input: {} }), undefined);
+  assert.equal(await f.event("context", { messages: [] }), undefined);
+  const snapshot = f.exec.state;
+  assert.equal(
+    await f.event("tool_result", { toolName: "write", input: { path: "outside.ts" }, content: [], isError: false }),
+    undefined,
+  );
+  assert.deepEqual(f.exec.state, snapshot, "Plan edits do not add implementation tripwires or touched files");
+  assert.equal(f.prompts.length, 0);
+  assert.equal(f.messages().length, 0);
+});
+
+for (const reason of ["exhausted", "failure", "interrupted", "user_needed"] as const) {
+  test(`reapproval preserves ${reason} recovery, task identity, budget, findings and evidence`, async () => {
+    const f = fixture({ replies: [decision("changes_requested")] });
+    f.begin();
+    await f.tool(FINISH_TOOL);
+    const n = f.latest().negotiation!;
+    n.phase = "paused";
+    n.pause = {
+      reason,
+      action: "Explicit recovery required",
+      ...(reason === "user_needed" ? { question: "Ready?" } : {}),
+    };
+    n.revisionsUsed = n.maxRevisions;
+    n.userAnswers = ["Prior human evidence"];
+    await f.event("session_tree");
+    const before = f.exec.state!;
+    // Runtime callers may carry initial-task defaults beyond the typed resume input.
+    const next = { ...revision(f), active: false, asks: 0, costUsd: 0, touched: [] };
+    f.exec.suspendForReplan(f.ctx, next.planFile);
+    f.exec.resumeReplan(f.ctx, next, { record: true });
+    const resumed = f.exec.state!;
+    assert.equal(f.exec.replanning, false);
+    assert.equal(f.exec.active, true);
+    assert.equal(resumed.planFile, next.planFile);
+    assert.equal(resumed.negotiation?.executionId, before.negotiation?.executionId);
+    const expected = { ...before.negotiation!, planRevision: 2 };
+    delete expected.latestReport;
+    delete expected.latestExchangeId;
+    assert.deepEqual(resumed.negotiation, expected);
+    assert.equal(resumed.negotiation?.reviewCostUsd, 0.05);
+    assert.deepEqual(outstanding(resumed.negotiation!), outstanding(before.negotiation!));
+    assert.equal(resumed.asks, before.asks);
+    assert.equal(resumed.costUsd, before.costUsd);
+    assert.deepEqual(resumed.touched, before.touched);
+    assert.deepEqual(resumed.pendingQuestion, before.pendingQuestion);
+    assert.equal(f.prompts.length, 1, "approval does not retry a paid review or resolve its pause");
+    assert.deepEqual(f.publications.at(-1), { active: true, source: "transition" });
+    assert.ok(f.mock.rawPi.getActiveTools().includes(FINISH_TOOL));
+  });
+}
+
+test("suspension disposes the old consultant and resumed consultation opens only the fresh seed", async () => {
+  const f = fixture();
+  f.begin();
+  await f.tool(ASK_TOOL, { message: "First decision" });
+  assert.equal(f.disposals, 0);
+  assert.deepEqual(f.storages, [{ kind: "open", file: f.state.planner?.sessionFile }]);
+  const next = revision(f);
+  f.exec.suspendForReplan(f.ctx, next.planFile);
+  assert.equal(f.disposals, 1);
+  f.exec.resumeReplan(f.ctx, next, { record: true });
+  assert.equal(f.storages.length, 1, "approval itself is not a paid consultation");
+  await f.tool(ASK_TOOL, { message: "Current-plan decision" });
+  assert.deepEqual(f.storages.at(-1), { kind: "open", file: next.planner.sessionFile });
+  assert.equal(f.exec.state?.asks, 4);
+  assert.equal(f.exec.state?.negotiation?.planRevision, 2);
+});
+
+test("a postponed human question survives revision and returns to normal mediation only after worker resume", async () => {
+  const f = fixture();
+  f.begin();
+  f.latest().pendingQuestion = {
+    id: "postponed",
+    questions: [
+      {
+        id: "account",
+        header: "Account",
+        question: "Which account?",
+        options: [
+          { label: "Staging", description: "Use staging." },
+          { label: "Production", description: "Use production." },
+        ],
+      },
+    ],
+    implementerMessage: "Need an account.",
+  };
+  await f.event("session_tree");
+  const pending = structuredClone(f.exec.state?.pendingQuestion);
+  assert.ok(pending, "the postponed question is valid and restored");
+  const next = revision(f);
+  f.exec.suspendForReplan(f.ctx, next.planFile);
+  f.ctx.ui.setEditorText("");
+  const questions: string[][] = [];
+  f.ctx.ui.select = async (_title, options) => {
+    questions.push(options);
+    return undefined;
+  };
+  await f.event("agent_settled", { aborted: false });
+  assert.equal(questions.length, 0);
+  f.exec.resumeReplan(f.ctx, next, { record: true });
+  assert.deepEqual(f.exec.state?.pendingQuestion, pending);
+  await f.exec.menu(f.ctx);
+  assert.deepEqual(questions, [["Staging", "Production", "Type something."]]);
+  assert.deepEqual(f.exec.state?.pendingQuestion, pending, "cancelling the restored question does not answer it");
+  assert.equal(f.prompts.length, 0);
+});
+
+test("typed action labels do not gain replan or stop authority", async () => {
+  const replan = vi.fn(async () => true);
+  const f = fixture({ replan });
+  f.begin();
+  f.ctx.ui.select = async () => "Type something.";
+  f.ctx.ui.input = async () => "Revisit plan";
+  await f.exec.menu(f.ctx);
+  assert.equal(replan.mock.calls.length, 0);
+  f.exec.suspendForReplan(f.ctx, revision(f).planFile);
+  f.ctx.ui.input = async () => "Stop implementation";
+  await f.exec.menu(f.ctx);
+  assert.equal(f.exec.replanning, true);
+  assert.equal(f.finishLinked.mock.calls.length, 0);
+});
+
+test("record:false resume exposes a detached authoritative snapshot without mutating initial-begin input", () => {
+  const f = fixture();
+  f.begin();
+  const initial = structuredClone(f.state);
+  const next = revision(f);
+  f.exec.suspendForReplan(f.ctx, next.planFile);
+  const count = f.mock.entries.length;
+  f.exec.resumeReplan(f.ctx, next, { record: false });
+  assert.equal(f.mock.entries.length, count);
+  assert.deepEqual(f.state, initial);
+  assert.equal(f.exec.state?.negotiation?.executionId, initial.negotiation?.executionId);
+  assert.equal(f.exec.state?.negotiation?.planRevision, 2);
+  const detached = f.exec.state!;
+  detached.negotiation!.executionId = "mutation";
+  next.planner.sessionFile = "mutation";
+  assert.notEqual(f.exec.state?.planner?.sessionFile, "mutation");
+  assert.notEqual(f.exec.state?.negotiation?.executionId, "mutation");
+});
+
+test("restored replanning suppresses automatic dialogs and paid work, but main-session questions work", async () => {
+  const f = fixture();
+  f.begin();
+  const next = revision(f);
+  f.exec.suspendForReplan(f.ctx, next.planFile);
+  f.ctx.ui.setEditorText("");
+  const select = vi.fn(async () => undefined);
+  f.ctx.ui.select = select;
+  await f.event("session_start");
+  await f.event("agent_start");
+  await f.event("agent_settled", { aborted: false });
+  assert.equal(f.exec.replanning, true);
+  assert.equal(select.mock.calls.length, 0);
+  assert.equal(f.prompts.length, 0);
+  assert.equal(await f.event("tool_call", { toolName: "ask_user_question" }), undefined);
+});
+
+test("prepare/cancel replan suppression is transient and restore clears it", async () => {
+  const f = fixture();
+  f.begin();
+  f.ctx.ui.setEditorText("");
+  const select = vi.fn(async () => undefined);
+  f.ctx.ui.select = select;
+  f.exec.prepareReplan();
+  await f.event("agent_settled", { aborted: false });
+  assert.equal(select.mock.calls.length, 0);
+  f.exec.cancelReplan();
+  await f.event("agent_settled", { aborted: false });
+  assert.equal(select.mock.calls.length, 1);
+  f.exec.prepareReplan();
+  await f.event("session_tree");
+  await f.exec.menu(f.ctx);
+  assert.equal(select.mock.calls.length, 2);
+});
+
+test("missing, reused or mismatched refreshed consultant cannot resume a suspended task", () => {
+  const f = fixture();
+  f.begin();
+  const next = revision(f);
+  f.exec.suspendForReplan(f.ctx, next.planFile);
+  const suspended = f.exec.state;
+  for (const planner of [undefined, f.state.planner, { ...next.planner, sessionFile: "" }]) {
+    assert.throws(() => f.exec.resumeReplan(f.ctx, { ...next, planner }, { record: true }), /could not be refreshed/u);
+    assert.deepEqual(f.exec.state, suspended);
+  }
+  assert.throws(
+    () => f.exec.resumeReplan(f.ctx, { ...next, planFile: f.state.planFile }, { record: true }),
+    /revision draft/u,
+  );
+  assert.throws(() => f.exec.begin(f.ctx, f.state, { record: true }), pausedMessage);
+  assert.deepEqual(f.exec.state, suspended);
+});
+
+for (const independent of [false, true]) {
+  test(`replanning task menu and stop preserve explicit ${independent ? "Independent" : "Linked"} recovery`, async () => {
+    const f = fixture();
+    f.begin();
+    f.exec.suspendForReplan(f.ctx, revision(f).planFile);
+    if (independent) f.coordinator.snapshot = { ...f.coordinator.snapshot!, operatingMode: "independent" };
+    const selects: string[][] = [];
+    f.ctx.ui.select = async (_question, options) => {
+      selects.push(options);
+      return "Keep planning";
+    };
+    await f.command("");
+    assert.deepEqual(selects, [["Keep planning", "Stop implementation", "Type something."]]);
+    const suspended = f.exec.state;
+    for (const action of ["retry", "resume an answer", "accept"]) {
+      await f.command(action);
+      assert.match(f.context.notifications.at(-1)?.message ?? "", pausedMessage);
+      assert.deepEqual(f.exec.state, suspended);
+    }
+    await f.command("status");
+    assert.equal(selects.length, 1, "status never opens a dialog");
+    await f.command("stop");
+    assert.equal(f.exec.active, false);
+    assert.equal(f.exec.replanning, false);
+    assert.equal(f.exec.state?.replanning, undefined);
+    assert.equal(f.latest().completion?.completion, "stopped");
+    assert.equal(f.finishLinked.mock.calls.length, independent ? 0 : 1);
+    assert.equal(f.prompts.length, 0);
+    assert.deepEqual(f.publications.at(-1), { active: false, source: "transition" });
+  });
+}
+
+test("only eligible idle Linked menus invoke the owner replan callback", async () => {
+  const replan = vi.fn(async () => true);
+  const f = fixture({ replan });
+  f.begin();
+  const choices: string[][] = [];
+  f.ctx.ui.select = async (_title, options) => {
+    choices.push(options);
+    return "Revisit plan";
+  };
+  await f.exec.menu(f.ctx);
+  assert.ok(choices.at(-1)?.includes("Revisit plan"));
+  assert.equal(replan.mock.calls.length, 1);
+  for (const change of ["busy", "independent", "completion"] as const) {
+    if (change === "busy") f.ctx.isIdle = () => false;
+    else if (change === "independent") {
+      f.ctx.isIdle = () => true;
+      f.coordinator.snapshot = { ...f.coordinator.snapshot!, operatingMode: "independent" };
+    } else {
+      f.latest().pendingCompletion = {
+        ...report,
+        planFile: f.state.planFile,
+        completion: "stopped",
+        negotiation: f.latest().negotiation,
+      };
+      await f.event("session_tree");
+    }
+    await f.exec.menu(f.ctx);
+    assert.ok(!choices.at(-1)?.includes("Revisit plan"));
+    assert.equal(replan.mock.calls.length, 1);
+  }
+});
+
+test("replan refusal protects live paid work, dialogs and pending completion", async () => {
+  let release!: (ok: boolean) => void;
+  const f = fixture({
+    review: false,
+    hook: async () =>
+      new Promise((done) => {
+        release = done;
+      }),
+  });
+  assert.ok(f.exec.replanRefusal());
+  f.begin();
+  for (const phase of ["consulting"] as const) {
+    const saved = f.latest();
+    saved.negotiation!.phase = phase;
+    // Restore converts interrupted paid work to an allowed paused execution.
+    await f.event("session_tree");
+    assert.equal(f.exec.replanRefusal(), undefined);
+  }
+  let answer!: (choice: string | undefined) => void;
+  f.ctx.ui.select = async () =>
+    new Promise((done) => {
+      answer = done;
+    });
+  const menu = f.exec.menu(f.ctx);
+  await vi.waitFor(() => assert.equal(typeof answer, "function"));
+  assert.match(f.exec.replanRefusal() ?? "", /dialog is open/u);
+  answer(undefined);
+  await menu;
+  // Reset the restored interrupted pause before exercising finalization.
+  f.latest().negotiation!.phase = "implementing";
+  f.latest().negotiation!.pause = undefined;
+  await f.event("session_tree");
+  const finish = f.tool(FINISH_TOOL);
+  await vi.waitFor(() => assert.equal(typeof release, "function"));
+  assert.match(f.exec.replanRefusal() ?? "", /Completion is pending/u);
+  release(false);
+  await finish;
+  assert.match(f.exec.replanRefusal() ?? "", /Completion is pending/u);
+});
+
+test("failed prior-plan reports and responses are not reused after explicit current-plan retry", async () => {
+  const f = fixture({ replies: [decision("changes_requested"), "invalid review JSON", "still invalid", decision()] });
+  f.begin();
+  await f.tool(FINISH_TOOL);
+  const oldResponses = [{ id: "F1", status: "addressed", response: "Old-plan evidence" }];
+  await f.tool(FINISH_TOOL, { ...report, report: "Old report", responses: oldResponses });
+  assert.equal(f.latest().negotiation?.pause?.reason, "failure");
+  const oldReport = f.latest().negotiation?.latestReport;
+  const next = revision(f);
+  f.exec.suspendForReplan(f.ctx, next.planFile);
+  f.exec.resumeReplan(f.ctx, next, { record: true });
+  assert.equal(f.exec.state?.negotiation?.latestReport, undefined);
+  // Also defend restored mixed-revision snapshots: presence alone is not saved-report authority.
+  f.latest().negotiation!.latestReport = oldReport;
+  await f.event("session_tree");
+  await f.command("retry");
+  assert.match(f.mock.sentUserMessages.at(-1)?.text ?? "", /fresh report for the current revised plan/u);
+  const fresh = {
+    ...report,
+    report: "Revised plan implemented",
+    responses: [{ id: "F1", status: "disputed", response: "New-plan evidence" }],
+  };
+  const result = await f.tool(FINISH_TOOL, fresh);
+  assert.equal(result.details?.report, fresh.report);
+  assert.deepEqual(result.details?.responses, fresh.responses);
+  assert.equal(f.latest().negotiation?.history.at(-1)?.planRevision, 2);
+  assert.match(result.details?.exchangeId ?? "", /:plan:2:review:4$/u);
+  assert.equal(f.prompts.length, 4);
+  assert.equal(f.latest().negotiation?.history[1]?.report.report, "Old report");
+});
+
+test("an execution dialog cannot stop or resume a task after restoration into replanning Plan", async () => {
+  const f = fixture();
+  f.begin();
+  let answer!: (choice: string | undefined) => void;
+  f.ctx.ui.select = async () =>
+    new Promise((done) => {
+      answer = done;
+    });
+  const menu = f.exec.menu(f.ctx);
+  await vi.waitFor(() => assert.equal(typeof answer, "function"));
+  f.latest().replanning = { version: 1, draftFile: revision(f).planFile };
+  await f.event("session_tree");
+  const suspended = f.exec.state;
+  answer("Stop implementation");
+  await menu;
+  assert.deepEqual(f.exec.state, suspended);
+  assert.equal(f.exec.replanning, true);
+  assert.equal(f.finishLinked.mock.calls.length, 0);
+  assert.equal(f.mock.sentMessages.length, 0);
+});
+
+for (const tool of [ASK_TOOL, FINISH_TOOL]) {
+  test(`a stale ${tool} result cannot mutate a restored suspended execution`, async () => {
+    let release!: () => void;
+    const f = fixture({
+      beforeReply: async () =>
+        new Promise((done) => {
+          release = done;
+        }),
+    });
+    f.begin();
+    const paid = f.tool(tool, tool === ASK_TOOL ? { message: "Need a decision" } : report);
+    await vi.waitFor(() => assert.equal(typeof release, "function"));
+    f.latest().replanning = { version: 1, draftFile: revision(f).planFile };
+    await f.event("session_tree");
+    const suspended = f.exec.state;
+    const count = f.mock.entries.length;
+    release();
+    await paid;
+    assert.deepEqual(f.exec.state, suspended);
+    assert.equal(f.mock.entries.length, count);
+    assert.equal(f.finishLinked.mock.calls.length, 0);
+  });
+}
+
+test("malformed restored suspension remains active and refuses implementation until explicit stop", async () => {
+  const f = fixture();
+  f.begin();
+  f.latest().replanning = { version: 2, draftFile: 123 } as never;
+  await f.event("session_start");
+  assert.equal(f.exec.active, true);
+  assert.equal(f.exec.replanning, true);
+  assert.ok(!f.mock.rawPi.getActiveTools().includes(FINISH_TOOL));
+  assert.throws(() => f.exec.resumeReplan(f.ctx, revision(f), { record: true }), /Replanning state is invalid/u);
+  await f.command("stop");
+  assert.equal(f.exec.active, false);
+});
+
+for (const name of [ASK_TOOL, FINISH_TOOL]) {
+  test(`live paid ${name} refuses replan without cancelling or restarting it`, async () => {
+    let release!: () => void;
+    const f = fixture({
+      beforeReply: async () =>
+        new Promise((done) => {
+          release = done;
+        }),
+    });
+    f.begin();
+    const paid = f.tool(name, name === ASK_TOOL ? { message: "Consult about the guard" } : report);
+    await vi.waitFor(() => assert.equal(typeof release, "function"));
+    assert.match(f.exec.replanRefusal() ?? "", /planner is busy/u);
+    assert.throws(() => f.exec.suspendForReplan(f.ctx, revision(f).planFile), /planner is busy/u);
+    assert.equal(f.prompts.length, 1);
+    release();
+    await paid;
+  });
 }
 
 test("fresh Linked restoration retains the uninitialized durable seed until bootstrap commits begin", async () => {

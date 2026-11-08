@@ -10,7 +10,7 @@ import {
   type ToolDefinition,
 } from "@earendil-works/pi-coding-agent";
 import { onTestFinished, test, vi } from "vitest";
-import { LINKED_FRESH } from "../src/approval-picker.js";
+import { APPROVE, CONTEXT_COMPACT, CONTEXT_FRESH, CONTEXT_KEEP } from "../src/approval-picker.js";
 import { EXEC_ENTRY, type ExecState } from "../src/exec.js";
 import { FAMILY_CHANNEL, type FamilyMembership, type FamilyRequest } from "../src/family-contract.js";
 import {
@@ -21,11 +21,13 @@ import {
   type FlowTransitionResult,
   type FlowWorkflow,
   queryFlow,
+  requestReplan,
 } from "../src/flow-contract.js";
 import { FRESH_HANDOFF_CHANNEL, type FreshHandoffRequest } from "../src/fresh-handoff.js";
 import type { pickImplementationEffort } from "../src/implementation-effort.js";
 import planMode from "../src/index.js";
 import { ENTER_TOOL, EXIT_TOOL, INLINE_ENTRY, MODE_CHANGED, MODE_SET } from "../src/inline-plan.js";
+import { finishReview, outstanding, reviseNegotiationPlan, startReview } from "../src/negotiation.js";
 import * as plannerSessions from "../src/planner/session.js";
 import type { PlanModeSettings } from "../src/settings.js";
 import { createCustomSelectorHarness, createMockContext, createMockPi } from "./support.js";
@@ -36,8 +38,10 @@ const GENERAL = { provider: "test", id: "general", name: "General", reasoning: t
 // Deliberately identical planner/worker: model inequality is not execution intent.
 const WORKER = { provider: "test", id: "sol", name: "Sol", reasoning: true };
 const OTHER = { provider: "other", id: "override", name: "Other model", reasoning: true };
-const KEEP = "Execute with linked worker";
-const COMPACT = "Compact first, then execute";
+const KEEP = CONTEXT_KEEP;
+const COMPACT = CONTEXT_COMPACT;
+const LINKED_FRESH = CONTEXT_FRESH;
+const PLANNER = { provider: "test", id: "planner", name: "Planner", reasoning: true };
 const PLAN = "# Linked lifecycle\n\n1. Implement the approved change.\n";
 const CYCLE = ["work", "chat", "plan"];
 type MockPi = ReturnType<typeof createMockPi>;
@@ -54,7 +58,7 @@ function deferred<T>() {
 }
 
 /** Protocol fake, not a model guard: only this coordinator mutates the fake model. */
-function coordinator(mock: MockPi, ctx: ExtensionCommandContext) {
+function coordinator(mock: MockPi, ctx: ExtensionCommandContext, planner = WORKER) {
   const state: FlowSnapshot = {
     version: 1,
     operatingMode: "linked",
@@ -65,7 +69,7 @@ function coordinator(mock: MockPi, ctx: ExtensionCommandContext) {
       roles: {
         work: { provider: GENERAL.provider, modelId: GENERAL.id },
         chat: { provider: GENERAL.provider, modelId: GENERAL.id },
-        plan: { provider: WORKER.provider, modelId: WORKER.id },
+        plan: { provider: planner.provider, modelId: planner.id },
         exec: { provider: WORKER.provider, modelId: WORKER.id, suggestedThinking: "medium" },
       },
     },
@@ -80,6 +84,7 @@ function coordinator(mock: MockPi, ctx: ExtensionCommandContext) {
   const attempts: FlowWorkflow[] = [];
   const activated: FlowWorkflow[] = [];
   const legacyRequests: unknown[] = [];
+  const publications: Array<{ event: { active: boolean; replanning?: boolean }; snapshot: FlowSnapshot }> = [];
   const snapshot = () => structuredClone(state);
   const result = (error?: string): FlowTransitionResult => ({
     ok: !error,
@@ -93,9 +98,19 @@ function coordinator(mock: MockPi, ctx: ExtensionCommandContext) {
     const manager = ctx.sessionManager;
     const session = manager.getSessionId();
     const current = () =>
-      state.revision === revision && ctx.sessionManager === manager && manager.getSessionId() === session;
+      state.revision === revision &&
+      ctx.sessionManager === manager &&
+      manager.getSessionId() === session &&
+      !ctx.signal?.aborted;
     if (!current()) return result("Stale linked transition.");
-    const workflow = request.kind === "workflow" ? request.workflow : request.phase === "begin" ? "exec" : "work";
+    const workflow =
+      request.kind === "workflow"
+        ? request.workflow
+        : request.phase === "replan"
+          ? "plan"
+          : request.phase === "begin" || request.phase === "resume"
+            ? "exec"
+            : "work";
     state.transitioning = true;
     attempts.push(workflow);
     try {
@@ -103,14 +118,19 @@ function coordinator(mock: MockPi, ctx: ExtensionCommandContext) {
       // The async activation result must never commit into a newer selection/session.
       if (!current()) return result("Stale linked transition.");
       if (!ok) return result("Assigned model unavailable.");
-      ctx.model = (workflow === "plan" || workflow === "exec" ? WORKER : GENERAL) as ExtensionCommandContext["model"];
+      ctx.model = (
+        workflow === "plan" ? planner : workflow === "exec" ? WORKER : GENERAL
+      ) as ExtensionCommandContext["model"];
       activated.push(workflow);
+      // The real gate stages its lifecycle destination before the owner publishes synchronously.
+      state.workflow = workflow;
       if (request.kind === "execution") {
+        if (request.phase === "replan") state.replanning = true;
+        else delete state.replanning;
         const returned = request.commit();
         assert.equal(returned, undefined, "lifecycle commit must be synchronous");
         commits.push(request);
       }
-      state.workflow = workflow;
       mock.eventBus.emit(MODE_CHANGED, { mode: workflow, cycle: CYCLE, source: "transition" });
       return result();
     } finally {
@@ -134,6 +154,10 @@ function coordinator(mock: MockPi, ctx: ExtensionCommandContext) {
     (data as { reply(value: unknown): void }).reply({ mode: state.workflow, cycle: CYCLE });
   });
   mock.eventBus.on(MODE_SET, (data) => legacyRequests.push(data));
+  mock.eventBus.on("workflow-mode:exec", (data) => {
+    const event = data as { active: boolean; replanning?: boolean };
+    publications.push({ event: structuredClone(event), snapshot: snapshot() });
+  });
   return {
     snapshot,
     workflows,
@@ -142,6 +166,11 @@ function coordinator(mock: MockPi, ctx: ExtensionCommandContext) {
     attempts,
     activated,
     legacyRequests,
+    publications,
+    independent: () => {
+      state.operatingMode = "independent";
+      state.revision++;
+    },
     activation: (fn: typeof activate) => {
       activate = fn;
     },
@@ -154,6 +183,7 @@ function coordinator(mock: MockPi, ctx: ExtensionCommandContext) {
 async function fixture(
   options: {
     choice?: string;
+    distinctModels?: boolean;
     planners?: boolean;
     thinkingLevel?: "high" | "off";
     fresh?: boolean;
@@ -171,12 +201,18 @@ async function fixture(
   let onBranch = true;
   let app: ReturnType<typeof createCustomSelectorHarness> | undefined;
   const selections: Array<{ title: string; choices: string[] }> = [];
-  let select = async (_title: string, choices: string[]): Promise<string | undefined> =>
-    choices.includes(options.choice ?? KEEP)
-      ? (options.choice ?? KEEP)
-      : choices.includes("high")
-        ? choices[0]
-        : undefined;
+  let select = async (title: string, choices: string[]): Promise<string | undefined> => {
+    const choice = options.choice ?? KEEP;
+    if (title === "Implementation effort") return choices[0];
+    if (choices.includes(CONTEXT_KEEP)) {
+      return choice;
+    }
+    if (choices.includes(APPROVE)) {
+      if (choice !== KEEP && choices.includes(`Context: ${KEEP}`)) return `Context: ${KEEP}`;
+      return APPROVE;
+    }
+    return undefined;
+  };
   const context = createMockContext({
     cwd: directory,
     mode: options.planners ? "tui" : "rpc",
@@ -192,14 +228,15 @@ async function fixture(
       : {
           select: (title: string, choices: string[]) => {
             selections.push({ title, choices });
+            assert.ok(selections.length < 100, `Unexpected repeated RPC dialog: ${title}: ${choices.join(", ")}`);
             return select(title, choices);
           },
         }),
     modelRegistry: {
-      getAvailable: () => [GENERAL, WORKER, OTHER],
-      getAll: () => [GENERAL, WORKER, OTHER],
+      getAvailable: () => [GENERAL, WORKER, OTHER, PLANNER],
+      getAll: () => [GENERAL, WORKER, OTHER, PLANNER],
       find: (provider: string, id: string) =>
-        [GENERAL, WORKER, OTHER].find((model) => model.provider === provider && model.id === id),
+        [GENERAL, WORKER, OTHER, PLANNER].find((model) => model.provider === provider && model.id === id),
       getApiKeyAndHeaders: async () => ({ ok: false, error: "No network in lifecycle tests" }),
       isUsingOAuth: () => false,
     },
@@ -219,7 +256,7 @@ async function fixture(
     },
   });
   const ctx = context.ctx as ExtensionCommandContext;
-  const flow = coordinator(mock, ctx);
+  const flow = coordinator(mock, ctx, options.distinctModels ? PLANNER : WORKER);
   const freshRequests: FreshHandoffRequest[] = [];
   const freshJobs: Array<() => Promise<void>> = [];
   let freshAvailable = options.fresh === true;
@@ -240,7 +277,7 @@ async function fixture(
   });
   mock.rawPi.setModel = setModel;
   const approvals: unknown[] = [];
-  const execPublications: Array<{ active: boolean; source: string }> = [];
+  const execPublications: Array<{ active: boolean; replanning?: boolean; source: string }> = [];
   mock.eventBus.on("permission-mode:set", (data) => approvals.push(data));
   mock.eventBus.on("workflow-mode:exec", (data) => execPublications.push(data as (typeof execPublications)[number]));
   const emit = async (name: string, payload: Record<string, unknown> = {}): Promise<unknown> => {
@@ -253,6 +290,9 @@ async function fixture(
     await emit("session_shutdown");
     seedDirectory.mockRestore();
     rmSync(directory, { recursive: true, force: true });
+  });
+  const createSession = vi.fn(async () => {
+    throw new Error("Lifecycle tests must not start a real planner session.");
   });
   await planMode(mock.pi, {
     pickImplementationEffort:
@@ -267,9 +307,7 @@ async function fixture(
       implementationModelMap: { "test/sol": [{ provider: OTHER.provider, modelId: OTHER.id }] },
       ...options.settings,
     }),
-    createSession: async () => {
-      throw new Error("Lifecycle tests must not start a real planner session.");
-    },
+    createSession,
   });
   if (options.planners) {
     mock.entries.push({
@@ -315,8 +353,32 @@ async function fixture(
     })) as { block?: boolean } | undefined;
     return result?.block === true;
   };
-  const settle = async () =>
-    (await emit("agent_before_settle", { outcome: "completed" })) as AgentBeforeSettleEventResult | undefined;
+  type BoundaryEntry = NonNullable<AgentBeforeSettleEventResult["entries"]>[number];
+  const boundaryEntries: BoundaryEntry[] = [];
+  const settle = async (
+    outcome = "completed",
+    proposals: BoundaryEntry[] = [],
+  ): Promise<AgentBeforeSettleEventResult | undefined> => {
+    // Pi passes accumulated proposals to each handler, and commits the final returned entries.
+    let entries = proposals;
+    let result: AgentBeforeSettleEventResult | undefined;
+    for (const handler of mock.events.get("agent_before_settle") ?? []) {
+      const next = (await handler({ type: "agent_before_settle", outcome, entries }, ctx)) as
+        | AgentBeforeSettleEventResult
+        | undefined;
+      if (next) {
+        result = next;
+        entries = next.entries ?? entries;
+      }
+    }
+    boundaryEntries.push(...entries);
+    for (const entry of entries) {
+      if (entry.type === "custom")
+        mock.entries.push({ customType: entry.customType, data: structuredClone(entry.data) });
+    }
+    return result;
+  };
+  const execution = () => mock.entries.filter((entry) => entry.customType === EXEC_ENTRY).at(-1)?.data as ExecState;
   const assertNoExec = () => {
     assert.equal(
       execPublications.some((event) => event.active && event.source === "transition"),
@@ -351,9 +413,13 @@ async function fixture(
     plan,
     guard,
     settle,
+    execution,
+    boundaryEntries,
+    execPublications,
     selections,
     freshRequests,
     freshJobs,
+    createSession,
     freshAvailable: (available: boolean) => {
       freshAvailable = available;
     },
@@ -373,6 +439,209 @@ async function fixture(
       return app;
     },
   };
+}
+
+async function executingFixture(options: Parameters<typeof fixture>[0] = {}) {
+  const f = await fixture(options);
+  await f.plan();
+  await f.tool(EXIT_TOOL);
+  assert.equal((await f.settle())?.continue, true);
+  assert.ok(f.execution().negotiation, "the first boundary record must include the durable execution identity");
+  return f;
+}
+
+async function exhaustedFixture(options: Parameters<typeof fixture>[0] = {}) {
+  const f = await executingFixture(options);
+  // Restore a real, previously paid task. No planner/network calls are permitted by the fixture.
+  const saved = structuredClone(f.execution());
+  const finding = { id: "F1", title: "Retain safety", detail: "Missing guard", requestedChange: "Keep the guard." };
+  assert.ok(saved.negotiation);
+  let negotiation = { ...saved.negotiation, maxRevisions: 1 };
+  for (let round = 0; round < 2; round++) {
+    negotiation = finishReview(
+      startReview(
+        negotiation,
+        { report: `Attempt ${round + 1}`, verification: "Focused tests", concerns: "Guard missing" },
+        round ? [{ id: "F1", status: "addressed", response: "Added guard." }] : [],
+      ),
+      {
+        decision: {
+          outcome: "changes_requested",
+          summary: "Keep revising",
+          evidence: ["Guard missing"],
+          limitations: ["Offline fixture"],
+          findings: [finding],
+        },
+        costUsd: 0.04,
+      },
+    );
+  }
+  negotiation.userAnswers = ["Retain the original safety boundary."];
+  saved.negotiation = negotiation;
+  saved.asks = 3;
+  saved.costUsd = 0.12;
+  const touchedFile = join(f.ctx.cwd, "source.ts");
+  writeFileSync(touchedFile, "unfinished implementation\n");
+  saved.touched = [touchedFile];
+  saved.pendingQuestion = {
+    id: "postponed",
+    questions: [
+      {
+        id: "account",
+        header: "Account",
+        question: "Which account?",
+        options: [
+          { label: "Staging", description: "Use the test account." },
+          { label: "Production", description: "Use the live account." },
+        ],
+      },
+    ],
+    implementerMessage: "Need an account.",
+  };
+  f.mock.entries.push({ customType: EXEC_ENTRY, data: saved });
+  await f.emit("session_tree");
+  return { ...f, saved: structuredClone(saved), touchedFile };
+}
+
+for (const distinctModels of [false, true]) {
+  for (const choice of [KEEP, COMPACT]) {
+    test(`real owner Plan → Exec → Plan → Exec retains the ${distinctModels ? "distinct" : "same"}-model task with ${choice}`, async () => {
+      const f = await exhaustedFixture({ distinctModels, choice, fresh: true });
+      const approvedFile = f.saved.planFile;
+      const approvedPlan = readFileSync(approvedFile, "utf8");
+      await f.enter();
+      const suspended = structuredClone(f.execution());
+      const draft = suspended.replanning?.draftFile;
+      assert.ok(draft);
+      assert.notEqual(draft, approvedFile);
+      assert.equal(suspended.active, true);
+      assert.equal(suspended.planFile, approvedFile, "the old approval is retained, not edited in place");
+      assert.deepEqual(suspended.negotiation, f.saved.negotiation);
+      assert.deepEqual(suspended.pendingQuestion, f.saved.pendingQuestion);
+      assert.match(readFileSync(draft, "utf8"), /F1: Retain safety[\s\S]*Which account\?/u);
+      assert.equal(f.inline()?.planFile, draft);
+      assert.equal(f.flow.snapshot().workflow, "plan");
+      assert.equal(f.flow.snapshot().replanning, true);
+      assert.equal(f.ctx.model?.id, distinctModels ? PLANNER.id : WORKER.id);
+      assert.equal(await f.guard(), true);
+      assert.match(f.context.statuses.get("plan-exec") ?? "", /replanning/u);
+      const replan = f.flow.executions.at(-1);
+      assert.equal(replan?.phase, "replan");
+      assert.equal(replan?.planFile, approvedFile);
+      assert.equal(replan?.expectedExecutionId, f.saved.negotiation?.executionId);
+      assert.equal(replan?.expectedPlanRevision, 1);
+      assert.notEqual(
+        (
+          (await f.emit("tool_call", { toolName: "write", input: { path: draft, content: "draft" } })) as
+            | { block?: boolean }
+            | undefined
+        )?.block,
+        true,
+      );
+      assert.equal(
+        (
+          (await f.emit("tool_call", { toolName: "write", input: { path: approvedFile, content: "unapproved" } })) as {
+            block?: boolean;
+          }
+        )?.block,
+        true,
+      );
+      for (const name of ["ask_planner", "finish_plan", "continue_plan"]) {
+        const result = await f.tool(
+          name,
+          name === "finish_plan" ? { report: "Done", verification: "Tests", concerns: "None" } : {},
+        );
+        assert.match(JSON.stringify(result.content), /paused while the plan is revised/u);
+      }
+      const revised = "# Revised lifecycle\n\nKeep the guard and existing changes.\n";
+      writeFileSync(draft, revised);
+      assert.equal(readFileSync(approvedFile, "utf8"), approvedPlan);
+      f.selections.length = 0;
+      let contextSelected = false;
+      f.select(async (title, choices) => {
+        if (title === "Implementation effort") return choices[0];
+        if (choices.includes(CONTEXT_KEEP)) {
+          assert.deepEqual(
+            new Set(choices),
+            new Set([CONTEXT_KEEP, CONTEXT_COMPACT]),
+            "resume has no fresh context option",
+          );
+          contextSelected = true;
+          return choice;
+        }
+        if (!contextSelected) return choices.find((label) => label.startsWith("Context:"));
+        return APPROVE;
+      });
+      const approval = await f.tool(EXIT_TOOL);
+      assert.equal((approval.details as { outcome: string }).outcome, "handoff");
+      assert.equal(f.flow.snapshot().workflow, "plan", "approval waits for the successful turn boundary");
+      const boundary = await f.settle();
+      assert.equal(boundary?.continue, true);
+      assert.equal(
+        boundary?.entries?.filter((entry) => entry.type === "compaction").length,
+        choice === COMPACT ? 1 : 0,
+      );
+      const resumed = f.execution();
+      assert.equal(resumed.active, true);
+      assert.equal(resumed.planFile, draft);
+      assert.equal(resumed.replanning, undefined);
+      assert.equal(resumed.implementerModel, "test/sol");
+      assert.ok(resumed.negotiation);
+      assert.ok(f.saved.negotiation);
+      assert.deepEqual(resumed.negotiation, reviseNegotiationPlan(f.saved.negotiation));
+      assert.deepEqual(outstanding(resumed.negotiation), outstanding(f.saved.negotiation));
+      assert.equal(resumed.asks, f.saved.asks);
+      assert.equal(resumed.costUsd, f.saved.costUsd);
+      assert.deepEqual(resumed.touched, f.saved.touched);
+      assert.deepEqual(resumed.pendingQuestion, f.saved.pendingQuestion);
+      assert.notEqual(
+        resumed.planner?.sessionFile,
+        f.saved.planner?.sessionFile,
+        "seed a new consultant from revised history",
+      );
+      assert.equal(readFileSync(f.touchedFile, "utf8"), "unfinished implementation\n");
+      assert.equal(readFileSync(approvedFile, "utf8"), approvedPlan);
+      assert.equal(f.flow.snapshot().workflow, "exec");
+      assert.equal(f.flow.snapshot().replanning, undefined);
+      assert.equal(f.ctx.model?.id, WORKER.id);
+      assert.deepEqual(
+        f.flow.executions.map((request) => request.phase),
+        ["begin", "replan", "resume"],
+      );
+      assert.equal(f.flow.executions.at(-1)?.expectedExecutionId, f.saved.negotiation?.executionId);
+      assert.equal(f.flow.executions.at(-1)?.expectedPlanRevision, 1);
+      assert.equal(f.flow.executions.at(-1)?.planFile, draft);
+      const publications = f.flow.publications.filter(({ event }) => event.active);
+      assert.ok(
+        publications.some(
+          ({ event, snapshot }) => event.replanning && snapshot.workflow === "plan" && snapshot.replanning,
+        ),
+      );
+      assert.ok(
+        publications.every(({ event, snapshot }) => snapshot.workflow === (event.replanning ? "plan" : "exec")),
+        "publication never exposes an intermediate Work tuple",
+      );
+      assert.equal(
+        f.selections.some(({ choices }) => choices.includes(CONTEXT_FRESH)),
+        false,
+        "an unfinished task cannot move to a fresh child",
+      );
+      assert.equal(f.freshJobs.length, 0);
+      assert.equal(f.createSession.mock.calls.length, 0, "reapproval neither calls the planner nor retries paid work");
+      assert.match(
+        JSON.stringify(boundary?.entries),
+        /Existing review recovery or the unanswered planner question remains required/u,
+      );
+      assert.equal(
+        f.mock.sentMessages.some(
+          ({ message }) => (message as { customType?: string }).customType === "plan-mode-finish",
+        ),
+        false,
+      );
+      assert.equal(await f.settle(), undefined);
+      f.assertNoEscape();
+    });
+  }
 }
 
 for (const via of ["command", "tool"] as const) {
@@ -425,7 +694,13 @@ for (const choice of [KEEP, COMPACT]) {
     const approved = await f.tool(EXIT_TOOL);
     assert.equal((approved as { terminate?: boolean }).terminate, true);
     assert.equal((approved.details as { outcome: string }).outcome, "handoff");
-    assert.deepEqual(f.selections[0]?.choices, [KEEP, COMPACT, "Edit the plan", "Save for later", "No, keep planning"]);
+    assert.deepEqual(f.selections[0]?.choices, [
+      APPROVE,
+      `Context: ${KEEP}`,
+      "Edit the plan",
+      "Save for later",
+      "No, keep planning",
+    ]);
     assert.match(f.selections[0]?.title ?? "", /test\/sol/u);
     assert.equal(f.ctx.model?.id, WORKER.id, "planner and worker intentionally share a physical model");
     assert.equal(f.inline()?.active, true);
@@ -505,8 +780,8 @@ for (const choice of [KEEP, COMPACT]) {
     const approved = await reviewing;
     assert.equal((approved as { terminate?: boolean }).terminate, true);
     assert.equal(picker.mock.calls.length, 1);
-    assert.equal(f.selections[1]?.title, "Implementation effort");
-    assert.equal(f.selections[1]?.choices[0], "low");
+    assert.equal(f.selections.at(-1)?.title, "Implementation effort");
+    assert.equal(f.selections.at(-1)?.choices[0], "low");
     assert.deepEqual(f.mock.thinkingLevels, levelsBefore, "opening and approving do not apply effort");
     assert.equal(await f.guard(), true);
     f.assertNoExec();
@@ -577,9 +852,7 @@ for (const restore of ["session_tree", "reload"] as const) {
       await f.plan();
       await f.tool(EXIT_TOOL);
       const settled = await f.settle();
-      for (const entry of settled?.entries ?? []) {
-        if (entry.type === "custom") f.mock.entries.push({ customType: entry.customType, data: entry.data });
-      }
+      assert.ok(settled?.entries?.some((entry) => entry.type === "custom" && entry.customType === EXEC_ENTRY));
       const initial = f.flow.snapshot().revision;
       f.flow.revise();
       if (restore === "reload") {
@@ -614,7 +887,7 @@ test("changing flow revision while the approval UI is open expires the approval"
   const reviewing = f.tool(EXIT_TOOL);
   await opened.promise;
   f.flow.revise();
-  answer.resolve(KEEP);
+  answer.resolve(APPROVE);
   const result = await reviewing;
   assert.match(result.content.map((part) => (part.type === "text" ? part.text : "")).join("\n"), /expired/iu);
   assert.equal(f.inline()?.active, true);
@@ -687,6 +960,327 @@ test("failed linked worker activation keeps Plan active without a continuation",
   assert.deepEqual(f.flow.activated, ["plan"]);
   f.assertNoExec();
   f.assertNoEscape();
+});
+
+for (const distinctModels of [false, true]) {
+  test(`healthy ${distinctModels ? "distinct" : "same"}-model task survives repeated replan/resume boundaries and restore`, async () => {
+    const f = await executingFixture({ distinctModels });
+    const initial = structuredClone(f.execution());
+    for (let revision = 1; revision <= 2; revision++) {
+      const request = requestReplan(f.mock.eventBus);
+      assert.ok(request instanceof Promise, "owner attaches its result synchronously");
+      assert.equal((await request).ok, true);
+      const draft = f.execution().replanning?.draftFile;
+      assert.ok(draft);
+      writeFileSync(draft, `# Revision ${revision + 1}\n\nContinue the same implementation.\n`);
+      await f.tool(EXIT_TOOL);
+      assert.equal((await f.settle())?.continue, true);
+      const resumed = f.execution();
+      assert.equal(resumed.negotiation?.executionId, initial.negotiation?.executionId);
+      assert.equal(resumed.negotiation?.planRevision, revision + 1);
+      assert.equal(resumed.negotiation?.phase, "implementing");
+      assert.equal(resumed.negotiation?.attempts, 0);
+      assert.equal(resumed.planFile, draft);
+      assert.equal(resumed.replanning, undefined);
+      await f.emit("session_tree");
+      assert.equal(f.flow.snapshot().workflow, "exec");
+    }
+    assert.deepEqual(
+      f.flow.executions.map((request) => request.phase),
+      ["begin", "replan", "resume", "replan", "resume"],
+    );
+    assert.deepEqual(
+      f.flow.executions.filter((request) => request.phase === "resume").map((request) => request.expectedPlanRevision),
+      [1, 2],
+    );
+    f.assertNoEscape();
+  });
+}
+
+test("command replanning is idle-only and never schedules a surprise transition", async () => {
+  const f = await executingFixture();
+  const before = structuredClone(f.execution());
+  Object.assign(f.ctx, { isIdle: () => false });
+  await f.enter();
+  assert.match(f.context.notifications.at(-1)?.message ?? "", /Implementation is running\. Interrupt it/u);
+  assert.deepEqual(f.execution(), before);
+  assert.deepEqual(
+    f.flow.executions.map((request) => request.phase),
+    ["begin"],
+  );
+  Object.assign(f.ctx, { isIdle: () => true });
+  await f.settle();
+  assert.equal(f.flow.snapshot().workflow, "exec");
+  await f.enter();
+  assert.equal(f.flow.snapshot().workflow, "plan");
+  assert.equal(f.flow.executions.at(-1)?.phase, "replan");
+  f.assertNoEscape();
+});
+
+for (const outcome of ["completed", "aborted", "settled-aborted"] as const) {
+  test(`tool replanning defers one draft to successful settlement: ${outcome}`, async () => {
+    const f = await executingFixture({ distinctModels: true });
+    const before = structuredClone(f.execution());
+    const records = f.mock.entries.length;
+    Object.assign(f.ctx, { isIdle: () => false });
+    const request = await f.tool(ENTER_TOOL);
+    const duplicate = await f.tool(ENTER_TOOL);
+    assert.equal((request as { terminate?: boolean }).terminate, true);
+    assert.equal((duplicate as { terminate?: boolean }).terminate, true);
+    assert.match(JSON.stringify(request.content), /Stop implementing.*after this turn settles/u);
+    assert.equal(f.mock.entries.length, records);
+    assert.equal(f.flow.snapshot().workflow, "exec");
+    assert.equal(f.ctx.model?.id, WORKER.id);
+    assert.deepEqual(
+      f.flow.executions.map((entry) => entry.phase),
+      ["begin"],
+    );
+    const proposal = { type: "custom" as const, customType: "another-extension:proposal", data: { keep: true } };
+    if (outcome === "settled-aborted") await f.emit("agent_settled", { aborted: true });
+    const result = await f.settle(outcome === "aborted" ? "aborted" : "completed", [proposal]);
+    if (outcome === "completed") {
+      assert.equal(result?.continue, true);
+      assert.deepEqual(result.entries?.[0], proposal, "do not discard another extension's boundary proposals");
+      assert.equal(f.flow.snapshot().workflow, "plan");
+      assert.equal(f.ctx.model?.id, PLANNER.id);
+      assert.equal(f.flow.executions.filter((entry) => entry.phase === "replan").length, 1);
+      assert.equal(f.execution().negotiation?.executionId, before.negotiation?.executionId);
+      assert.ok(f.execution().replanning);
+      assert.equal(await f.guard(), true);
+    } else {
+      assert.equal(result, undefined);
+      assert.deepEqual(f.execution(), before);
+      assert.equal(f.flow.snapshot().workflow, "exec");
+      assert.equal(f.flow.executions.length, 1);
+    }
+    assert.ok(
+      f.mock.entries.some((entry) => entry.customType === proposal.customType),
+      "the mock branch commits boundary entries",
+    );
+    assert.equal(await f.settle(), undefined);
+    f.assertNoEscape();
+  });
+}
+
+for (const phase of ["replan", "resume"] as const) {
+  for (const invalidation of ["unavailable", "revision", "session", "abort"] as const) {
+    test(`${phase} ${invalidation} leaves the previous approval/task intact`, async () => {
+      const f = await exhaustedFixture({ distinctModels: true });
+      if (phase === "resume") {
+        await f.enter();
+        const draft = f.execution().replanning?.draftFile;
+        assert.ok(draft);
+        writeFileSync(draft, "# Revised plan\n\nKeep safety.\n");
+        await f.tool(EXIT_TOOL);
+      }
+      const prior = structuredClone(f.execution());
+      const model = f.ctx.model;
+      const controller = new AbortController();
+      f.ctx.signal = controller.signal;
+      const started = deferred<void>();
+      const activation = deferred<boolean>();
+      f.flow.activation(async () => {
+        started.resolve();
+        return activation.promise;
+      });
+      const pending = phase === "replan" ? f.enter() : f.settle();
+      await started.promise;
+      assert.deepEqual(f.execution(), prior, "no state changes before model activation");
+      if (invalidation === "revision") f.flow.revise();
+      else if (invalidation === "session") f.switchSession();
+      else if (invalidation === "abort") controller.abort();
+      activation.resolve(invalidation !== "unavailable");
+      await pending;
+      assert.deepEqual(f.execution(), prior);
+      assert.equal(f.flow.snapshot().workflow, phase === "resume" ? "plan" : "exec");
+      assert.equal(f.inline()?.active, phase === "resume");
+      assert.equal(f.flow.commits.at(-1)?.phase, phase === "resume" ? "replan" : "begin");
+      if (invalidation === "unavailable") {
+        assert.equal(f.ctx.model, model);
+        assert.match(f.context.notifications.at(-1)?.message ?? "", /unavailable/iu);
+      }
+      assert.equal(await f.settle(), undefined);
+      f.assertNoEscape();
+    });
+  }
+}
+
+for (const choice of [KEEP, COMPACT]) {
+  for (const mutation of ["edit", "delete"] as const) {
+    for (const boundary of ["before settle", "during activation"] as const) {
+      test(`resumed '${choice}' approval rejects draft ${mutation} ${boundary} without revising the task`, async () => {
+        const f = await exhaustedFixture({ choice, distinctModels: true });
+        await f.enter();
+        const suspended = structuredClone(f.execution());
+        const draft = suspended.replanning?.draftFile;
+        assert.ok(draft);
+        const approvedPlan = readFileSync(suspended.planFile, "utf8");
+        writeFileSync(draft, "# Revised plan\n\nKeep safety and the existing implementation.\n");
+        const approval = await f.tool(EXIT_TOOL);
+        assert.equal((approval.details as { outcome: string }).outcome, "handoff");
+        assert.equal(f.inline()?.active, true);
+        assert.equal(await f.guard(), true);
+        assert.deepEqual(f.execution(), suspended);
+
+        const entries = structuredClone(f.mock.entries);
+        const boundaryEntries = structuredClone(f.boundaryEntries);
+        const publications = structuredClone(f.execPublications);
+        const messages = structuredClone(f.mock.sentMessages);
+        const userMessages = structuredClone(f.mock.sentUserMessages);
+        const levels = [...f.mock.thinkingLevels];
+        const commits = f.flow.commits.length;
+        const activation = deferred<boolean>();
+        const started = deferred<void>();
+        f.flow.activation(async (workflow) => {
+          assert.equal(workflow, "exec");
+          started.resolve();
+          return activation.promise;
+        });
+        let settling: ReturnType<typeof f.settle> | undefined;
+        if (boundary === "during activation") {
+          settling = f.settle();
+          await started.promise;
+          assert.deepEqual(f.execution(), suspended, "activation must not resume the task early");
+          assert.equal(await f.guard(), true);
+        }
+        if (mutation === "edit") writeFileSync(draft, "# Unapproved replacement\n\nRemove the guard.\n");
+        else rmSync(draft);
+        if (boundary === "before settle") settling = f.settle();
+        activation.resolve(true);
+
+        assert.equal(await settling, undefined, "invalidated approval must not produce a continuation or compaction");
+        assert.equal(await f.settle(), undefined, "the invalidated handoff is consumed exactly once");
+        assert.deepEqual(f.mock.entries, entries, "no resumed execution or inline exit is persisted");
+        assert.deepEqual(f.boundaryEntries, boundaryEntries, "no new revision, brief or compaction is proposed");
+        assert.deepEqual(f.execution(), suspended, "the durable replanning task is unchanged");
+        assert.equal(f.execution().negotiation?.planRevision, f.saved.negotiation?.planRevision);
+        assert.deepEqual(f.execution().negotiation, f.saved.negotiation, "review budgets and findings are retained");
+        assert.equal(f.execution().asks, f.saved.asks);
+        assert.equal(f.execution().costUsd, f.saved.costUsd);
+        assert.deepEqual(f.execution().pendingQuestion, f.saved.pendingQuestion);
+        assert.deepEqual(f.execution().touched, f.saved.touched);
+        assert.equal(readFileSync(f.touchedFile, "utf8"), "unfinished implementation\n");
+        assert.equal(readFileSync(suspended.planFile, "utf8"), approvedPlan);
+        assert.equal(f.inline()?.active, true);
+        assert.equal(f.inline()?.planFile, draft);
+        assert.equal(await f.guard(), true, "an expired approval cannot release the readonly guard");
+        assert.deepEqual(f.execPublications, publications, "no resumed execution is published");
+        assert.deepEqual(f.mock.sentMessages, messages);
+        assert.deepEqual(f.mock.sentUserMessages, userMessages, "no implementation continuation is sent");
+        assert.deepEqual(f.mock.thinkingLevels, levels);
+        assert.equal(f.flow.commits.length, commits);
+        assert.equal(f.flow.commits.at(-1)?.phase, "replan");
+        assert.deepEqual(
+          f.flow.executions.map((request) => request.phase),
+          boundary === "before settle" ? ["begin", "replan"] : ["begin", "replan", "resume"],
+        );
+        if (boundary === "during activation") {
+          // The setter may already have activated the worker before the synchronous commit fence fails.
+          assert.equal(f.ctx.model?.id, WORKER.id);
+          assert.match(f.context.notifications.at(-1)?.message ?? "", /expired/iu);
+        }
+        assert.equal(f.createSession.mock.calls.length, 0, "invalidated reapproval cannot replay paid work");
+        f.assertNoEscape();
+      });
+    }
+  }
+}
+
+for (const lifecycle of ["session_tree", "reload"] as const) {
+  test(`replanning ${lifecycle} restores the execution draft without an inline record`, async () => {
+    const f = await exhaustedFixture();
+    await f.enter();
+    const suspended = structuredClone(f.execution());
+    const draft = suspended.replanning?.draftFile;
+    assert.ok(draft);
+    // Supplementary inline entries may not survive a compaction/reload boundary.
+    for (let index = f.mock.entries.length - 1; index >= 0; index--)
+      if (f.mock.entries[index]?.customType === INLINE_ENTRY) f.mock.entries.splice(index, 1);
+    if (lifecycle === "reload") {
+      await f.emit("session_shutdown");
+      await f.emit("session_start");
+    } else await f.emit("session_tree");
+    assert.equal(f.inline(), undefined, "restore does not allocate or persist a replacement draft");
+    assert.equal(await f.guard(), true);
+    assert.equal(f.flow.snapshot().workflow, "plan");
+    assert.deepEqual(f.execution(), suspended);
+    f.select(async () => "No, keep planning");
+    const review = await f.tool(EXIT_TOOL);
+    assert.equal((review.details as { planFile: string }).planFile, draft);
+    assert.equal((review.details as { outcome: string }).outcome, "kept");
+    assert.equal(
+      (review.details as { previous: string }).previous,
+      PLAN.trim(),
+      "restored comparison baseline is the last approval",
+    );
+    assert.deepEqual(f.execution(), suspended);
+    assert.equal(f.createSession.mock.calls.length, 0, "restore must not replay paid consultation/review");
+    assert.equal(await f.settle(), undefined);
+    f.assertNoEscape();
+  });
+}
+
+for (const choice of [undefined, "No, keep planning", "Save for later"]) {
+  test(`replanning ${choice ?? "Escape"} retains the paused budget and distinct draft`, async () => {
+    const f = await exhaustedFixture();
+    await f.enter();
+    const before = structuredClone(f.execution());
+    const draft = before.replanning?.draftFile;
+    assert.ok(draft);
+    f.ctx.ui.input = async () => "revised-snapshot";
+    f.select(async (_title, choices) => (choices.includes("Enter different name") ? "Enter different name" : choice));
+    const result = await f.tool(EXIT_TOOL);
+    assert.equal((result.details as { outcome: string }).outcome, choice === "Save for later" ? "saved" : "kept");
+    if (choice === "Save for later") {
+      const savedFile = (result.details as { savedFile: string }).savedFile;
+      assert.notEqual(savedFile, draft);
+      assert.notEqual(savedFile, before.planFile);
+      assert.equal(readFileSync(savedFile, "utf8").trim(), readFileSync(draft, "utf8").trim());
+      assert.match(JSON.stringify(result.content), /Implementation remains paused in Plan/u);
+    }
+    assert.deepEqual(f.execution(), before);
+    assert.equal(f.inline()?.active, true);
+    assert.equal(f.inline()?.planFile, draft);
+    assert.equal(await f.guard(), true);
+    assert.equal(await f.settle(), undefined);
+    assert.deepEqual(
+      f.flow.executions.map((request) => request.phase),
+      ["begin", "replan"],
+    );
+    f.assertNoEscape();
+  });
+}
+
+test("explicit Independent recovery refuses approval until the suspended task is stopped", async () => {
+  const f = await exhaustedFixture();
+  await f.enter();
+  const suspended = structuredClone(f.execution());
+  f.flow.independent();
+  const opened = f.selections.length;
+  const refused = await f.tool(EXIT_TOOL);
+  assert.match(
+    JSON.stringify(refused.content),
+    /This suspended Linked task is now Independent\. Stop implementation before approving another plan/u,
+  );
+  assert.equal(f.selections.length, opened, "no replacement approval dialog");
+  assert.deepEqual(f.execution(), suspended);
+  assert.equal(await f.guard(), true);
+  await f.mock.commands.get("plan-exec")?.handler("stop", f.ctx);
+  assert.equal(f.execution().active, false);
+  assert.equal(f.execution().replanning, undefined);
+  assert.deepEqual(
+    f.flow.executions.map((request) => request.phase),
+    ["begin", "replan"],
+    "Independent stop does not require a Linked model transition",
+  );
+  f.select(async () => "No, keep planning");
+  await f.enter();
+  const nextPlan = f.inline()?.planFile;
+  assert.ok(nextPlan);
+  writeFileSync(nextPlan, "# New independent plan\n");
+  const next = await f.tool(EXIT_TOOL);
+  assert.doesNotMatch(JSON.stringify(next.content), /suspended Linked task/u);
+  assert.equal((next.details as { outcome: string }).outcome, "kept");
 });
 
 async function implementationScreen(options: { settings?: Partial<PlanModeSettings> } = {}) {
@@ -833,8 +1427,8 @@ for (const thinkingLevel of ["high", "off"] as const) {
     const result = await f.tool(EXIT_TOOL);
     assert.equal((result as { terminate?: boolean }).terminate, true);
     assert.match(JSON.stringify(result.content), /fresh conversation after this turn settles/u);
-    assert.equal(f.selections[1]?.choices[0], "medium");
-    assert.ok(f.selections[0]?.choices.includes(LINKED_FRESH));
+    assert.equal(f.selections.at(-1)?.choices[0], "medium");
+    assert.ok(f.selections.some((selection) => selection.choices.includes(LINKED_FRESH)));
     assert.ok(LINKED_FRESH.length <= 42);
     assert.equal(f.freshJobs.length, 0, "tool only records explicit approval, not a replacement");
     assert.equal(await f.guard(), true);
@@ -916,7 +1510,7 @@ test("absent fresh host omits the option and supplies the /planners keyboard pat
   await f.plan();
   f.select(async () => undefined);
   await f.tool(EXIT_TOOL);
-  assert.ok(!f.selections[0]?.choices.includes(LINKED_FRESH));
+  assert.ok(!f.selections.some((selection) => selection.choices.includes(LINKED_FRESH)));
   assert.ok(f.context.notifications.some((notice) => /For a fresh conversation, use \/planners/u.test(notice.message)));
   assert.equal(f.freshJobs.length, 0);
   f.assertNoExec();

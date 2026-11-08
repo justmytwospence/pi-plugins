@@ -1,7 +1,13 @@
 import assert from "node:assert/strict";
 import { visibleWidth } from "@earendil-works/pi-tui";
 import { test } from "vitest";
-import { pausePresentation, pauseQuestion, stalledQuestion, statusQuestion } from "../src/exec-interaction.js";
+import {
+  pausePresentation,
+  pauseQuestion,
+  replanningQuestion,
+  stalledQuestion,
+  statusQuestion,
+} from "../src/exec-interaction.js";
 import { createNegotiation, type NegotiationState } from "../src/negotiation.js";
 
 function paused(
@@ -162,13 +168,35 @@ test("stalled and status dialogs", () => {
   );
 });
 
+test("eligible Linked status and stalled menus offer replan without changing ordinary choices", () => {
+  for (const question of [stalledQuestion("Task", true), statusQuestion("Task", "Worker", "Planner", false, true)]) {
+    assert.deepEqual(
+      question.options.map((o) => o.label),
+      ["Continue", "Submit for review", "Revisit plan", "Stop implementation"],
+    );
+    assert.equal(question.options.length, 4);
+  }
+  assert.deepEqual(
+    statusQuestion("Task", "Worker", "Planner", true, true).options.map((o) => o.label),
+    ["Keep going", "Stop implementation"],
+  );
+  const question = replanningQuestion("Task");
+  assert.equal(question.header, "Replanning");
+  assert.match(question.question, /paused while its plan is revised/u);
+  assert.deepEqual(
+    question.options.map((o) => o.label),
+    ["Keep planning", "Stop implementation"],
+  );
+});
+
 test("every dialog label fits the phone width", () => {
   const all = [
     ...(["failure", "interrupted", "exhausted", "user_needed"] as const).flatMap((reason) =>
       pauseQuestion(paused(reason), false).question.options.map((o) => o.label),
     ),
     ...pauseQuestion(paused("failure"), true).question.options.map((o) => o.label),
-    ...stalledQuestion("t").options.map((o) => o.label),
+    ...stalledQuestion("t", true).options.map((o) => o.label),
+    ...replanningQuestion("t").options.map((o) => o.label),
     ...statusQuestion("t", "i", "p", true).options.map((o) => o.label),
     ...statusQuestion("t", "i", "p", false).options.map((o) => o.label),
   ];

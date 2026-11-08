@@ -46,7 +46,7 @@ const { subagentScreens } = await import('./remote-clients/subagents.mjs');
 const { TerminalPanel } = await jiti.import('../packages/pi-interactive-shell/src/panel.ts');
 const { HistoryPicker } = await jiti.import('../packages/pi-history-search/src/picker.ts');
 const { default: historySearch } = await jiti.import('../packages/pi-history-search/src/index.ts');
-const { ApprovalPicker, pickApproval, createApprovalState, handoffLabel, HERE: IMPLEMENT_HERE, COMPACT_HERE, LINKED_EXECUTE, LINKED_COMPACT, LINKED_FRESH, EDIT, SAVE, KEEP } = await jiti.import('../packages/pi-plan-mode/src/approval-picker.ts');
+const { ApprovalPicker, pickApproval, createApprovalState, handoffLabel, HERE: IMPLEMENT_HERE, COMPACT_HERE, APPROVE, CONTEXT_KEEP, CONTEXT_COMPACT, CONTEXT_FRESH, EDIT, SAVE, KEEP } = await jiti.import('../packages/pi-plan-mode/src/approval-picker.ts');
 const { PlanNameInput } = await jiti.import('../packages/pi-plan-mode/src/plan-name-input.ts');
 const { registerExec, FINISH_MESSAGE_TYPE } = await jiti.import('../packages/pi-plan-mode/src/exec.ts');
 const { default: askUserQuestion } = await jiti.import('../packages/pi-ask-user-question/src/index.ts');
@@ -83,7 +83,7 @@ const modeStatuses = (workflow, approval, phase) => new Map([
   ...(phase ? [['plan-exec', `exec mode on · ${phase} · 2 consultations · $0.02 consult · $0.01 review`]] : []),
 ]);
 // Detached protocol snapshots, never a second renderer or a copy of role-default policy.
-const flowSnapshot = (workflow, blocked) => ({
+const flowSnapshot = (workflow, blocked, replanning = false) => ({
   version: 1, operatingMode: 'linked', revision: 1, workflow,
   ready: true, guardAvailable: true, transitioning: false,
   selectedFlow: {
@@ -93,6 +93,7 @@ const flowSnapshot = (workflow, blocked) => ({
     }])),
   },
   ...(blocked ? { blocked } : {}),
+  ...(replanning ? { replanning: true } : {}),
 });
 const activity = width => [...renderPill({ label: '1 task' }, false, width, theme), ''];
 function statusFooter(width, statuses, { compact = false, phase = 'idle', flow, autoEffort, providerUsage, providerUsageMore, system1, settingsCycle, readOnly = false } = {}) {
@@ -124,9 +125,10 @@ function statusFooter(width, statuses, { compact = false, phase = 'idle', flow, 
   assert.doesNotMatch(plain.join('\n'), /\bpending\b|\bapplying\b/iu,
     'footer values do not duplicate the transcript phase indicator');
   const linked = !readOnly && flow?.operatingMode === 'linked';
-  const effectiveKind = absorbed.exec !== undefined ? 'exec' : absorbed.workflow?.kind;
+  const replanning = !readOnly && flow?.replanning === true;
+  const effectiveKind = replanning ? 'plan' : linked ? flow.workflow : absorbed.exec !== undefined ? 'exec' : absorbed.workflow?.kind;
   const preview = !compact && !readOnly && ['pending', 'applying'].includes(settingsCycle?.phase) ? settingsCycle : undefined;
-  const kind = effectiveKind && effectiveKind !== 'exec'
+  const kind = effectiveKind && !replanning && effectiveKind !== 'exec'
     ? preview?.settings.find(item => item.key === 'workflow')?.target ?? effectiveKind : effectiveKind;
   const badge = kind;
   assert.doesNotMatch(plain.join('\n'), /workflow: (work|chat|plan|exec)/iu, 'raw provider status must not leak into the footer');
@@ -144,7 +146,8 @@ function statusFooter(width, statuses, { compact = false, phase = 'idle', flow, 
       // Hints yield before critical state at narrow widths; Sidebar also probes smaller widths.
       if (!preview && !linked && !absorbed.exec && width >= (kind === 'exec' ? 120 : 46)) assert.ok(workflow[0].includes(WORKFLOW_EXPLANATIONS[kind]), `workflow row explains ${kind} when space permits: ${workflow[0]}`);
       if (preview && width >= 46) assert.ok(workflow[0].includes(badge), 'draft workflow retains the target badge in its existing semantic row');
-      if (!linked && kind === 'exec' && width >= 46) assert.match(workflow[0], /\/plan-exec\s*$/u, 'Independent Exec offers status, never a workflow cycle');
+      if (!linked && (kind === 'exec' || replanning) && width >= 46) assert.match(workflow[0], /\/plan-exec\s*$/u, 'an unfinished Independent task offers status, never a workflow cycle');
+      if (replanning && width >= 46) assert.match(workflow[0], /replanning/u, 'effective Plan describes the suspended task');
       if (linked && !absorbed.exec && !flow.blocked && width >= 120) assert.match(workflow[0], /anthropic/u, 'Linked combines provider and workflow on one row');
     }
     assert.equal(approvals.length, absorbed.mode ? 1 : 0, 'Approvals keeps its own row');
@@ -165,7 +168,7 @@ function statusFooter(width, statuses, { compact = false, phase = 'idle', flow, 
     // At full width each effective key follows its content directly, not a padded rail.
     if (width >= 120 && !readOnly) {
       const controls = [[linked ? workflow[0] : plain.find(line => line.includes('reasoning')), snapshot.primaryKeys.model]];
-      if (!linked && workflow.length) controls.push([workflow[0], kind === 'exec' ? '/plan-exec' : snapshot.primaryKeys.workflow]);
+      if (!linked && workflow.length) controls.push([workflow[0], kind === 'exec' || replanning ? '/plan-exec' : snapshot.primaryKeys.workflow]);
       if (approvals.length) controls.push([approvals[0], snapshot.primaryKeys.approvals]);
       for (const [line, key] of controls) {
         if (!key || !line) continue;
@@ -212,6 +215,13 @@ const UNDERS = {
     ];
   })),
 };
+
+for (const independent of [false, true]) {
+  const flow = { ...flowSnapshot('plan', undefined, true), ...(independent ? { operatingMode: 'independent' } : {}) };
+  const rows = width => statusFooter(width, modeStatuses('plan', 'auto', 'replanning'), { compact: true, phase: 'waiting', flow });
+  UNDERS[`${independent ? 'Independent' : 'Linked'} replanning blocked footer`] = rows;
+  UNDERS[`${independent ? 'Independent' : 'Linked'} replanning blocked pill+footer`] = width => [...activity(width), ...rows(width)];
+}
 
 const question = (multiSelect, options = 3) => ({
   question: 'Which approach should the remote-client check take?',
@@ -278,16 +288,32 @@ const PLAN_TARGETS = [
 function planLabels(count) {
   return [IMPLEMENT_HERE, COMPACT_HERE, ...PLAN_TARGETS.slice(0, count).map(t => handoffLabel(t.targetName, t.target.thinkingLevel)), EDIT, SAVE, KEEP];
 }
-async function selectorLines(width, count, changed, linked = false, fresh = false, recommendedThinkingLevel, effortDefaultKey) {
-  let lines;
+async function selectorLines(width, count, changed, linked = false, fresh = false, recommendedThinkingLevel, effortDefaultKey, view = 'main', context = 'keep', contextNote) {
+  let lines, component;
+  const selected = [];
+  const controller = new AbortController();
+  const state = createApprovalState();
   const models = [{ provider: 'anthropic', id: 'claude-fable-5-5', reasoning: true }, ...PLAN_TARGETS.map(t => ({ provider: t.target.provider, id: t.target.modelId, reasoning: true }))];
   const ctx = {
     hasUI: true, mode: 'tui',
     modelRegistry: { getAvailable: () => models, find: (p, id) => models.find(m => m.provider === p && m.id === id) },
     getScopedModels: () => [],
-    ui: { custom: factory => new Promise(() => {
-      const component = factory(tui, theme, kb, () => {});
+    ui: { custom: factory => new Promise(resolve => {
+      component = factory(tui, theme, kb, value => { selected.push(value); resolve(value); });
       if (changed) component.handleInput('\x1b[C');
+      if (linked && (view === 'context' || context !== 'keep')) {
+        component.handleInput('\x1b[B');
+        component.handleInput('\r');
+        assert.equal(state.stage, 'context', 'Context opens its own stage, not an approval');
+        if (context !== 'keep') {
+          component.handleInput('\x1b[B');
+          if (context === 'clear') component.handleInput('\x1b[B');
+          component.handleInput('\r');
+          assert.equal(state.context, context);
+          assert.equal(state.stage, 'main', 'context selection returns to the primary approval');
+        }
+      }
+      assert.deepEqual(selected, [], 'opening/changing Context never submits approval');
       lines = component.render(width);
     }) },
   };
@@ -295,9 +321,12 @@ async function selectorLines(width, count, changed, linked = false, fresh = fals
     planning: { provider: 'anthropic', modelId: linked ? PLAN_TARGETS[0].target.modelId : 'claude-fable-5-5', thinkingLevel: 'high' },
     targets: PLAN_TARGETS.slice(0, count),
     recommendedThinkingLevel, effortDefaultKey,
-    ...(linked ? { intent: 'linked-execution', flow: flowSnapshot('plan'), ...(fresh ? { freshTarget: PLAN_TARGETS[0] } : {}) } : {}),
-  }, createApprovalState());
+    ...(linked ? { intent: 'linked-execution', flow: flowSnapshot('plan'), ...(fresh ? { freshTarget: PLAN_TARGETS[0] } : {}), ...(contextNote ? { contextNote } : {}) } : {}),
+  }, state, controller.signal);
   await new Promise(resolve => setTimeout(resolve, 0));
+  assert.deepEqual(selected, [], 'rendering a returned main screen still requires explicit approval');
+  controller.abort();
+  component?.dispose();
   return lines;
 }
 
@@ -393,6 +422,8 @@ const EXEC_DIALOGS = [
   { name: 'pending planner question', labels: ['Staging', 'Production'], pendingQuestion: { id: 'q1', implementerMessage: 'Which account?', questions: [{ id: 'acct', header: 'Account', question: 'Which account should the migration use?', options: [{ label: 'Staging', description: 'Safe to rerun' }, { label: 'Production', description: 'Live data' }] }] }, open: 'command' },
   { name: 'implementer stopped', labels: ['Continue', 'Submit for review', 'Stop implementation'], open: 'settle' },
   { name: 'execution menu', labels: ['Continue', 'Submit for review', 'Stop implementation'], open: 'footer' },
+  { name: 'Linked execution menu with Revisit plan', labels: ['Continue', 'Submit for review', 'Revisit plan', 'Stop implementation'], linked: true, open: 'footer' },
+  { name: 'replanning task menu', labels: ['Keep planning', 'Stop implementation'], linked: true, replanning: true, open: 'command' },
 ];
 const tick = () => new Promise(resolve => setTimeout(resolve, 20));
 async function execDialogLines(width, spec) {
@@ -407,10 +438,16 @@ async function execDialogLines(width, spec) {
     events,
   };
   askUserQuestion(pi);
-  const exec = registerExec(pi, { completionReview: () => true, completionMaxRevisions: () => 2 });
+  if (spec.linked) events.on('pi-plugins.workflow-flow.v1', request => {
+    if (request.kind === 'query') request.snapshot = { ...flowSnapshot(spec.replanning ? 'plan' : 'exec'), ...(spec.replanning ? { replanning: true } : {}) };
+  });
+  const exec = registerExec(pi, { completionReview: () => true, completionMaxRevisions: () => 2,
+    ...(spec.linked ? { replan: async () => assert.fail('canceling a rendered task menu must not revisit the plan') } : {}) });
   const negotiation = createNegotiation('remote-client-dialog', 2);
   spec.negotiation?.(negotiation);
-  const state = { active: true, planFile: '/tmp/client-plan.md', implementer: 'Terra', implementerModel: 'openai-codex/gpt-6.1-terra', asks: 0, costUsd: 0, negotiation, planner: { spec: 'anthropic/claude-opus-5-5:high', name: 'Claude Opus 5.5', sessionFile: '/tmp/client-planner.jsonl' }, ...(spec.pendingQuestion ? { pendingQuestion: spec.pendingQuestion } : {}) };
+  const state = { active: true, planFile: '/tmp/client-plan.md', implementer: 'Terra', implementerModel: 'openai-codex/gpt-6.1-terra', asks: 0, costUsd: 0, negotiation,
+    ...(spec.linked ? { linkedFlow: flowSnapshot('exec') } : {}),
+    ...(spec.replanning ? { replanning: { version: 1, draftFile: '/tmp/client-revision.md' } } : {}), planner: { spec: 'anthropic/claude-opus-5-5:high', name: 'Claude Opus 5.5', sessionFile: '/tmp/client-planner.jsonl' }, ...(spec.pendingQuestion ? { pendingQuestion: spec.pendingQuestion } : {}) };
   const ctx = {
     hasUI: true, mode: 'tui', cwd: '/tmp', isIdle: () => true, hasPendingMessages: () => false, abort() {},
     sessionManager: { getBranch: () => [{ type: 'custom', customType: 'plan-mode:exec', data: state }] },
@@ -629,24 +666,37 @@ const DIALOGS = [
     collie: { kind: 'prompt-select', options: 6 + count, labels: planLabels(count), wraps: planLabels(count) },
   }))),
   ...[false, true].flatMap(fresh => [false, true].map(changed => {
-    const labels = [LINKED_EXECUTE, LINKED_COMPACT, ...(fresh ? [LINKED_FRESH] : []), EDIT, SAVE, KEEP];
+    const labels = [APPROVE, `Context: ${CONTEXT_KEEP}`, EDIT, SAVE, KEEP];
     return {
       name: `linked plan approval (same-model worker${fresh ? ', fresh available' : ''}${changed ? ', effort changed' : ''})`,
       lines: w => selectorLines(w, 1, changed, true, fresh),
-      question: `Implement this plan? Linked worker: anthropic/claude-opus-5-5. ←/→ effort: ${changed ? 'off' : 'high'}`,
+      question: `Implement this plan? Linked worker: anthropic/claude-opus-5-5. Context: ${CONTEXT_KEEP}. ←/→ effort: ${changed ? 'off' : 'high'}`,
       herdr: { options: labels.length, multi: false, labels },
       collie: { kind: 'prompt-select', options: labels.length + 1, labels, wraps: labels },
     };
   })),
   ...[false, true].flatMap(linked => [false, true].map(changed => {
-    const labels = linked ? [LINKED_EXECUTE, LINKED_COMPACT, EDIT, SAVE, KEEP] : planLabels(1);
+    const labels = linked ? [APPROVE, `Context: ${CONTEXT_KEEP}`, EDIT, SAVE, KEEP] : planLabels(1);
     return {
       name: `${linked ? 'linked plan approval (same-model worker' : 'plan approval (1 target'}, recommended${changed ? ', effort changed' : ''})`,
       lines: w => selectorLines(w, 1, changed, linked, false, 'low', 'recommended-fixture'),
-      question: `Implement this plan? ${linked ? 'Linked worker: anthropic/claude-opus-5-5. ' : ''}←/→ effort: ${changed ? 'medium' : 'low'}`,
+      question: `Implement this plan? ${linked ? `Linked worker: anthropic/claude-opus-5-5. Context: ${CONTEXT_KEEP}. ` : ''}←/→ effort: ${changed ? 'medium' : 'low'}`,
       herdr: { options: labels.length, multi: false, labels },
       collie: { kind: 'prompt-select', options: labels.length + 1, labels, wraps: labels },
     };
+  })),
+  ...[
+    { name: 'linked plan context (fresh unavailable)', view: 'context', fresh: false, labels: [CONTEXT_KEEP, CONTEXT_COMPACT] },
+    { name: 'linked plan context (fresh available)', view: 'context', fresh: true, labels: [CONTEXT_KEEP, CONTEXT_COMPACT, CONTEXT_FRESH] },
+    { name: 'linked plan approval (compact selected)', context: 'compact', labels: [APPROVE, 'Context: Compact to plan', EDIT, SAVE, KEEP] },
+    { name: 'linked plan approval (fresh selected)', context: 'clear', fresh: true, labels: [APPROVE, `Context: ${CONTEXT_FRESH}`, EDIT, SAVE, KEEP] },
+    { name: 'linked resumed approval (fresh unavailable)', contextNote: 'Fresh conversation is unavailable while revisiting this task. Preserved review pause: exhausted.', labels: [APPROVE, `Context: ${CONTEXT_KEEP}`, EDIT, SAVE, KEEP] },
+  ].map(spec => ({
+    name: spec.name,
+    lines: width => selectorLines(width, 1, false, true, spec.fresh, undefined, undefined, spec.view, spec.context, spec.contextNote),
+    questionIncludes: ['Implement this plan?', 'Linked worker: anthropic/claude-opus-5-5.', `Context: ${spec.context === 'compact' ? CONTEXT_COMPACT : spec.context === 'clear' ? CONTEXT_FRESH : CONTEXT_KEEP}.`, '←/→ effort: high', ...(spec.contextNote ? [spec.contextNote] : [])],
+    herdr: { options: spec.labels.length, multi: false, labels: spec.labels },
+    collie: { kind: 'prompt-select', options: spec.labels.length + 1, labels: spec.labels, wraps: spec.labels },
   })),
   ...[false, true].map(edited => ({
     name: `plan save filename (${edited ? 'edited' : 'prefilled'})`, question: 'Save plan as',
@@ -672,6 +722,48 @@ for (const width of [46, 120, 180]) {
         ...(width === 46 && under === 'footer' && dialog.name === 'plan save filename (prefilled)' ? { answer: { custom_text: 'phone-renamed' } } : {}) });
     }
   }
+}
+
+// Replay the phone's parsed answer keys across all three real Linked stages.
+// Intermediate Enter presses must never count as approval; only returned main's
+// explicit primary action can produce a handoff.
+function linkedNavigationFixture(fresh) {
+  const state = createApprovalState(), selected = [];
+  const input = {
+    planning: PLAN_TARGETS[0].target, targets: [PLAN_TARGETS[0]],
+    intent: 'linked-execution', flow: flowSnapshot('plan'),
+    ...(fresh ? { freshTarget: PLAN_TARGETS[0] } : {}),
+  };
+  const component = new ApprovalPicker(input, state, { efforts: () => ['off', 'minimal', 'low', 'medium', 'high'] }, theme, kb, () => {}, choice => selected.push(choice));
+  return { component, state, selected };
+}
+for (const width of [46, 120, 180]) for (const context of ['compact', 'clear']) {
+  const fresh = context === 'clear';
+  const { component, state, selected } = linkedNavigationFixture(fresh);
+  for (const stage of ['open-context', 'choose-context', 'approve']) {
+    const labels = stage === 'choose-context'
+      ? [CONTEXT_KEEP, CONTEXT_COMPACT, ...(fresh ? [CONTEXT_FRESH] : [])]
+      : [APPROVE, `Context: ${stage === 'approve' ? fresh ? CONTEXT_FRESH : 'Compact to plan' : CONTEXT_KEEP}`, EDIT, SAVE, KEEP];
+    const optionIndex = stage === 'open-context' ? 1 : stage === 'choose-context' ? fresh ? 2 : 1 : 0;
+    const contextLabel = stage === 'approve' ? fresh ? CONTEXT_FRESH : CONTEXT_COMPACT : CONTEXT_KEEP;
+    screens.push({ name: `linked parsed navigation ${context} ${stage}`, width, under: 'footer',
+      ansi: [...component.render(width), ...footer(width)].join('\n'),
+      answer: { option_index: optionIndex }, answerFlow: { id: `${width}-${context}`, stage, context, fresh },
+      dialog: { questionIncludes: ['Linked worker: anthropic/claude-opus-5-5.', `Context: ${contextLabel}.`, '←/→ effort: high'],
+        herdr: { options: labels.length, multi: false, labels },
+        collie: { kind: 'prompt-select', options: labels.length + 1, labels, wraps: labels } },
+    });
+    if (stage === 'approve') component.handleInput('\r');
+    else {
+      for (let i = 0; i < optionIndex; i++) component.handleInput('\x1b[B');
+      component.handleInput('\r');
+      assert.deepEqual(selected, [], 'context-only fixture navigation must never approve');
+      assert.equal(state.stage, stage === 'open-context' ? 'context' : 'main');
+    }
+  }
+  assert.equal(selected.length, 1, 'the explicit main approval alone submits');
+  assert.equal(selected[0].choice.context, context);
+  component.dispose();
 }
 
 // Sidebar open: below main under 161 columns, beside it from there (its default share and minimum).
@@ -823,6 +915,11 @@ const FOOTERS = [
   { name: 'Independent auto off', statuses: modeStatuses('work', 'auto'), autoEffort: false },
   { name: 'Linked auto off', statuses: modeStatuses('work', 'auto'), flow: flowSnapshot('work'), autoEffort: false },
   { name: 'Linked Exec paused', statuses: modeStatuses('exec', 'auto', 'waiting for answer'), flow: flowSnapshot('exec') },
+  ...[false, true].flatMap(independent => [false, true].map(highStatus => ({
+    name: `${independent ? 'Independent' : 'Linked'} replanning${highStatus ? ' high status' : ''}`,
+    statuses: modeStatuses('plan', 'auto', 'replanning'), highStatus,
+    flow: { ...flowSnapshot('plan', undefined, true), ...(independent ? { operatingMode: 'independent' } : {}) },
+  }))),
   { name: 'Linked unavailable', statuses: modeStatuses('plan', 'auto'), flow: flowSnapshot('plan', 'Assigned model is unavailable. Use /flow independent.') },
   { name: 'Linked high status count', statuses: modeStatuses('plan', 'yolo'), flow: flowSnapshot('plan'), highStatus: true },
   ...['pending', 'applying', 'cancelled', 'interrupted'].flatMap(phase => [false, true].map(linked => ({
@@ -1275,14 +1372,20 @@ if (colliePresent) results.collie = probe('Collie', 'collie.ts', path.join(colli
 else console.log('SKIP Collie: no checkout with frames.toml support (COLLIE_DIR)');
 
 if (results.herdr) {
+  const linkedNavigations = new Map();
   for (const [index, screen] of screens.entries()) {
     if (!screen.answer) continue;
     const steps = results.herdr[index]?.answerSteps;
     assert.ok(Array.isArray(steps), 'Client navigation must come from the parsed card');
-    const selected = [];
-    const component = screen.answer.option_index !== undefined
+    if (screen.answerFlow && !linkedNavigations.has(screen.answerFlow.id)) {
+      assert.equal(screen.answerFlow.stage, 'open-context');
+      linkedNavigations.set(screen.answerFlow.id, linkedNavigationFixture(screen.answerFlow.fresh));
+    }
+    const navigation = screen.answerFlow ? linkedNavigations.get(screen.answerFlow.id) : undefined;
+    const selected = navigation?.selected ?? [];
+    const component = navigation?.component ?? (screen.answer.option_index !== undefined
       ? new ApprovalPicker({ targets: [] }, createApprovalState(), { efforts: () => [] }, theme, kb, () => {}, choice => selected.push(choice))
-      : new PlanNameInput({ suggestion: 'client-plan', directory: '/tmp/plans' }, theme, kb, () => {}, value => selected.push(value));
+      : new PlanNameInput({ suggestion: 'client-plan', directory: '/tmp/plans' }, theme, kb, () => {}, value => selected.push(value)));
     for (const step of steps) {
       if ('text' in step) {
         assert.equal(typeof step.text, 'string');
@@ -1296,9 +1399,28 @@ if (results.herdr) {
         component.handleInput(key);
       }
     }
-    assert.deepEqual(selected, [screen.answer.option_index !== undefined ? { choice: { kind: 'save' } } : 'phone-renamed'], 'client navigation must submit exactly the intended Save action or replacement name');
-    component.dispose();
+    if (navigation) {
+      const { stage, context } = screen.answerFlow;
+      if (stage === 'approve') {
+        assert.equal(selected.length, 1, 'phone must approve only once, from returned main');
+        assert.equal(selected[0].choice.kind, 'handoff');
+        assert.equal(selected[0].choice.context, context);
+        assert.equal(selected[0].choice.intent, 'linked-execution');
+        assert.deepEqual(selected[0].choice.target, PLAN_TARGETS[0].target);
+        assert.equal(selected[0].thinkingLevel, 'high');
+        component.dispose();
+        linkedNavigations.delete(screen.answerFlow.id);
+      } else {
+        assert.deepEqual(selected, [], 'parser-generated Context answers must not approve or implement');
+        assert.equal(navigation.state.stage, stage === 'open-context' ? 'context' : 'main');
+        assert.equal(navigation.state.context, stage === 'choose-context' ? context : 'keep');
+      }
+    } else {
+      assert.deepEqual(selected, [screen.answer.option_index !== undefined ? { choice: { kind: 'save' } } : 'phone-renamed'], 'client navigation must submit exactly the intended Save action or replacement name');
+      component.dispose();
+    }
   }
+  assert.equal(linkedNavigations.size, 0, 'every parsed Context flow reaches an explicit main approval');
 }
 
 let failures = 0;

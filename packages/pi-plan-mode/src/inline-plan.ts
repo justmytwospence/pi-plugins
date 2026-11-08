@@ -125,6 +125,7 @@ export interface InlineHost {
         intent?: "independent" | "linked-execution";
         flow?: FlowState;
         freshTarget?: { target: ModelSpec; targetName: string };
+        contextNote?: string;
       }
     | undefined;
   /** A task-level default only; callers retain manual effort choices and approval freshness. */
@@ -136,6 +137,9 @@ export interface InlineHost {
   implementHere(ctx: ExtensionContext, approval: Approval): string;
   /** Whether an approved plan is being implemented (exec mode). */
   executing(): boolean;
+  replanning?(): boolean;
+  requestReplan?(ctx: ExtensionContext, origin: "command" | "tool"): Promise<boolean>;
+  approvalRefusal?(): string | undefined;
   /** The execution menu: what needs the user now, else status. "stopped" when exec ended. */
   executionMenu?(ctx: ExtensionContext): Promise<"stopped" | "kept">;
   /** The key that toggles plan mode without pi-tool-gate, for the status line. */
@@ -151,6 +155,7 @@ export interface InlinePlanMode {
   work(ctx: ExtensionContext): Promise<boolean>;
   /** The flow coordinator calls this only after activating an approved worker. */
   commitExecution(ctx: ExtensionContext): void;
+  commitReplan(ctx: ExtensionContext, draftFile: string): void;
   /** A token invalidated by workflow/branch changes, for pending handoffs. */
   readonly revision: number;
   /** Toggle (alone) or cycle (with the gate): what the shortcut does. */
@@ -226,9 +231,11 @@ export function registerInlinePlanMode(pi: ExtensionAPI, host: InlineHost): Inli
   let hostCtx: ExtensionContext | undefined;
   /** The plan the user last declined: a revision's review shows what changed since. */
   let declined: string | undefined;
+  let invalidReplan = false;
+  const implementing = () => host.executing() && !host.replanning?.();
   const reviewViewport = new PlanReviewViewport();
   let presentedMode: WorkflowKind | undefined;
-  const effectiveMode = (): WorkflowKind => (host.executing() ? "exec" : state.active ? "plan" : "work");
+  const effectiveMode = (): WorkflowKind => (implementing() ? "exec" : state.active ? "plan" : "work");
   const presentTransition = () => {
     const mode = effectiveMode();
     const previous = presentedMode;
@@ -259,7 +266,7 @@ export function registerInlinePlanMode(pi: ExtensionAPI, host: InlineHost): Inli
     safely(() =>
       ctx.ui.setStatus(
         MODE_STATUS_KEY,
-        `workflow: ${host.executing() ? "exec" : state.active ? "plan" : "work"}${key && !host.executing() ? ` (${key} to cycle)` : ""}`,
+        `workflow: ${implementing() ? "exec" : state.active ? "plan" : "work"}${key && !host.executing() ? ` (${key} to cycle)` : ""}`,
       ),
     );
   };
@@ -284,12 +291,14 @@ export function registerInlinePlanMode(pi: ExtensionAPI, host: InlineHost): Inli
   };
 
   const noticeText = () =>
-    state.active
-      ? enterPlanText(state.planFile as string, hasPlan(state.planFile))
-      : exitPlanText(state.planFile, gate?.mode);
+    invalidReplan
+      ? "Replanning state is invalid; no implementation was resumed. Only read-only actions are permitted."
+      : state.active
+        ? enterPlanText(state.planFile as string, hasPlan(state.planFile))
+        : exitPlanText(state.planFile, gate?.mode);
 
   const allocatePlanFile = () => {
-    if (state.planFile) return;
+    if (state.planFile || invalidReplan) return;
     state.planFile = newPlanFile(plansDir());
     state.temporaryDraft = true;
     safely(() => mkdirSync(dirname(state.planFile as string), { recursive: true }));
@@ -381,9 +390,12 @@ export function registerInlinePlanMode(pi: ExtensionAPI, host: InlineHost): Inli
     // the genuine transition before asking the gate to enter plan mode.
     if (!restored) restore(ctx);
     hostCtx = ctx;
-    if (host.executing() || gate?.mode === "exec") {
+    if (implementing() || gate?.mode === "exec") {
+      if (queryFlow(pi.events)?.operatingMode === "linked" && host.requestReplan)
+        return host.requestReplan(ctx, "command");
       if (!(await execMenu(ctx))) return false;
     }
+    if (host.replanning?.()) return state.active;
     const enteringGeneration = generation;
     if ((gate || queryFlow(pi.events)) && !(await requestMode("plan"))) return false;
     if (enteringGeneration !== generation || !restored) return false;
@@ -435,6 +447,20 @@ export function registerInlinePlanMode(pi: ExtensionAPI, host: InlineHost): Inli
       ...(typeof latest?.planFile === "string" ? { planFile: latest.planFile } : {}),
     };
     declined = lastDeclined(entries);
+    invalidReplan = false;
+    const execution = [...entries]
+      .reverse()
+      .find((entry) => entry.type === "custom" && entry.customType === "plan-mode:exec")?.data as
+      | { active?: unknown; planFile?: unknown; replanning?: { version?: unknown; draftFile?: unknown } }
+      | undefined;
+    if (execution?.active && execution.replanning !== undefined) {
+      const marker = execution.replanning;
+      invalidReplan = marker?.version !== 1 || typeof marker.draftFile !== "string" || !marker.draftFile.trim();
+      state.planFile = invalidReplan ? undefined : (marker.draftFile as string);
+      state.temporaryDraft = false;
+      state.active = true;
+      declined ??= typeof execution.planFile === "string" ? readPlan(execution.planFile) : undefined;
+    }
     // Query the destination itself, never the previous branch's cached gate mode. The
     // responder is registered at factory time, so lifecycle handler order is irrelevant.
     safely(() =>
@@ -510,6 +536,7 @@ export function registerInlinePlanMode(pi: ExtensionAPI, host: InlineHost): Inli
 
   pi.registerTool({
     name: ENTER_TOOL,
+    executionMode: "sequential",
     exposure: "model-only",
     label: "Enter plan mode",
     description:
@@ -519,7 +546,21 @@ export function registerInlinePlanMode(pi: ExtensionAPI, host: InlineHost): Inli
     parameters: { type: "object", additionalProperties: false, properties: {} } as never,
     async execute(_id, _params, _signal, _onUpdate, ctx) {
       settings.cancel("Plan entry requested by tool.");
-      if (host.executing() || gate?.mode === "exec") {
+      if (implementing() || gate?.mode === "exec") {
+        if (queryFlow(pi.events)?.operatingMode === "linked" && host.requestReplan) {
+          const scheduled = await host.requestReplan(ctx, "tool");
+          return {
+            content: [
+              {
+                type: "text",
+                text: scheduled
+                  ? "Replanning requested. Stop implementing; planning continues after this turn settles."
+                  : "Replanning is not available right now; no workflow changed.",
+              },
+            ],
+            terminate: scheduled,
+          } as never;
+        }
         return text(EXEC_GUIDANCE);
       }
       if (state.active) return text("You are already in plan mode.");
@@ -577,6 +618,8 @@ export function registerInlinePlanMode(pi: ExtensionAPI, host: InlineHost): Inli
       }
       let changes = supplied as string[] | undefined;
       hostCtx = ctx;
+      const refusal = host.approvalRefusal?.();
+      if (refusal) return text(refusal);
       if (!state.active || !state.planFile) {
         return text("You are not in plan mode. This tool only asks the user to approve a plan in plan mode.");
       }
@@ -608,10 +651,10 @@ export function registerInlinePlanMode(pi: ExtensionAPI, host: InlineHost): Inli
           flow?.operatingMode === approvalFlow?.operatingMode
         );
       };
-      const current = () => sameDestination() && revision === approvalRevision && state.active && !host.executing();
+      const current = () => sameDestination() && revision === approvalRevision && state.active && !implementing();
       let edited = false;
       const models = host.implementationChoices(ctx, { plan, planFile });
-      if (approvalFlow?.operatingMode === "linked" && !models?.freshTarget)
+      if (approvalFlow?.operatingMode === "linked" && !models?.freshTarget && !host.replanning?.())
         ctx.ui.notify("For a fresh conversation, use /planners.", "info");
       const pickerState = createApprovalState();
       const effortCache = new Map<string, Promise<ImplementationEffortPick>>();
@@ -730,6 +773,21 @@ export function registerInlinePlanMode(pi: ExtensionAPI, host: InlineHost): Inli
                 "error",
               );
               continue;
+            }
+            if (host.replanning?.()) {
+              return transcriptCheckpoint(
+                {
+                  content: [
+                    {
+                      type: "text",
+                      text: `Saved a copy at ${savedFile}. Implementation remains paused in Plan; approve the revised plan to resume, or stop implementation.`,
+                    },
+                  ],
+                  details: { plan, planFile, savedFile, outcome: "saved", edited, mode: "plan" } satisfies ExitDetails,
+                  terminate: true,
+                },
+                { id, kind: "plan" },
+              ) as never;
             }
             if (!(await requestWorkFromTool()))
               return text(
@@ -897,6 +955,7 @@ export function registerInlinePlanMode(pi: ExtensionAPI, host: InlineHost): Inli
       await enter(ctx, planFile);
     },
     async work(ctx) {
+      if (host.replanning?.()) return (await execMenu(ctx)) && !state.active;
       settings.cancel("Work selected explicitly.");
       if (!restored) restore(ctx);
       hostCtx = ctx;
@@ -910,12 +969,29 @@ export function registerInlinePlanMode(pi: ExtensionAPI, host: InlineHost): Inli
       settings.cancel("Execution committed.");
       exitLocal(ctx, false);
     },
+    commitReplan(ctx, draftFile) {
+      settings.cancel("Plan revision committed.");
+      const execution = [...ctx.sessionManager.getBranch()]
+        .reverse()
+        .find((entry) => entry.type === "custom" && entry.customType === "plan-mode:exec");
+      const approvedFile =
+        execution?.type === "custom" ? (execution.data as { planFile?: string }).planFile : undefined;
+      declined = approvedFile ? readPlan(approvedFile) : undefined;
+      invalidReplan = false;
+      state.planFile = draftFile;
+      state.temporaryDraft = false;
+      enterLocal(ctx);
+      persist();
+      announce();
+    },
     get revision() {
       return revision;
     },
     async toggle(ctx, trigger) {
       hostCtx = ctx;
       if (host.executing() || gate?.mode === "exec") {
+        if (implementing() && queryFlow(pi.events)?.operatingMode === "linked" && host.requestReplan)
+          return host.requestReplan(ctx, "command");
         await execMenu(ctx);
         return false;
       }

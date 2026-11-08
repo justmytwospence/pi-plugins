@@ -160,6 +160,8 @@ These keys are **local to the named focused surface**, not global shortcuts. No 
 
 Linked maps Work/Chat to `general`, Plan to `planner`, and approved Exec to `worker`, all within the selected provider. Free `/model` and model-cycle attempts are rejected before ordinary model API mutation; they **never silently unlink**. Use `/flow independent` explicitly to regain free model selection. Changing provider or entering Linked requires idle and is unavailable during Exec; leaving Linked preserves the current model, reasoning, workflow, approvals and Exec lifecycle. `/flow status` explains unavailable or blocked flows; select a valid provider or Independent to recover.
 
+While Linked implementation is idle, `/plan`, `/mode plan`, the configured workflow key or **Revisit plan** suspends the same task in Plan. Busy requests refuse without cancelling paid work; tool-origin requests wait for successful turn settlement. Reapproval preserves review pauses and budget. `/flow independent` preserves a suspended task and its draft; stop it before approving a new Independent plan. The Plan badge opens task choices while replanning.
+
 `app.thinking.cycle` continues to cycle reasoning in either mode, and auto effort remains independently toggleable. Linkage is models-only, not a reasoning lock. Exec requires explicit plan approval even when planner and worker use the same physical model; its footer badge inspects status/recovery instead of cycling or launching it.
 
 Workflow/standalone Plan, reasoning, auto-effort and approval cycles share a preview: repeated keys and eligible clicks update one combined, UI-only history line and apply only the final changes. Pending values are not effective or protective; a round trip to the original settings changes nothing. With the custom footer active, the reasoning key and click share this staging; without it native reasoning remains stock. Native model cycling is unchanged. Explicit picker, command and tool choices stay immediate, while plan/tool approvals still require confirmation.
@@ -204,7 +206,7 @@ With [pi-todo](/plugins/pi-todo/) selected, pi-select-nav can forward **Ctrl+Shi
 **Current Pi skips a suite shortcut that conflicts with these reserved stock actions. A startup warning is not an automatic override.**
 
 - **Ctrl+L:** move or disable `app.model.select` before clear-screen can register a working shortcut.
-- **Shift+Tab:** move or disable `app.thinking.cycle` before tool-gate's default `workflowShortcut` can work. Alternatively change `workflowShortcut` itself (`cycleShortcut` is its legacy fallback). `/mode` works without the key. During exec, use `/plan-exec` or `/plan-exec stop` rather than cycling.
+- **Shift+Tab:** move or disable `app.thinking.cycle` before tool-gate's default `workflowShortcut` can work. Alternatively change `workflowShortcut` itself (`cycleShortcut` is its legacy fallback). `/mode` works without the key. During Linked Exec the configured workflow key requests an idle replan; in Independent Exec use `/plan-exec` or `/plan-exec stop`.
 - Plan mode alone registers no shortcut. If you set `toggleShortcut` to Shift+Tab, resolve the same thinking conflict. With tool-gate, never also register plan mode on the gate's key.
 - **Customized todo key:** pi-todo's Ctrl+Shift+T default has no stock Ctrl+T conflict. If you change `collapseKey` to Ctrl+T, move or disable `app.thinking.toggle` first. A personal native Ctrl+Shift+T binding also requires moving that action or choosing another todo key.
 

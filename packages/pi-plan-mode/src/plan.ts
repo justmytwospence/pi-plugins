@@ -36,7 +36,14 @@ import {
 import { EXEC_ENTRY, type ExecState, registerExec } from "./exec.js";
 import { editExternally, externalEditorCommand, prepareEditor } from "./external-editor.js";
 import { discoverFamily, FAMILY_ENTRY, type FamilyMembership } from "./family-contract.js";
-import { FLOW_ENTRY, type FlowState, queryFlow, requestExecution } from "./flow-contract.js";
+import {
+  FLOW_CHANNEL,
+  FLOW_ENTRY,
+  type FlowRequest,
+  type FlowState,
+  queryFlow,
+  requestExecution,
+} from "./flow-contract.js";
 import { discoverFreshHandoff } from "./fresh-handoff.js";
 import { directImplementationBrief, HANDOFF_MESSAGE_TYPE, implementationBrief } from "./handoff.js";
 import { HERDR_BLOCKED_CHANNEL, holdBlocked, holdWorking, isOwnEmit } from "./herdr-blocked.js";
@@ -56,7 +63,13 @@ import {
   sameModel,
   subagentRoleModel,
 } from "./implementation-models.js";
-import { type Approval, EXEC_GUIDANCE, type HandoffTarget, registerInlinePlanMode } from "./inline-plan.js";
+import {
+  type Approval,
+  EXEC_GUIDANCE,
+  enterPlanText,
+  type HandoffTarget,
+  registerInlinePlanMode,
+} from "./inline-plan.js";
 import { DEFAULT_JEV_MODEL, DEFAULT_JEV_PROVIDER, pickToolsWithJev } from "./jev-tool-picker.js";
 import { runLaneCommand } from "./lane-commands.js";
 import { isAuthError, loginInDialog, providerName } from "./login.js";
@@ -71,6 +84,7 @@ import {
 } from "./main-chat.js";
 import { buildMcpCatalog, readConfiguredMcpServers } from "./mcp-tools.js";
 import { modelCatalog, normalizeEffort } from "./model-catalog.js";
+import { outstanding } from "./negotiation.js";
 import { exportPlanToFile } from "./plan-export.js";
 import { plansDirectoryPath, planTitle, readPlan, writePlanFile } from "./plan-file.js";
 import { expandHome, runPlanCompleteHook } from "./plan-hook.js";
@@ -631,6 +645,7 @@ export default async function plan(pi: ExtensionAPI, dependencies: PlanDependenc
 
   /** Operations owned by this runtime and branch, consumed exactly once. */
   let pendingOperation:
+    | { kind: "replan"; epoch: number; run(): Promise<boolean>; signal?: AbortSignal }
     | { kind: "compact-here"; approval: Approval; epoch: number; workflowRevision: number; flow?: FlowState }
     | {
         kind: "handoff";
@@ -805,6 +820,7 @@ export default async function plan(pi: ExtensionAPI, dependencies: PlanDependenc
     },
     ...(dependencies.createSession ? { createSession: dependencies.createSession } : {}),
     restoreModel: (ctx, spec) => applyRuntime(ctx, spec),
+    replan: (ctx) => requestLinkedReplan(ctx, "command"),
     finishLinked: async (ctx, completion, commitEnd) => {
       const epoch = branchEpoch;
       const execution = exec.state;
@@ -820,6 +836,8 @@ export default async function plan(pi: ExtensionAPI, dependencies: PlanDependenc
       const result = await requestExecution(pi.events, {
         phase: completion.completion === "stopped" ? "stop" : "finish",
         expectedRevision: flow.revision,
+        expectedExecutionId: execution?.negotiation?.executionId,
+        expectedPlanRevision: execution?.negotiation?.planRevision ?? 1,
         planFile: execution?.planFile ?? completion.planFile ?? "",
         commit: () => {
           if (
@@ -861,7 +879,13 @@ export default async function plan(pi: ExtensionAPI, dependencies: PlanDependenc
           intent: "linked-execution" as const,
           flow: structuredClone(flow),
           defaultThinkingLevel: settings.defaultImplementationThinkingLevel,
+          ...(exec.replanning
+            ? {
+                contextNote: `Revising an unfinished implementation. Fresh conversation is unavailable.${exec.state?.negotiation?.phase === "paused" ? ` Existing review recovery remains required: ${exec.state.negotiation.pause?.action ?? "paused"}.` : " Review findings and limits are retained."}`,
+              }
+            : {}),
           ...(worker &&
+          !exec.replanning &&
           discoverFreshHandoff(pi.events, {
             sessionManager: ctx.sessionManager,
             approvedPlan,
@@ -952,8 +976,123 @@ export default async function plan(pi: ExtensionAPI, dependencies: PlanDependenc
       return directImplementationBrief(approval);
     },
     executing: () => exec.active,
+    replanning: () => exec.replanning,
+    requestReplan: (ctx, origin) => requestLinkedReplan(ctx, origin),
+    approvalRefusal: () =>
+      exec.replanning && queryFlow(pi.events)?.operatingMode !== "linked"
+        ? "This suspended Linked task is now Independent. Stop implementation before approving another plan."
+        : undefined,
     executionMenu: (ctx) => exec.menu(ctx),
     toggleKey: () => configuredPlanModeToggleShortcut(settings),
+  });
+
+  async function requestLinkedReplan(ctx: ExtensionContext, origin: "command" | "tool"): Promise<boolean> {
+    if (exec.replanning) return true;
+    const execution = exec.state;
+    const flow = queryFlow(pi.events);
+    const notify = (message: string) => {
+      ctx.ui.notify(message, "warning");
+      return false;
+    };
+    if (
+      !execution?.active ||
+      !execution.negotiation ||
+      flow?.operatingMode !== "linked" ||
+      JSON.stringify(execution.linkedFlow?.selectedFlow) !== JSON.stringify(flow.selectedFlow)
+    )
+      return notify("Revisiting this plan is unavailable; no workflow changed.");
+    if (origin === "command" && !ctx.isIdle())
+      return notify("Implementation is running. Interrupt it, then revisit the plan.");
+    if (pendingOperation?.kind === "replan") return true;
+    if (flow.transitioning || flow.blocked) return notify(flow.blocked ?? "A linked flow transition is in progress.");
+    const refusal = exec.replanRefusal();
+    if (refusal) return notify(refusal);
+    const epoch = branchEpoch;
+    const revision = inline.revision;
+    const manager = ctx.sessionManager;
+    const session = manager.getSessionId?.();
+    const anchor = manager.getLeafId?.();
+    const signal = ctx.signal;
+    const negotiation = execution.negotiation;
+    const id = negotiation.executionId;
+    const planRevision = negotiation.planRevision ?? 1;
+    const live = () =>
+      runtimeActive &&
+      epoch === branchEpoch &&
+      revision === inline.revision &&
+      ctx.sessionManager === manager &&
+      manager.getSessionId?.() === session &&
+      (!anchor || manager.getBranch().some((entry) => entry.id === anchor)) &&
+      !signal?.aborted &&
+      flowCurrent(flow) &&
+      exec.active &&
+      !exec.replanning &&
+      exec.state?.negotiation?.executionId === id &&
+      (exec.state?.negotiation?.planRevision ?? 1) === planRevision &&
+      (origin === "tool" || ctx.isIdle());
+    const run = async () => {
+      let committed = false;
+      try {
+        if (!live()) return false;
+        const approved = readPlan(execution.planFile);
+        if (!approved) return notify("The approved plan is missing; no workflow changed.");
+        const findings = outstanding(negotiation)
+          .map((finding) => `- ${finding.id}: ${finding.title}\n  ${finding.requestedChange}`)
+          .join("\n");
+        const questions = execution.pendingQuestion?.questions.map((question) => `- ${question.question}`).join("\n");
+        const draftFile = writePlanFile(
+          plansDirectoryPath(settings.plansDirectory),
+          `${approved}\n\n## Replanning context\n\nKeep existing implementation changes and conversation history. This is the same unfinished task; review findings and limits are retained.\n${findings ? `\nOutstanding findings:\n${findings}\n` : ""}${questions ? `\nUnanswered planner question:\n${questions}\n` : ""}`,
+        );
+        if (!live()) return false;
+        const result = await requestExecution(pi.events, {
+          phase: "replan",
+          expectedRevision: flow.revision,
+          expectedExecutionId: id,
+          expectedPlanRevision: planRevision,
+          planFile: execution.planFile,
+          commit: () => {
+            if (!live()) throw new Error("Plan revision expired.");
+            exec.suspendForReplan(ctx, draftFile);
+            inline.commitReplan(ctx, draftFile);
+            committed = true;
+          },
+        });
+        if (!result?.ok && runtimeActive && epoch === branchEpoch)
+          notify(result?.error ?? "Revisiting this plan is unavailable; no workflow changed.");
+        return result?.ok === true && committed;
+      } catch (error) {
+        if (runtimeActive && epoch === branchEpoch) notify(`Could not revisit the plan: ${errorText(error)}`);
+        return false;
+      } finally {
+        exec.cancelReplan();
+      }
+    };
+    exec.prepareReplan();
+    if (origin === "tool") {
+      pendingOperation = { kind: "replan", epoch, run, signal };
+      return true;
+    }
+    return run();
+  }
+
+  pi.events.on(FLOW_CHANNEL, (data) => {
+    const request = data as FlowRequest | undefined;
+    if (request?.kind !== "replan" || !hostCtx || !runtimeActive) return;
+    const ctx = hostCtx;
+    const flow = queryFlow(pi.events);
+    if (!flow) return;
+    request.result = requestLinkedReplan(ctx, "command").then((ok) => ({
+      ok,
+      snapshot: queryFlow(pi.events) ?? flow,
+      ...(ok ? {} : { error: "Revisiting this plan did not change the workflow." }),
+    }));
+  });
+  pi.on("agent_settled", (event) => {
+    if (event.aborted && pendingOperation?.kind === "replan") {
+      pendingOperation = undefined;
+      exec.cancelReplan();
+    }
   });
 
   // An approved plan handed off: once the turn that approved it ends, preserve its history,
@@ -961,6 +1100,27 @@ export default async function plan(pi: ExtensionAPI, dependencies: PlanDependenc
   pi.on("agent_before_settle", async (event, ctx) => {
     const operation = pendingOperation;
     pendingOperation = undefined;
+    if (operation?.kind === "replan") {
+      if (event.outcome !== "completed" || operation.signal?.aborted || operation.epoch !== branchEpoch) {
+        exec.cancelReplan();
+        return undefined;
+      }
+      if (!(await operation.run())) return undefined;
+      const draftFile = inline.planFile;
+      if (!draftFile) return undefined;
+      return {
+        entries: [
+          ...(event.entries ?? []),
+          {
+            type: "custom_message" as const,
+            customType: "plan-mode-replanning",
+            content: enterPlanText(draftFile, true),
+            display: false,
+          },
+        ],
+        continue: true,
+      };
+    }
     const flow = queryFlow(pi.events);
     if (
       !operation ||
@@ -1016,6 +1176,7 @@ export default async function plan(pi: ExtensionAPI, dependencies: PlanDependenc
       await recover();
       return undefined;
     }
+    const resumed = exec.replanning ? exec.state : undefined;
     const target = normalizedSpec(
       ctx,
       who.target,
@@ -1026,6 +1187,7 @@ export default async function plan(pi: ExtensionAPI, dependencies: PlanDependenc
       operation.epoch === branchEpoch &&
       operation.workflowRevision === inline.revision &&
       flowCurrent(who.flow) &&
+      readPlan(approval.planFile) === approval.plan &&
       !ctx.signal?.aborted;
     if (!live()) return undefined;
     if (who.intent !== "linked-execution" && (!(await applyRuntime(ctx, target, live)) || !live())) {
@@ -1043,10 +1205,16 @@ export default async function plan(pi: ExtensionAPI, dependencies: PlanDependenc
     } catch (error: unknown) {
       if (ctx.hasUI) {
         ctx.ui.notify(
-          `The planner could not be put on call (${errorText(error)}); the handoff goes ahead without it.`,
+          resumed
+            ? `The planner could not be refreshed (${errorText(error)}); implementation remains paused in Plan.`
+            : `The planner could not be put on call (${errorText(error)}); the handoff goes ahead without it.`,
           "warning",
         );
       }
+    }
+    if (resumed && !sessionFile) {
+      ctx.ui.notify("The planner could not be refreshed; implementation remains paused in Plan.", "warning");
+      return undefined;
     }
     const implementer = who.targetName;
     const planner =
@@ -1113,9 +1281,28 @@ export default async function plan(pi: ExtensionAPI, dependencies: PlanDependenc
         !(await applyRuntime(ctx, target, live, {
           flow: who.flow,
           planFile: approval.planFile,
+          ...(resumed
+            ? {
+                phase: "resume" as const,
+                expectedExecutionId: resumed.negotiation?.executionId,
+                expectedPlanRevision: resumed.negotiation?.planRevision ?? 1,
+              }
+            : {}),
           commit: () => {
             inline.commitExecution(ctx);
-            exec.begin(ctx, execState, { record: false });
+            if (resumed)
+              exec.resumeReplan(
+                ctx,
+                {
+                  planFile: execState.planFile,
+                  implementer: execState.implementer,
+                  implementerModel: execState.implementerModel,
+                  planner,
+                  linkedFlow: execState.linkedFlow,
+                },
+                { record: false },
+              );
+            else exec.begin(ctx, execState, { record: false });
           },
         }))
       )
@@ -1133,18 +1320,22 @@ export default async function plan(pi: ExtensionAPI, dependencies: PlanDependenc
               },
             ]
           : []),
-        { type: "custom" as const, customType: EXEC_ENTRY, data: execState },
+        { type: "custom" as const, customType: EXEC_ENTRY, data: resumed ? exec.state : execState },
         transcriptCheckpoint(
           {
             type: "custom_message" as const,
             customType: HANDOFF_MESSAGE_TYPE,
-            content: implementationBrief({
-              plan: approval.plan,
-              planFile: approval.planFile,
-              context: "here",
-              ...(planner ? { planner: planner.name } : {}),
-              edited: approval.edited,
-            }),
+            content:
+              implementationBrief({
+                plan: approval.plan,
+                planFile: approval.planFile,
+                context: "here",
+                ...(planner ? { planner: planner.name } : {}),
+                edited: approval.edited,
+              }) +
+              (resumed?.negotiation?.phase === "paused" || resumed?.pendingQuestion
+                ? "\n\nExisting review recovery or the unanswered planner question remains required. Do not implement until it is resolved through the execution dialog; reapproval did not authorize a retry or another review cycle."
+                : ""),
             display: true,
             details: {
               planFile: approval.planFile,
@@ -1216,8 +1407,10 @@ export default async function plan(pi: ExtensionAPI, dependencies: PlanDependenc
       await sessionReady;
       if (!runtimeActive || epoch !== branchEpoch) return;
       hostCtx = ctx;
-      if (exec.active) {
-        if (!ctx.hasUI || (await exec.menu(ctx)) !== "stopped" || exec.active) {
+      if (exec.active && !exec.replanning) {
+        if (queryFlow(pi.events)?.operatingMode === "linked") {
+          if (!(await requestLinkedReplan(ctx, "command"))) return;
+        } else if (!ctx.hasUI || (await exec.menu(ctx)) !== "stopped" || exec.active) {
           if (!ctx.hasUI) ctx.ui.notify(EXEC_GUIDANCE, "warning");
           return;
         }
@@ -2790,7 +2983,14 @@ export default async function plan(pi: ExtensionAPI, dependencies: PlanDependenc
     ctx: ExtensionContext,
     target: ModelSpec,
     isCurrent: () => boolean = () => true,
-    linked?: { flow: FlowState; planFile: string; commit(): void },
+    linked?: {
+      flow: FlowState;
+      planFile: string;
+      phase?: "begin" | "resume";
+      expectedExecutionId?: string;
+      expectedPlanRevision?: number;
+      commit(): void;
+    },
   ): Promise<boolean> {
     const epoch = branchEpoch;
     if (linked || queryFlow(pi.events)?.operatingMode === "linked") {
@@ -2800,8 +3000,10 @@ export default async function plan(pi: ExtensionAPI, dependencies: PlanDependenc
       let committed = false;
       try {
         const result = await requestExecution(pi.events, {
-          phase: "begin",
+          phase: linked.phase ?? "begin",
           expectedRevision: linked.flow.revision,
+          expectedExecutionId: linked.expectedExecutionId,
+          expectedPlanRevision: linked.expectedPlanRevision,
           planFile: linked.planFile,
           commit: () => {
             if (

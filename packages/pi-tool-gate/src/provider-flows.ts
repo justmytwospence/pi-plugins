@@ -5,6 +5,7 @@ import {
   type FlowSnapshot, type FlowState, type FlowTransitionResult, type FlowWorkflow, type ProviderFlow,
 } from "./flow-contract.ts";
 export type { OperatingMode, FlowAssignment, ProviderFlow, FlowState } from "./flow-contract.ts";
+import { executionReplanning, INVALID_REPLANNING, latestExecution } from "./modes.ts";
 
 export const FLOW_BUSY = "Wait for the current turn before changing the linked flow.";
 export const FLOW_TRANSITION = "A linked flow transition is in progress. Try again when it finishes.";
@@ -98,6 +99,7 @@ export interface FlowModelLease {
 export interface FlowHost {
   events: FlowBus;
   workflow(): FlowWorkflow;
+  replanning?(): boolean;
   lease(): FlowModelLease | undefined;
   setModel(model: Model<Api>): Promise<boolean>;
   getThinking(): string;
@@ -122,7 +124,7 @@ export class ProviderFlowController {
   private shutdownPromise?: Promise<void>;
   constructor(private readonly host: FlowHost) {}
   snapshot(): FlowSnapshot {
-    return { ...copy(this.state), workflow: this.host.workflow(), ready: this.ready, guardAvailable: this.host.lease()?.available === true && this.host.lease()?.pauseAvailable === true, ...(this.blocked ? { blocked: this.blocked } : {}), transitioning: this.pending > 0 };
+    return { ...copy(this.state), workflow: this.host.workflow(), ...(this.host.replanning?.() ? { replanning: true } : {}), ready: this.ready, guardAvailable: this.host.lease()?.available === true && this.host.lease()?.pauseAvailable === true, ...(this.blocked ? { blocked: this.blocked } : {}), transitioning: this.pending > 0 };
   }
   get inFlight(): boolean { return this.pending > 0 || this.activation; }
   /** The initial activation is locked too, before durable Linked metadata is committed. */
@@ -231,12 +233,12 @@ export class ProviderFlowController {
   }
   selectProvider(provider: string, ctx: ExtensionContext): Promise<FlowTransitionResult> {
     if (!ctx.isIdle()) return Promise.resolve(this.result(FLOW_BUSY));
-    if (this.host.workflow() === "exec") return Promise.resolve(this.result("Provider changes and entering Linked are unavailable during Exec. Use /plan-exec for status or /flow independent."));
+    if (this.host.workflow() === "exec" || this.host.replanning?.()) return Promise.resolve(this.result("Provider changes and entering Linked are unavailable during Exec. Use /plan-exec for status or /flow independent."));
     return this.enqueue(ctx, async fence => {
       const check = () => {
         fence();
         if (!ctx.isIdle()) throw new Error(FLOW_BUSY);
-        if (this.host.workflow() === "exec") throw new Error("Cannot change the provider during Exec.");
+        if (this.host.workflow() === "exec" || this.host.replanning?.()) throw new Error("Cannot change the provider during Exec or replanning.");
       };
       check();
       this.selecting = true;
@@ -275,7 +277,7 @@ export class ProviderFlowController {
     });
   }
   prepareWorkflow(next: Exclude<FlowWorkflow, "exec">, ctx: ExtensionContext, commit: () => void = () => {}): Promise<FlowTransitionResult> {
-    if (this.host.workflow() === "exec") return Promise.resolve(this.result("Exec is active. Use /plan-exec for status and recovery."));
+    if (this.host.workflow() === "exec" || this.host.replanning?.()) return Promise.resolve(this.result("Exec is active. Use /plan-exec for status and recovery."));
     if (this.state.operatingMode === "independent") {
       if (this.inFlight) return Promise.resolve(this.result(FLOW_TRANSITION));
       if (this.blocked) return Promise.resolve(this.result(this.blocked));
@@ -284,7 +286,7 @@ export class ProviderFlowController {
     return this.enqueue(ctx, async fence => {
       const check = () => {
         fence();
-        if (this.host.workflow() === "exec") throw new Error("Exec is active. Use /plan-exec for status and recovery.");
+        if (this.host.workflow() === "exec" || this.host.replanning?.()) throw new Error("Exec is active. Use /plan-exec for status and recovery.");
       };
       check();
       if (this.blocked) throw new Error(this.blocked);
@@ -303,7 +305,8 @@ export class ProviderFlowController {
     };
     const runtime = latest("plan-implementation-runtime");
     const active = latest("plan-mode:exec");
-    if (!runtime || !record(runtime.exec) || !active || active.active !== true || active.planFile !== phase.planFile) return false;
+    if (!runtime || !record(runtime.exec) || !active || active.active !== true || active.planFile !== phase.planFile ||
+        Object.hasOwn(active, "replanning") || Object.hasOwn(runtime.exec, "replanning")) return false;
     const seed = runtime.exec;
     const saved = parseFlowState(seed.linkedFlow);
     const worker = this.state.selectedFlow?.roles.exec;
@@ -316,25 +319,56 @@ export class ProviderFlowController {
       !record(active.negotiation);
   }
   runExecutionTransition(phase: Omit<FlowExecution, "commit">, ctx: ExtensionContext, commit: () => void): Promise<FlowTransitionResult> {
+    // The bus request is mutable for its result only, not a moving approval identity.
+    phase = { ...phase };
     return this.enqueue(ctx, async fence => {
       const check = () => {
         fence();
         if (phase.expectedRevision !== this.state.revision) throw new Error("Approved plan flow revision is stale.");
         const workflow = this.host.workflow();
-        const seeded = phase.phase === "begin" && workflow === "exec" && this.seededExecution(ctx, phase);
-        if (!seeded && workflow !== (phase.phase === "begin" ? "plan" : "exec")) throw new Error("Approved plan lifecycle changed before the flow transition.");
-        if (phase.phase !== "begin") {
-          const entries = ctx.sessionManager.getBranch();
-          const execution = [...entries].reverse().find(entry => entry.type === "custom" && entry.customType === "plan-mode:exec");
-          const data = execution?.type === "custom" ? execution.data : undefined;
-          if (!record(data) || data.active !== true || data.planFile !== phase.planFile) throw new Error("Approved plan identity changed before completion.");
+        const data = latestExecution(ctx.sessionManager.getBranch());
+        const suspension = executionReplanning(data);
+        if (suspension.invalid) throw new Error(INVALID_REPLANNING);
+        const replanning = suspension.replanning || this.host.replanning?.() === true;
+        const seeded = phase.phase === "begin" && workflow === "exec" && !replanning && this.seededExecution(ctx, phase);
+        const source = phase.phase === "begin" || phase.phase === "resume" || (phase.phase === "stop" && replanning) ? "plan" : "exec";
+        if (!seeded && workflow !== source) throw new Error("Approved plan lifecycle changed before the flow transition.");
+        if (phase.phase === "begin") {
+          if (replanning || (data?.active === true && !seeded)) throw new Error("An unfinished execution cannot begin again; approve its revised plan to resume.");
+          return;
+        }
+        const revisiting = phase.phase === "replan" || phase.phase === "resume";
+        if ((phase.phase === "replan" && replanning) || (phase.phase === "resume" && !suspension.replanning) ||
+            (phase.phase === "finish" && replanning)) throw new Error("Approved plan lifecycle changed before the flow transition.");
+        const planFile = phase.phase === "resume" ? suspension.draftFile : data?.planFile;
+        if (!data || data.active !== true || planFile !== phase.planFile) throw new Error("Approved plan identity changed before completion.");
+        const negotiation = record(data.negotiation) ? data.negotiation : undefined;
+        if (revisiting || phase.expectedExecutionId !== undefined) {
+          if (typeof phase.expectedExecutionId !== "string" || !phase.expectedExecutionId.trim() ||
+              negotiation?.executionId !== phase.expectedExecutionId) throw new Error("Approved execution identity is stale or missing.");
+        }
+        if (revisiting || phase.expectedPlanRevision !== undefined) {
+          const revision = negotiation?.planRevision === undefined ? 1 : negotiation.planRevision;
+          if (!Number.isSafeInteger(phase.expectedPlanRevision) || phase.expectedPlanRevision! < 1 ||
+              !Number.isSafeInteger(revision) || (revision as number) < 1 || revision !== phase.expectedPlanRevision) {
+            throw new Error("Approved plan revision is stale or missing.");
+          }
+        }
+        if (revisiting) {
+          const saved = parseFlowState(data.linkedFlow);
+          if (saved?.operatingMode !== "linked" || saved.revision !== this.state.revision ||
+              JSON.stringify(saved.selectedFlow) !== JSON.stringify(this.state.selectedFlow)) {
+            throw new Error("The unfinished task's Linked assignments no longer match the selected flow.");
+          }
         }
       };
+      if (!["begin", "replan", "resume", "finish", "stop"].includes(phase.phase)) throw new Error("Invalid approved plan lifecycle phase.");
       if (this.state.operatingMode !== "linked" || !this.state.selectedFlow) throw new Error("Linked execution requires a selected provider flow.");
       if (!phase.planFile.trim()) throw new Error("Linked execution requires an approved plan identity.");
       if (this.blocked && this.explicitRecovery) throw new Error(this.blocked);
       check();
-      await this.activate(this.state.selectedFlow, phase.phase === "begin" ? "exec" : "work", ctx, check, false, this.blocked !== undefined);
+      const destination = phase.phase === "replan" ? "plan" : phase.phase === "begin" || phase.phase === "resume" ? "exec" : "work";
+      await this.activate(this.state.selectedFlow, destination, ctx, check, false, this.blocked !== undefined);
       check();
       this.blocked = undefined;
       this.commit(commit);
@@ -362,8 +396,9 @@ export class ProviderFlowController {
       try {
         if (this.explicitRecovery) throw new Error(this.blocked ?? FLOW_RECOVERY);
         if (!this.state.selectedFlow) throw new Error("Linked flow snapshot is missing or invalid.");
-        await this.activate(this.state.selectedFlow, this.host.workflow(), ctx, check, false, true);
+        await this.activate(this.state.selectedFlow, this.host.replanning?.() ? "plan" : this.host.workflow(), ctx, check, false, true);
         check();
+        if (executionReplanning(latestExecution(ctx.sessionManager.getBranch())).invalid) throw new Error(INVALID_REPLANNING);
         this.blocked = undefined;
       } catch (error) {
         // Stale completions must not block a newly restored destination.

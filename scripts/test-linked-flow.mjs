@@ -892,7 +892,7 @@ export default function (pi) {
   for (const names of orderings) for (const same of [false, true]) {
     const label = `${names.join('+')}-${same ? 'same-model' : 'distinct-worker'}`;
     await scenario(label, async () => {
-      const test = await flowFixture(label, names, { same });
+      const test = await flowFixture(label, names, { same, planShortcut: 'alt+o' });
       try {
         const current = test.current();
         const manager = current.sessionManager;
@@ -1008,11 +1008,11 @@ export default function (pi) {
         test.choices.push((title, options) => {
           assert.match(title, /Linked worker:/u);
           assert(title.includes(`${provider}/${same ? 'plan' : 'worker'}`));
-          assert(options.includes('Execute with linked worker'));
-          assert(options.some(option => /compact/iu.test(option)), 'retain compact context policy');
+          assert.deepEqual(options, ['Approve and implement', 'Context: Keep history', 'Edit the plan', 'Save for later', 'No, keep planning']);
+          assert.match(title, /Context: Keep history\. Effort:/u, 'worker, context and effort belong in the question');
           assert(options.some(option => /save/iu.test(option)) && options.some(option => /edit/iu.test(option)));
           assert(!options.some(option => /implement here|hand off to/iu.test(option)), 'no free-model implementation choices');
-          return 'Execute with linked worker';
+          return 'Approve and implement';
         }, 'medium');
         const approved = await test.call('exit_plan_mode');
         assert.equal(approved.details?.outcome, 'handoff', JSON.stringify(approved));
@@ -1034,7 +1034,119 @@ export default function (pi) {
         await test.command('/mode work');
         assert.deepEqual(stable(), beforeExecControls, 'provider/work commands cannot leave active Exec');
         await test.command('/mode');
-        assert.deepEqual(test.dialogs.at(-1).options, ['Execution status', 'Use Independent mode']);
+        assert.deepEqual(test.dialogs.at(-1).options, ['Revisit plan', 'Execution status', 'Use Independent mode']);
+        // Every public re-entry path reaches the registered planner owner. Reapproval
+        // resumes the same durable task, even when planner and worker are identical.
+        const workingFile = resolve(test.dir, 'unfinished.txt');
+        writeFileSync(workingFile, 'Preserve unfinished implementation.\n');
+        const originalExecution = structuredClone(test.exec());
+        const implementationStarted = deferred();
+        const releaseImplementation = deferred();
+        test.script.push(() => { implementationStarted.resolve(); return { wait: releaseImplementation.promise }; });
+        const implementing = test.turn('Hold implementation while a user requests Plan.');
+        await deadline(implementationStarted.promise, 'busy implementation');
+        try {
+          const beforeBusyReplan = structuredClone(test.exec());
+          for (const command of ['/plan', '/mode plan']) await test.command(command);
+          check('exec', same ? 'plan' : 'worker');
+          assert.deepEqual(test.exec(), beforeBusyReplan, 'busy replan cannot stage or suspend a task');
+          assert(test.notes.some(note => note.includes('Implementation is running. Interrupt it, then revisit the plan.')));
+        } finally { releaseImplementation.resolve(); await implementing; }
+        check('exec', same ? 'plan' : 'worker');
+        for (const [index, control] of ['/plan', '/mode plan', 'shortcut', 'menu'].entries()) {
+          const approvedFile = test.exec().planFile;
+          const approvedText = readFileSync(approvedFile, 'utf8');
+          const beforeReplan = test.requests.length;
+          const transitionsBeforeReplan = visibleTransitions(current).length;
+          if (control === 'shortcut') {
+            const shortcuts = current.extensionRunner.getShortcuts(keybindings.getResolvedBindings());
+            assert.ok(shortcuts.has('alt+o'), 'configured Plan shortcut is actually registered');
+            await deadline(shortcuts.get('alt+o').handler(current.extensionRunner.createContext()), 'revisit shortcut');
+          } else if (control === 'menu') {
+            test.choices.push('Revisit plan');
+            await test.command('/mode');
+          } else await test.command(control);
+          check('plan', 'plan');
+          assert.equal(test.requests.length, beforeReplan, `${control}: command-only replan makes no model request`);
+          assert.equal(test.flow().replanning, true);
+          assert.equal(test.exec().active, true, 'effective Plan still owns an unfinished execution');
+          const draft = test.exec().replanning.draftFile;
+          assert.notEqual(draft, approvedFile);
+          assert.equal(branchData(current, 'plan-mode:inline').planFile, draft);
+          assert.equal(readFileSync(approvedFile, 'utf8'), approvedText, 'replan cannot overwrite the old approval');
+          assert.equal(test.exec().negotiation.id, originalExecution.negotiation.id);
+          assert.equal(test.exec().negotiation.planRevision ?? 1, index + 1);
+          if (index === 0) {
+            const suspendedTuple = structuredClone({ flow: test.flow(), exec: test.exec(), models: test.record.models });
+            for (const execution of [
+              { phase: 'begin', planFile: draft },
+              { phase: 'resume', planFile: draft, expectedExecutionId: 'stale-task', expectedPlanRevision: 1 },
+              { phase: 'resume', planFile: draft, expectedExecutionId: test.exec().negotiation.id, expectedPlanRevision: 0 },
+            ]) {
+              let committed = false;
+              const refused = await request(test.record, { kind: 'execution', expectedRevision: test.flow().revision,
+                ...execution, commit() { committed = true; } });
+              assert.equal(refused.ok, false, 'begin cannot replace resume, and resume requires the exact task/revision');
+              assert.equal(committed, false);
+              assert.deepEqual({ flow: test.flow(), exec: test.exec(), models: test.record.models }, suspendedTuple);
+            }
+          }
+          for (const field of ['attempts', 'revisionsUsed', 'maxRevisions', 'reviewCostUsd', 'history']) {
+            assert.deepEqual(test.exec().negotiation[field], originalExecution.negotiation[field], `replan preserves ${field}`);
+          }
+          await test.command('/mode work');
+          assert.deepEqual(test.dialogs.at(-1).options, ['Keep planning', 'Execution status', 'Stop implementation', 'Use Independent mode']);
+          await test.command('/mode chat');
+          check('plan', 'plan');
+          const beforePlanners = test.requests.length;
+          await test.command('/planners');
+          assert.equal(test.requests.length, beforePlanners, '/planners cannot replace this unfinished task');
+          await test.command('/flow linked linked-other');
+          check('plan', 'plan');
+          await test.turn(`Inspect revised draft ${index} without implementing.`);
+          assert.equal(test.requests.at(-1).model, 'plan', 'the actual next provider request uses the planner');
+          const revisedText = `# Revised linked plan ${index}\n\nKeep the unfinished changes.\n`;
+          writeFileSync(draft, revisedText);
+          // Enter Context and return to main. Choosing keep/compact alone cannot
+          // activate a worker or approve the draft, even in RPC's select loop.
+          const compact = index % 2 === 1;
+          test.choices.push('Context: Keep history', (title, options) => {
+            assert.deepEqual(options, ['Keep history', 'Compact to approved plan']);
+            assert.equal(test.exec().replanning.draftFile, draft);
+            assert.equal(current.model.id, 'plan');
+            return compact ? 'Compact to approved plan' : 'Keep history';
+          }, (title, options) => {
+            assert.equal(test.exec().active, true);
+            assert.equal(test.exec().replanning.draftFile, draft, 'context-only selection never approves');
+            assert.equal(current.model.id, 'plan');
+            assert.equal(options[0], 'Approve and implement');
+            assert.match(title, new RegExp(`Context: ${compact ? 'Compact to approved plan' : 'Keep history'}`, 'u'));
+            return 'Approve and implement';
+          }, 'medium');
+          const beforeResume = test.requests.length;
+          const resumed = await test.call('exit_plan_mode');
+          assert.equal(resumed.details?.outcome, 'handoff', JSON.stringify(resumed));
+          check('exec', same ? 'plan' : 'worker');
+          assert.equal(test.flow().replanning, undefined, 'false replanning is omitted from the contract');
+          assert.equal(test.exec().replanning, undefined);
+          assert.equal(test.exec().planFile, draft);
+          assert.equal(readFileSync(draft, 'utf8'), revisedText);
+          assert.equal(test.exec().negotiation.id, originalExecution.negotiation.id, 'resume is not begin');
+          assert.equal(test.exec().negotiation.planRevision, index + 2);
+          for (const field of ['attempts', 'revisionsUsed', 'maxRevisions', 'reviewCostUsd', 'history']) {
+            assert.deepEqual(test.exec().negotiation[field], originalExecution.negotiation[field], `resume preserves ${field}`);
+          }
+          assert.deepEqual(test.requests.slice(beforeResume).map(call => call.model), ['plan', same ? 'plan' : 'worker']);
+          const workerContext = JSON.stringify(test.requests.at(-1).messages);
+          assert.equal(workerContext.includes(`Inspect revised draft ${index} without implementing.`), !compact,
+            'explicit compaction alone removes the old conversation from the actual worker context');
+          assert.equal(manager.getEntries().filter(entry => entry.type === 'compaction').length, Math.floor((index + 1) / 2),
+            'only explicit compact approvals create compaction records');
+          assert.equal(readFileSync(workingFile, 'utf8'), 'Preserve unfinished implementation.\n');
+          assert.deepEqual(visibleTransitions(current).slice(transitionsBeforeReplan).map(entry => entry.details), [
+            { version: 1, previous: 'exec', mode: 'plan' }, { version: 1, previous: 'plan', mode: 'exec' },
+          ], 'neither direction visits Work');
+        }
         await test.reload();
         const resumedAt = test.requests.length;
         await test.turn('Resume the approved implementation.');
@@ -1084,7 +1196,7 @@ export default function (pi) {
         await test.command('/flow linked');
         await test.command('/plan');
         writeFileSync(branchData(test.current(), 'plan-mode:inline').planFile, '# Retry completion\n\nImplement locally.\n');
-        test.choices.push('Execute with linked worker', 'medium');
+        test.choices.push('Approve and implement', 'medium');
         await test.call('exit_plan_mode');
         const completion = { report: `saved-${label}`, verification: 'Passed.', concerns: 'None.' };
         authHook = () => { throw new Error('Local Work activation failed'); };
@@ -1496,6 +1608,98 @@ export default function (pi) {
       stopWatching();
       await test.dispose();
     }
+  });
+
+  for (const same of [false, true]) await scenario(`tool-origin replan settles onto planner (${same ? 'same' : 'distinct'} model)`, async () => {
+    const test = await flowFixture(`tool-replan-${same}`, orderings[1], { same });
+    try {
+      await test.command('/flow linked');
+      await test.command('/plan');
+      writeFileSync(branchData(test.current(), 'plan-mode:inline').planFile, '# Tool-origin revision\n\nImplement locally.\n');
+      test.choices.push('Approve and implement', 'medium');
+      await test.call('exit_plan_mode');
+      const before = structuredClone(test.exec());
+      const requests = test.requests.length;
+      await test.call('enter_plan_mode');
+      assert.equal(test.flow().workflow, 'plan');
+      assert.equal(test.flow().replanning, true);
+      assert.equal(test.exec().active, true);
+      assert.equal(test.exec().negotiation.id, before.negotiation.id);
+      assert.equal(test.exec().planFile, before.planFile, 'the tool request creates a draft, not a replacement approval');
+      assert.notEqual(test.exec().replanning.draftFile, before.planFile);
+      assert.deepEqual(test.requests.slice(requests).map(call => call.model), [same ? 'plan' : 'worker', 'plan'],
+        'settlement stops the implementer before one planner continuation');
+      await test.command('/plan-exec stop');
+      assert.equal(test.flow().workflow, 'work');
+      assert.equal(test.current().model.id, 'work');
+      assert.deepEqual(test.errors, []);
+    } finally { await test.dispose(); }
+  });
+
+  for (const unlink of [false, true]) await scenario(`stop suspended task${unlink ? ' after explicit unlink' : ''}`, async () => {
+    const test = await flowFixture(`stop-replanning-${unlink}`, orderings[2]);
+    try {
+      await test.command('/flow linked');
+      await test.command('/plan');
+      writeFileSync(branchData(test.current(), 'plan-mode:inline').planFile, '# Suspend and stop\n\nKeep local work.\n');
+      test.choices.push('Approve and implement', 'medium');
+      await test.call('exit_plan_mode');
+      const id = test.exec().negotiation.id;
+      await test.command('/plan');
+      const suspended = structuredClone(test.exec());
+      assert.equal(test.flow().workflow, 'plan');
+      await test.reload();
+      await test.turn('Continue revising, without resuming implementation.');
+      assert.equal(test.requests.at(-1).model, 'plan', 'restored suspension sends the next turn to the planner');
+      assert.equal(test.exec().negotiation.id, id);
+      assert.deepEqual(test.exec().replanning, suspended.replanning);
+      if (unlink) {
+        await test.command('/flow independent');
+        assert.equal(test.flow().operatingMode, 'independent');
+        assert.deepEqual(test.exec(), suspended, 'explicit recovery preserves the suspended task');
+        const refused = await test.call('exit_plan_mode');
+        assert.match(JSON.stringify(refused), /This suspended Linked task is now Independent/u);
+        assert.equal(test.exec().negotiation.id, id);
+        assert.equal(test.flow().workflow, 'plan');
+      }
+      await test.command('/plan-exec stop');
+      assert.equal(test.exec().active, false);
+      assert.equal(test.exec().replanning, undefined);
+      assert.equal(test.exec().completion.completion, 'stopped');
+      assert.equal(test.flow().workflow, 'work');
+      assert.equal(test.current().model.id, unlink ? 'plan' : 'work', 'Independent stop never secretly switches the model');
+      await test.turn('Report stopped task status.');
+      assert.equal(test.requests.at(-1).model, unlink ? 'plan' : 'work');
+      assert.deepEqual(test.errors, []);
+    } finally { await test.dispose(); }
+  });
+
+  await scenario('missing planner owner refuses replan without changing the real worker', async () => {
+    const test = await flowFixture('missing-replan-owner', ['tool-gate', 'subagents'], {
+      seed(manager, dir) {
+        const selectedFlow = { provider, anchorModel: work.id, roles: Object.fromEntries(
+          [['work', work], ['chat', work], ['plan', plan], ['exec', worker]].map(([role, model]) =>
+            [role, { provider: model.provider, modelId: model.id, suggestedThinking: 'high' }])) };
+        const planFile = resolve(dir, 'approved.md');
+        writeFileSync(planFile, '# Approved task\n');
+        manager.appendCustomEntry('tool-gate:flow', { version: 1, operatingMode: 'linked', revision: 1, selectedFlow });
+        manager.appendCustomEntry('plan-mode:exec', { active: true, planFile,
+          negotiation: { id: 'owner-missing', planRevision: 1 }, linkedFlow: { selectedFlow } });
+      },
+    });
+    try {
+      await test.turn('Inspect task with planner owner absent.');
+      assert.equal(test.requests.at(-1).model, 'worker');
+      const before = structuredClone({ flow: test.flow(), exec: test.exec(), entries: customRecords(test.current()) });
+      await test.command('/mode plan');
+      test.choices.push('Revisit plan');
+      await test.command('/mode');
+      assert.deepEqual({ flow: test.flow(), exec: test.exec(), entries: customRecords(test.current()) }, before);
+      assert(test.notes.some(note => note.includes('Revisiting this plan is unavailable; no workflow changed.')));
+      await test.turn('Still implementing on the existing worker.');
+      assert.equal(test.requests.at(-1).model, 'worker');
+      assert.deepEqual(test.errors, []);
+    } finally { await test.dispose(); }
   });
 
   await scenario('missing optional role service preserves Independent', async () => {

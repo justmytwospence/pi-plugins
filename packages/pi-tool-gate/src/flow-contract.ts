@@ -23,6 +23,8 @@ export interface FlowSnapshot extends FlowState {
   guardAvailable: boolean;
   blocked?: string;
   transitioning: boolean;
+  /** An unfinished execution is suspended under effective Plan. Omitted when false. */
+  replanning?: boolean;
 }
 export interface FlowAvailability {
   flows: ProviderFlow[];
@@ -33,10 +35,13 @@ export interface FlowTransitionResult {
   snapshot: FlowSnapshot;
   error?: string;
 }
-export type ExecutionPhase = "begin" | "finish" | "stop";
+export type ExecutionPhase = "begin" | "replan" | "resume" | "finish" | "stop";
 export interface FlowExecution {
   phase: ExecutionPhase;
   expectedRevision: number;
+  /** Required for replan/resume; optional fences for legacy completion owners. */
+  expectedExecutionId?: string;
+  expectedPlanRevision?: number;
   /** The approved plan's durable identity, not an inferred model difference. */
   planFile: string;
   /** Synchronous final lifecycle update, after authorized model activation and fencing. */
@@ -46,6 +51,7 @@ export type FlowRequest =
   | { kind: "query"; snapshot?: FlowSnapshot; claimDisplay?: boolean }
   | { kind: "resolve"; result?: Promise<FlowAvailability> }
   | { kind: "open"; result?: Promise<void> }
+  | { kind: "replan"; result?: Promise<FlowTransitionResult> }
   | { kind: "workflow"; workflow: Exclude<FlowWorkflow, "exec">; result?: Promise<FlowTransitionResult> }
   | ({ kind: "execution"; result?: Promise<FlowTransitionResult> } & FlowExecution);
 export interface FlowBus {
@@ -72,6 +78,12 @@ export function requestWorkflow(
 }
 export function requestExecution(events: FlowBus, execution: FlowExecution): Promise<FlowTransitionResult> | undefined {
   const request: Extract<FlowRequest, { kind: "execution" }> = { kind: "execution", ...execution };
+  events.emit(FLOW_CHANNEL, request);
+  return request.result;
+}
+/** Optional planner-owner capability. The coordinator never creates a revision draft. */
+export function requestReplan(events: FlowBus): Promise<FlowTransitionResult> | undefined {
+  const request: Extract<FlowRequest, { kind: "replan" }> = { kind: "replan" };
   events.emit(FLOW_CHANNEL, request);
   return request.result;
 }
