@@ -8,7 +8,7 @@ When adding or changing plugin functionality, inspect its user-visible states, c
 
 ## Information architecture
 
-One concern per row. Context owns usage, cache state/timer, MCP and skills. Independent keeps model and workflow on separate rows; Linked combines them and cannot silently unlink. Approvals remain independent. Exec represents an approved lifecycle, not a freely cycled model setting. Reasoning and auto-effort remain independent of model/workflow linkage.
+One concern per row. Context owns usage, cache state/timer, MCP and skills. Independent keeps model and workflow on separate rows; Linked combines them and cannot silently unlink. Approvals remain independent. Exec represents an approved lifecycle, not a freely cycled model setting. Reasoning remains independently adjustable in either model/workflow mode.
 
 ## Controls and hints
 

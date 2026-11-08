@@ -1,15 +1,12 @@
-// Same fixtures in every port (only the imports differ): readings, the forecast, the tiers and
-// their confirmation, and the parsers.
 import { expect, test } from "vitest";
 import {
   DEFAULT_LIMITS,
   Tracker,
   limitsPolicy,
-  readAnthropicHeaders,
-  readClaudeCodeLimits,
-  readCodexHeaders,
-  readCodexUsage,
-} from "../src/limits.ts";
+  pressureValue,
+  windowLength,
+  windowLabel,
+} from "../src/quota-pressure.ts";
 
 // The fixtures were written for these thresholds; the defaults are earlier and gentler (tested below).
 const P = limitsPolicy({ caution: { used: 0.75, projected: 1.0 }, critical: { used: 0.9, projected: 1.5, exhaustMinutes: 30 } });
@@ -17,24 +14,24 @@ const P = limitsPolicy({ caution: { used: 0.75, projected: 1.0 }, critical: { us
 const M = 60_000;
 const H = 60 * M;
 const t0 = Date.UTC(2026, 0, 1);
-const at = (min: number) => t0 + min * M;
+const at = (min) => t0 + min * M;
 
-function feed(t: Tracker, window: string, resetsAt: number, points: [number, number][]) {
+function feed(t, window, resetsAt, points) {
   for (const [min, used] of points) t.record({ window, used, resetsAt, at: at(min) });
 }
 
 /** Weekly: a slow day, then +2% in the last half hour. */
-function weeklyBurst(): [number, number][] {
-  const points: [number, number][] = [];
+function weeklyBurst() {
+  const points = [];
   for (let m = -24 * 60; m <= -30; m += 30) points.push([m, 0.28 - 0.0015 * ((-30 - m) / 60)]);
   points.push([0, 0.3]);
   return points;
 }
 
 /** A burst: +44% in the last 20 minutes. */
-const burst: [number, number][] = [[-120, 0.2], [-90, 0.22], [-60, 0.24], [-30, 0.26], [-20, 0.4], [-10, 0.55], [0, 0.7]];
+const burst = [[-120, 0.2], [-90, 0.22], [-60, 0.24], [-30, 0.26], [-20, 0.4], [-10, 0.55], [0, 0.7]];
 /** Steady 24% an hour for two hours. */
-const steady: [number, number][] = [[-120, 0.02], [-90, 0.14], [-60, 0.26], [-30, 0.38], [0, 0.5]];
+const steady = [[-120, 0.02], [-90, 0.14], [-60, 0.26], [-30, 0.38], [0, 0.5]];
 
 test("absolute use enters a tier at once", () => {
   const t = new Tracker();
@@ -44,7 +41,7 @@ test("absolute use enters a tier at once", () => {
   expect(t.assess(at(1), P)).toMatchObject({ tier: "critical" });
 
   const r = new Tracker();
-  for (const reading of readAnthropicHeaders({ "anthropic-ratelimit-unified-7d-utilization": "0.4", "anthropic-ratelimit-unified-7d-reset": String(at(600) / 1000), "anthropic-ratelimit-unified-7d-status": "rejected" }, t0)) r.record(reading);
+  r.record({ window: "7d", used: 0.4, resetsAt: at(600), at: t0, exhausted: true });
   expect(r.assess(t0, P)).toMatchObject({ tier: "critical", reason: "exhausted", used: 1 });
 });
 
@@ -54,7 +51,7 @@ test("a short burst far from the weekly reset stays none", () => {
   const p = t.assess(t0, P);
   expect(p.tier).toBe("none");
   expect(p.warming).toBe(false);
-  expect(p.projected!).toBeLessThan(0.9);
+  expect(p.projected).toBeLessThan(0.9);
 });
 
 test("a burst near the 5h reset goes critical at once: it runs out within 30 minutes", () => {
@@ -62,7 +59,7 @@ test("a burst near the 5h reset goes critical at once: it runs out within 30 min
   feed(t, "5h", at(60), burst);
   const p = t.assess(t0, P);
   expect(p).toMatchObject({ tier: "critical", reason: "runs out soon", warming: false });
-  expect(p.exhaustsAt! - t0).toBeLessThan(30 * M);
+  expect(p.exhaustsAt - t0).toBeLessThan(30 * M);
 });
 
 test("sustained burn past the reset goes caution after a confirming assessment", () => {
@@ -75,8 +72,8 @@ test("sustained burn past the reset goes caution after a confirming assessment",
   t.record({ window: "5h", used: 0.52, resetsAt: at(180), at: at(5) });
   const p = t.assess(at(5), P);
   expect(p.tier).toBe("caution");
-  expect(p.projected!).toBeGreaterThan(1);
-  expect(p.projected!).toBeLessThan(1.5);
+  expect(p.projected).toBeGreaterThan(1);
+  expect(p.projected).toBeLessThan(1.5);
 });
 
 test("warm-up: the linear pace stands in until there is enough history", () => {
@@ -86,7 +83,7 @@ test("warm-up: the linear pace stands in until there is enough history", () => {
   const p = t.assess(t0, P);
   expect(p.tier).toBe("none");
   expect(p.warming).toBe(true);
-  expect(p.projected!).toBeGreaterThan(1.5);
+  expect(p.projected).toBeGreaterThan(1.5);
   expect(t.assess(at(5), P)).toMatchObject({ tier: "critical", warming: true, reason: "pace" });
 
   // 30% used at 5% elapsed: too early to say anything.
@@ -153,14 +150,14 @@ test("out-of-order readings are dropped; long gaps give no recent rate", () => {
   const t = new Tracker();
   t.record({ window: "5h", used: 0.5, resetsAt: at(120), at: t0 });
   t.record({ window: "5h", used: 0.1, resetsAt: at(120), at: at(-10) });
-  expect(t.readings()[0]!.used).toBe(0.5);
+  expect(t.readings()[0].used).toBe(0.5);
 
   // Readings an hour apart: the recent rate falls back to the sustained one.
   const g = new Tracker();
   feed(g, "5h", at(100), [[-180, 0.1], [-120, 0.2], [-60, 0.3], [0, 0.4]]);
   const p = g.assess(t0, P);
   expect(p.warming).toBe(false);
-  expect(Math.abs(p.projected! - (0.4 + (0.1 / 60) * 100))).toBeLessThan(0.01);
+  expect(Math.abs(p.projected - (0.4 + (0.1 / 60) * 100))).toBeLessThan(0.01);
 });
 
 test("the worst window wins", () => {
@@ -204,66 +201,51 @@ test("defaults: caution from 60% used or 90% projected, critical from 80%, 120% 
   expect(t.assess(at(1), DEFAULT_LIMITS)).toMatchObject({ tier: "critical" });
 });
 
-test("Anthropic headers: case-insensitive, fractions, reset seconds; token-bucket headers ignored", () => {
-  const r = readAnthropicHeaders(
-    {
-      "Anthropic-Ratelimit-Unified-5h-Utilization": "0.42",
-      "anthropic-ratelimit-unified-5h-reset": "1767232800",
-      "anthropic-ratelimit-unified-5h-status": "allowed",
-      "anthropic-ratelimit-unified-7d-utilization": "0.1",
-      "anthropic-ratelimit-unified-representative-claim": "five_hour",
-      "anthropic-ratelimit-tokens-remaining": "1000",
-      "anthropic-ratelimit-unified-bad-utilization": "nope",
-    },
-    t0,
-  );
-  expect(r).toEqual([
-    { window: "5h", used: 0.42, at: t0, resetsAt: 1767232800000 },
-    { window: "7d", used: 0.1, at: t0 },
-  ]);
-  expect(readAnthropicHeaders({ "anthropic-ratelimit-tokens-limit": "80000" }, t0)).toEqual([]);
+test("pressure mapping and window normalization preserve the pure engine policy", () => {
+  expect(["none", "caution", "critical"].map(pressureValue)).toEqual([0, 0.5, 1]);
+  for (const window of ["5h", "five_hour", "primary"]) expect(windowLength({ window })).toBe(5 * H);
+  for (const window of ["7d", "7d scoped", "seven_day", "secondary"]) expect(windowLength({ window })).toBe(7 * 24 * H);
+  expect(windowLength({ window: "unknown" })).toBeUndefined();
+  expect(windowLength({ window: "5h", spend: true })).toBeUndefined();
+  expect(windowLength({ window: "custom", lengthMs: 2 * H })).toBe(2 * H);
+  expect(windowLabel({ window: "primary", lengthMs: 90 * M })).toBe("90m");
+  expect(windowLabel({ window: "secondary" })).toBe("7d");
 });
 
-test("Codex headers and usage JSON: percents, seconds, window length", () => {
-  expect(
-    readCodexHeaders(
-      { "x-codex-primary-used-percent": "37.5", "x-codex-primary-window-minutes": "300", "x-codex-primary-reset-after-seconds": "600", "x-codex-secondary-used-percent": "" },
-      t0,
-    ),
-  ).toEqual([{ window: "primary", used: 0.375, at: t0, resetsAt: t0 + 600_000, lengthMs: 5 * H }]);
-  expect(
-    readCodexUsage(
-      {
-        rate_limit: {
-          primary_window: { used_percent: 12, reset_at: 1767232800, limit_window_seconds: 18000 },
-          secondary_window: { used_percent: 40, reset_after_seconds: 3600 },
-        },
-        additional_rate_limits: [{ limit_name: "spark", rate_limit: { primary_window: { used_percent: 99 } } }],
-      },
-      t0,
-    ),
-  ).toEqual([
-    { window: "primary", used: 0.12, at: t0, resetsAt: 1767232800000, lengthMs: 5 * H },
-    { window: "secondary", used: 0.4, at: t0, resetsAt: t0 + H },
-  ]);
-  expect(readCodexUsage({ nothing: true }, t0)).toEqual([]);
-  expect(readCodexUsage("garbage", t0)).toEqual([]);
+test("status reads and elapsed idle time do not advance confirmations; sparse boundary calls do", () => {
+  const t = new Tracker();
+  t.record({ window: "5h", used: 0.34, resetsAt: at(240), at: t0 });
+  expect(t.assess(t0, P, false).tier).toBe("none");
+  expect(t.view(at(30), P)[0]).not.toHaveProperty("pending");
+  // The first committed boundary starts, rather than completes, confirmation.
+  expect(t.assess(at(30), P).tier).toBe("none");
+  expect(t.view(at(35), P)[0]).toMatchObject({ tier: "none", pending: "caution", ageMs: 35 * M });
+  expect(t.assess(at(35), P, false).tier).toBe("caution");
+  expect(t.view(at(35), P)[0].tier).toBe("none");
+  expect(t.assess(at(35), P).tier).toBe("caution");
+  expect(t.readings()).toHaveLength(1);
+  expect(t.readings()[0].at).toBe(t0);
 });
 
-test("Claude Code rateLimits: percent, ISO reset, spend limit", () => {
-  expect(
-    readClaudeCodeLimits(
-      [
-        { kind: "five_hour", percentUsed: 84, resetsAt: "2026-01-01T02:00:00.000Z" },
-        { kind: "spend_limit", percentUsed: 101.5 },
-        { kind: "seven_day", percentUsed: "x" },
-        "junk",
-      ],
-      t0,
-    ),
-  ).toEqual([
-    { window: "five_hour", used: 0.84, at: t0, resetsAt: t0 + 2 * H },
-    { window: "spend_limit", used: 1.015, at: t0, spend: true },
-  ]);
-  expect(readClaudeCodeLimits(undefined, t0)).toEqual([]);
+test("weighted forecast freshness uses the exact original observation age", () => {
+  const t = new Tracker();
+  feed(t, "5h", at(180), steady);
+  expect(t.view(at(15), P)[0]).toMatchObject({ warming: false, ageMs: 15 * M });
+  expect(t.view(at(15) + 1, P)[0]).toMatchObject({ warming: true, ageMs: 15 * M + 1 });
+  expect(t.readings()[0].at).toBe(t0);
+});
+
+test("retaining the snapshot removes disappeared windows; tier reset keeps original readings", () => {
+  const t = new Tracker();
+  t.record({ window: "5h", used: 0.8, resetsAt: at(120), at: t0 });
+  t.record({ window: "7d", used: 0.95, resetsAt: at(3000), at: t0 });
+  expect(t.assess(t0, P).tier).toBe("critical");
+  t.retain(new Set(["5h"]));
+  expect(t.assess(t0, P)).toMatchObject({ tier: "caution", window: "5h" });
+  t.clearTiers();
+  expect(t.view(t0, P)[0].tier).toBe("none");
+  expect(t.readings()).toHaveLength(1);
+  expect(t.readings()[0].used).toBe(0.8);
+  expect(t.assess(at(120), P).tier).toBe("none");
+  expect(t.readings()).toEqual([]);
 });

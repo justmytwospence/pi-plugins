@@ -183,7 +183,7 @@ def run(mode, sidebar="closed", offer_only=False):
         agent.mkdir()
         (agent / "settings.json").write_text(json.dumps({"packages": [], "quietStartup": True, "cacheWarming": "off", "compaction": {"enabled": False}}))
         # Keep all exercised classifiers and cache warming offline, independent of user config.
-        for name in ("next-prompt", "auto-effort", "cache-guard"):
+        for name in ("next-prompt", "cache-guard"):
             (agent / f"{name}.json").write_text(json.dumps({"jev": {"enabled": False}}))
         (agent / "tool-gate.json").write_text(json.dumps({"jev": {"enabled": False}, "defaultApproval": "bypassPermissions"}))
         fixture = temp / "probe.ts"

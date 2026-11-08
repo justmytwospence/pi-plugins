@@ -9,6 +9,7 @@ import {
   initTheme,
   type ToolDefinition,
 } from "@earendil-works/pi-coding-agent";
+import * as usage from "@justmytwospence/pi-subscription-usage";
 import { onTestFinished, test, vi } from "vitest";
 import { APPROVE, CONTEXT_COMPACT, CONTEXT_FRESH, CONTEXT_KEEP } from "../src/approval-picker.js";
 import { EXEC_ENTRY, type ExecState } from "../src/exec.js";
@@ -58,7 +59,7 @@ function deferred<T>() {
 }
 
 /** Protocol fake, not a model guard: only this coordinator mutates the fake model. */
-function coordinator(mock: MockPi, ctx: ExtensionCommandContext, planner = WORKER) {
+function coordinator(mock: MockPi, ctx: ExtensionCommandContext, planner = WORKER, thinkingPinned?: true) {
   const state: FlowSnapshot = {
     version: 1,
     operatingMode: "linked",
@@ -70,7 +71,12 @@ function coordinator(mock: MockPi, ctx: ExtensionCommandContext, planner = WORKE
         work: { provider: GENERAL.provider, modelId: GENERAL.id },
         chat: { provider: GENERAL.provider, modelId: GENERAL.id },
         plan: { provider: planner.provider, modelId: planner.id },
-        exec: { provider: WORKER.provider, modelId: WORKER.id, suggestedThinking: "medium" },
+        exec: {
+          provider: WORKER.provider,
+          modelId: WORKER.id,
+          suggestedThinking: "medium",
+          ...(thinkingPinned ? { thinkingPinned } : {}),
+        },
       },
     },
     workflow: "work",
@@ -127,6 +133,12 @@ function coordinator(mock: MockPi, ctx: ExtensionCommandContext, planner = WORKE
       if (request.kind === "execution") {
         if (request.phase === "replan") state.replanning = true;
         else delete state.replanning;
+        if (
+          (request.phase === "begin" || request.phase === "resume") &&
+          request.effort?.thinkingLevel &&
+          request.effort.thinkingLevel !== mock.thinkingLevel
+        )
+          mock.rawPi.setThinkingLevel(request.effort.thinkingLevel as never);
         const returned = request.commit();
         assert.equal(returned, undefined, "lifecycle commit must be synchronous");
         commits.push(request);
@@ -186,6 +198,7 @@ async function fixture(
     distinctModels?: boolean;
     planners?: boolean;
     thinkingLevel?: "high" | "off";
+    thinkingPinned?: true;
     fresh?: boolean;
     settings?: Partial<PlanModeSettings>;
     pickImplementationEffort?: typeof pickImplementationEffort;
@@ -256,7 +269,7 @@ async function fixture(
     },
   });
   const ctx = context.ctx as ExtensionCommandContext;
-  const flow = coordinator(mock, ctx, options.distinctModels ? PLANNER : WORKER);
+  const flow = coordinator(mock, ctx, options.distinctModels ? PLANNER : WORKER, options.thinkingPinned);
   const freshRequests: FreshHandoffRequest[] = [];
   const freshJobs: Array<() => Promise<void>> = [];
   let freshAvailable = options.fresh === true;
@@ -751,6 +764,113 @@ for (const choice of [KEEP, COMPACT]) {
   });
 }
 
+for (const manual of [false, true]) {
+  test(`pinned linked approval skips judgment and retains ${manual ? "manual" : "configured"} provenance`, async () => {
+    const picker = vi.fn<typeof pickImplementationEffort>();
+    const pressure = vi.spyOn(usage, "readSelectionPressure");
+    onTestFinished(() => pressure.mockRestore());
+    const f = await fixture({ thinkingPinned: true, pickImplementationEffort: picker });
+    f.select(async (title, choices) => (title === "Implementation effort" ? (manual ? "high" : choices[0]) : APPROVE));
+    await f.plan();
+    await f.tool(EXIT_TOOL);
+    assert.equal(picker.mock.calls.length, 0);
+    assert.equal(pressure.mock.calls.length, 0);
+    assert.equal((await f.settle())?.continue, true);
+    assert.deepEqual(f.flow.executions[0]?.effort, {
+      provider: WORKER.provider,
+      modelId: WORKER.id,
+      thinkingLevel: manual ? "high" : "medium",
+      source: manual ? "manual" : "configured",
+    });
+    f.assertNoEscape();
+  });
+}
+
+for (const source of ["legacy", "default", "manual", "configured", "system1", "fallback"] as const) {
+  test(`fresh Linked bootstrap preserves approved effort/source and legacy behavior: ${source}`, async () => {
+    const picker = vi.fn<typeof pickImplementationEffort>();
+    const f = await fixture({ pickImplementationEffort: picker });
+    const expected = source === "default" ? undefined : "low";
+    const effort = {
+      provider: WORKER.provider,
+      modelId: WORKER.id,
+      ...(expected ? { thinkingLevel: expected } : {}),
+      source: source === "default" ? "manual" : source,
+    };
+    f.mock.entries.push({
+      customType: "plan-implementation-runtime",
+      data: {
+        model: `${WORKER.provider}/${WORKER.id}${expected ? `:${expected}` : ""}`,
+        ...(source === "legacy" ? {} : { effort }),
+        exec: {
+          active: true,
+          planFile: "/approved.md",
+          implementer: WORKER.name,
+          implementerModel: `${WORKER.provider}/${WORKER.id}`,
+          linkedFlow: f.flow.snapshot(),
+          asks: 0,
+          costUsd: 0,
+        },
+      },
+    });
+    await f.emit("resources_discover");
+    assert.equal(picker.mock.calls.length, 0, "fresh startup must not re-judge an approved tuple");
+    assert.equal(f.flow.executions.length, 1);
+    assert.deepEqual(f.flow.executions[0]?.effort, source === "legacy" ? undefined : effort);
+    assert.equal(f.mock.thinkingLevel, source === "legacy" || source === "default" ? "high" : "low");
+    const identity = f.execution().negotiation?.executionId;
+    assert.ok(identity);
+    const levels = [...f.mock.thinkingLevels];
+    await f.emit("session_start");
+    await f.emit("resources_discover");
+    assert.equal(f.execution().negotiation?.executionId, identity);
+    assert.equal(f.flow.executions.length, 1);
+    assert.deepEqual(f.mock.thinkingLevels, levels);
+    assert.equal(f.mock.entries.filter((e) => e.customType === "plan-implementation-runtime-consumed").length, 1);
+    f.assertNoEscape();
+  });
+}
+
+for (const effort of [
+  undefined,
+  null,
+  false,
+  {},
+  { provider: "test", modelId: "other", thinkingLevel: "low", source: "manual" },
+  { provider: WORKER.provider, modelId: WORKER.id, thinkingLevel: "invalid", source: "manual" },
+  { provider: WORKER.provider, modelId: WORKER.id, thinkingLevel: "low", source: "invalid" },
+  { provider: WORKER.provider, modelId: WORKER.id, thinkingLevel: "high", source: "manual" },
+]) {
+  test(`fresh Linked bootstrap rejects supplied malformed or mismatched effort: ${JSON.stringify(effort)}`, async () => {
+    const f = await fixture();
+    f.mock.entries.push({
+      customType: "plan-implementation-runtime",
+      data: {
+        model: `${WORKER.provider}/${WORKER.id}:low`,
+        effort,
+        exec: {
+          active: true,
+          planFile: "/approved.md",
+          implementer: WORKER.name,
+          implementerModel: `${WORKER.provider}/${WORKER.id}`,
+          linkedFlow: f.flow.snapshot(),
+          asks: 0,
+          costUsd: 0,
+        },
+      },
+    });
+    await f.emit("resources_discover");
+    assert.equal(f.flow.executions.length, 0);
+    assert.deepEqual(f.mock.thinkingLevels, []);
+    assert.deepEqual(f.flow.activated, []);
+    f.assertNoExec();
+    assert.match(f.context.notifications.at(-1)?.message ?? "", /invalid approved effort/u);
+    await f.emit("resources_discover");
+    assert.equal(f.mock.entries.filter((e) => e.customType === "plan-implementation-runtime-consumed").length, 1);
+    f.assertNoEscape();
+  });
+}
+
 for (const choice of [KEEP, COMPACT]) {
   test(`same-model linked '${choice}' approves the recommendation before entering Exec once`, async () => {
     const recommendation = deferred<Awaited<ReturnType<typeof pickImplementationEffort>>>();
@@ -771,7 +891,13 @@ for (const choice of [KEEP, COMPACT]) {
     f.assertNoExec();
     recommendation.resolve({
       kind: "system1",
-      thinkingLevel: "low",
+      choice: "low",
+      confidence: 0.8,
+      probabilities: { low: 1, medium: 0, high: 0, xhigh: 0 },
+      waterfall: ["jev"],
+      targetKey: "test-target",
+      fallback: false,
+      attempts: [],
       backend: "jev",
       provider: "typesafe",
       model: "jev-latest",
@@ -816,7 +942,13 @@ test("flow revision changing while the effort recommendation is pending expires 
   f.flow.revise();
   recommendation.resolve({
     kind: "system1",
-    thinkingLevel: "low",
+    choice: "low",
+    confidence: 0.8,
+    probabilities: { low: 1, medium: 0, high: 0, xhigh: 0 },
+    waterfall: ["jev"],
+    targetKey: "test-target",
+    fallback: false,
+    attempts: [],
     backend: "jev",
     provider: "typesafe",
     model: "jev-latest",

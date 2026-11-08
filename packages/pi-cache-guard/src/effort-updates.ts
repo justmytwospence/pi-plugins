@@ -20,6 +20,20 @@ export const DEFAULT_EFFORT_UPDATES: EffortUpdatesConfig = {
   models: ["openai-codex/gpt-6-astra", "openai-codex/gpt-6.1-sol", "openai-codex/gpt-6.1-terra"],
 };
 
+/** Sanitize each layer against its lower-precedence settings. */
+export function effortUpdatesConfig(value: unknown, fallback: EffortUpdatesConfig = DEFAULT_EFFORT_UPDATES): EffortUpdatesConfig {
+  const v = (value && typeof value === "object" && !Array.isArray(value) ? value : {}) as Partial<Record<keyof EffortUpdatesConfig, unknown>>;
+  return {
+    enabled: typeof v.enabled === "boolean" ? v.enabled : fallback.enabled,
+    models: Array.isArray(v.models) ? v.models.filter((m): m is string => typeof m === "string") : fallback.models,
+  };
+}
+
+export function globMatch(glob: string, text: string): boolean {
+  const pattern = glob.split("*").map((part) => part.replace(/[.+?^${}()|[\]\\]/gu, "\\$&")).join(".*");
+  return new RegExp(`^${pattern}$`, "u").test(text);
+}
+
 /** Efforts the verified models accept. */
 const WIRE_EFFORTS = new Set(["low", "medium", "high", "xhigh", "max"]);
 

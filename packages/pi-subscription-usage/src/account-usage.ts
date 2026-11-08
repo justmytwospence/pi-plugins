@@ -5,6 +5,8 @@ import { homedir } from "node:os";
 import path from "node:path";
 import { stripVTControlCharacters } from "node:util";
 import type { ProviderUsage, ExtraUsage, AccountAccess } from "./provider-usage.ts";
+import { Tracker, pressureValue, type Tier } from "./quota-pressure.ts";
+import { loadPressurePolicy } from "./pressure-config.ts";
 
 type RecordValue = Record<string, unknown>;
 export interface QuotaWindow { label: string; used: number; reset?: number; observedAt?: number }
@@ -564,6 +566,83 @@ async function readUsage(context: AccountUsageContext, provider: Provider, optio
     clearTimeout(timeout);
     options.signal?.removeEventListener("abort", abort);
   }
+}
+
+export type SelectionPressureTarget = { provider: string; id: string };
+export type SelectionPressure = { state: "ready" | "unavailable" | "not-applicable" | "disabled"; tier: Tier; p: number; label?: string; reason?: string };
+// The model shape is supplied by the host registry; no Pi runtime dependency is required.
+export type SelectionPressureContext = AccountUsageContext & { modelRegistry: AccountUsageContext["modelRegistry"] & {
+  find(provider: string, id: string): any;
+  isUsingOAuth(model: any): boolean;
+} };
+
+const pressureTrackers = new Map<string, Tracker>();
+const neutral = (state: SelectionPressure["state"], reason?: string): SelectionPressure => ({ state, tier: "none", p: 0, ...(reason ? { reason } : {}) });
+function route(context: SelectionPressureContext, target: SelectionPressureTarget): boolean {
+  try {
+    const model = context.modelRegistry.find(target.provider, target.id);
+    if (!model || model.provider !== target.provider || model.id !== target.id || (model.type && model.type !== "chat") || !context.modelRegistry.isUsingOAuth(model)) return false;
+    return target.provider === "anthropic" ? model.api === "anthropic-messages" && model.baseUrl === "https://api.anthropic.com"
+      : target.provider === "openai-codex" && model.api === "openai-codex-responses" && model.baseUrl === "https://chatgpt.com/backend-api";
+  } catch { return false; }
+}
+function applicableWindow(provider: Provider, label: string, target: string, scope: "shared" | "target"): boolean {
+  const name = label.toLowerCase();
+  if (provider === "anthropic") {
+    if (name === "5h" || name === "week") return true;
+    if (scope === "shared") return false;
+    // Scoped display names refer to a model family, never a substring of another name.
+    const family = /(?:^|[^a-z])(opus|sonnet|haiku|fable)(?:[^a-z]|$)/i.exec(name)?.[1]?.toLowerCase();
+    return !!family && new RegExp(`(?:^|[^a-z])${family}(?:[^a-z]|$)`, "i").test(target);
+  }
+  return /^(?:primary|secondary|week|\d+[hd])$/i.test(label);
+}
+
+/** One demand-driven, account- and execution-target-specific quota assessment. */
+export async function readSelectionPressure(context: SelectionPressureContext, target: SelectionPressureTarget,
+  options: AccountUsageOptions & { cwd?: string; scope?: "shared" | "target" } = {}): Promise<SelectionPressure> {
+  const policy = loadPressurePolicy(options.cwd ?? process.cwd());
+  if (!policy.enabled) return neutral("disabled", "Quota pressure is disabled.");
+  if (typeof context.modelRegistry?.find !== "function" || typeof context.modelRegistry?.isUsingOAuth !== "function")
+    return neutral("unavailable", "The execution target cannot be verified.");
+  if (!route(context, target)) return neutral("not-applicable", "The execution target is not a supported OAuth subscription route.");
+  const provider = target.provider as Provider;
+  const controller = new AbortController();
+  const abort = () => controller.abort();
+  options.signal?.addEventListener("abort", abort, { once: true });
+  if (options.signal?.aborted) abort();
+  const timeout = setTimeout(abort, TIMEOUT_MS);
+  try {
+    const before = await identity(context, provider, controller.signal);
+    if (!before) return neutral("unavailable", "Subscription identity is unavailable.");
+    const usage = await readUsage(context, provider, { signal: controller.signal });
+    const after = await identity(context, provider, controller.signal);
+    if (!after || after.digest !== before.digest || !route(context, target) || controller.signal.aborted)
+      return neutral("unavailable", "The subscription identity or route changed during the read.");
+    if (usage.state !== "ready") return neutral("unavailable", usage.reason);
+    // The final identity await can cross an observation's age/reset boundary.
+    // Validate the whole account again before touching Tracker history; filtering
+    // invalid windows here would incorrectly infer replenishment from a partial snapshot.
+    const now = Date.now(), scope = options.scope ?? "target";
+    if (!fresh(usage, MAX_AGE_MS, now)) return neutral("unavailable", "Account quota is unknown, expired or unavailable.");
+    const windows = usage.windows.filter(w => applicableWindow(provider, w.label, target.id, scope));
+    if (!windows.length) return neutral("unavailable", "No current applicable quota windows are available.");
+    const root = path.resolve(process.env.XDG_CACHE_HOME || path.join(homedir(), ".cache"));
+    const key = JSON.stringify([root, provider, before.digest, scope, scope === "target" ? target.id : ""]);
+    const tracker = pressureTrackers.get(key) ?? new Tracker();
+    pressureTrackers.delete(key); pressureTrackers.set(key, tracker);
+    while (pressureTrackers.size > MAX_ACCOUNTS) pressureTrackers.delete(pressureTrackers.keys().next().value!);
+    tracker.retain(new Set(windows.map(w => w.label)));
+    const previous = new Map(tracker.readings().map(r => [r.window, r.at]));
+    for (const w of windows) if (previous.get(w.label) !== w.observedAt) {
+      const duration = w.label.toLowerCase() === "week" ? 7 * 24 * 60 * 60_000 : /^(\d+)([hd])$/i.exec(w.label);
+      const lengthMs = typeof duration === "number" ? duration : duration ? Number(duration[1]) * (duration[2]!.toLowerCase() === "d" ? 24 : 1) * 60 * 60_000 : undefined;
+      tracker.record({ window: w.label, used: w.used! / 100, at: w.observedAt!, resetsAt: w.reset, lengthMs });
+    }
+    const result = tracker.assess(now, policy);
+    return { state: "ready", tier: result.tier, p: pressureValue(result.tier), ...(result.label ? { label: result.label } : {}), ...(result.reason ? { reason: result.reason } : {}) };
+  } catch { return neutral("unavailable", options.signal?.aborted ? "Account quota read was cancelled." : "Account quota is unavailable."); }
+  finally { clearTimeout(timeout); options.signal?.removeEventListener("abort", abort); }
 }
 
 /**

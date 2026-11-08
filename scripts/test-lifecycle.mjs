@@ -23,7 +23,7 @@ try {
   await models.setRuntimeApiKey('anthropic', 'test-placeholder');
   models.classify = async () => ({ answers: {}, stopReason: 'error', errorMessage: 'Classification disabled in lifecycle test' });
   const factories = [];
-  for (const name of ['auto-effort', 'subagents', 'herdr', 'next-prompt']) factories.push((await jiti.import(`../packages/pi-${name}/src/index.ts`)).default);
+  for (const name of ['subagents', 'herdr', 'next-prompt']) factories.push((await jiti.import(`../packages/pi-${name}/src/index.ts`)).default);
   factories.push((await jiti.import('../packages/pi-todo/index.ts')).default);
   let pi;
   factories.push(api => { pi = api; api.on('before_agent_start', (event, ctx) => { starts.push({ type: event.messageType, busy: !ctx.isIdle(), prompt: event.prompt }); }); });

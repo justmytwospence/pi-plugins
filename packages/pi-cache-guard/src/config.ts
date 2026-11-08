@@ -3,6 +3,7 @@ import { homedir } from "node:os";
 import path from "node:path";
 
 import { DEFAULT_SETTINGS, NAME, type Settings, mergeSettings } from "./core.ts";
+import { effortUpdatesConfig } from "./effort-updates.ts";
 
 /**
  * Shared `~/.config/agents/cache-guard.json`, then `~/.pi/agent/cache-guard.json`, then the
@@ -10,19 +11,35 @@ import { DEFAULT_SETTINGS, NAME, type Settings, mergeSettings } from "./core.ts"
  * merge, other values replace). Unreadable or invalid files are ignored.
  */
 export function loadSettings(cwd: string): Settings {
-  const files = [
-    path.join(sharedConfigDir(), `${NAME}.json`),
-    userSettingsFile(),
-    path.join(cwd, ".agents", `${NAME}.json`),
-    path.join(cwd, ".pi", `${NAME}.json`),
-  ];
-  return mergeSettings(DEFAULT_SETTINGS, files.map((file) => {
+  const scopes = [sharedConfigDir(), agentDir(), path.join(cwd, ".agents"), path.join(cwd, ".pi")];
+  const texts: Array<string | undefined> = [];
+  for (const scope of scopes) {
     try {
-      return existsSync(file) ? readFileSync(file, "utf8") : undefined;
+      const legacy: unknown = JSON.parse(readFileSync(path.join(scope, "auto-effort.json"), "utf8"));
+      if (isRecord(legacy)) texts.push(JSON.stringify({ effortUpdates: legacy.effortUpdates }));
     } catch {
-      return undefined;
+      // Missing, unreadable or malformed legacy settings do not affect this scope.
     }
-  }));
+    try {
+      texts.push(readFileSync(path.join(scope, `${NAME}.json`), "utf8"));
+    } catch {
+      // Missing or unreadable settings leave earlier layers intact.
+    }
+  }
+  let settings = structuredClone(DEFAULT_SETTINGS);
+  for (const text of texts) {
+    if (text === undefined) continue;
+    try {
+      const value: unknown = JSON.parse(text);
+      if (!isRecord(value)) continue;
+      const updates = effortUpdatesConfig(value.effortUpdates, settings.effortUpdates);
+      settings = mergeSettings(settings, [text]);
+      settings.effortUpdates = updates;
+    } catch {
+      // Invalid JSON leaves earlier layers intact.
+    }
+  }
+  return settings;
 }
 
 /** `~/.pi/agent/cache-guard.json`: the Pi-only user file, which `/cache-guard jev` writes. */

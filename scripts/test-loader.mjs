@@ -18,7 +18,7 @@ process.env.XDG_CONFIG_HOME = resolve(temp, 'xdg');
 // The first participating extension owns one runtime-shared coordinator. Normalize
 // only those known hooks, and assert its ownership separately rather than weakening
 // per-component registration parity for ordinary handlers.
-const cycleParticipants = new Set(['pi-plan-mode', 'pi-tool-gate', 'pi-auto-effort', 'pi-status-footer']);
+const cycleParticipants = new Set(['pi-plan-mode', 'pi-tool-gate', 'pi-status-footer']);
 const cycleEvents = new Set(['session_start', 'session_tree', 'session_before_switch', 'session_before_fork',
   'session_before_tree', 'session_before_compact', 'ui_prompt_start', 'session_shutdown', 'before_agent_start',
   'model_select', 'thinking_level_select', 'message_start', 'input']);

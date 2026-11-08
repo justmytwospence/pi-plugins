@@ -6,7 +6,7 @@ plugin: pi-trends
 
 ## Quick reference
 
-- **Use it for:** See how the session evolved, model call by model call: context growth, effort changes (including pi-auto-effort's), token and cost spikes, tool-heavy or slow calls.
+- **Use it for:** See how the session evolved, model call by model call: context growth, effort changes, token and cost spikes, tool-heavy or slow calls.
 - **Enable:** Select `packages/pi-trends/src/index.ts` with [`pi config`](/guides/install/#enable-an-explicit-subset).
 - **Controls:** `/trends` opens the chart overlay; `alt+g` or `/trends widget [on|off]` toggles the one-line sparkline widget.
 - **Settings:** Optional `~/.pi/agent/pi-trends.json` (project `.pi/pi-trends.json` overrides): `widget` (show at startup, default `false`), `shortcut` (default `alt+g`, or `"off"`), `placement` (`belowEditor` default, or `aboveEditor`).

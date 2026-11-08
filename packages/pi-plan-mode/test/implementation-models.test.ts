@@ -190,6 +190,22 @@ test("linked worker includes the same physical planner with explicit execution i
   assert.equal(snapshot.selectedFlow.roles.plan.modelId, "gpt-6.1-sol");
 });
 
+test("authored worker effort pins are separate from role suggestions and survive detached flow choices", () => {
+  const snapshot = linkedSnapshot();
+  assert.ok(snapshot.selectedFlow);
+  assert.equal(linkedImplementationChoice(snapshot, linkedAvailable)?.thinkingPinned, undefined);
+  snapshot.selectedFlow.roles.exec.thinkingPinned = true;
+  const choice = linkedImplementationChoice(snapshot, linkedAvailable);
+  assert.equal(choice?.thinkingPinned, true);
+  assert.equal(choice?.spec.thinkingLevel, "medium");
+  assert.equal(choice?.flow?.selectedFlow?.roles.exec.thinkingPinned, true);
+  const mock = createMockPi();
+  mock.eventBus.on(ROLE_MODEL_CHANNEL, (request) => {
+    (request as { reply: unknown }).reply = { model: "anthropic/sonnet", thinking: "medium", thinkingPinned: true };
+  });
+  assert.deepEqual(subagentRoleModel(mock.eventBus, "worker", opus), { ...sonnet, thinkingPinned: true });
+});
+
 test("linked worker requires a ready, unblocked guarded flow and never falls back to another available model", () => {
   const snapshot = linkedSnapshot();
   for (const unavailable of [
@@ -246,7 +262,7 @@ test("overrides replace defaults, remove planner identity and duplicates, and re
     map: { "anthropic/opus": [opus, sonnet, { ...sonnet, thinkingLevel: "high" as const }, haiku] },
   };
   assert.deepEqual(implementationChoices(base), [
-    { spec: sonnet, source: "map" },
+    { spec: sonnet, source: "map", thinkingPinned: true },
     { spec: haiku, source: "map" },
   ]);
   assert.deepEqual(implementationChoices({ ...base, available: [] }), []);
@@ -280,7 +296,7 @@ test("explicit configuration is authoritative even for an unknown planning famil
       available,
     }),
     [
-      { spec: sonnet, source: "map" },
+      { spec: sonnet, source: "map", thinkingPinned: true },
       { spec: haiku, source: "map" },
     ],
   );

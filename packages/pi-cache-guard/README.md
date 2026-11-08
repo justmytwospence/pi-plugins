@@ -8,6 +8,10 @@ Part of [Pi Plugins](https://github.com/justmytwospence/pi-plugins). Reference: 
 
 **System 1 backend.** `/system1` configures an ordered chain of Jev and native OpenAI Decisions for the suite (Jev only by default); `/system1 jev` and `/system1 openai` select singleton chains. Newly including OpenAI requires billing confirmation. The selection is shared by sessions using the same agent directory. Jev works standalone; Decisions requires the `pi-system1` component and its isolated `/login system1-openai` API key (or `SYSTEM1_OPENAI_API_KEY`), not subscription OAuth or the ordinary OpenAI credential. Before selecting Decisions, claim eligible [ChatGPT Pro API credits](https://developers.openai.com/api/docs/guides/chatgpt-api-credits) in an API organization with no purchased balance, auto-recharge or paid continuation. Pi cannot verify entitlement or which funds pay for a request. Classifier requests may be billed. Operational failures can advance to the next configured backend with a notification; valid judgments and safety refusals do not trigger failover. Legacy `jev` settings remain: the local enable flag, thresholds and timeouts apply to either backend, while provider/model overrides apply only to Jev.
 
+## Cache-safe effort changes
+
+Cache guard transports deliberate manual and phase effort changes as `configuration_update` items for supported allowlisted physical models. It never chooses effort. This works even when warnings are off or Pi starts with explicit `--thinking`. Configure `effortUpdates.enabled` and `effortUpdates.models` in `cache-guard.json`; legacy `auto-effort.json` effort-update settings and session entries remain readable. See [Choosing effort](https://pi-plugins.vercel.app/guides/effort/).
+
 ## Install
 
 Install the suite and select only this component. Merge this object into the `packages` array of `~/.pi/agent/settings.json` (or a trusted project's `.pi/settings.json`):
@@ -56,7 +60,7 @@ Sending re-caches 601k tokens on any model; a summary reads up to 601k, a quick 
    Keep the prompt in the editor
 ```
 
-Model offers require a listener from another extension; pi-auto-effort does not supply them.
+Model offers require a listener from another extension.
 
 Example of the question with model offers (model names and the note are examples):
 

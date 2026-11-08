@@ -93,13 +93,10 @@ with the main session model even for a plan written by A or B; **Handoff** is of
 plan author's targets include a distinct available model. Its model row cycles those targets, and
 its effort row is adjustable with Left/Right in both modes.
 
-Before approval, System 1 recommends an implementation effort, including for the same model. Manual
-choices win. Direct execution and Linked keep/compact use the recommendation before inherited
-effort. Independent handoffs use the target suffix, then an explicit `defaultImplementationThinkingLevel`,
-then the recommendation, then `medium`. Linked fresh uses an explicit `defaultImplementationThinkingLevel`,
-then the recommendation, then the worker suggestion or existing fallback. If classification is unavailable,
-the existing defaults apply: Linked fresh retains the worker suggestion before the configured fallback.
-This one-shot default neither requires pi-auto-effort nor changes its ongoing policy.
+Before approval, System 1 can judge implementation effort once, including for the same model; each
+execution target receives its own quota snapshot and recommendation. Authored effort pins and manual
+adjustments take precedence. Configured defaults and existing fallbacks apply when appropriate.
+The approved tuple is applied without another judgment. See [Choosing effort](https://pi-plugins.vercel.app/guides/effort/).
 Unsupported levels normalize to the
 greatest supported level no higher than requested, or the first supported level if none qualifies.
 Nonreasoning models have no effort adjustment. Approval changes are per approval, not saved

@@ -7,7 +7,10 @@ const dist = fileURLToPath(new URL("../dist/", import.meta.url));
 const origin = "https://pi-plugins.vercel.app";
 const errors = [];
 // Astro redirect stubs (<meta http-equiv="refresh">) that are expected, by route, with their target.
-const redirects = new Map([["/plugins/pi-marimo/", "https://github.com/justmytwospence/pi-marimo"]]);
+const redirects = new Map([
+  ["/plugins/pi-marimo/", "https://github.com/justmytwospence/pi-marimo"],
+  ["/plugins/pi-auto-effort/", "/guides/effort/"],
+]);
 async function walk(dir) {
   return (await Promise.all((await readdir(dir, { withFileTypes: true })).map((entry) => entry.isDirectory() ? walk(path.join(dir, entry.name)) : path.join(dir, entry.name)))).flat();
 }

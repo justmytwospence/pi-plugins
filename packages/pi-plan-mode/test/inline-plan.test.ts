@@ -165,7 +165,13 @@ async function setup(
 
 const recommendedEffort = {
   kind: "system1" as const,
-  thinkingLevel: "low" as const,
+  choice: "low" as const,
+  confidence: 0.8,
+  probabilities: { low: 1, medium: 0, high: 0, xhigh: 0 },
+  waterfall: ["jev" as const],
+  targetKey: "test-target",
+  fallback: false,
+  attempts: [],
   backend: "jev" as const,
   provider: "typesafe" as const,
   model: "jev-latest" as const,
@@ -261,7 +267,7 @@ for (const action of ["cancel", "edit", "save"] as const) {
 }
 
 for (const changed of [false, true]) {
-  test(`editing ${changed ? "changed" : "unchanged"} plan ${changed ? "reclassifies exact text" : "reuses cached result"}`, async () => {
+  test(`editing ${changed ? "changed" : "unchanged"} plan disposes the approval judgment`, async () => {
     const pick = vi.fn<typeof pickImplementationEffort>().mockResolvedValue(recommendedEffort);
     const h = await setup({ models: true, pickImplementationEffort: pick });
     const ctx = h.context.ctx as ExtensionContext;
@@ -283,7 +289,7 @@ for (const changed of [false, true]) {
     }
     assert.deepEqual(
       pick.mock.calls.map(([input]) => input.plan),
-      changed ? ["# Original", "# Revised\n\nExact new text."] : ["# Original"],
+      changed ? ["# Original", "# Revised\n\nExact new text."] : ["# Original", "# Original"],
     );
     assert.deepEqual(h.mock.thinkingLevels, ["low"]);
   });

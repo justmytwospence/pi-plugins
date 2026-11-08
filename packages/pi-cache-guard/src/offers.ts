@@ -1,6 +1,6 @@
 // Model choice in the cold-cache question. A cold cache re-sends the whole conversation whatever the
 // model, so the miss is also the cheapest moment to change model. cache-guard does not pick models
-// itself: before the question it asks other extensions (pi-auto-effort, for one) for offers on
+// itself: before the question it asks other extensions for offers on
 // `cache:model-offers`, and after it says which offer was taken on `cache:model-choice`. The listener
 // that made the offer applies it; cache-guard never switches the model.
 

@@ -1,6 +1,7 @@
 import { expect, test } from "vitest";
+import { theta as sharedTheta, climb as sharedClimb, DEFAULT_THRESHOLD as sharedThreshold } from "@justmytwospence/pi-subscription-usage";
 import { GENERAL, parseAgent } from "../src/agents.ts";
-import { DEFAULT_THRESHOLD, DEFAULT_TIER_DESCRIPTIONS, EFFORT_DESCRIPTIONS, TIERS, newestFirst, physicalChatModels, pickQuestions, providerTiers, readPicks, resolve, theta } from "../src/pick.ts";
+import { DEFAULT_THRESHOLD, DEFAULT_TIER_DESCRIPTIONS, EFFORT_DESCRIPTIONS, TIERS, climb, newestFirst, physicalChatModels, pickQuestions, providerTiers, readPicks, resolve, theta } from "../src/pick.ts";
 
 const scout = parseAgent("---\nname: scout\ndescription: Fast recon\ntools: read, grep\nmodel: anthropic/claude-haiku-5\n---\nYou are a scout.", "user")!;
 const reviewer = parseAgent("---\nname: reviewer\ndescription: Code review\nthinking: high\n---\nReview carefully.", "project")!;
@@ -10,6 +11,12 @@ const models = { fast: "anthropic/claude-haiku-5", balanced: "anthropic/claude-s
 const tiers = { models, descriptions: DEFAULT_TIER_DESCRIPTIONS };
 const registry = (provider: string, ids: string[]) => ids.map((id) => ({ provider, id }));
 const answer = (choice: string, probabilities: Record<string, number> = {}, confidence = 1) => ({ type: "choice" as const, choice, probabilities, confidence });
+
+test("selection helpers are the shared policy exports", () => {
+  expect(theta).toBe(sharedTheta);
+  expect(climb).toBe(sharedClimb);
+  expect(DEFAULT_THRESHOLD).toBe(sharedThreshold);
+});
 
 test("frontmatter parse keeps agent tools and validated turn limits", () => {
   expect(scout).toMatchObject({ name: "scout", tools: ["read", "grep"], model: "anthropic/claude-haiku-5", prompt: "You are a scout.", source: "user" });

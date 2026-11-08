@@ -101,13 +101,17 @@ export function subagentRoleModel(
   events: { emit(channel: string, data: unknown): void },
   role: string,
   parent: ModelSpec,
-): ModelSpec | undefined {
-  const request: { role: string; parent: string; thinking?: string; reply?: { model?: unknown; thinking?: unknown } } =
-    {
-      role,
-      parent: formatModelKey(parent),
-      ...(parent.thinkingLevel ? { thinking: parent.thinkingLevel } : {}),
-    };
+): (ModelSpec & { thinkingPinned?: true }) | undefined {
+  const request: {
+    role: string;
+    parent: string;
+    thinking?: string;
+    reply?: { model?: unknown; thinking?: unknown; thinkingPinned?: unknown };
+  } = {
+    role,
+    parent: formatModelKey(parent),
+    ...(parent.thinkingLevel ? { thinking: parent.thinkingLevel } : {}),
+  };
   try {
     events.emit(ROLE_MODEL_CHANNEL, request);
   } catch {
@@ -119,13 +123,19 @@ export function subagentRoleModel(
   const level = (MODEL_SPEC_THINKING_LEVELS as readonly unknown[]).includes(thinking)
     ? (thinking as ModelSpecThinkingLevel)
     : undefined;
-  return { provider: spec.provider, modelId: spec.modelId, ...(level ? { thinkingLevel: level } : {}) };
+  return {
+    provider: spec.provider,
+    modelId: spec.modelId,
+    ...(level ? { thinkingLevel: level } : {}),
+    ...(request.reply?.thinkingPinned === true ? { thinkingPinned: true as const } : {}),
+  };
 }
 
 export type ImplementationSource = "map" | "default" | "linked";
 export interface ImplementationChoice {
   spec: ModelSpec;
   source: ImplementationSource;
+  thinkingPinned?: true;
   intent?: "independent" | "linked-execution";
   flow?: FlowState;
 }
@@ -157,6 +167,7 @@ export function linkedImplementationChoice(
       ...(thinkingLevel ? { thinkingLevel } : {}),
     },
     source: "linked",
+    ...(worker.thinkingPinned ? { thinkingPinned: true as const } : {}),
     intent: "linked-execution",
     flow: structuredClone({
       version: snapshot.version,
@@ -248,6 +259,12 @@ export function implementationChoices(input: {
       return [];
     }
     seen.add(identity);
-    return [{ spec, source: mapped ? ("map" as const) : ("default" as const) }];
+    return [
+      {
+        spec,
+        source: mapped ? ("map" as const) : ("default" as const),
+        ...(mapped && spec.thinkingLevel ? { thinkingPinned: true as const } : {}),
+      },
+    ];
   });
 }

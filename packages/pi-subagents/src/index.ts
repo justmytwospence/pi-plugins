@@ -17,6 +17,7 @@ import path from "node:path";
 import { type AgentBeforeSettleEvent, type BoundaryResult, type ExtensionAPI, type ExtensionContext, getMarkdownTheme } from "@earendil-works/pi-coding-agent";
 import { type Component, Markdown, Text, truncateToWidth, visibleWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
+import { readSelectionPressure } from "@justmytwospence/pi-subscription-usage";
 import { ACTIVITY_CHANGED, ACTIVITY_GONE, ACTIVITY_HOST, ACTIVITY_SECTION, type ActivityEntry, type ActivitySection, FLEET_HOST_PRIORITY, hostOutranks, readHost } from "./activity.ts";
 import { type AgentDef, discoverAgents } from "./agents.ts";
 import { MENTION_TYPE, mentionGuidance, subagentAutocomplete } from "./mentions.ts";
@@ -88,7 +89,7 @@ export const DEFAULT_CONFIG: SubagentsConfig = {
 const CONSERVATIVE_GUIDELINE =
   "Prefer direct work for routine investigation, diagnosis, and verification. Do not delegate merely because work is long or multistep, or commission a redundant audit of work you are already doing. Delegate only genuinely independent tasks with a clear payoff or when requested; when delegating report-back work, use headless subagents rather than interactive Herdr sessions.";
 const ECONOMICAL_GUIDELINE =
-  "Delegate work that can run in parallel, is larger than one context, or is routine with a long tail (a settled change applied across files, tests to a given spec, mechanical refactors, running checks and fixing what fails): give it a precise, self-contained spec and leave model and effort open for task-calibrated selection, then review the result (diff, check output) instead of redoing it. Otherwise keep the work in this session, at lower effort when it is routine: cheaper subagents trade cost for a few points of pass rate, and a spec about as long as the work, judgment calls, or work that needs this conversation's context belong here. Do not commission redundant audits of work you are already doing; use headless subagents rather than interactive Herdr sessions for report-back work.";
+  "Delegate work that can run in parallel, is larger than one context, or is routine with a long tail (a settled change applied across files, tests to a given spec, mechanical refactors, running checks and fixing what fails): give it a precise, self-contained spec and leave model and effort open for task-calibrated selection, then review the result (diff, check output) instead of redoing it. Otherwise keep the work in this session: cheaper subagents trade cost for a few points of pass rate, and a spec about as long as the work, judgment calls, or work that needs this conversation's context belong here. Do not commission redundant audits of work you are already doing; use headless subagents rather than interactive Herdr sessions for report-back work.";
 /** The built-in roles, one line each; shared by both delegation settings. */
 const ROLES_GUIDELINE =
   "Choosing a role (omit agent to have one picked): explorer for search and tracing; worker for any specified change, edit or check; reviewer for independent review; researcher for web and docs; writer for documentation; planner for design and hard analysis without edits; general only when none of these fits. Built-in role model and effort are fallbacks, not fixed assignments: leave both open to fit the delegated task.";
@@ -124,7 +125,7 @@ export interface RoleModelRequest {
   cwd?: string;
   /** Caller's authenticated availability snapshot (e.g. getAvailable()), intersected with the registry. */
   availableModels?: readonly { provider: string; id: string }[];
-  reply?: { model: string; thinking: string; source: ChoiceSource["model"] };
+  reply?: { model: string; thinking: string; source: ChoiceSource["model"]; thinkingPinned?: true };
 }
 export function roleModel(
   data: unknown,
@@ -164,26 +165,8 @@ export function roleModel(
   const thinking = request.thinking || fallbackThinking;
   const resolved = resolve({ agent: request.role }, agents, undefined, tiers, { model: request.parent, thinking }, { available, selectSingleTier: false });
   if ("error" in resolved || !resolved.model || (allowed && !allowed.has(resolved.model))) return undefined;
-  return { model: resolved.model, thinking: resolved.thinking, source: resolved.source.model };
-}
-
-/** `quota:pressure` from pi-auto-effort: how close a provider is to its usage limit. */
-export const QUOTA_PRESSURE = "quota:pressure";
-export interface QuotaPressure {
-  provider: string;
-  tier: "none" | "caution" | "critical";
-  /** 0..1 */
-  p: number;
-  label?: string;
-}
-
-/** A valid `quota:pressure` payload with `p` clamped to 0..1, or undefined. */
-export function readPressure(data: unknown): QuotaPressure | undefined {
-  if (typeof data !== "object" || data === null) return undefined;
-  const d = data as Record<string, unknown>;
-  if (typeof d.provider !== "string" || !d.provider || typeof d.p !== "number" || !Number.isFinite(d.p)) return undefined;
-  const tier = d.tier === "caution" || d.tier === "critical" ? d.tier : "none";
-  return { provider: d.provider, tier, p: Math.min(1, Math.max(0, d.p)), ...(typeof d.label === "string" ? { label: d.label } : {}) };
+  const fixed = fixedAgentDefaults(agents.find((agent) => agent.name === request.role), request.parent, available);
+  return { model: resolved.model, thinking: resolved.thinking, source: resolved.source.model, ...(fixed.thinking ? { thinkingPinned: true as const } : {}) };
 }
 
 /** ` (auto)`, or ` (auto, p=0.5)` for a pick made under quota pressure. */
@@ -466,13 +449,6 @@ export default function subagents(pi: ExtensionAPI) {
     const pick = pickedTargets.get(resolved);
     return pick && (pick.key !== key || pick.generation !== selectionGeneration) ? pick.fallback : resolved;
   };
-  /** The latest quota pressure per provider (pi-auto-effort's `quota:pressure`); none known is 0. */
-  const pressures = new Map<string, QuotaPressure>();
-  pi.events.on(QUOTA_PRESSURE, (data) => {
-    const pressure = readPressure(data);
-    if (pressure) pressures.set(pressure.provider, pressure);
-  });
-  const pressureFor = (provider: string) => pressures.get(provider)?.p ?? 0;
   let backgroundCount = 0;
   /** Numbers each async call's herdr:background hold. */
   let holdCount = 0;
@@ -1034,6 +1010,7 @@ export default function subagents(pi: ExtensionAPI) {
     const context = { fork, ...(parentTokens ? { parentTokens } : {}) };
     const askTier = Object.values(tiers.models).some(Boolean);
     const parentRequest = clip(recentTexts(ctx.sessionManager.getBranch()).user, 2_000);
+    const pressures = new Map<string, ReturnType<typeof readSelectionPressure>>();
     return Promise.all(
       items.map(async (item) => {
         const given: Given = { ...(item.agent ? { agent: item.agent } : {}), ...(item.model ? { model: item.model } : {}), ...(item.thinking ? { thinking: item.thinking } : {}) };
@@ -1049,10 +1026,38 @@ export default function subagents(pi: ExtensionAPI) {
           const controller = new AbortController();
           pendingPicks.add(controller);
           try {
-            const outcome = await askJev(ctx.modelRegistry, config.jev, { task: clip(item.task, 6_000), parent_request: parentRequest || "(none)", role: given.agent ?? "auto" }, questions, signal ? AbortSignal.any([signal, controller.signal]) : controller.signal);
-            if (outcome.ok && currentSelection() === key && generation === selectionGeneration && outcome.selectionKey === key && !controller.signal.aborted) {
-              picks = readPicks(outcome.answers, { pressure: pressureFor(parent.model.split("/")[0]!), threshold: config.jev.threshold, tiers: Object.keys(questions.tier?.criteria ?? {}) as Tier[] });
-              classifier = provenanceOf(outcome);
+            const pickSignal = signal ? AbortSignal.any([signal, controller.signal]) : controller.signal;
+            const outcome = await askJev(ctx.modelRegistry, config.jev, { task: clip(item.task, 6_000), parent_request: parentRequest || "(none)", role: given.agent ?? "auto" }, questions, pickSignal);
+            if (outcome.ok && currentSelection() === key && generation === selectionGeneration && outcome.selectionKey === key && !pickSignal.aborted) {
+              // Role choice is independent of pressure. A selected authored profile may pin either
+              // dimension, so determine the actual execution target before asking for quota.
+              const pickedRole = readPicks(outcome.answers).agent;
+              const role = pickedRole && agents.some((agent) => agent.name === pickedRole) ? pickedRole : undefined;
+              const effectiveAgent = agents.find((agent) => agent.name === (given.agent ?? role ?? "general"));
+              const effectiveFixed = fixedAgentDefaults(effectiveAgent, parent.model, available);
+              const autoTier = Boolean(questions.tier && !given.model && !effectiveFixed.model);
+              const autoEffort = Boolean(questions.effort && !given.thinking && !effectiveFixed.thinking);
+              let pressure = 0;
+              if (autoTier || autoEffort) {
+                const baseline = resolve({ ...given, agent: given.agent ?? role }, agents, undefined, tiers, parent, { available, context });
+                const targetModel = autoTier ? parent.model : ("error" in baseline ? "" : baseline.model);
+                const slash = targetModel.indexOf("/");
+                if (slash > 0 && slash < targetModel.length - 1) {
+                  const target = { provider: targetModel.slice(0, slash), id: targetModel.slice(slash + 1) };
+                  const scope = autoTier ? "shared" : "target";
+                  const pressureKey = JSON.stringify([scope, target.provider, target.id]);
+                  let snapshot = pressures.get(pressureKey);
+                  if (!snapshot) {
+                    snapshot = readSelectionPressure(ctx, target, { cwd: ctx.cwd, scope, signal: pickSignal });
+                    pressures.set(pressureKey, snapshot);
+                  }
+                  pressure = (await snapshot).p;
+                }
+              }
+              if (currentSelection() === key && generation === selectionGeneration && outcome.selectionKey === key && !pickSignal.aborted) {
+                picks = readPicks(outcome.answers, { pressure, threshold: config.jev.threshold, tiers: Object.keys(questions.tier?.criteria ?? {}) as Tier[] });
+                classifier = provenanceOf(outcome);
+              }
             }
           } finally {
             pendingPicks.delete(controller);

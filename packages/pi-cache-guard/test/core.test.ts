@@ -95,6 +95,10 @@ describe("formatting", () => {
     expect(formatDuration(52 * 3_600_000)).toBe("2d4h");
   });
 
+  test("effort update defaults retain the verified model allowlist", () => {
+    expect(DEFAULT_SETTINGS.effortUpdates).toEqual({ enabled: true, models: ["openai-codex/gpt-6-astra", "openai-codex/gpt-6.1-sol", "openai-codex/gpt-6.1-terra"] });
+  });
+
   test("settings merge objects and ignore bad JSON", () => {
     const s = mergeSettings(DEFAULT_SETTINGS, ['{"warn":{"minCost":2}}', "{nope", '{"warm":{"idleMinutes":{"1h":60}}}']);
     expect(s.warn.minCost).toBe(2);

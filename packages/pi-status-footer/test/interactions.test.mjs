@@ -125,7 +125,6 @@ function fixture({ width = 120, sidebar = false, vim = false, regular = false, b
     "flow.open": { label: "Flow", run() { calls.push("flow"); } },
     "cache.status": { label: "Cache", run() { calls.push("cache"); } },
     "execution.status": { label: "Execution", run() { calls.push("execution"); } },
-    "effort.toggle": { label: "Effort", active: false, run() { calls.push("effort"); } },
     "approvals.open": { label: "Approvals", run() { calls.push("approvals"); } },
     "context.open": { label: "Context", run() { calls.push("context"); } },
     "context.skills": { label: "Skills", run() { calls.push("skills"); } },
@@ -333,7 +332,7 @@ test("native selector focus (without prompt events), overlay, prompts and blocke
   assert.equal(f.state.promptDepth, 0, "native selector emits no extension prompt lifecycle");
   assert.equal(f.tui.hasOverlay(), false);
   assert.equal(f.tui.getFocusedComponent(), f.selector);
-  for (const action of ["model.open", "reasoning.cycle", "cache.status", "effort.toggle"]) {
+  for (const action of ["model.open", "reasoning.cycle", "cache.status"]) {
     assert.equal(f.controller.available(action), false);
     await f.controller.activate(action);
   }
@@ -438,7 +437,6 @@ for (const vim of [false, true]) for (const regular of [false, true]) {
     f.tui.setFocus(f.side);
     const scopes = f.scopes.length;
     await f.controller.activate("reasoning.cycle", "keyboard");
-    await f.controller.activate("effort.toggle");
     assert.equal(f.scopes.length, scopes, "Sidebar/non-main focus never enters a settings scope");
     f.tui.setFocus(f.editor);
     f.state.promptDepth++;
@@ -466,8 +464,8 @@ test("pointer provider scope covers only synchronous invocation, not an awaited 
   pending.resolve();
   await opening;
   assert.deepEqual(observations, [{ kind: "pointer" }, undefined]);
-  f.state.actions["effort.toggle"].run = () => { assert.deepEqual(f.state.cycleTrigger, { kind: "pointer" }); throw new Error("scope failure"); };
-  await f.controller.activate("effort.toggle");
+  f.state.actions["approvals.open"].run = () => { assert.deepEqual(f.state.cycleTrigger, { kind: "pointer" }); throw new Error("scope failure"); };
+  await f.controller.activate("approvals.open");
   assert.equal(f.state.cycleTrigger, undefined, "throwing providers cannot leak a scope");
   assert.match(f.notify.mock.calls.at(-1)[0], /scope failure/);
 });
@@ -551,11 +549,11 @@ test("busy controls explain why pickers wait; reversible settings and inspection
     assert.match(f.notify.mock.calls.at(-1)[0], /Wait for the current turn/);
   }
   assert.deepEqual(f.calls, []);
-  for (const action of ["reasoning.cycle", "effort.toggle", "cache.status", "execution.status", "headsup.open"]) {
+  for (const action of ["reasoning.cycle", "cache.status", "execution.status", "headsup.open"]) {
     assert.equal(f.controller.available(action), true, action);
     await f.controller.activate(action);
   }
-  assert.deepEqual(f.calls, ["native.reasoning", "effort", "cache", "execution", "headsup"]);
+  assert.deepEqual(f.calls, ["native.reasoning", "cache", "execution", "headsup"]);
 });
 
 test("serialization, errors, stale completion and recaptured generation are session-owned", async () => {
@@ -591,16 +589,16 @@ test("actual captured editor and TUI identities plus active/current generation a
   const f = fixture();
   for (const [key, other] of [["active", false], ["editor", new CustomEditor(f.tui, getEditorTheme(), new KeybindingsManager())], ["tui", {}], ["generation", 2]]) {
     const previous = f.state[key]; f.state[key] = other;
-    assert.equal(f.controller.available("effort.toggle"), false);
-    await f.controller.activate("effort.toggle");
+    assert.equal(f.controller.available("approvals.open"), false);
+    await f.controller.activate("approvals.open");
     f.state[key] = previous;
   }
   f.tui.setFocus(f.side); // read-only child/Sidebar chrome must not mutate main
-  await f.controller.activate("effort.toggle");
+  await f.controller.activate("approvals.open");
   assert.deepEqual(f.calls, []);
   f.tui.setFocus(f.editor);
-  await f.controller.activate("effort.toggle");
-  assert.deepEqual(f.calls, ["effort"]);
+  await f.controller.activate("approvals.open");
+  assert.deepEqual(f.calls, ["approvals"]);
 });
 
 test("absent native handlers/focus API omit controls and report command paths on programmatic invocation", async () => {

@@ -3,7 +3,7 @@ import starlight from "@astrojs/starlight";
 import { groups } from "./src/data/plugins.mjs";
 
 export default defineConfig({
-  redirects: { "/plugins/pi-marimo": "https://github.com/justmytwospence/pi-marimo" },
+  redirects: { "/plugins/pi-marimo": "https://github.com/justmytwospence/pi-marimo", "/plugins/pi-auto-effort": "/guides/effort/" },
   site: "https://pi-plugins.vercel.app",
   output: "static",
   trailingSlash: "always",
@@ -22,6 +22,7 @@ export default defineConfig({
           { label: "Install & select", slug: "guides/install" },
           { label: "Pin, update & rollback", slug: "guides/releases" },
           { label: "Requirements & costs", slug: "guides/requirements" },
+          { label: "Choosing effort", slug: "guides/effort" },
           { label: "Choosing subagent models", slug: "guides/subagent-models" },
           { label: "Keymap & focus", slug: "guides/keyboard" },
           { label: "Standalone & compatibility", slug: "guides/standalone" },

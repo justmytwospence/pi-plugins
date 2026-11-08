@@ -2,9 +2,14 @@ import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { initTheme } from "@earendil-works/pi-coding-agent";
-import { beforeAll, expect, test } from "vitest";
-import subagents, { DEFAULT_CONFIG, jevMark, promptGuidelines, readPressure, truncateOutput } from "../src/index.ts";
+import { beforeAll, expect, test, vi } from "vitest";
+import subagents, { DEFAULT_CONFIG, jevMark, promptGuidelines, truncateOutput } from "../src/index.ts";
 import { fakeJev, harness } from "./harness.ts";
+const pressureReader = vi.hoisted(() => vi.fn(async (..._args: any[]): Promise<any> => ({ state: "unavailable", tier: "none", p: 0 })));
+vi.mock("@justmytwospence/pi-subscription-usage", async (importOriginal) => ({
+  ...await importOriginal<object>(),
+  readSelectionPressure: pressureReader,
+}));
 import { fakeUI, normalFocus, plain } from "./ui-helpers.ts";
 import { readTranscriptCheckpoint } from "../src/transcript-contract.ts";
 
@@ -339,19 +344,94 @@ test("delegation picks the first prompt guideline (economical by default); a pro
   await h.emit("session_shutdown", { type: "session_shutdown" }, ctx);
 });
 
-test("quota:pressure payloads are validated and clamped; the mark shows p", () => {
-  expect(readPressure({ provider: "anthropic", tier: "critical", p: 1.4, label: "5h 97%" })).toEqual({ provider: "anthropic", tier: "critical", p: 1, label: "5h 97%" });
-  expect(readPressure({ provider: "anthropic", tier: "weird", p: 0.2 })).toEqual({ provider: "anthropic", tier: "none", p: 0.2 });
-  expect(readPressure({ provider: "", p: 0.2 })).toBeUndefined();
-  expect(readPressure({ provider: "x", p: Number.NaN })).toBeUndefined();
-  expect(readPressure(null)).toBeUndefined();
+test("cancellation while quota is pending prevents a late spawn", async () => {
+  const { setPiInvocation } = await import("../src/child.ts");
+  setPiInvocation({ command: process.execPath, args: [path.join(import.meta.dirname, "fixtures", "fake-pi-loop.mjs")] });
+  let release!: (value: any) => void;
+  let entered!: () => void;
+  const waiting = new Promise<void>((resolve) => { entered = resolve; });
+  pressureReader.mockReset().mockImplementation(() => {
+    entered();
+    return new Promise((resolve) => { release = resolve; });
+  });
+  try {
+    const cwd = mkdtempSync(path.join(tmpdir(), "subagents-abort-pressure-"));
+    const jev = fakeJev(() => ({
+      effort: { type: "choice", choice: "high", confidence: 1, probabilities: { high: 1 } },
+    }));
+    const h = harness();
+    let tool: any;
+    h.pi.registerTool = (t: unknown) => void (tool = t);
+    subagents(h.pi);
+    const ctx = h.ctx({ cwd, ui: fakeUI(), model: { provider: "p", id: "parent" }, modelRegistry: { ...jev.registry as object, getAll: () => [] } });
+    await h.emit("session_start", {}, ctx);
+    const abort = new AbortController();
+    const work = tool.execute("cancel", { task: "cancel", agent: "general", model: "p/parent" }, abort.signal, undefined, ctx);
+    const rejected = expect(work).rejects.toThrow(/Cancelled/);
+    await waiting;
+    abort.abort();
+    release({ state: "ready", tier: "critical", p: 1 });
+    await rejected;
+    expect(h.entries.filter((entry) => entry.customType === "subagents:run")).toHaveLength(0);
+    await h.emit("session_shutdown", {}, ctx);
+  } finally {
+    setPiInvocation(undefined);
+    pressureReader.mockReset().mockResolvedValue({ state: "unavailable", tier: "none", p: 0 });
+  }
+});
+
+test("boundary snapshots are shared within a batch, target explicit providers, and skip pinned choices", async () => {
+  const { setPiInvocation } = await import("../src/child.ts");
+  setPiInvocation({ command: process.execPath, args: [path.join(import.meta.dirname, "fixtures", "fake-pi-loop.mjs")] });
+  pressureReader.mockReset().mockResolvedValue({ state: "ready", tier: "critical", p: 1 });
+  try {
+    const cwd = mkdtempSync(path.join(tmpdir(), "subagents-scopes-"));
+    mkdirSync(path.join(cwd, ".pi"));
+    writeFileSync(path.join(cwd, ".pi", "pi-subagents.json"), JSON.stringify({
+      providerTiers: { p: { fast: "p/small", balanced: "p/mid" } },
+    }));
+    const jev = fakeJev(() => ({
+      role: { type: "choice", choice: "general", confidence: 1, probabilities: { general: 1 } },
+      tier: { type: "choice", choice: "balanced", confidence: 1, probabilities: { balanced: 1 } },
+      effort: { type: "choice", choice: "high", confidence: 1, probabilities: { high: 1 } },
+    }));
+    const h = harness();
+    let tool: any;
+    h.pi.registerTool = (t: unknown) => void (tool = t);
+    subagents(h.pi);
+    const ctx = h.ctx({ cwd, ui: fakeUI(), model: { provider: "p", id: "parent" }, modelRegistry: { ...jev.registry as object, getAll: () => [] } });
+    await h.emit("session_start", {}, ctx);
+    const tasks = [
+      { task: "one", model: "other/model" },
+      { task: "two", model: "other/model" },
+      { task: "three" },
+      { task: "pinned", model: "other/model", thinking: "low" },
+    ];
+    const result = await tool.execute("batch", { tasks, async: true }, undefined, undefined, ctx);
+    expect(result.details.runs).toHaveLength(4);
+    expect(pressureReader).toHaveBeenCalledTimes(2);
+    expect(pressureReader.mock.calls.map((call) => [call[1], call[2].scope])).toEqual(expect.arrayContaining([
+      [{ provider: "other", id: "model" }, "target"],
+      [{ provider: "p", id: "parent" }, "shared"],
+    ]));
+    const pinned = result.details.runs.find((run: any) => run.task === "pinned");
+    expect(pinned).not.toHaveProperty("pressure");
+    await h.emit("session_shutdown", {}, ctx);
+  } finally {
+    setPiInvocation(undefined);
+    pressureReader.mockReset().mockResolvedValue({ state: "unavailable", tier: "none", p: 0 });
+  }
+});
+
+test("the automatic mark shows pressure", () => {
   expect(jevMark(false, 0.5)).toBe("");
   expect(jevMark(true)).toBe(" (auto)");
   expect(jevMark(true, 0)).toBe(" (auto)");
   expect(jevMark(true, 0.46)).toBe(" (auto, p=0.5)");
 });
 
-test("quota pressure on the parent's provider tightens Jev's picks, and the row and record show it", async () => {
+test("boundary pressure tightens Jev picks, and the row and record show it", async () => {
+  pressureReader.mockReset().mockResolvedValue({ state: "unavailable", tier: "none", p: 0 });
   const { setPiInvocation } = await import("../src/child.ts");
   setPiInvocation({ command: process.execPath, args: [path.join(import.meta.dirname, "fixtures", "fake-pi-loop.mjs")] });
   try {
@@ -372,7 +452,6 @@ test("quota pressure on the parent's provider tightens Jev's picks, and the row 
       listeners.set(channel, [...(listeners.get(channel) ?? []), fn]);
       return () => undefined;
     };
-    const send = (channel: string, data: unknown) => { for (const fn of listeners.get(channel) ?? []) fn(data); };
     h.pi.registerTool = (t: unknown) => void (tool = t);
     subagents(h.pi);
     const ctx = h.ctx({ cwd, ui: fakeUI(), model: { provider: "p", id: "m" }, modelRegistry: { ...jev.registry as object, getAll: () => [] } });
@@ -384,15 +463,15 @@ test("quota pressure on the parent's provider tightens Jev's picks, and the row 
     expect(calm.details.runs[0]).not.toHaveProperty("pressure");
     expect(tool.renderResult(calm, { expanded: false }, plain).render(200).join("\n")).toContain("big (auto) · high (auto)");
 
-    // Another provider's pressure does not count; the parent's does, latest wins.
-    send("quota:pressure", { provider: "other", tier: "critical", p: 1 });
-    send("quota:pressure", { provider: "p", tier: "caution", p: 0.2 });
-    send("quota:pressure", { provider: "p", tier: "critical", p: 1 });
+    pressureReader.mockResolvedValue({ state: "ready", tier: "critical", p: 1 });
     const tight = await tool.execute("t2", { task: "tight", async: true }, undefined, undefined, ctx);
     expect(tight.details.runs[0]).toMatchObject({ model: "p/mid", thinking: "medium", pressure: 1 });
     expect(tool.renderResult(tight, { expanded: false }, plain).render(200).join("\n")).toContain("mid (auto, p=1.0) · medium (auto, p=1.0)");
     const record = h.entries.filter((e) => e.customType === "subagents:run").map((e) => e.data as any).find((d) => d.id === tight.details.runs[0].id);
     expect(record).toMatchObject({ pressure: 1, byJev: { model: true, thinking: true }, source: { model: "tier", thinking: "jev" } });
+    expect(pressureReader).toHaveBeenCalledTimes(2);
+    expect(pressureReader.mock.calls[1]![1]).toEqual({ provider: "p", id: "m" });
+    expect(pressureReader.mock.calls[1]![2]).toMatchObject({ scope: "shared", cwd });
     await h.emit("session_shutdown", { type: "session_shutdown" }, ctx);
   } finally {
     setPiInvocation(undefined);

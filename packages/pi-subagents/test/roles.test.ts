@@ -8,11 +8,18 @@ import subagents, { promptGuidelines, recordedRun, resumable, subagentCallReadOn
 import { fakeJev, harness } from "./harness.ts";
 import { fakeUI, plain } from "./ui-helpers.ts";
 
+const pressureReader = vi.hoisted(() => vi.fn(async () => ({ state: "unavailable", tier: "none", p: 0 })));
+vi.mock("@justmytwospence/pi-subscription-usage", async (importOriginal) => ({
+  ...await importOriginal<object>(),
+  readSelectionPressure: pressureReader,
+}));
+
 const fixture = (name: string) => ({ command: process.execPath, args: [path.join(import.meta.dirname, "fixtures", name)] });
 const claude = ["claude-haiku-5", "claude-sonnet-5-5", "claude-opus-5-5"].map((id) => ({ provider: "anthropic", id }));
 const choice = (best: string) => ({ type: "choice", choice: best, confidence: 0.9, probabilities: { [best]: 0.9 } });
 
 beforeEach(() => {
+  pressureReader.mockReset().mockResolvedValue({ state: "unavailable", tier: "none", p: 0 });
   // Keep agent discovery to the built-ins.
   vi.stubEnv("PI_CODING_AGENT_DIR", mkdtempSync(path.join(tmpdir(), "subagents-roles-agent-")));
 });
@@ -169,14 +176,10 @@ test.each([
 });
 
 test.each([1, 2, 4])("critical quota pressure preserves configured parallel concurrency %i without a serialization notice", async (concurrency) => {
+  pressureReader.mockResolvedValue({ state: "ready", tier: "critical", p: 1 });
   const s = await setup({ concurrency });
   const tasks = ["a", "b", "c", "d", "e"].map((task) => ({ task, agent: "explorer" }));
-  for (const [index, pressure] of [
-    { provider: "openai-codex", tier: "critical", p: 1 },
-    { provider: "anthropic", tier: "caution", p: 0.6 },
-    { provider: "anthropic", tier: "critical", p: 1, label: "5h 97%" },
-  ].entries()) {
-    s.send("quota:pressure", pressure);
+  for (const index of [0, 1, 2]) {
     const result = await s.tool().execute(`t${index}`, { tasks, async: true }, undefined, undefined, s.ctx);
     expect(result.details.runs).toHaveLength(concurrency);
     expect(result.content[0].text).not.toContain("one at a time");
@@ -208,7 +211,8 @@ test("both delegation settings list the roles; economical says when delegating p
   const economical = promptGuidelines("economical");
   const conservative = promptGuidelines("conservative");
   expect(economical[0]).toMatch(/^Delegate work that can run in parallel, is larger than one context, or is routine with a long tail/u);
-  expect(economical[0]).toContain("Otherwise keep the work in this session, at lower effort when it is routine");
+  expect(economical[0]).toContain("Otherwise keep the work in this session");
+  expect(economical[0]).not.toContain("lower effort");
   expect(economical[0]).toContain("a few points of pass rate");
   expect(conservative[0]).toMatch(/^Prefer direct work for routine investigation/u);
   for (const list of [economical, conservative]) {

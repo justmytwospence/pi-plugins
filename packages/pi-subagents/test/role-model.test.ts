@@ -133,7 +133,7 @@ test("taskless singleton discovery retains worker baseline provenance and reject
 test("an unavailable custom model does not erase its same-provider effort pin in taskless discovery", () => {
   const pinned = { ...WORKER, source: "user" as const, models: { anthropic: { model: "anthropic/not-registered", thinking: "high" } } };
   expect(roleModel({ role: "worker", parent, availableModels: [opus] }, [GENERAL, pinned], DEFAULT_CONFIG, [opus], "low"))
-    .toEqual({ model: parent, thinking: "high", source: "default" });
+    .toEqual({ model: parent, thinking: "high", source: "default", thinkingPinned: true });
 });
 
 test("roleModel falls back to the balanced tier", () => {
@@ -303,12 +303,12 @@ test("destination agent discovery honors project over user over built-in without
   const r = runtime(live, [sonnet, opus, userModel]);
   await r.start();
   const ask = (cwd?: string) => r.ask({ cwd, availableModels: [sonnet, opus, userModel] }).reply;
-  expect(ask()).toEqual(workerReply);
-  expect(ask(a)).toEqual({ model: parent, thinking: "high", source: "profile" });
-  expect(ask(path.relative(live, b))).toEqual({ model: "anthropic/claude-sonnet-5-5", thinking: "off", source: "profile" });
-  expect(ask(bare)).toEqual({ model: "anthropic/user-worker", thinking: "low", source: "profile" });
-  expect(ask(a)).toEqual({ model: parent, thinking: "high", source: "profile" });
-  expect(ask()).toEqual(workerReply);
+  expect(ask()).toEqual({ ...workerReply, thinkingPinned: true });
+  expect(ask(a)).toEqual({ model: parent, thinking: "high", source: "profile", thinkingPinned: true });
+  expect(ask(path.relative(live, b))).toEqual({ model: "anthropic/claude-sonnet-5-5", thinking: "off", source: "profile", thinkingPinned: true });
+  expect(ask(bare)).toEqual({ model: "anthropic/user-worker", thinking: "low", source: "profile", thinkingPinned: true });
+  expect(ask(a)).toEqual({ model: parent, thinking: "high", source: "profile", thinkingPinned: true });
+  expect(ask()).toEqual({ ...workerReply, thinkingPinned: true });
 });
 
 test("destination tiers merge user/project overrides while no cwd keeps the live configuration", async () => {

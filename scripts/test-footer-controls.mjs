@@ -111,7 +111,7 @@ export default function (pi) {
   pi.events.emit('test:cycle-transport', transport);
   const cycles = settingsCycles(pi, { inputPorts: transport.inputPorts });
   const owner = {};
-  const values = { workflow: 'work', 'auto-effort': false, approvals: 'auto' };
+  const values = { workflow: 'work', approvals: 'auto' };
   const applied = [];
   let ctx, shortcut;
   pi.registerShortcut('alt+j', { description: 'Fixture approval cycle', handler(context) {
@@ -430,7 +430,7 @@ async function terminalCycles() {
 
       // New transactions settled by the timer still reuse the original component,
       // not merely the same persisted ID appended as a second native anchor.
-      for (const key of ['workflow', 'auto-effort', 'workflow']) {
+      for (const key of ['workflow', 'approvals', 'workflow']) {
         const result = stage(f, key);
         assert.equal(api.cycles.inputStatus().mode, 'timer');
         assert.equal(await result, true);
@@ -581,31 +581,31 @@ async function journalCheckpoint() {
     assert.ok(anchor, 'appendEntry immediately inserts the native visible anchor');
     await pause(100);
     const second = stage(f, 'workflow');
-    const mixed = stage(f, 'auto-effort');
+    const mixed = stage(f, 'approvals');
     const lastStaged = Date.now();
     assert.equal(first, second, 'same-key callers await the same settled burst');
     assert.equal(second, mixed, 'mixed controls share one settled result');
     assert.deepEqual(api.applied, [], 'previews call no effective setter');
     assert.equal(api.values.workflow, 'work');
-    assert.equal(api.values['auto-effort'], false);
+    assert.equal(api.values.approvals, 'auto');
     assert.equal(journalEntries(f).filter(entry => entry.customType === 'settings:cycle').length, 1);
     assert.ok(journalEntries(f).filter(entry => entry.customType === 'settings:cycle-state').length >= 2,
       'later previews append hidden snapshots, not replacement entries');
     await tick(); f.frame();
     assert.equal(historyLines(f).length, 1, 'one real transcript row for the entire mixed burst');
-    assert.match(historyLines(f)[0], /Settings pending · Workflow plan · Auto on/u);
+    assert.match(historyLines(f)[0], /Settings pending · Workflow plan · Approvals yolo/u);
     assert.equal(screenLines(f).filter(line => line.includes('Settings pending')).length, 1,
       'the actual fullscreen frame shows exactly one immediate pending history row');
     assert.ok(f.mode.chatContainer.children.includes(anchor), 'snapshot appends keep the original anchor component');
-    assert.match(anchor.render(120).map(plain).join('\n'), /Workflow plan · Auto on/u,
+    assert.match(anchor.render(120).map(plain).join('\n'), /Workflow plan · Approvals yolo/u,
       'an already-created native component renders the latest hidden snapshot');
     await pause(250);
     assert.deepEqual(api.applied, [], 'no effective changes before the idle quiet period');
     assert.equal(await first, true);
     assert.ok(Date.now() - lastStaged >= 390, 'settlement waits for the quiet period after the latest mixed-control input');
-    assert.deepEqual(api.applied, [{ key: 'workflow', value: 'plan' }, { key: 'auto-effort', value: true }]);
+    assert.deepEqual(api.applied, [{ key: 'workflow', value: 'plan' }, { key: 'approvals', value: 'yolo' }]);
     assert.equal(historyLines(f).length, 1);
-    assert.match(historyLines(f)[0], /Settings · Workflow plan · Auto on/u);
+    assert.match(historyLines(f)[0], /Settings · Workflow plan · Approvals yolo/u);
     assert.deepEqual(f.runtime.session.sessionManager.buildSessionContext().messages, beforeContext,
       'neither the anchor nor any hidden snapshot enters model context');
     const originalRow = api.cycles.snapshot().id;
@@ -618,13 +618,13 @@ async function journalCheckpoint() {
       assert.equal(await unchanged, true);
       assert.equal(api.cycles.snapshot().phase, 'unchanged');
       assert.equal(api.cycles.snapshot().id, originalRow);
-      assert.equal(api.cycles.snapshot().settings.length, 1, 'latest no-op batch does not claim older committed auto-effort changes');
+      assert.equal(api.cycles.snapshot().settings.length, 1, 'latest no-op batch does not claim older committed approval changes');
       assert.equal(api.cycles.snapshot().settings[0].baseline, 'plan', 'new batch validates against fresh effective baseline');
       assert.equal(cycleAnchors(f).length, 1);
       assert.deepEqual(cycleAnchors(f)[0], originalRecord);
       assert.ok(f.mode.chatContainer.children.includes(anchor));
       assert.match(anchor.render(120).map(plain).join('\n'), /Settings unchanged/u);
-      assert.deepEqual(api.applied, [{ key: 'workflow', value: 'plan' }, { key: 'auto-effort', value: true }], 'unchanged batches invoke no setter');
+      assert.deepEqual(api.applied, [{ key: 'workflow', value: 'plan' }, { key: 'approvals', value: 'yolo' }], 'unchanged batches invoke no setter');
     }
     api.cycles.cancel('explicit fixture selection'); // boundary even with no pending transaction
     const selected = stage(f, 'workflow');
@@ -670,19 +670,19 @@ async function journalCheckpoint() {
       const pending = stage(f, 'approvals');
       assert.equal(f.runtime.session.isStreaming, true);
       assert.equal(historyLines(f).length, count + 1, 'preview is visible without waiting for the assistant to finish');
-      const streamingAnchor = f.mode.chatContainer.children.find(child => child.render(120).some(line => plain(line).includes('Approvals yolo')));
+      const streamingAnchor = f.mode.chatContainer.children.find(child => child.render(120).some(line => plain(line).includes('Approvals auto')));
       assert.ok(streamingAnchor);
       assert.ok(f.mode.chatContainer.children.indexOf(streamingAnchor) < f.mode.chatContainer.children.indexOf(streaming),
         'native entry insertion places the anchor before the active assistant component');
       const roundTrip = stage(f, 'approvals');
       await tick(); f.frame();
       assert.equal(historyLines(f).length, count + 1);
-      assert.match(streamingAnchor.render(120).map(plain).join('\n'), /Approvals auto/u,
+      assert.match(streamingAnchor.render(120).map(plain).join('\n'), /Approvals yolo/u,
         'hidden snapshot redraws the same anchor during streaming');
       assert.equal(screenLines(f).filter(line => line.includes('Settings pending')).length, 1,
         'the real fullscreen stream frame shows only the latest preview, not each snapshot');
       assert.ok(screenLines(f).some(line => line.includes('Local streamed reply.')), 'the assistant stream remains visible');
-      assert.equal(api.values.approvals, 'auto', 'streaming preview is not an approval grant');
+      assert.equal(api.values.approvals, 'yolo', 'streaming preview does not change effective approvals');
       api.cycles.cancel('streaming checkpoint complete');
       assert.equal(await pending, false);
       assert.equal(await roundTrip, false);

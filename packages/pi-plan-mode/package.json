@@ -24,6 +24,7 @@
     "test": "vitest run"
   },
   "dependencies": {
+    "@justmytwospence/pi-subscription-usage": "file:../pi-subscription-usage",
     "grok-mermaid": "^0.2.2",
     "marked": "^18.0.11",
     "shiki": "^4.5.0"

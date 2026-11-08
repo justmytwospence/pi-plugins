@@ -292,12 +292,10 @@ test("footer uses natural spacing and a consistent inset without label columns",
 test("footer lines share separators, concise labels and unparenthesized qualifiers", () => {
   const s = fixture();
   s.borderGauge = true;
-  s.autoEffort = true;
-  s.autoEffortDetail = "→";
   s.statuses = mod.absorbStatuses(new Map([["tool-gate", "gate: 0 auto · 0 pushed back · 0 asked"]]), { claudeRow: false }).rest;
   s.quotas = [{ source: "Codex acct", updated: now, windows: [{ label: "week", used: 39, reset: now + 86400_000 }] }];
   const rows = mod.renderFooter(s, 160, theme);
-  assert.equal(rows[1], " \u{f06a9}  opus-5.5 · \uee9c reasoning auto → xhigh");
+  assert.equal(rows[1], " \u{f06a9}  opus-5.5 · \uee9c reasoning xhigh");
   assert.equal(rows[2], " \uf0e4  Context 28% used");
   assert.equal(rows[3], " \uf510  Gate 0 auto · 0 pushed back · 0 asked");
   assert.equal(rows[4], " \uf252  Codex week 39% used · resets in 1d0h");
@@ -402,16 +400,16 @@ test("extension statuses wrap without losing notices or ANSI, no duplicate task 
 
 test("companion extension statuses fold into their rows, and degrade when absent or reshaped", () => {
   const statuses = new Map([
-    ["auto-effort", "effort: medium (auto)"], ["lean-context", "lean: \u221212k tok"], ["cache-guard", "cache 4:12"],
+    ["lean-context", "lean: \u221212k tok"], ["cache-guard", "cache 4:12"],
     ["anthropic-billing", "extra usage x3"], ["tool-gate", "gate: 2 auto \u00b7 0 pushed back \u00b7 1 asked"], ["plan", "plan: A working (/plan)"],
   ]);
   const absorbed = mod.absorbStatuses(statuses, { claudeRow: true });
-  assert.deepEqual(absorbed, { autoEffort: true, lean: "\u221212k tok", cache: "4:12", extraBilled: 3,
+  assert.deepEqual(absorbed, { lean: "\u221212k tok", cache: "4:12", extraBilled: 3,
     rest: ["Plan A working · /plan", "Gate 2 auto \u00b7 0 pushed back \u00b7 1 asked"] });
 
-  const s = { ...fixture(), thinking: "medium", statuses: absorbed.rest, autoEffort: true, lean: absorbed.lean, cache: absorbed.cache, extraBilled: 3 };
+  const s = { ...fixture(), thinking: "medium", statuses: absorbed.rest, lean: absorbed.lean, cache: absorbed.cache, extraBilled: 3 };
   const rows = mod.renderFooter(s, 200, theme).map(plain);
-  assert.match(rows[1], /reasoning auto → medium/);
+  assert.match(rows[1], /reasoning medium/);
   assert.match(rows[2], /Lean \u221212k tok/);
   assert.match(rows[2], /Cache 4:12/);
   for (const text of ["cache cold", "cache cold (model)", "cache cold?", "cache 1h05m", "cache ~4:12", "cache ~1h05m"]) {
@@ -434,17 +432,9 @@ test("companion extension statuses fold into their rows, and degrade when absent
   for (let width = 1; width <= 160; width++) assert.ok(mod.renderFooter(s, width, theme).every((row) => visibleWidth(row) <= width));
   assert.match(plain(mod.renderFooter(s, 50, theme).at(-1)), /extra x3/);
 
-  // Automatic reasoning has one direction arrow; quota limits remain a qualifier.
-  for (const [text, shown] of [["effort: low (auto \u2192)", "reasoning auto → low"], ["effort: medium (auto \u2193, limited: 5h 84%)", "reasoning auto → low · limited: 5h 84%"]]) {
-    const a = mod.absorbStatuses(new Map([["auto-effort", text]]), { claudeRow: false });
-    assert.deepEqual(a.rest, []);
-    const row = plain(mod.renderFooter({ ...fixture(), thinking: "low", statuses: a.rest, autoEffort: a.autoEffort, autoEffortDetail: a.autoEffortDetail }, 200, theme)[1]);
-    assert.ok(row.includes(shown), row);
-  }
-
   // Companions not installed (no statuses): the plain footer.
   const bare = mod.absorbStatuses(new Map(), { claudeRow: true });
-  assert.deepEqual(bare, { autoEffort: false, rest: [] });
+  assert.deepEqual(bare, { rest: [] });
   const plainRows = mod.renderFooter({ ...fixture(), ...bare, statuses: bare.rest }, 200, theme).map(plain);
   assert.match(plainRows[1], /reasoning xhigh$/);
   assert.doesNotMatch(plainRows.join("\n"), /auto|lean|billed/);
@@ -453,12 +443,12 @@ test("companion extension statuses fold into their rows, and degrade when absent
   const fallback = mod.absorbStatuses(new Map([
     ["anthropic-billing", "extra usage x3"], ["auto-effort", "\x1b[33meffort: something new\x1b[0m"], ["lean-context", "trimmed"],
   ]), { claudeRow: false });
-  assert.deepEqual(fallback, { autoEffort: false, rest: ["extra usage x3", "\x1b[33meffort: something new\x1b[0m", "trimmed"] });
+  assert.deepEqual(fallback, { rest: ["extra usage x3", "\x1b[33meffort: something new\x1b[0m", "trimmed"] });
 });
 
 test("a stashed prompt gets its own row under the editor, with a preview when readable", () => {
   const absorbed = mod.absorbStatuses(new Map([["prompt-stash", "\x1b[36mprompt stashed\x1b[0m"]]), { claudeRow: true });
-  assert.deepEqual(absorbed, { autoEffort: false, stashed: true, rest: [] });
+  assert.deepEqual(absorbed, { stashed: true, rest: [] });
   const s = { ...fixture(), statuses: absorbed.rest, stash: { text: "refactor the quota poller\n\nso that it backs off\non 429" } };
   const rows = mod.renderFooter(s, 120, theme).map(plain);
   assert.equal(rows[0], ' \uf187  Stashed \u00b7 "refactor the quota poller" +2 lines \u00b7 ctrl+s to restore');
@@ -480,7 +470,7 @@ test("a stashed prompt gets its own row under the editor, with a preview when re
 test("a waiting heads-up note gets its own row under the editor, filling the width", () => {
   const text = "Chose SQLite over Postgres without saying why";
   const absorbed = mod.absorbStatuses(new Map([["sidebar-headsup", `\u2726 heads up (3) \u00b7 tradeoff: ${text}`]]), { claudeRow: true });
-  assert.deepEqual(absorbed, { autoEffort: false, headsUp: { kind: "tradeoff", text, more: 2 }, rest: [] });
+  assert.deepEqual(absorbed, { headsUp: { kind: "tradeoff", text, more: 2 }, rest: [] });
   const actions = { "headsup.open": { key: "ctrl+'" } };
   const s = { ...fixture(), statuses: [], headsUp: absorbed.headsUp, actions };
   const rows = mod.renderFooter(s, 120, theme).map(plain);
@@ -527,7 +517,6 @@ test("optional companions share label style and preserve meaningful qualifiers",
 
 test("all optional footer rows fit both themes at every width, alone and combined", () => {
   const companions = mod.absorbStatuses(new Map([
-    ["auto-effort", "effort: high (auto ↑, limited: 5h 84%)"],
     ["lean-context", "lean: −12k tok"], ["cache-guard", "cache cold (model)"],
     ["anthropic-billing", "extra usage x3"], ["prompt-stash", "prompt stashed"],
     ["marimo", "marimo: 診断.py · running Data › Model fit (12s) · 2 queued · 1 error · also prep.py, plots.py"],
@@ -543,7 +532,7 @@ test("all optional footer rows fit both themes at every width, alone and combine
   };
   combined.quotas[0].extra = { enabled: true, used: 12.5, limit: 50, currency: "USD" };
   combined.quotas[0].windows[0].reset = now - 1;
-  const variants = [combined, ...["stash", "marimo", "bg", "cache", "lean", "autoEffort", "extraBilled"].map((key) => ({ ...fixture(), [key]: combined[key] })),
+  const variants = [combined, ...["stash", "marimo", "bg", "cache", "lean", "extraBilled"].map((key) => ({ ...fixture(), [key]: combined[key] })),
     { ...fixture(), stash: {} },
     ...["4:12", "1h05m", "cold", "cold?"].map((cache) => ({ ...fixture(), cache })),
     ...["marimo: idle.py", "marimo: local.py · :2718", "marimo: remote.py · nb.example.com/lab · disconnected", "marimo: queued.py · 2 queued", "marimo: broken.py · 2 errors · not open", "marimo: older.py · +3 open", "marimo: /marimo to pick one"].map((text) => ({ ...fixture(), marimo: [mod.parseMarimoStatus(text)] })),
@@ -723,13 +712,12 @@ test("pi-marimo's Lens selections get their own row under the marimo row", () =>
 test("settings previews show targets without phase suffixes or changes to effective state and row budget", () => {
   for (const linked of [false, true]) for (const phase of ["pending", "applying"]) for (const width of [46, 120, 180]) {
     const s = { ...fixture(), workflow: { kind: "work", key: "alt+w" }, mode: { kind: "auto", key: "alt+a" },
-      actions: { "workflow.cycle": {}, "reasoning.cycle": {}, "effort.toggle": { active: true }, "approvals.open": {} },
+      actions: { "workflow.cycle": {}, "reasoning.cycle": {}, "approvals.open": {} },
       ...(linked ? { flow: { operatingMode: "linked", workflow: "work", ready: true, guardAvailable: true, selectedFlow: { provider: "anthropic" } } } : {}) };
     const before = mod.layoutFooter(s, width, theme);
     s.settingsCycle = { id: "preview", phase, settings: [
       { key: "workflow", baseline: "work", target: "plan", actual: "work", label: "plan" },
       { key: "reasoning", baseline: "xhigh", target: "high", actual: "xhigh", label: "high" },
-      { key: "auto-effort", baseline: true, target: false, actual: true, label: "off" },
       { key: "approvals", baseline: "auto", target: "bypassPermissions", actual: "auto", label: "yolo" },
     ] };
     const layout = mod.layoutFooter(s, width, theme);
@@ -741,10 +729,9 @@ test("settings previews show targets without phase suffixes or changes to effect
     assert.doesNotMatch(text, /pending|applying/);
     if (width >= 120) {
       assert.match(text, /high/);
-      assert.match(text, /auto off/);
       assert.match(text, /opus-5\.5/, "Linked preview retains the effective physical model");
     }
-    assert.equal(s.workflow.kind, "work"); assert.equal(s.mode.kind, "auto"); assert.equal(s.actions["effort.toggle"].active, true);
+    assert.equal(s.workflow.kind, "work"); assert.equal(s.mode.kind, "auto");
     for (const hit of layout.hits) assert.ok(hit.startCol >= 0 && hit.endCol <= width);
     const blocked = mod.layoutFooter({ ...s, compact: true }, width, theme);
     assert.equal(blocked.lines.length, 1); assert.deepEqual(blocked.hits, []);
@@ -1440,12 +1427,6 @@ test("lifecycle: native fallback, mode persistence, provider isolation, reload a
     assert.match(h.footer.render(120).join("\n"), /PLAN mode/);
     assert.match(h.footer.render(120)[0], /!/, "unmeasured Git state is not clean");
     assert.doesNotMatch(plain(h.footer.render(120)[1]), /\(auto\)/);
-    h.statuses.set("auto-effort", "effort: xhigh (auto)");
-    await refreshFrame(h);
-    assert.match(plain(h.footer.render(120)[1]), /reasoning auto → xhigh/);
-    assert.doesNotMatch(h.footer.render(120).join("\n"), /effort:/);
-    h.statuses.delete("auto-effort");
-    await refreshFrame(h);
     assert.doesNotMatch(plain(h.footer.render(120)[1]), /\(auto\)/);
     await vi.waitFor(() => assert.equal(fetches.length, 1));
     assert.equal(fetches[0].url, "https://chatgpt.com/backend-api/wham/usage");
@@ -2310,7 +2291,7 @@ test("ordinary low-usage session and weekly windows retain routine reset countdo
 });
 
 const controlState = () => Object.fromEntries([
-  ["model.open", {}], ["reasoning.cycle", {}], ["effort.toggle", { active: true }],
+  ["model.open", {}], ["reasoning.cycle", {}],
   ["workflow.cycle", { key: "ctrl+w" }], ["workflow.open", {}], ["flow.open", {}],
   ["execution.status", {}], ["approvals.open", { key: "ctrl+a" }],
   ["context.open", {}], ["context.skills", {}], ["cache.status", {}], ["mcp.open", {}],
@@ -2335,7 +2316,7 @@ test("final cell metadata selects only explicit values, never labels, icons, sep
   const layout = mod.layoutFooter(s, 180, getThemeByName("dark"));
   assert.deepEqual(mod.renderFooter(s, 180, getThemeByName("dark")), layout.lines);
   assert.deepEqual(layout.hits.map((hit) => [hit.action, hitText(layout, hit)]), [
-    ["model.open", "日本語-e\u0301-model"], ["effort.toggle", "auto"], ["reasoning.cycle", "xhigh"], ["model.open", "alt+p"],
+    ["model.open", "日本語-e\u0301-model"], ["reasoning.cycle", "xhigh"], ["model.open", "alt+p"],
     ["workflow.cycle", "work"], ["workflow.cycle", "ctrl+w"], ["approvals.open", "auto"], ["approvals.open", "ctrl+a"],
     ["context.open", "28%"], ["cache.status", "Cache cold"], ["mcp.open", "MCP 2/3"], ["context.skills", "Skills 7"],
   ]);
@@ -2370,10 +2351,10 @@ test("control-row hint reservation has the exact 18-cell threshold and never sac
   const tiny = mod.layoutFooter({ ...s, model: "日本語" }, 5, theme);
   assert.equal(tiny.hits.filter((hit) => hit.row === 1).length, 0, "a clipped model/ellipsis is inert");
   const narrow = mod.layoutFooter(controlledFixture(), 28, theme);
-  assert.ok(!narrow.hits.some((hit) => hit.action === "effort.toggle" || hit.action === "reasoning.cycle"), "dropped reasoning has no invisible controls");
+  assert.ok(!narrow.hits.some((hit) => hit.action === "reasoning.cycle"), "dropped reasoning has no invisible controls");
 });
 
-test("Linked combines model/workflow while reasoning, auto-off and approvals stay independent", () => {
+test("Linked combines model/workflow while reasoning and approvals stay independent", () => {
   for (const workflow of ["work", "chat", "plan", "exec"]) {
     const independent = { ...controlledFixture(), workflow: { kind: workflow },
       exec: workflow === "exec" ? "review 2 · 3 consultations · $0.31 consult · $0.42 review" : undefined };
@@ -2389,7 +2370,7 @@ test("Linked combines model/workflow while reasoning, auto-off and approvals sta
       assert.equal(separate.lines[2].endsWith(workflow === "exec" ? "/plan-exec" : "ctrl+w"), true);
       assert.equal(joined.lines[1].endsWith("alt+p"), true);
       if (width >= 120) {
-        assert.match(joined.lines[1], /anthropic · opus-5\.5 · .*reasoning auto → xhigh/);
+        assert.match(joined.lines[1], /anthropic · opus-5\.5 · .*reasoning xhigh/);
         if (workflow === "exec") {
           assert.match(joined.lines[1], /review 2/);
           assert.equal(joined.hits.find((hit) => hitText(joined, hit) === "exec").action, "execution.status");
@@ -2398,15 +2379,9 @@ test("Linked combines model/workflow while reasoning, auto-off and approvals sta
       if (width === 180 && workflow === "exec") assert.ok(joined.lines[1].includes(independent.exec));
     }
   }
-  const s = { ...controlledFixture(), flow: flowState(), actions: { ...controlState(), "effort.toggle": { active: false } } };
-  const off = mod.layoutFooter(s, 180, theme);
-  assert.match(off.lines[1], /reasoning xhigh · auto off/);
-  assert.equal(hitText(off, off.hits.find((hit) => hit.action === "effort.toggle")), "auto off");
-  delete s.actions["effort.toggle"];
-  const pinned = mod.layoutFooter(s, 180, theme);
-  assert.match(pinned.lines[1], /reasoning xhigh/);
-  assert.doesNotMatch(pinned.lines[1], /auto off/);
-  assert.ok(!pinned.hits.some((hit) => hit.action === "effort.toggle"));
+  const layout = mod.layoutFooter({ ...controlledFixture(), flow: flowState() }, 180, theme);
+  assert.match(layout.lines[1], /reasoning xhigh/);
+  assert.ok(!layout.hits.some((hit) => hit.action === "effort.toggle"));
 });
 
 test("Linked replanning keeps Plan, physical model and task action across widths and failure states", () => {
@@ -3006,12 +2981,11 @@ test("OpenAI's single Codex row preserves ready, unavailable, stale, reset-due a
   }
 });
 
-test("child chrome clears main flow, mutable workflow, auto-effort and key metadata", async () => {
+test("child chrome clears main flow, mutable workflow and key metadata", async () => {
   const h = host();
   h.ctx.model = { provider: "test", id: "test", contextWindow: 1000 };
   h.pi.events.on("pi-plugins.workflow-flow.v1", (request) => { request.snapshot = flowState("exec"); });
   h.pi.events.on("pi-plugins.footer-actions.v1", (request) => {
-    request.actions["effort.toggle"] = { label: "auto", active: true, run() { throw new Error("child must not mutate main"); } };
     request.actions["workflow.cycle"] = { label: "workflow", key: "ctrl+w", run() {} };
     request.actions["approvals.open"] = { label: "approvals", key: "ctrl+a", run() {} };
   });

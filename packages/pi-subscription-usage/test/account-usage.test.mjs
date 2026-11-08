@@ -1,17 +1,19 @@
 import assert from "node:assert/strict";
 import { test, vi, afterEach } from "vitest";
-import { mkdtemp, mkdir, rm } from "node:fs/promises";
+import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
+import { Tracker } from "../src/quota-pressure.ts";
 import { createHash } from "node:crypto";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import {
   parseClaudeQuota, parseClaudeHeaders, parseCodexUsage, parseCodexHeaders, claudeCodeUserAgent,
-  codexAccountId, codexRateLimitsEvent, codexWindowLabel, mergeQuota, readPiAnthropicUsage, readCodexUsage,
+  codexAccountId, codexRateLimitsEvent, codexWindowLabel, mergeQuota, readPiAnthropicUsage, readCodexUsage, readSelectionPressure,
 } from "../src/account-usage.ts";
 
 const now = Date.parse("2026-09-23T12:00:00Z");
 const directories = [];
 afterEach(async () => {
+  vi.restoreAllMocks();
   vi.unstubAllGlobals();
   vi.unstubAllEnvs();
   await Promise.all(directories.splice(0).map(dir => rm(dir, { recursive: true, force: true })));
@@ -20,10 +22,38 @@ async function isolatedCache() {
   const dir = await mkdtemp(path.join(tmpdir(), "pi-usage-test-"));
   directories.push(dir);
   vi.stubEnv("XDG_CACHE_HOME", dir);
+  vi.stubEnv("XDG_CONFIG_HOME", path.join(dir, "config"));
+  vi.stubEnv("PI_CODING_AGENT_DIR", path.join(dir, "agent"));
   return dir;
 }
 const context = token => ({ modelRegistry: { getApiKeyForProvider: async () => token } });
 const json = body => new Response(JSON.stringify(body), { status: 200 });
+
+test("boundary pressure is neutral when verification is missing or cancelled", async () => {
+  await isolatedCache();
+  assert.equal((await readSelectionPressure(context("sk-ant-oat-test-token"), { provider: "anthropic", id: "claude" })).state, "unavailable");
+  const abort = new AbortController(); abort.abort();
+  const ctx = { modelRegistry: { ...context("sk-ant-oat-test-token").modelRegistry, find: (provider, id) => ({ provider, id, api: "anthropic-messages", baseUrl: "https://api.anthropic.com" }), isUsingOAuth: () => true } };
+  assert.equal((await readSelectionPressure(ctx, { provider: "anthropic", id: "claude" }, { signal: abort.signal })).state, "unavailable");
+});
+
+test("boundary pressure respects physical route, family and cached observation", async () => {
+  await isolatedCache();
+  const expires = new Date(Date.now() + 3600_000).toISOString();
+  let calls = 0;
+  vi.stubGlobal("fetch", async () => { calls++; return json({ five_hour: { utilization: 20, resets_at: expires }, limits: [{ kind: "weekly_scoped", percent: 90, resets_at: expires, scope: { model: { display_name: "Fable" } } }] }); });
+  const registry = { getApiKeyForProvider: async () => "sk-ant-oat-test-token", isUsingOAuth: () => true,
+    find: (provider, id) => ({ provider, id, api: "anthropic-messages", baseUrl: "https://api.anthropic.com" }) };
+  const ctx = { modelRegistry: registry };
+  const sonnet = { provider: "anthropic", id: "claude-sonnet-4" }, fable = { provider: "anthropic", id: "claude-fable-4" };
+  assert.equal((await readSelectionPressure(ctx, sonnet)).p, 0);
+  assert.equal((await readSelectionPressure(ctx, fable, { scope: "shared" })).p, 0);
+  assert.equal((await readSelectionPressure(ctx, fable)).p, 1);
+  assert.equal(calls, 1);
+  assert.equal((await readSelectionPressure(ctx, { provider: "openai", id: "gpt" })).state, "not-applicable");
+  registry.isUsingOAuth = () => false;
+  assert.equal((await readSelectionPressure(ctx, sonnet)).state, "not-applicable");
+});
 
 test("Claude endpoint preserves percentage points, reset dates, scoped windows and spend", () => {
   const quota = parseClaudeQuota({
@@ -457,4 +487,339 @@ test("a fresh cache file from a writer without extra usage support is refetched 
   const cold = await import("../src/account-usage.ts");
   assert.deepEqual((await cold.readPiAnthropicUsage(context(token))).extra, first.extra);
   assert.equal(fetcher.mock.calls.length, 1);
+});
+
+const sonnetTarget = { provider: "anthropic", id: "claude-sonnet-4" };
+function selectionContext(getToken = async () => "sk-ant-oat-selection-tests") {
+  return { modelRegistry: {
+    getApiKeyForProvider: vi.fn(getToken),
+    find: vi.fn((provider, id) => ({ provider, id, type: "chat",
+      api: provider === "anthropic" ? "anthropic-messages" : "openai-codex-responses",
+      baseUrl: provider === "anthropic" ? "https://api.anthropic.com" : "https://chatgpt.com/backend-api" })),
+    isUsingOAuth: vi.fn(() => true),
+  } };
+}
+const assertNeutral = (result, state = "unavailable") => {
+  assert.equal(result.state, state);
+  assert.equal(result.tier, "none");
+  assert.equal(result.p, 0);
+  assert.equal(result.label, undefined);
+};
+
+// These exercise the boundary API itself, not only the shared account collector.
+test("mixed fresh weekly and reset-due 5h quota is unavailable until a fully fresh snapshot recovers", async () => {
+  const cwd = await isolatedCache();
+  const clock = Date.now();
+  vi.spyOn(Date, "now").mockReturnValue(clock);
+  const ctx = selectionContext();
+  const fetcher = vi.fn(async () => json({
+    five_hour: { utilization: 99, resets_at: clock },
+    seven_day: { utilization: 90, resets_at: clock + 7 * 86400_000 },
+  }));
+  vi.stubGlobal("fetch", fetcher);
+  const record = vi.spyOn(Tracker.prototype, "record"), assess = vi.spyOn(Tracker.prototype, "assess");
+  assertNeutral(await readSelectionPressure(ctx, sonnetTarget, { cwd }));
+  assert.equal(record.mock.calls.length, 0);
+  assert.equal(assess.mock.calls.length, 0);
+  // The strict footer/waterfall reader rejects the same whole account snapshot.
+  assert.equal((await readPiAnthropicUsage(ctx)).state, "unavailable");
+  fetcher.mockImplementation(async () => json({
+    five_hour: { utilization: 10, resets_at: clock + 5 * 3600_000 },
+    seven_day: { utilization: 90, resets_at: clock + 7 * 86400_000 },
+  }));
+  const recovered = await readSelectionPressure(ctx, sonnetTarget, { cwd });
+  assert.equal(recovered.state, "ready");
+  assert.equal(recovered.p, 1);
+  assert.equal(recovered.label, "week");
+  assert.equal(record.mock.calls.length, 2);
+  assert.equal(assess.mock.calls.length, 1);
+  assert.equal((await readPiAnthropicUsage(ctx)).state, "ready");
+  assert.equal(fetcher.mock.calls.length, 3);
+});
+
+for (const invalid of ["reset", "age", "future"]) test(`whole-account ${invalid} freshness is rechecked after the final identity await`, async () => {
+  const cwd = await isolatedCache();
+  let clock = Date.now();
+  const observedAt = clock;
+  vi.spyOn(Date, "now").mockImplementation(() => clock);
+  // identity is read before selection, before collection, after collection, and
+  // finally before recording. Only that last await advances time.
+  let identities = 0;
+  const ctx = selectionContext(async () => {
+    if (++identities === 4) clock += invalid === "age" ? 600_000 : invalid === "future" ? -1 : 1000;
+    return "sk-ant-oat-final-freshness";
+  });
+  vi.stubGlobal("fetch", vi.fn(async () => json({
+    five_hour: { utilization: 10, resets_at: observedAt + (invalid === "reset" ? 1000 : 3600_000) },
+    seven_day: { utilization: 90, resets_at: observedAt + 7 * 86400_000 },
+  })));
+  const record = vi.spyOn(Tracker.prototype, "record"), assess = vi.spyOn(Tracker.prototype, "assess");
+  assertNeutral(await readSelectionPressure(ctx, sonnetTarget, { cwd }));
+  assert.equal(identities, 4);
+  assert.equal(record.mock.calls.length, 0);
+  assert.equal(assess.mock.calls.length, 0);
+});
+
+for (const change of ["account", "auth", "route", "oauth", "cancel"]) {
+  for (const stage of ["fetch", "final identity"]) test(`boundary discards stale pressure on ${change} during ${stage}`, async () => {
+    const cwd = await isolatedCache();
+    let token = "sk-ant-oat-selection-a", identities = 0;
+    const controller = new AbortController();
+    const started = deferred(), response = deferred();
+    const ctx = selectionContext(async () => {
+      if (++identities === 4 && stage === "final identity") mutate();
+      return token;
+    });
+    function mutate() {
+      if (change === "account") token = "sk-ant-oat-selection-b";
+      if (change === "auth") token = undefined;
+      if (change === "route") ctx.modelRegistry.find.mockImplementation((provider, id) => ({ provider, id, api: "anthropic-messages", baseUrl: "http://localhost:8080" }));
+      if (change === "oauth") ctx.modelRegistry.isUsingOAuth.mockReturnValue(false);
+      if (change === "cancel") controller.abort();
+    }
+    const fetcher = vi.fn(() => { started.resolve(); return response.promise; });
+    vi.stubGlobal("fetch", fetcher);
+    const record = vi.spyOn(Tracker.prototype, "record"), assess = vi.spyOn(Tracker.prototype, "assess");
+    const pending = readSelectionPressure(ctx, sonnetTarget, { cwd, signal: controller.signal });
+    await started.promise;
+    if (stage === "fetch") mutate();
+    response.resolve(json({ five_hour: { utilization: 99, resets_at: Date.now() + 3600_000 } }));
+    assertNeutral(await pending);
+    assert.equal(record.mock.calls.length, 0);
+    assert.equal(assess.mock.calls.length, 0);
+    // A later, healthy account must not inherit account A's rejected critical tier.
+    const healthy = selectionContext(async () => "sk-ant-oat-selection-b");
+    fetcher.mockImplementation(async () => json({ five_hour: { utilization: 10, resets_at: Date.now() + 3600_000 } }));
+    assert.equal((await readSelectionPressure(healthy, sonnetTarget, { cwd })).p, 0);
+  });
+}
+
+test("boundary normalizes percentages and week duration without manufacturing cache observations", async () => {
+  const cwd = await isolatedCache();
+  let clock = Date.now();
+  vi.spyOn(Date, "now").mockImplementation(() => clock);
+  const observedAt = clock;
+  const ctx = selectionContext();
+  const fetcher = vi.fn(async () => json({ seven_day: { utilization: 30, resets_at: observedAt + 6 * 86400_000 } }));
+  vi.stubGlobal("fetch", fetcher);
+  const record = vi.spyOn(Tracker.prototype, "record"), assess = vi.spyOn(Tracker.prototype, "assess");
+  assert.equal((await readSelectionPressure(ctx, sonnetTarget, { cwd })).p, 0);
+  assert.deepEqual(record.mock.calls, [[{ window: "week", used: 0.3, at: observedAt, resetsAt: observedAt + 6 * 86400_000, lengthMs: 7 * 86400_000 }]]);
+  // With seven-day normalization this is a warming critical pace (30% in one
+  // day). Confirm at the next selection, reusing the exact original observation.
+  clock += 299_999;
+  assert.equal(assess.mock.calls.length, 1);
+  assert.equal((await readSelectionPressure(ctx, sonnetTarget, { cwd })).p, 0);
+  clock++;
+  fetcher.mockRejectedValue(new Error("offline"));
+  assert.equal((await readSelectionPressure(ctx, sonnetTarget, { cwd })).p, 1);
+  assert.equal(record.mock.calls.length, 1);
+  assert.equal(assess.mock.calls.length, 3);
+  clock = observedAt + 599_999;
+  assert.equal((await readSelectionPressure(ctx, sonnetTarget, { cwd })).state, "ready");
+  clock++;
+  assertNeutral(await readSelectionPressure(ctx, sonnetTarget, { cwd }));
+  assert.equal(record.mock.calls.length, 1);
+  assert.equal(assess.mock.calls.length, 4);
+});
+
+for (const body of [null, {}, { five_hour: { utilization: "90", resets_at: 1 } },
+  { five_hour: { utilization: 90 } }, { five_hour: { utilization: 90, resets_at: 1 } },
+  { five_hour: { utilization: 10, resets_at: 1 }, seven_day_opus: { utilization: "90", resets_at: 1 } }]) {
+  test(`boundary returns neutral unknown for missing/malformed/expired quota ${JSON.stringify(body)}`, async () => {
+    const cwd = await isolatedCache();
+    vi.stubGlobal("fetch", vi.fn(async () => json(body)));
+    const record = vi.spyOn(Tracker.prototype, "record");
+    assertNeutral(await readSelectionPressure(selectionContext(), sonnetTarget, { cwd }));
+    assert.equal(record.mock.calls.length, 0);
+  });
+}
+
+test("disabled pressure skips identity, registry and network work", async () => {
+  const cwd = await isolatedCache();
+  await mkdir(path.join(cwd, ".pi"));
+  await writeFile(path.join(cwd, ".pi", "quota-pressure.json"), JSON.stringify({ limits: { enabled: false } }));
+  const ctx = selectionContext(), fetcher = vi.fn();
+  vi.stubGlobal("fetch", fetcher);
+  assertNeutral(await readSelectionPressure(ctx, sonnetTarget, { cwd }), "disabled");
+  assert.equal(ctx.modelRegistry.find.mock.calls.length, 0);
+  assert.equal(ctx.modelRegistry.getApiKeyForProvider.mock.calls.length, 0);
+  assert.equal(fetcher.mock.calls.length, 0);
+});
+
+for (const model of [undefined,
+  { provider: "anthropic", id: "different" },
+  { provider: "anthropic", id: sonnetTarget.id, type: "embedding", api: "anthropic-messages", baseUrl: "https://api.anthropic.com" },
+  { ...sonnetTarget, api: "openai-completions", baseUrl: "https://api.anthropic.com" },
+  { ...sonnetTarget, api: "anthropic-messages", baseUrl: "http://localhost:8080" },
+  { ...sonnetTarget, api: "anthropic-messages", baseUrl: "https://api.anthropic.com/proxy" }]) {
+  test(`unregistered/nonphysical/unsupported route skips quota I/O: ${JSON.stringify(model)}`, async () => {
+    const cwd = await isolatedCache();
+    const ctx = selectionContext(); ctx.modelRegistry.find.mockReturnValue(model);
+    const fetcher = vi.fn(); vi.stubGlobal("fetch", fetcher);
+    assertNeutral(await readSelectionPressure(ctx, sonnetTarget, { cwd }), "not-applicable");
+    assert.equal(ctx.modelRegistry.getApiKeyForProvider.mock.calls.length, 0);
+    assert.equal(fetcher.mock.calls.length, 0);
+  });
+}
+
+test("scoped Anthropic windows never leak across targets or shared selection", async () => {
+  const cwd = await isolatedCache();
+  const ctx = selectionContext();
+  const fetcher = vi.fn(async () => json({ five_hour: { utilization: 0.5, resets_at: Date.now() + 3600_000 },
+    limits: [{ kind: "weekly_scoped", percent: 99, resets_at: Date.now() + 86400_000, scope: { model: { display_name: "Fable" } } }] }));
+  vi.stubGlobal("fetch", fetcher);
+  for (const id of ["claude-fable-4", "claude-sonnet-4", "claude-opus-4", "claude-fablelike-4"]) {
+    const target = { provider: "anthropic", id };
+    assert.equal((await readSelectionPressure(ctx, target, { cwd })).p, id === "claude-fable-4" ? 1 : 0);
+    assert.equal((await readSelectionPressure(ctx, target, { cwd, scope: "shared" })).p, 0);
+  }
+  assert.equal(fetcher.mock.calls.length, 1);
+});
+
+for (const label of ["primary", "secondary", "week", "2h", "1d"]) test(`legacy Codex common ${label} excludes named additional pools and modern OpenAI`, async () => {
+  const cwd = await isolatedCache();
+  const token = collectors[1].token("selection-codex");
+  const ctx = selectionContext(async () => token);
+  const seconds = { week: 604800, "2h": 7200, "1d": 86400 }[label];
+  const key = label === "secondary" ? "secondary_window" : "primary_window";
+  const fetcher = vi.fn(async () => json({ rate_limit: { [key]: { used_percent: 65, limit_window_seconds: seconds, reset_after_seconds: 3600 } },
+    additional_rate_limits: [{ limit_name: "reserve", rate_limit: { primary_window: { used_percent: 99, reset_after_seconds: 3600 } } }] }));
+  vi.stubGlobal("fetch", fetcher);
+  const target = { provider: "openai-codex", id: "gpt-codex" };
+  const record = vi.spyOn(Tracker.prototype, "record");
+  for (const scope of ["shared", "target"]) {
+    const result = await readSelectionPressure(ctx, target, { cwd, scope });
+    assert.equal(result.state, "ready"); assert.equal(result.p, 0.5);
+    assert.ok([label, "5h", "7d"].includes(result.label));
+  }
+  assert.equal(record.mock.calls.length, 2);
+  assert.equal(record.mock.calls[0][0].window, label);
+  assert.equal(record.mock.calls[0][0].used, 0.65);
+  if (seconds) assert.equal(record.mock.calls[0][0].lengthMs, seconds * 1000);
+  assert.equal(fetcher.mock.calls.length, 1);
+  ctx.modelRegistry.getApiKeyForProvider.mockClear();
+  assertNeutral(await readSelectionPressure(ctx, { provider: "openai", id: "gpt" }, { cwd }), "not-applicable");
+  assert.equal(ctx.modelRegistry.getApiKeyForProvider.mock.calls.length, 0);
+});
+
+test("concurrent boundary callers share collection, not cancellation or manufactured observations", async () => {
+  const cwd = await isolatedCache();
+  const ctx = selectionContext();
+  const started = deferred(), response = deferred(), joined = deferred();
+  let identities = 0;
+  ctx.modelRegistry.getApiKeyForProvider.mockImplementation(async () => {
+    if (++identities === 6) joined.resolve(); // all three have reached readUsage
+    return "sk-ant-oat-concurrent-selection";
+  });
+  const fetcher = vi.fn(() => { started.resolve(); return response.promise; });
+  vi.stubGlobal("fetch", fetcher);
+  const controller = new AbortController();
+  const record = vi.spyOn(Tracker.prototype, "record"), assess = vi.spyOn(Tracker.prototype, "assess");
+  const pending = [readSelectionPressure(ctx, sonnetTarget, { cwd, signal: controller.signal }),
+    readSelectionPressure(ctx, sonnetTarget, { cwd }), readSelectionPressure(ctx, sonnetTarget, { cwd })];
+  await Promise.all([started.promise, joined.promise]);
+  controller.abort();
+  assertNeutral(await pending[0]);
+  response.resolve(json({ five_hour: { utilization: 90, resets_at: Date.now() + 3600_000 } }));
+  assert.deepEqual((await Promise.all(pending.slice(1))).map(r => r.p), [1, 1]);
+  assert.equal(fetcher.mock.calls.length, 1);
+  assert.equal(record.mock.calls.length, 1);
+  assert.equal(assess.mock.calls.length, 2);
+});
+
+for (const isolation of ["account", "cache root"]) test(`boundary Tracker history is isolated by ${isolation}`, async () => {
+  const cwd = await isolatedCache();
+  const clock = Date.now(); vi.spyOn(Date, "now").mockReturnValue(clock);
+  let used = 81, token = "sk-ant-oat-history-a";
+  const ctx = selectionContext(async () => token);
+  const fetcher = vi.fn(async () => json({ five_hour: { utilization: used, resets_at: clock + 3600_000 } }));
+  vi.stubGlobal("fetch", fetcher);
+  assert.equal((await readSelectionPressure(ctx, sonnetTarget, { cwd })).p, 1);
+  // A one-point drop would retain critical under Tracker hysteresis if reused.
+  used = 79;
+  if (isolation === "account") token = "sk-ant-oat-history-b";
+  else await isolatedCache();
+  assert.equal((await readSelectionPressure(ctx, sonnetTarget, { cwd })).p, 0.5);
+  assert.equal(fetcher.mock.calls.length, 2);
+});
+
+test("boundary Tracker history has a bounded 32-entry LRU, not a provider-global tier", async () => {
+  const cwd = await isolatedCache();
+  let clock = Date.now(), used = 81;
+  const reset = clock + 3600_000;
+  vi.spyOn(Date, "now").mockImplementation(() => clock);
+  // A fresh module isolates the LRU itself, not just each observation's cache root.
+  vi.resetModules();
+  const { readSelectionPressure: read } = await import("../src/account-usage.ts");
+  const ctx = selectionContext();
+  const fetcher = vi.fn(async () => json({ five_hour: { utilization: used, resets_at: reset } }));
+  vi.stubGlobal("fetch", fetcher);
+  const targets = Array.from({ length: 33 }, (_, i) => ({ provider: "anthropic", id: `claude-sonnet-${i}` }));
+  for (const target of targets.slice(0, 32)) assert.equal((await read(ctx, target, { cwd })).p, 1);
+  await read(ctx, targets[0], { cwd }); // touch oldest so target 1, not 0, is evicted
+  await read(ctx, targets[32], { cwd });
+  clock += 300_000; used = 79;
+  // The retained tier holds under hysteresis; an evicted target starts at caution.
+  assert.equal((await read(ctx, targets[0], { cwd })).p, 1);
+  assert.equal((await read(ctx, targets[1], { cwd })).p, 0.5);
+  assert.equal(fetcher.mock.calls.length, 2);
+});
+
+test("a boundary's final uncooperative identity await is bounded and never records quota", async () => {
+  const cwd = await isolatedCache();
+  let identities = 0;
+  const stalled = deferred();
+  const ctx = selectionContext(() => {
+    if (++identities === 4) { stalled.resolve(); return new Promise(() => {}); }
+    return Promise.resolve("sk-ant-oat-final-stall");
+  });
+  vi.stubGlobal("fetch", vi.fn(async () => json({ five_hour: { utilization: 99, resets_at: Date.now() + 3600_000 } })));
+  const record = vi.spyOn(Tracker.prototype, "record");
+  vi.useFakeTimers();
+  try {
+    const pending = readSelectionPressure(ctx, sonnetTarget, { cwd });
+    await stalled.promise;
+    await vi.advanceTimersByTimeAsync(5_001);
+    assertNeutral(await pending);
+    assert.equal(record.mock.calls.length, 0);
+  } finally { vi.useRealTimers(); }
+});
+
+for (const stale of [false, true]) test(`boundary ${stale ? "rejects" : "preserves"} original per-window observation timestamps from shared cache`, async () => {
+  const cwd = await isolatedCache();
+  const clock = Date.now(); vi.spyOn(Date, "now").mockReturnValue(clock);
+  const token = "sk-ant-oat-window-ages";
+  const account = createHash("sha256").update(token).digest("hex");
+  const root = path.join(cwd, "pi-subscription-usage");
+  await mkdir(root, { mode: 0o700 });
+  const windows = [{ label: "5h", used: 10, reset: clock + 3600_000, observedAt: clock },
+    { label: "week", used: 20, reset: clock + 6 * 86400_000, observedAt: clock - 60_000 },
+    { label: "Fable", used: 99, reset: clock + 86400_000, observedAt: clock - (stale ? 600_000 : 120_000) }];
+  await writeFile(path.join(root, `anthropic-${account}.json`), JSON.stringify({ version: 1, detail: 2,
+    account, provider: "anthropic", updated: clock, windows }), { mode: 0o600 });
+  const fetcher = vi.fn(async () => { throw new Error("offline"); }); vi.stubGlobal("fetch", fetcher);
+  const record = vi.spyOn(Tracker.prototype, "record");
+  const ctx = selectionContext(async () => token);
+  const result = await readSelectionPressure(ctx, sonnetTarget, { cwd, scope: "shared" });
+  if (stale) {
+    // Even an out-of-scope family window invalidates the whole account snapshot.
+    assertNeutral(result);
+    assert.equal(record.mock.calls.length, 0);
+    assert.equal(fetcher.mock.calls.length, 1);
+  } else {
+    assert.equal(result.state, "ready");
+    assert.deepEqual(record.mock.calls.map(([r]) => [r.window, r.used, r.at]), [["5h", 0.1, clock], ["week", 0.2, clock - 60_000]]);
+    assert.equal(fetcher.mock.calls.length, 0);
+  }
+});
+
+test("family-only quota is unavailable, not healthy, outside its target scope", async () => {
+  const cwd = await isolatedCache();
+  vi.stubGlobal("fetch", vi.fn(async () => json({ limits: [{ kind: "weekly_scoped", percent: 99,
+    resets_at: Date.now() + 86400_000, scope: { model: { display_name: "Fable" } } }] })));
+  const ctx = selectionContext(), fable = { provider: "anthropic", id: "claude-fable-4" };
+  assertNeutral(await readSelectionPressure(ctx, sonnetTarget, { cwd }));
+  assertNeutral(await readSelectionPressure(ctx, fable, { cwd, scope: "shared" }));
+  assert.equal((await readSelectionPressure(ctx, fable, { cwd })).p, 1);
 });

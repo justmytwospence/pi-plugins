@@ -7,7 +7,10 @@ import { AgentSession } from "@earendil-works/pi-coding-agent";
 import { downloadsOf } from "../src/downloads.ts";
 import toolGate, { blockedBy, CLASSIFIER_UNAVAILABLE, DECLINED, DECLINED_WITH_MESSAGE, DECLINED_WITH_MESSAGE_END, DEFAULT_CONFIG, judgeStateOf, scriptOfCall } from "../src/index.ts";
 import { APPROVAL_ENTRY, WORKFLOW_ENTRY, WORKFLOW_SET, WORKFLOW_CYCLE, MODE_CYCLE, MODE_CHANGED, MODE_SET, PLAN_PROVIDER } from "../src/modes.ts";
-import { settingsCycles } from "../src/settings-cycle.ts";
+import { SETTINGS_REASONING_COMMITTED, settingsCycles } from "../src/settings-cycle.ts";
+import * as selectionUsage from "@justmytwospence/pi-subscription-usage";
+import * as taskEffort from "../src/task-effort.ts";
+import { effortOrigin, withEffortOrigin } from "../src/effort-origin.ts";
 import { FLOW_ENTRY, queryFlow, requestExecution, requestWorkflow, type FlowState } from "../src/flow-contract.ts";
 import { queryFooterActions } from "../src/footer-actions.ts";
 import * as modelGuard from "../src/model-guard.ts";
@@ -55,7 +58,9 @@ function setup(answers: any, ctxOverrides: Record<string, unknown> = {}) {
   // Coordinator discovery occurs during registration, before any tested interaction.
   h.events.length = 0;
   const branch: any[] = [userEntry("Fix the failing test"), assistantEntry("I'll rerun the tests.")];
-  const jev = fakeJev((questions) => (questions.workaround ? workaround : answers));
+  const jev = fakeJev((questions) => questions.effort ? {
+    effort: { type: "choice", choice: "high", confidence: 0.75, probabilities: { low: 0.05, medium: 0.15, high: 0.75, xhigh: 0.05 } },
+  } : questions.workaround ? workaround : answers);
   const ctx = h.ctx({
     cwd,
     modelRegistry: jev.registry,
@@ -572,7 +577,7 @@ describe("awaited Linked gate transitions", () => {
     const session = { sessionManager: s.ctx.sessionManager, agent: { abort },
       abortRetry() {}, abortCompaction() {}, abortBranchSummary() {}, async waitForIdle() {} };
     (AgentSession.prototype as unknown as { _bindExtensionCore: Function })._bindExtensionCore.call(session, { bindCore() {} });
-    const available = ["start", "general", "planner", "worker"].map(id => ({ provider: "test", id, api: "openai-completions" }));
+    const available = ["start", "general", "planner", "worker"].map(id => ({ provider: "test", id, api: "openai-completions", reasoning: true }));
     let model = available[0]!;
     let serial = 0;
     let roleAvailable = true;
@@ -596,7 +601,7 @@ describe("awaited Linked gate transitions", () => {
     });
     s.h.pi.setModel = setModel;
     s.h.pi.events.on("subagents:role-model", (request: any) => {
-      if (roleAvailable) request.reply = { model: `test/${request.role}`, thinking: "medium" };
+      if (roleAvailable) request.reply = { model: `test/${request.role}`, thinking: "medium", thinkingPinned: true };
     });
     s.h.pi.events.emit(PLAN_PROVIDER, { planFile: "/tmp/approved.md" });
     return { ...s, session, abort, available, setModel, getAvailable, setRoleAvailable: (ready: boolean) => { roleAvailable = ready; } };
@@ -892,7 +897,7 @@ describe("awaited Linked gate transitions", () => {
       await s.h.emit("session_shutdown", {}, s.ctx);
     }
   });
-  test("tool-owned Plan entry is awaited mid-run, preserving approvals and effort; user controls require idle", async () => {
+  test("tool-owned Plan entry is awaited mid-run, preserving approvals and selecting phase effort; user controls require idle", async () => {
     const s = await linkedStart();
     await s.h.commands.get("approvals").handler("yolo", s.ctx);
     s.h.pi.setThinkingLevel("high");
@@ -914,7 +919,7 @@ describe("awaited Linked gate transitions", () => {
     expect(await request.result).toBe(true);
     expect(queryFlow(s.h.pi.events)?.workflow).toBe("plan");
     expect(s.ctx.model.id).toBe("planner");
-    expect(s.h.thinking).toBe("high");
+    expect(s.h.thinking).toBe("medium");
     expect(s.h.entries.filter(entry => entry.customType === APPROVAL_ENTRY)).toEqual([{ customType: APPROVAL_ENTRY, data: { version: 1, mode: "bypassPermissions" } }]);
     await s.h.emit("session_shutdown", {}, s.ctx);
   });
@@ -994,6 +999,221 @@ describe("awaited Linked gate transitions", () => {
     expect(queryFlow(s.h.pi.events)).toEqual(snapshot);
     await s.h.emit("session_shutdown", {}, s.ctx);
   });
+  describe("boundary effort inference and explicit origins", () => {
+    afterEach(() => vi.restoreAllMocks());
+    const unknown = { state: "unavailable" as const, tier: "none" as const, p: 0, reason: "no verified account" };
+    function automaticSetup() {
+      const s = linkedSetup();
+      s.h.pi.events.on("subagents:role-model", (request: any) => {
+        request.reply = { model: `test/${request.role}`, thinking: "medium" };
+      });
+      const quota = vi.spyOn(selectionUsage, "readSelectionPressure").mockResolvedValue(unknown);
+      const judge = vi.spyOn(taskEffort, "judgeTaskEffort");
+      return { ...s, quota, judge };
+    }
+    async function automaticStart() {
+      const s = automaticSetup();
+      await s.h.emit("session_start", {}, s.ctx);
+      await s.h.commands.get("flow").handler("linked test", s.ctx);
+      expect(queryFlow(s.h.pi.events)?.operatingMode).toBe("linked");
+      return s;
+    }
+    const records = (s: ReturnType<typeof linkedSetup>) => s.h.entries.filter(entry => entry.customType === "tool-gate:phase-effort");
+
+    test("only canonical phase/provider selections infer; prompts, errors, restore and reconciliation are inert", async () => {
+      const s = await automaticStart();
+      try {
+        expect(s.judge).toHaveBeenCalledOnce();
+        expect(s.quota).toHaveBeenCalledExactlyOnceWith(s.ctx, { provider: "test", id: "general" }, expect.objectContaining({ scope: "target", cwd: s.ctx.cwd }));
+        expect(s.h.thinking).toBe("high");
+        expect(records(s)).toHaveLength(1);
+        expect(records(s)[0]!.data).toMatchObject({ phase: "general", requested: "high", effective: "high", source: "system1", pressure: unknown,
+          classifier: { backend: "jev", provider: "typesafe", model: "jev-latest" } });
+        const writes = s.h.thinkingChanges.length;
+        for (let i = 0; i < 3; i++) {
+          await s.h.emit("input", { text: "continue", source: "interactive" }, s.ctx);
+          await s.h.emit("before_agent_start", { prompt: "fix another issue" }, s.ctx);
+          await s.h.emit("tool_result", { toolName: "bash", toolCallId: "failed", content: [], isError: true }, s.ctx);
+          await s.h.emit("turn_end", { turnIndex: i, toolResults: [{ isError: true }] }, s.ctx);
+          await s.h.emit("session_tree", {}, s.ctx);
+        }
+        expect(s.h.thinkingChanges).toHaveLength(writes);
+        expect(s.judge).toHaveBeenCalledOnce();
+        expect(s.quota).toHaveBeenCalledOnce();
+        await s.h.commands.get("mode").handler("chat", s.ctx);
+        expect(s.judge).toHaveBeenCalledOnce();
+        await s.h.commands.get("mode").handler("plan", s.ctx);
+        expect(s.judge).toHaveBeenCalledTimes(2);
+        expect(s.judge.mock.calls.at(-1)![0]).toMatchObject({ phase: "plan", task: "Fix the failing test" });
+        expect(s.quota.mock.calls.at(-1)![1]).toEqual({ provider: "test", id: "planner" });
+        await s.h.commands.get("mode").handler("plan", s.ctx);
+        expect(s.judge).toHaveBeenCalledTimes(2);
+        await s.h.commands.get("mode").handler("work", s.ctx);
+        expect(s.judge).toHaveBeenCalledTimes(3);
+        const modelCalls = s.setModel.mock.calls.length;
+        await s.h.commands.get("flow").handler("linked test", s.ctx);
+        expect(s.setModel).toHaveBeenCalledTimes(modelCalls);
+        expect(s.judge).toHaveBeenCalledTimes(4);
+        expect(s.quota).toHaveBeenCalledTimes(4);
+        expect(records(s)).toHaveLength(4);
+        expect(JSON.stringify(records(s))).not.toContain("Fix the failing test");
+      } finally { await s.h.emit("session_shutdown", {}, s.ctx); }
+    });
+
+    test.each(["empty", "nonreasoning", "configured"] as const)("%s context skips both classifier and quota", async kind => {
+      const s = automaticSetup();
+      if (kind === "empty") s.branch.splice(0, s.branch.length);
+      if (kind === "nonreasoning") for (const model of s.available) model.reasoning = false;
+      if (kind === "configured") s.h.pi.events.on("subagents:role-model", (request: any) => {
+        request.reply = { model: `test/${request.role}`, thinking: "high", thinkingPinned: true };
+      });
+      try {
+        await s.h.emit("session_start", {}, s.ctx);
+        await s.h.commands.get("flow").handler("linked test", s.ctx);
+        expect(queryFlow(s.h.pi.events)?.operatingMode).toBe("linked");
+        expect(s.judge).not.toHaveBeenCalled();
+        expect(s.quota).not.toHaveBeenCalled();
+        expect(records(s)[0]!.data).toMatchObject({ source: kind === "configured" ? "configured" : "fallback", requested: kind === "configured" ? "high" : "medium" });
+      } finally { await s.h.emit("session_shutdown", {}, s.ctx); }
+    });
+
+    test("failed judgment falls back to the destination role, preserving unknown quota", async () => {
+      const s = automaticSetup();
+      s.judge.mockResolvedValue({ kind: "fallback", reason: "no classifier" });
+      try {
+        await s.h.emit("session_start", {}, s.ctx);
+        await s.h.commands.get("flow").handler("linked test", s.ctx);
+        expect(s.h.thinking).toBe("medium");
+        expect(records(s)[0]!.data).toMatchObject({ source: "fallback", requested: "medium", effective: "medium", pressure: unknown });
+      } finally { await s.h.emit("session_shutdown", {}, s.ctx); }
+    });
+
+    test("quota and judgment begin concurrently and owned native model/default writes retain provenance", async () => {
+      const nativeJudge = taskEffort.judgeTaskEffort;
+      const s = automaticSetup();
+      const quotaEntered = deferred<void>();
+      const judgeEntered = deferred<void>();
+      const pressure = deferred<typeof unknown>();
+      s.quota.mockImplementationOnce(async () => { quotaEntered.resolve(); return pressure.promise; });
+      s.judge.mockImplementationOnce(async input => { judgeEntered.resolve(); return nativeJudge(input); });
+      const native = s.setModel.getMockImplementation()!;
+      s.setModel.mockImplementationOnce(async model => {
+        expect(effortOrigin()).toBe("flow");
+        await Promise.resolve();
+        expect(effortOrigin()).toBe("flow");
+        return native(model);
+      });
+      try {
+        await s.h.emit("session_start", {}, s.ctx);
+        const pending = s.h.commands.get("flow").handler("linked test", s.ctx);
+        await Promise.all([quotaEntered.promise, judgeEntered.promise]);
+        expect(s.setModel).not.toHaveBeenCalled();
+        pressure.resolve(unknown);
+        await pending;
+        expect(queryFlow(s.h.pi.events)?.operatingMode, JSON.stringify(s.ctx.ui.notes)).toBe("linked");
+        expect(s.h.thinking).toBe("high");
+        expect(effortOrigin()).toBeUndefined();
+      } finally { pressure.resolve(unknown); await s.h.emit("session_shutdown", {}, s.ctx); }
+    });
+
+    test.each(["native", "same-level-final", "system1", "shutdown", "tree"] as const)("%s cancels pending quota/classifier work without late effort mutation", async action => {
+      const s = await automaticStart();
+      const entered = deferred<AbortSignal>();
+      const pressure = deferred<typeof unknown>();
+      s.quota.mockImplementationOnce(async (_ctx, _target, options) => { entered.resolve(options!.signal!); return pressure.promise; });
+      try {
+        const pending = requestWorkflow(s.h.pi.events, "plan")!;
+        const signal = await entered.promise;
+        const writes = s.h.thinkingChanges.length;
+        const recordCount = records(s).length;
+        if (action === "native") {
+          s.h.pi.setThinkingLevel("high"); // Same level, unowned event.
+          await s.h.emit("thinking_level_select", { level: "high", previousLevel: "high" }, s.ctx);
+        }
+        if (action === "same-level-final") {
+          const cycles = settingsCycles(s.h.pi);
+          const staged = cycles.stage(s.ctx, {
+            key: "reasoning", owner: {}, read: () => "low", next: () => "high", format: value => value,
+            validate: () => undefined, current: () => true,
+            apply: () => { s.h.pi.events.emit(SETTINGS_REASONING_COMMITTED, { level: "high" }); return true; },
+          });
+          await cycles.flush();
+          await staged;
+        }
+        if (action === "system1") { selectSystem1("openai-decisions"); s.h.pi.events.emit(SYSTEM1_CHANGED, {}); }
+        if (action === "shutdown") await s.h.emit("session_shutdown", {}, s.ctx);
+        if (action === "tree") await s.h.emit("session_tree", {}, s.ctx);
+        expect(signal.aborted).toBe(true);
+        expect(await pending).toMatchObject({ ok: false });
+        pressure.resolve(unknown);
+        await Promise.resolve();
+        expect(s.setModel).toHaveBeenCalledOnce();
+        expect(records(s)).toHaveLength(recordCount);
+        expect(s.h.thinkingChanges).toHaveLength(writes + (action === "native" ? 1 : 0));
+        if (action !== "shutdown") expect(queryFlow(s.h.pi.events)?.workflow).toBe("work");
+      } finally { pressure.resolve(unknown); await s.h.emit("session_shutdown", {}, s.ctx); }
+    });
+
+    test("a pending classifier answer is discarded after an explicit effort choice even when quota already completed", async () => {
+      const s = await automaticStart();
+      const entered = deferred<AbortSignal>();
+      const answer = deferred<taskEffort.TaskEffortJudgment>();
+      s.judge.mockImplementationOnce(async input => { entered.resolve(input.signal!); return answer.promise; });
+      try {
+        const pending = requestWorkflow(s.h.pi.events, "plan")!;
+        const signal = await entered.promise;
+        s.h.pi.setThinkingLevel("low");
+        await s.h.emit("thinking_level_select", { level: "low", previousLevel: "high" }, s.ctx);
+        expect(signal.aborted).toBe(true);
+        expect(await pending).toMatchObject({ ok: false });
+        answer.resolve({ kind: "fallback", reason: "late classifier" });
+        await Promise.resolve();
+        expect(s.h.thinking).toBe("low");
+        expect(s.setModel).toHaveBeenCalledOnce();
+        expect(records(s)).toHaveLength(1);
+        // This is a current-phase choice, not a sticky Plan pin.
+        expect(await requestWorkflow(s.h.pi.events, "plan")).toMatchObject({ ok: true });
+        expect(s.h.thinking).toBe("high");
+        expect(s.judge).toHaveBeenCalledTimes(3);
+      } finally { answer.resolve({ kind: "fallback", reason: "cancelled" }); await s.h.emit("session_shutdown", {}, s.ctx); }
+    });
+
+    test("invalid final-commit publications cannot cancel preparation; owned effort events cannot cancel it either", async () => {
+      const s = await automaticStart();
+      const entered = deferred<void>();
+      const pressure = deferred<typeof unknown>();
+      s.quota.mockImplementationOnce(async () => { entered.resolve(); return pressure.promise; });
+      try {
+        const pending = requestWorkflow(s.h.pi.events, "plan")!;
+        await entered.promise;
+        for (const data of [null, { level: "high" }, { level: "bogus" }, { level: "medium" }]) s.h.pi.events.emit(SETTINGS_REASONING_COMMITTED, data);
+        withEffortOrigin("plan", () => s.h.pi.setThinkingLevel("high"));
+        pressure.resolve(unknown);
+        expect(await pending).toMatchObject({ ok: true });
+        expect(s.h.thinking).toBe("high");
+      } finally { pressure.resolve(unknown); await s.h.emit("session_shutdown", {}, s.ctx); }
+    });
+
+    test("approved begin applies its exact effort without a second classifier or quota read", async () => {
+      const s = await automaticStart();
+      try {
+        expect(await requestWorkflow(s.h.pi.events, "plan")).toMatchObject({ ok: true });
+        const revision = queryFlow(s.h.pi.events)!.revision;
+        const commit = vi.fn(() => {
+          expect(s.ctx.model.id).toBe("worker");
+          expect(s.h.thinking).toBe("medium");
+          s.h.pi.appendEntry("plan-mode:exec", { active: true, planFile: "/tmp/approved.md" });
+        });
+        expect(await requestExecution(s.h.pi.events, { phase: "begin", expectedRevision: revision, planFile: "/tmp/approved.md",
+          effort: { provider: "test", modelId: "worker", thinkingLevel: "medium", source: "manual" }, commit })).toMatchObject({ ok: true });
+        expect(commit).toHaveBeenCalledOnce();
+        expect(s.judge).toHaveBeenCalledTimes(2);
+        expect(s.quota).toHaveBeenCalledTimes(2);
+        expect(records(s).at(-1)!.data).toMatchObject({ phase: "exec", source: "manual", requested: "medium", effective: "medium" });
+      } finally { await s.h.emit("session_shutdown", {}, s.ctx); }
+    });
+  });
+
   test("Linked model control opens combined choices and approvals still open an explicit picker", async () => {
     const s = await linkedStart();
     const actions = queryFooterActions(s.h.pi.events);

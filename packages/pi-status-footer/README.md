@@ -111,7 +111,6 @@ System 1's optional Context chip shows only the classifier in use (`S1 Jev` or `
 | Extension | Status | Shown as |
 | --- | --- | --- |
 | pi-system1 | Structured order, recent-route and health snapshot | `S1 Jev`, `S1 OpenAI` or `S1 unavailable` on Context; no new row |
-| pi-auto-effort | `effort: high (auto ↑)` | `reasoning high · auto ↑` on the model row (arrow and any `limited:` note kept) |
 | pi-cache-guard | `cache 4:12`, `cache cold` | `Cache 4:12` or `Cache ❄` on the context row (warm in green, cold in the warning color) |
 | pi-tool-gate | `workflow: work (shift+tab to cycle)` and `⏵⏵ auto mode on (alt+a to cycle)` | separate Workflow and Approvals rows, with key hints and the gate tally on Approvals |
 | pi-plan-mode | workflow status and `plan-exec` detail | standalone work/plan workflow; during exec the Workflow row shows phase, counts and costs, while any Approvals row remains independent |
@@ -177,7 +176,7 @@ ordinary readings stay neutral. Each row's leading icon identifies it at a glanc
 Reasoning levels use Pi's native thinking colors. Context and quota percentages
 are bold; warm caches and ready services are green, while warnings and errors
 retain their semantic colors. Distinct pieces of information use a dim `·`;
-auto reasoning and reset countdowns have no parentheses. Quota windows are
+reset countdowns have no parentheses. Quota windows are
 text-only, labeled `Claude` or `Codex`, with quiet reset countdowns. The model row is separate from the project row;
 no background blocks are added.
 
@@ -255,7 +254,7 @@ Other providers get the common session rows, without invented quota information.
 
 ## Settings-cycle preview
 
-Workflow (including standalone Plan), native reasoning, auto-effort and approval cycles share a preview. Repeated or mixed cycles update one combined, UI-only transcript line, backed by hidden append-only snapshots; preview text is not model context. For example: `Settings pending · Workflow plan · Effort high`. Target values reuse existing footer rows without pending/applying suffixes or an increased row budget; only the chat line labels the phase. They are not yet effective: a pending restrictive mode does not protect tools. Only final changed settings apply; a full round trip ends `Settings unchanged` without changing settings.
+Workflow (including standalone Plan), native reasoning and approval cycles share a preview. Repeated or mixed cycles update one combined, UI-only transcript line, backed by hidden append-only snapshots; preview text is not model context. For example: `Settings pending · Workflow plan · Effort high`. Target values reuse existing footer rows without pending/applying suffixes or an increased row budget; only the chat line labels the phase. They are not yet effective: a pending restrictive mode does not protect tools. Only final changed settings apply; a full round trip ends `Settings unchanged` without changing settings.
 
 Keyboard cycles commit when all participating modifiers are released if release reporting is negotiated through the actual terminal path and the current held state is confirmed. SSH, Herdr and tmux paths are negotiated, not assumed to support it. Otherwise, including first or fast interactions while negotiation or held state is unconfirmed, unmodified keys, pointer and programmatic cycles, the final choice applies after 400 ms of inactivity; each accepted cycle restarts that deadline. The deadline stays armed during a confirmed hold too, so a release that a terminal or multiplexer misreports or drops never delays a change beyond it; release only commits sooner. Pausing longer than that while still holding commits the batch, and the next press starts a new one. Each batch has its own transaction; consecutive completed successful or unchanged batches reuse one UI-only history row until a boundary such as submit, an explicit choice, unrelated output or navigation. The row shows the latest batch, not an aggregate of earlier changes.
 

@@ -2,17 +2,16 @@
 title: Manage context & cost
 description: Use cache warnings, reasoning levels and usage measurements without mistaking estimates for guarantees.
 ---
-**Use:** [pi-cache-guard](/plugins/pi-cache-guard/), optionally [pi-auto-effort](/plugins/pi-auto-effort/) and [pi-status-footer](/plugins/pi-status-footer/).
+**Use:** [pi-cache-guard](/plugins/pi-cache-guard/) and optionally [pi-status-footer](/plugins/pi-status-footer/).
 
 ## Start with observation
 
 ```text
 /cache-guard status
 /status details
-/auto-effort status
 ```
 
-Use only the commands for plugins you enabled. The footer can put the cache clock on the context row and auto-effort next to the model. Without it, the plugins still publish their own statuses.
+Use only the commands for plugins you enabled. The footer can put the cache clock on the context row and show native reasoning. Without it, cache guard still publishes its own status.
 
 Keep the distinctions clear:
 
@@ -53,11 +52,9 @@ Tool trimming runs before results enter context and points to a saved full-outpu
 
 ## Let effort follow the work
 
-Auto-effort keeps your selected model and adjusts effort only. It rates the request and sets the thinking level from the floor (low) up to xhigh in its default `free` bounds; `ceiling` bounds cap it at your latest manual level. Off/minimal levels stay alone. Starting Pi with explicit `--thinking` disables automatic effort changes, which is how subagent effort stays fixed.
+Effort is selected at task and Linked phase boundaries, not on every message or during a run. Manual changes govern the current phase; approved implementation effort is applied without reclassification. Quota can influence automatic choices at those boundaries, but telemetry alone never changes effort. See [Choosing effort](/guides/effort/) for precedence, failure behavior and configuration.
 
-Mid-run adjustment is limited to models Pi marks compatible or explicitly configured effort-update models. Do not add broad `midRun.models` globs unless you accept the potential cache cost.
-
-`/auto-effort off` stops adaptation for the session and restores your manual level. Classifier failure keeps the current level. Subscription-limit pressure raises how sure the classifier must be before a higher level is used; `/auto-effort limits` explains the readings and forecast.
+Cache guard preserves supported deliberate effort changes in request history using cache-safe `configuration_update` transport. It does not select effort, and disabling cache warnings does not disable this transport.
 
 ## Warming belongs to Pi
 

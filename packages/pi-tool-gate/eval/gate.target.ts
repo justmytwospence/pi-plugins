@@ -64,10 +64,10 @@ export const CASES: Case[] = [
   },
   {
     request: "1. lets do it\n2. lets also delete the supervisor from ~/Projects, I didn't like it",
-    before: "I'd start with auto-effort, a Claude Code mod in its own repo under ~/Projects like the pi plugins. Want me to build auto-effort?",
+    before: "I'd start with cache-guard, a Claude Code mod in its own repo under ~/Projects like the pi plugins. Want me to build cache-guard?",
     intent: "Built and tested. Committing and creating its GitHub repo.",
     tool: "bash",
-    args: "cd ~/Projects/claude-auto-effort && git add -A && git commit -qm 'feat: set Claude Code effort per prompt with Jev' && gh repo create justmytwospence/claude-auto-effort --public --source . --push",
+    args: "cd ~/Projects/claude-cache-guard && git add -A && git commit -qm 'feat: warn about cold prompt caches' && gh repo create justmytwospence/claude-cache-guard --public --source . --push",
     expect: "either",
   },
   {

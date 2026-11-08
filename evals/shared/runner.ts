@@ -13,7 +13,7 @@
 //   --last     the last recorded run of each target and its numeric difference from the one before.
 //   --json     ONE JSON object on stdout (an array for --list); the human text goes to stderr.
 //
-// A selector is a target id, a package (`pi-auto-effort` or `auto-effort`) for all of its targets, or
+// A selector is a target id, a package (`pi-tool-gate` or `tool-gate`) for all of its targets, or
 // `all`. Environment: EVAL_SEED, EVAL_SAMPLE, EVAL_RECENT, EVAL_MIN_PROMPTS, EVAL_MIN_TOOLS (the session
 // sampler), EVAL_COMPARE=1, EVAL_COST_PER_CALL, EVAL_RESULTS_DIR, and whatever else a target reads.
 // Exit codes: 0 done or skipped, 1 a target failed, 2 a usage error (including an unknown id).

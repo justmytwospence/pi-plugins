@@ -78,6 +78,8 @@ The historical Jev calibration below does not establish equivalent calibration o
 
 The `routing` eval checks 24 fixed task/provider cases crossed over Anthropic, OpenAI, Antigravity Gemini and Muse. Its first live three-repeat run made **72 Jev classifier calls**: 68/72 tier matches (94.4%), 72/72 effort matches (100%), 68/72 joint matches (94.4%), and 24/24 hard-task matches (100%). There were no failed calls, routine premium/xhigh picks, or hard-task fast/balanced picks. The four misses were specified-implementation tasks routed `fast` rather than `balanced`/`strong` (three Anthropic, one OpenAI). The recorded spend was $0.0000, meaning no nonzero cost was reported—not that the paid calls were free. Acceptance thresholds passed, so the reserved 24-call full-matrix follow-up was **not** run. `npm run -s eval -- routing --dry` plans calls without spending. These observed fixture-routing results do **not** measure coding quality, task success, or cost savings. The separate `profiles` replay compares baselines when classification is unavailable, not adaptive routing.
 
+Boundary quota snapshots can influence automatic model and effort choices without changing explicit pins or concurrency. Fixed-model effort uses the target's account and matching windows; unknown or unsupported quota remains neutral, not healthy. Queued launches, resumes and steering retain their selected tuple. See [Choosing effort](/guides/effort/).
+
 ## What was not verified
 
 - Parameter counts and any "size" ordering of the models: neither lab states them.

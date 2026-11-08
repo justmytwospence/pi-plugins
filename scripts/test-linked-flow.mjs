@@ -35,7 +35,8 @@ const patchSymbol = Symbol.for('pi-plugins.linked-model-guard.v1');
 const bridgeSymbol = Symbol.for('pi-plugins.test-linked-flow.fixture');
 const temp = mkdtempSync(resolve(tmpdir(), 'pi-suite-linked-flow-'));
 const originalCwd = process.cwd();
-const originalEnv = Object.fromEntries(['HOME', 'PI_CODING_AGENT_DIR', 'XDG_CONFIG_HOME', 'PI_OFFLINE']
+const originalEnv = Object.fromEntries(['HOME', 'PI_CODING_AGENT_DIR', 'XDG_CONFIG_HOME', 'PI_OFFLINE',
+  'PI_SUBAGENT', 'PI_TOOL_GATE_APPROVAL', 'PI_TOOL_GATE_WORKFLOW']
   .map(key => [key, process.env[key]]));
 const restores = [];
 const sessions = [];
@@ -82,6 +83,8 @@ try {
   process.env.PI_CODING_AGENT_DIR = temp;
   process.env.XDG_CONFIG_HOME = resolve(temp, 'xdg');
   process.env.PI_OFFLINE = '1';
+  // The SDK fixtures are top-level sessions, not children of the test runner.
+  for (const key of ['PI_SUBAGENT', 'PI_TOOL_GATE_APPROVAL', 'PI_TOOL_GATE_WORKFLOW']) delete process.env[key];
   process.chdir(temp);
   // Install tripwires before importing the SDK. Offline catalogs and in-memory auth
   // are not substitutes for failing a test that accidentally tries the network.
@@ -179,12 +182,30 @@ export default function (pi) {
   for (const method of ['stream', 'complete', 'completeSimple', 'streamDeferred', 'fetchDeferred', 'generateImages']) {
     models[method] = forbid(`inference ${method}`, inferenceAttempts);
   }
-  // Approval now requests a one-shot effort default. Keep this lifecycle fixture
-  // offline and exercise unavailable-classifier fallback, never a paid transport.
-  models.classify = async (_model, context) => {
-    assert.deepEqual(Object.keys(context.questions), ['effort']);
-    assert.equal(context.state.phase, 'implementation');
-    return { answers: {}, stopReason: 'error', errorMessage: 'Offline effort classifier fixture' };
+  // Only replace the final classifier transport. Effort and unrelated permission
+  // questions share System 1, so count by the question contract, not total calls.
+  writeFileSync(resolve(temp, 'system1.json'), JSON.stringify({ waterfall: ['jev'] }));
+  const effortCalls = [];
+  const otherClassifierCalls = [];
+  // On this authenticated private route, boundary quota demand reaches the real
+  // registry's OAuth applicability check but never a subscription endpoint. None
+  // of the loaded siblings has observational quota refreshes (no footer here).
+  const quotaChecks = [];
+  const nativeOAuth = models.isUsingOAuth.bind(models);
+  models.isUsingOAuth = provider => { quotaChecks.push(provider); return nativeOAuth(provider); };
+  let effortTransport;
+  const effortAnswer = model => ({ model: model.id, stopReason: 'stop', answers: {
+    effort: { type: 'choice', choice: 'high', confidence: 0.4,
+      probabilities: { low: 0.3, medium: 0.25, high: 0.4, xhigh: 0.05 } },
+  } });
+  models.classify = async (model, context, options) => {
+    if (Object.keys(context.questions).length === 1 && context.questions.effort?.type === 'choice') {
+      assert(['general', 'plan', 'exec'].includes(context.state.phase), 'canonical effort phase');
+      const call = { model, context: structuredClone(context), options };
+      effortCalls.push(call);
+      if (effortTransport) return effortTransport(call);
+    } else otherClassifierCalls.push({ model, context: structuredClone(context) });
+    return { answers: {}, stopReason: 'error', errorMessage: 'Offline classifier fixture' };
   };
   models.streamSimple = model => {
     assert(localModels.some(local => modelRef(local) === modelRef(model)), 'only a local transport can run');
@@ -594,7 +615,10 @@ export default function (pi) {
   // Earlier startup handlers can select the restored model before this observer starts.
   // Capture those events too, rather than throwing or silently dropping them.
   const record = { pi, ctx: undefined, AgentSession, createAssistantMessageEventStream, createCustomSelectorHarness,
-    starts: [], models: [], roleQueries: [], workflows: [], shutdowns: 0 };
+    starts: [], models: [], roleQueries: [], workflows: [], activity: [], shutdowns: 0 };
+  for (const type of ['input', 'tool_result', 'turn_end']) pi.on(type, event => {
+    record.activity.push({ type, ...(type === 'tool_result' ? { isError: event.isError, toolName: event.toolName } : {}) });
+  });
   pi.on('session_start', (_event, ctx) => {
     record.ctx = ctx;
     records.push(record);
@@ -640,18 +664,18 @@ export default function (pi) {
     const index = sessions.indexOf(current);
     if (index >= 0) sessions.splice(index, 1);
   }
-  function roles(dir, same, general = 'work') {
+  function roles(dir, same, general = 'work', pins = true) {
     const agents = resolve(dir, '.pi/agents');
     mkdirSync(agents, { recursive: true });
     for (const [role, id, effort] of [['general', general, 'low'], ['planner', 'plan', 'high'], ['worker', same ? 'plan' : 'worker', 'medium']]) {
-      writeFileSync(resolve(agents, `${role}.md`), `---\nname: ${role}\ndescription: Local ${role}\nmodels:\n  ${provider}: ${provider}/${id}:${effort}\n  linked-other: linked-other/work:${effort}\n---\nLocal role fixture.\n`);
+      writeFileSync(resolve(agents, `${role}.md`), `---\nname: ${role}\ndescription: Local ${role}\nmodels:\n  ${provider}: ${provider}/${id}${pins ? `:${effort}` : ''}\n  linked-other: linked-other/work${pins ? `:${effort}` : ''}\n---\nLocal role fixture.\n`);
     }
   }
-  async function flowFixture(label, names, { same = false, seed, tui = false, nativeTui = false, compaction, newSession, review = false, planShortcut } = {}) {
+  async function flowFixture(label, names, { same = false, general = 'work', pins = true, seed, tui = false, nativeTui = false, compaction, newSession, review = false, planShortcut } = {}) {
     const dir = resolve(temp, label);
     mkdirSync(dir, { recursive: true });
     process.chdir(dir);
-    roles(dir, same);
+    roles(dir, same, general, pins);
     writeFileSync(resolve(temp, 'tool-gate.json'), JSON.stringify({ defaultApproval: 'auto' }));
     writeFileSync(resolve(temp, 'subagents.json'), JSON.stringify({ jev: { enabled: false }, widget: 'off', fleetView: false }));
     writeFileSync(resolve(temp, 'pi-plan-mode.json'), JSON.stringify({
@@ -786,8 +810,149 @@ export default function (pi) {
   async function scenario(label, run) {
     try { await run(); console.log(`PASS actual Pi linked flow: ${label}`); }
     catch (error) { failures.push(error); console.error(`FAIL actual Pi linked flow: ${label}: ${error.stack}`); }
-    finally { authHook = undefined; }
+    finally { authHook = undefined; effortTransport = undefined; }
   }
+
+  // Real input/agent/tool/turn events must not become task-admission boundaries.
+  // Run both extension orders and both distinct and same physical phase models.
+  for (const names of [orderings[0], orderings.at(-1)]) for (const general of ['work', 'plan']) {
+    const label = `boundary-effort-${names.join('+')}-${general}`;
+    await scenario(label, async () => {
+      const test = await flowFixture(label, names, { general, pins: false });
+      const current = test.current();
+      const writes = [];
+      const nativeThinking = current.setThinkingLevel;
+      current.setThinkingLevel = function (level, ...args) {
+        writes.push(level);
+        return nativeThinking.call(this, level, ...args);
+      };
+      const entries = () => current.sessionManager.getBranch().filter(entry => entry.customType === 'tool-gate:phase-effort');
+      const state = () => ({ calls: effortCalls.length, quotaChecks: quotaChecks.length,
+        writes: [...writes], entries: structuredClone(entries()), thinking: current.thinkingLevel });
+      const unchangedEffort = async (label, run) => {
+        const before = state();
+        await run();
+        assert.deepEqual(state(), before, `${label}: no effort classifier, quota demand, setter or boundary entry`);
+      };
+      try {
+        await unchangedEffort('ordinary Independent input', () => test.turn('Investigate the parser and design a focused fix.'));
+        effortTransport = ({ model }) => effortAnswer(model);
+        const beforeSelection = effortCalls.length;
+        const quotaBeforeSelection = quotaChecks.length;
+        await test.command('/flow linked');
+        assert.equal(test.flow().operatingMode, 'linked');
+        assert.equal(current.model.id, general, 'assigned General model is preserved');
+        assert.equal(effortCalls.length, beforeSelection + 1, 'explicit selection judges General once');
+        assert.equal(quotaChecks.length, quotaBeforeSelection + 1, 'selection demand-reads target pressure once');
+        assert.equal(current.thinkingLevel, 'medium', 'cumulative theta=0.5 wins, not argmax high');
+        assert.equal(entries().at(-1).data.phase, 'general');
+        assert.equal(entries().at(-1).data.source, 'system1');
+        assert.equal(entries().at(-1).data.requested, 'medium');
+        assert.equal(entries().at(-1).data.effective, 'medium');
+        assert.equal(entries().at(-1).data.pressure.state, 'not-applicable', 'private route is not healthy/unlimited quota');
+        assert.equal(entries().at(-1).data.classifier.provider, 'typesafe');
+        assert.equal(entries().at(-1).data.classifier.model, 'jev-latest');
+        current.setThinkingLevel('high'); // Real unowned SDK event, seen by both extensions.
+        await test.command('/approvals yolo');
+        await unchangedEffort('General messages and same-model reconciliation', async () => {
+          for (const mode of ['chat', 'work', 'work']) await test.command(`/mode ${mode}`);
+          await test.turn('Now solve a genuinely hard problem, not an acknowledgement.');
+          const failed = await test.call('read', { path: resolve(test.dir, 'missing-effort-regression.txt') });
+          assert.equal(failed.isError, true, 'a real failed tool result crosses the lifecycle');
+          await test.turn('Retry the investigation after that tool error.');
+          // Exercise the actual before-agent-start handler independently as well.
+          await current.extensionRunner.emit({ type: 'before_agent_start', prompt: 'Probe reconciliation', systemPrompt: '' });
+        });
+        assert(test.record.activity.some(event => event.type === 'input'));
+        assert(test.record.starts.length >= 3, 'real prompts dispatched before_agent_start');
+        assert(test.record.activity.some(event => event.type === 'tool_result' && event.isError));
+        assert(test.record.activity.some(event => event.type === 'turn_end'));
+        const beforePlan = effortCalls.length;
+        await test.command('/plan');
+        assert.equal(test.flow().workflow, 'plan');
+        assert.equal(current.model.id, 'plan', 'Plan keeps its durable model even when General shares it');
+        assert.equal(effortCalls.length, beforePlan + 1, 'genuine General → Plan calibrates once, even on the same model');
+        assert.equal(current.thinkingLevel, 'medium', 'later phase may replace a manual General choice');
+        assert.equal(entries().at(-1).data.phase, 'plan');
+        current.setThinkingLevel('high');
+        const planLeaf = current.sessionManager.appendCustomEntry('test:effort-plan', {});
+        await unchangedEffort('Plan routine input and restore', async () => {
+          await test.turn('Continue investigating without crossing a phase boundary.');
+          await test.reload();
+          await test.turn('Resume the existing Plan after reload.');
+        });
+        const beforeTree = { calls: effortCalls.length, quota: quotaChecks.length };
+        await test.go(planLeaf);
+        assert.deepEqual({ calls: effortCalls.length, quota: quotaChecks.length }, beforeTree,
+          'tree restore never reclassifies or reads pressure');
+        assert.equal(current.thinkingLevel, 'high', 'native saved effort is restoration authority');
+        const planFile = branchData(current, 'plan-mode:inline').planFile;
+        writeFileSync(planFile, '# Effort integration plan\n\nImplement the focused parser fix.\n');
+        const beforeApproval = effortCalls.length;
+        test.choices.push('Approve and implement', 'low');
+        await test.call('exit_plan_mode');
+        assert.equal(test.flow().workflow, 'exec');
+        assert.equal(current.model.id, 'worker');
+        assert.equal(effortCalls.length, beforeApproval + 1, 'approval judges once; coordinator does not reclassify Exec');
+        assert.equal(current.thinkingLevel, 'low', 'manual approval overrides the automatic default');
+        assert.equal(entries().at(-1).data.phase, 'exec');
+        assert.equal(entries().at(-1).data.source, 'manual');
+        assert.equal(entries().at(-1).data.requested, 'low');
+        await unchangedEffort('approved Exec continuation and reload', async () => {
+          await test.turn('Continue the approved implementation.');
+          await test.reload();
+          await test.turn('Resume the same execution.');
+        });
+        const beforeReplan = effortCalls.length;
+        await test.command('/plan');
+        assert.equal(effortCalls.length, beforeReplan + 1, 'explicit replan is another Plan boundary');
+        assert.equal(current.thinkingLevel, 'medium');
+        const draft = test.exec().replanning.draftFile;
+        writeFileSync(draft, '# Revised effort plan\n\nImplement the revised fix.\n');
+        const beforeResume = effortCalls.length;
+        test.choices.push('Approve and implement', 'high');
+        await test.call('exit_plan_mode');
+        assert.equal(effortCalls.length, beforeResume + 1, 'reapproval judges the revised plan once, not again at resume');
+        assert.equal(current.thinkingLevel, 'high');
+        assert.equal(entries().at(-1).data.source, 'manual');
+        assert.deepEqual(test.errors, []);
+      } finally { current.setThinkingLevel = nativeThinking; await test.dispose(); }
+    });
+  }
+
+  await scenario('manual native effort cancels a pending cross-extension phase judgment', async () => {
+    const test = await flowFixture('manual-phase-effort-race', orderings[3], { pins: false });
+    const entered = deferred();
+    const release = deferred();
+    let selecting;
+    try {
+      await test.turn('Investigate a parser bug and design its fix.');
+      effortTransport = ({ model }) => effortAnswer(model);
+      await test.command('/flow linked');
+      const current = test.current();
+      const entries = structuredClone(customRecords(current));
+      const before = effortCalls.length;
+      effortTransport = async ({ model }) => { entered.resolve(); await release.promise; return effortAnswer(model); };
+      selecting = test.command('/plan');
+      await deadline(entered.promise, 'pending Plan effort transport');
+      const call = effortCalls.at(-1);
+      current.setThinkingLevel('high');
+      await deadline(selecting, 'manual choice cancels Plan without waiting for classifier');
+      assert.equal(call.options.signal.aborted, true, 'unowned SDK effort event aborts pending inference');
+      release.resolve();
+      await new Promise(resolve => setImmediate(resolve));
+      assert.equal(effortCalls.length, before + 1);
+      assert.equal(test.flow().workflow, 'work', 'cancelled preparation commits no phase');
+      assert.equal(current.model.id, 'work');
+      assert.equal(current.thinkingLevel, 'high', 'late answer cannot overwrite manual effort');
+      assert.deepEqual(customRecords(current), entries);
+      effortTransport = ({ model }) => effortAnswer(model);
+      await test.command('/plan');
+      assert.equal(test.flow().workflow, 'plan', 'a later explicit boundary is not permanently pinned');
+      assert.equal(current.thinkingLevel, 'medium');
+      assert.deepEqual(test.errors, []);
+    } finally { release.resolve(); await selecting; await test.dispose(); }
+  });
 
   await scenario('TUI cycles share settlement; explicit commands and Linked role commits stay authoritative', async () => {
     const test = await flowFixture('settings-cycle-settlement', orderings[3], { tui: true, planShortcut: 'alt+o' });
@@ -910,10 +1075,12 @@ export default function (pi) {
         assert.equal(branchData(current, 'tool-gate:flow'), undefined, 'old/empty histories default to Independent without writing');
         await test.command('/mode plan');
         check('plan', 'work', 'independent');
+        const pinnedCalls = { calls: effortCalls.length, quota: quotaChecks.length };
         await test.command('/flow linked');
         check('plan', 'plan');
         assert.equal(current.thinkingLevel, 'high', 'initial activation applies destination role suggestion');
         const initial = structuredClone(test.flow().selectedFlow);
+        assert(Object.values(initial.roles).every(role => role.thinkingPinned === true), 'authored role effort provenance survives discovery');
         assert.deepEqual(initial.roles.work, initial.roles.chat);
         assert.deepEqual(Object.fromEntries(Object.entries(initial.roles).map(([phase, role]) => [phase, role.modelId])),
           { work: 'work', chat: 'work', plan: 'plan', exec: same ? 'plan' : 'worker' });
@@ -924,12 +1091,18 @@ export default function (pi) {
           approvals: test.statuses.get('permission-mode') }, preserved, 'unlink changes no other axis');
         await test.command('/flow linked');
         current.setThinkingLevel('medium');
+        // SDK setters dispatch effort events asynchronously. Let this completed
+        // manual choice settle before requesting a later (non-racing) boundary.
+        await new Promise(resolve => setImmediate(resolve));
         for (const mode of ['chat', 'plan', 'work']) {
           const result = await request(test.record, { kind: 'workflow', workflow: mode });
           assert.equal(result.ok, true, result.error);
           check(mode, initial.roles[mode].modelId);
-          assert.equal(current.thinkingLevel, 'medium', 'phase changes do not reapply suggested effort');
+          assert.equal(current.thinkingLevel, initial.roles[mode].suggestedThinking,
+            'a genuine phase boundary applies authored effort pins rather than carrying current effort');
         }
+        assert.deepEqual({ calls: effortCalls.length, quota: quotaChecks.length }, pinnedCalls,
+          'authored pins skip effort classification and quota demand at selection and phase boundaries');
         await test.command('/flow');
         assert.deepEqual(test.dialogs.at(-1), { title: 'Operating mode', options: ['Independent', 'Linked · linked-local', 'Linked · linked-other'] });
         await test.command('/mode');

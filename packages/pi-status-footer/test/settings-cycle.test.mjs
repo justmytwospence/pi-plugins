@@ -67,18 +67,33 @@ beforeEach(() => vi.useFakeTimers());
 afterEach(() => vi.useRealTimers());
 
 describe("settings cycle coordinator", () => {
+  it.each([false, true])("restores inert legacy history (mixed: %s)", async mixed => {
+    const h = host(); settingsCycles(h.pi);
+    const auto = { key: "auto-effort", baseline: false, target: true, actual: true, label: "on" };
+    const workflow = { key: "workflow", baseline: "work", target: "plan", actual: "plan", label: "plan" };
+    h.pi.appendEntry("settings:cycle", { version: 1, id: "legacy", phase: "applied", settings: mixed ? [workflow, auto] : [auto] });
+    await h.emit("session_start");
+    const component = h.renderers.get("settings:cycle")(h.entries[0], {}, { fg: (_color, text) => text });
+    expect(component.render(120)[0]).toBe(mixed ? "Settings · Workflow plan · Auto on" : "Settings · Auto on");
+    expect(h.entries).toHaveLength(1);
+  });
+  it("rejects retired settings even for untyped callers", async () => {
+    const h = host(), cycles = settingsCycles(h.pi), retired = control("auto-effort", false, [false, true]);
+    expect(await cycles.stage(h.ctx, retired.change)).toBe(false);
+    expect(retired.value).toBe(false); expect(h.entries).toHaveLength(0);
+  });
   it("shares a trailing deadline, pending targets and a single visible anchor", async () => {
-    const h = host(), cycles = settingsCycles(h.pi), workflow = control("workflow", "work", ["work", "plan", "linked"]), auto = control("auto-effort", false, [false, true]);
+    const h = host(), cycles = settingsCycles(h.pi), workflow = control("workflow", "work", ["work", "plan", "linked"]), approvals = control("approvals", "ask", ["ask", "auto"]);
     const a = cycles.stage(h.ctx, workflow.change);
     await vi.advanceTimersByTimeAsync(I - 1);
     expect(workflow.value).toBe("work");
-    const b = cycles.stage(h.ctx, workflow.change), c = cycles.stage(h.ctx, auto.change);
+    const b = cycles.stage(h.ctx, workflow.change), c = cycles.stage(h.ctx, approvals.change);
     expect(anchors(h)).toHaveLength(1); expect(states(h).length).toBeGreaterThanOrEqual(2);
     expect(cycles.snapshot().settings.find(s => s.key === "workflow").target).toBe("linked");
     await vi.advanceTimersByTimeAsync(I - 1); expect(workflow.value).toBe("work");
     await vi.advanceTimersByTimeAsync(1);
     expect(await Promise.all([a, b, c])).toEqual([true, true, true]);
-    expect(workflow.value).toBe("linked"); expect(auto.value).toBe(true); expect(last(h).phase).toBe("applied");
+    expect(workflow.value).toBe("linked"); expect(approvals.value).toBe("auto"); expect(last(h).phase).toBe("applied");
   });
   it("resets the idle deadline only for accepted stages", async () => {
     expect(SETTINGS_CYCLE_IDLE_MS).toBe(400);
@@ -108,12 +123,12 @@ describe("settings cycle coordinator", () => {
   });
   it("validates all settings before applying, and applies in safety order", async () => {
     const h = host(), cycles = settingsCycles(h.pi), calls = [];
-    const controls = [control("approvals", "ask", ["ask", "auto"], calls), control("reasoning", "low", ["low", "high"], calls), control("auto-effort", false, [false, true], calls), control("workflow", "work", ["work", "plan"], calls)];
+    const controls = [control("approvals", "ask", ["ask", "auto"], calls), control("reasoning", "low", ["low", "high"], calls), control("workflow", "work", ["work", "plan"], calls)];
     const first = controls.map(c => cycles.stage(h.ctx, c.change)); controls[0].valid = false; await vi.advanceTimersByTimeAsync(I);
-    expect(await Promise.all(first)).toEqual([false, false, false, false]); expect(calls).toEqual([]);
+    expect(await Promise.all(first)).toEqual([false, false, false]); expect(calls).toEqual([]);
     controls[0].valid = true;
     const second = controls.map(c => cycles.stage(h.ctx, c.change)); await vi.advanceTimersByTimeAsync(I);
-    expect(await Promise.all(second)).toEqual([true, true, true, true]); expect(calls).toEqual(["workflow", "auto-effort", "reasoning", "approvals"]);
+    expect(await Promise.all(second)).toEqual([true, true, true]); expect(calls).toEqual(["workflow", "reasoning", "approvals"]);
   });
   it("reports partial application and refuses staging during an async commit", async () => {
     const h = host(), cycles = settingsCycles(h.pi), calls = [];
@@ -158,10 +173,10 @@ describe("settings cycle coordinator", () => {
     expect(await second).toBe(true); expect(a.value).toBe("work"); expect(b.value).toBe("linked"); expect(anchors(h)).toHaveLength(2);
   });
   it("provides only net-changed targets to setters", async () => {
-    const h = host(), cycles = settingsCycles(h.pi), auto = control("auto-effort", true, [true, false]), reasoning = control("reasoning", "low", ["low", "high"]); let targets;
-    auto.apply = async (value, finalTargets) => { targets = finalTargets; auto.value = value; return true; };
-    const requests = [cycles.stage(h.ctx, auto.change), cycles.stage(h.ctx, reasoning.change), cycles.stage(h.ctx, reasoning.change)];
-    await vi.advanceTimersByTimeAsync(I); expect(await Promise.all(requests)).toEqual([true, true, true]); expect(targets).toEqual({ "auto-effort": false });
+    const h = host(), cycles = settingsCycles(h.pi), workflow = control("workflow", "work", ["work", "plan"]), reasoning = control("reasoning", "low", ["low", "high"]); let targets;
+    workflow.apply = async (value, finalTargets) => { targets = finalTargets; workflow.value = value; return true; };
+    const requests = [cycles.stage(h.ctx, workflow.change), cycles.stage(h.ctx, reasoning.change), cycles.stage(h.ctx, reasoning.change)];
+    await vi.advanceTimersByTimeAsync(I); expect(await Promise.all(requests)).toEqual([true, true, true]); expect(targets).toEqual({ workflow: "plan" });
   });
   it("finishes a cancelled in-flight setter before blocking a later input", async () => {
     const h = host(), cycles = settingsCycles(h.pi), c = control("workflow", "work", ["work", "plan"]); let release;
@@ -489,7 +504,7 @@ describe("settings cycle coordinator", () => {
     const second = cycles.stage(h.ctx, b.change); await vi.advanceTimersByTimeAsync(I); expect(await second).toBe(true);
     expect(anchors(h)).toHaveLength(2);
   });
-  it.each(["tool-gate:workflow", "tool-gate:approvals", "tool-gate:flow", "tool-gate:chat-notice", "plan-mode:inline", "auto-effort:state", "auto-effort:manual-level"])("allows own setting persistence during a setter: %s", async customType => {
+  it.each(["tool-gate:workflow", "tool-gate:approvals", "tool-gate:flow", "tool-gate:chat-notice", "plan-mode:inline", "tool-gate:phase-effort"])("allows own setting persistence during a setter: %s", async customType => {
     const h = host(), cycles = settingsCycles(h.pi), c = control("workflow", "work", ["work", "plan"]);
     c.apply = async value => { h.pi.appendEntry(customType, {}); c.value = value; return true; };
     const first = cycles.stage(h.ctx, c.change); await vi.advanceTimersByTimeAsync(I); expect(await first).toBe(true);
@@ -522,7 +537,7 @@ describe("settings cycle coordinator", () => {
   });
   it.each([true, false])("checks records appended by final publication listeners (setting-owned: %s)", async owned => {
     const h = host(), cycles = settingsCycles(h.pi), c = control("workflow", "work", ["work", "plan"]);
-    h.pi.events.on("pi-plugins.settings-cycle.v1", event => { if (event.snapshot?.phase === "applied") h.pi.appendEntry(owned ? "auto-effort:state" : "unrelated:output", {}); });
+    h.pi.events.on("pi-plugins.settings-cycle.v1", event => { if (event.snapshot?.phase === "applied") h.pi.appendEntry(owned ? "tool-gate:phase-effort" : "unrelated:output", {}); });
     const first = cycles.stage(h.ctx, c.change); await vi.advanceTimersByTimeAsync(I); expect(await first).toBe(true);
     const second = cycles.stage(h.ctx, c.change); await vi.advanceTimersByTimeAsync(I); expect(await second).toBe(true);
     expect(anchors(h)).toHaveLength(owned ? 1 : 2);

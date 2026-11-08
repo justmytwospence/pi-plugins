@@ -93,7 +93,7 @@ export interface Snapshot {
   workflow?: WorkflowStatus;
   /** pi-plan-mode's exec workflow detail after `exec mode on · `, empty when no detail is published. */
   exec?: string;
-  autoEffort?: boolean; autoEffortDetail?: string; lean?: string; cache?: string; extraBilled?: number;
+  lean?: string; cache?: string; extraBilled?: number;
   /** A prompt stashed by @saadjs/pi-stash; text is its content when readable. */
   stash?: { text?: string };
   /** pi-sidebar's latest waiting heads-up note (Sidebar closed); more counts the earlier ones. */
@@ -270,12 +270,11 @@ export function parseModeStatus(text: string): PermissionModeStatus | undefined 
   return { kind: MODE_KINDS[match[2]], label: `${glyph} ${match[2]} on`, ...(match[3] ? { key: match[3] } : {}) };
 }
 
-export interface AbsorbedStatuses { workflow?: WorkflowStatus; mode?: PermissionModeStatus; exec?: string; autoEffort: boolean; autoEffortDetail?: string; lean?: string; cache?: string; extraBilled?: number; stashed?: boolean; headsUp?: { kind: string; text: string; more: number }; marimo?: MarimoStatus[]; lens?: LensStatus; bg?: BgItem[]; pressure?: PressureItem[]; /** Another extension owns the `mcp` status. */ mcp?: boolean; rest: string[] }
+export interface AbsorbedStatuses { workflow?: WorkflowStatus; mode?: PermissionModeStatus; exec?: string; lean?: string; cache?: string; extraBilled?: number; stashed?: boolean; headsUp?: { kind: string; text: string; more: number }; marimo?: MarimoStatus[]; lens?: LensStatus; bg?: BgItem[]; pressure?: PressureItem[]; /** Another extension owns the `mcp` status. */ mcp?: boolean; rest: string[] }
 // Statuses from our own companion extensions that read better inside the footer
 // rows they describe. Each is optional: absent extensions publish nothing, and a
 // status whose text no longer matches the expected shape falls through to the
 // generic status row unchanged, so a format change never hides a notice.
-//   auto-effort       (pi-auto-effort)          "effort: high (auto ↑)" -> "reasoning high · auto ↑"
 //                                               (also the older "(auto)", and ", limited: 5h 84%")
 //   lean-context      (pi-cache-guard's Jev)    "lean: −12k tok"       -> context row
 //   cache-guard       (pi-cache-guard)          "cache 4:12"           -> context row
@@ -291,16 +290,10 @@ export interface AbsorbedStatuses { workflow?: WorkflowStatus; mode?: Permission
 //   plan-exec        (pi-plan-mode) "exec mode on · review 2" -> Workflow phase/detail
 // Everything else (plan, gate, mcp, ...) stays in the status row.
 export function absorbStatuses(statuses: ReadonlyMap<string, string>, options: { claudeRow: boolean }): AbsorbedStatuses {
-  const result: AbsorbedStatuses = { autoEffort: false, rest: [] };
+  const result: AbsorbedStatuses = { rest: [] };
   const notebooks: Array<[number, MarimoStatus]> = [];
   for (const [key, text] of [...statuses.entries()].sort(([a], [b]) => a.localeCompare(b))) {
     const plainText = clean(text);
-    const effort = key === "auto-effort" ? /^effort: \S+ \(auto(?: ([^()]+))?\)$/.exec(plainText) : null;
-    if (effort) {
-      result.autoEffort = true;
-      if (effort[1]) result.autoEffortDetail = effort[1];
-      continue;
-    }
     const lean = key === "lean-context" ? /^lean: (.+)$/.exec(plainText) : null;
     if (lean) { result.lean = lean[1]; continue; }
     const cache = key === "cache-guard" ? /^cache (~?(?:\d+:\d\d|\d+h\d\dm)|cold(?: \(model\)|\?)?)$/.exec(plainText) : null;
@@ -901,12 +894,9 @@ export function layoutFooter(snapshot: Snapshot, width: number, theme: Paint): F
   const draft = !s.readOnly && !s.compact && ["pending", "applying"].includes(s.settingsCycle?.phase ?? "") ? s.settingsCycle : undefined;
   const pending = (key: SettingKey) => draft?.settings.find(setting => setting.key === key);
   const thinking = typeof pending("reasoning")?.target === "string" ? pending("reasoning")!.target as string : s.thinking;
-  const automatic = typeof pending("auto-effort")?.target === "boolean" ? pending("auto-effort")!.target : s.actions?.["effort.toggle"]?.active ?? s.autoEffort;
   const reasoningParts: Part[] = thinking ? [
     { text: `${theme.fg("dim", `${ICONS.reasoning} `)}${theme.fg("muted", "reasoning")} ` },
-    ...(automatic ? [{ text: theme.fg("dim", "auto"), action: action("effort.toggle") }, { text: theme.fg("dim", " → ") }] : []),
     { text: theme.bold(theme.fg(thinkingColor(thinking), clean(thinking))), action: action("reasoning.cycle") },
-    ...(!automatic && action("effort.toggle") ? [{ text: sep }, { text: theme.fg("dim", "auto off"), action: action("effort.toggle") }] : []),
   ] : [];
   const reasoning = reasoningParts.map((part) => part.text).join("");
   const identity = `${model}${reasoning ? `${sep}${reasoning}` : ""}`;
@@ -957,10 +947,7 @@ export function layoutFooter(snapshot: Snapshot, width: number, theme: Paint): F
   const workflowAction = action(replanning || workflow?.kind === "exec" ? "execution.status" : "workflow.cycle");
   const identitySegments = [
     partsSegment([{ text: model, action: action("model.open") }], 100),
-    { ...partsSegment(reasoningParts, 65), atomic: !!pending("reasoning") || !!pending("auto-effort") },
-    // Trend is already expressed by auto → effort; retain quota-policy notes
-    // independently so they can yield before model/reasoning at narrow widths.
-    { text: automatic && s.autoEffortDetail?.includes("limited:") ? theme.fg("dim", clean(s.autoEffortDetail.replace(/^[↑↓→],?\s*/, ""))) : "", priority: 25 },
+    { ...partsSegment(reasoningParts, 65), atomic: !!pending("reasoning") },
     { text: phaseText, priority: 120 },
     { text: s.queued ? theme.fg("warning", "queued") : "", priority: 115 },
   ];
@@ -1748,7 +1735,7 @@ export default function statusFooter(pi: ExtensionAPI): void {
       context: current.getContextUsage() ?? { tokens: null, contextWindow: physicalModel?.contextWindow ?? 0, percent: null },
       totals, cacheHit, git: { ...git, branch: git.branch ?? branch ?? undefined },
       quotas, unavailableQuota, providerUsage: usage.rows, providerUsageMore: usage.more,
-      statuses: absorbed.rest, workflow: absorbed.workflow, mode: absorbed.mode, exec: absorbed.exec, autoEffort: absorbed.autoEffort, autoEffortDetail: absorbed.autoEffortDetail, lean: absorbed.lean, cache: absorbed.cache, extraBilled: absorbed.extraBilled,
+      statuses: absorbed.rest, workflow: absorbed.workflow, mode: absorbed.mode, exec: absorbed.exec, lean: absorbed.lean, cache: absorbed.cache, extraBilled: absorbed.extraBilled,
       stash: absorbed.stashed ? { text: stashedPrompt() } : undefined,
       headsUp: absorbed.headsUp,
       marimo: absorbed.marimo, lens: absorbed.lens, bg: absorbed.bg, pressure: absorbed.pressure, borderGauge, compact: blockedHolds > 0,
@@ -1773,7 +1760,7 @@ export default function statusFooter(pi: ExtensionAPI): void {
       // Main's mutable controls and policy are not the viewed agent's state.
       flow: undefined, system1: undefined, actions: undefined, settingsCycle: undefined, primaryKeys: undefined, readOnly: true,
       workflow: undefined, mode: undefined, exec: undefined,
-      autoEffort: undefined, autoEffortDetail: undefined, cache: undefined, lean: undefined,
+      cache: undefined, lean: undefined,
       cwd: session.cwd, provider: session.provider, model: session.model, thinking: session.thinking,
       oauth: false, quotas, unavailableQuota, providerUsage: usage.rows, providerUsageMore: usage.more,
       sessionName: session.sessionName, phase: session.phase, queued: session.queued === true,

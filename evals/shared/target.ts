@@ -93,7 +93,7 @@ export interface EvalTarget {
   id: string;
   /** One line for pickers and listings. */
   title: string;
-  /** The package directory name under `packages/`, e.g. `pi-auto-effort`. */
+  /** The package directory name under `packages/`, e.g. `pi-tool-gate`. */
   package: string;
   kind: TargetKind;
   /**
@@ -117,7 +117,7 @@ export function needsSessions(target: Pick<EvalTarget, "kind" | "needsSessions">
   return target.needsSessions ?? target.kind === "replay";
 }
 
-/** `pi-auto-effort` and `auto-effort` both name that package. */
+/** `pi-tool-gate` and `tool-gate` both name that package. */
 export function shortPackage(name: string): string {
   return name.replace(/^pi-/u, "");
 }

@@ -3,16 +3,20 @@ import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "no
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
 import { type ExtensionContext, initTheme } from "@earendil-works/pi-coding-agent";
-import { onTestFinished, test } from "vitest";
+import * as usage from "@justmytwospence/pi-subscription-usage";
+import { onTestFinished, test, vi } from "vitest";
+import { withEffortOrigin } from "../src/effort-origin.js";
 import { FAMILY_CHANNEL, FAMILY_ENTRY, type FamilyMembership, type FamilyRequest } from "../src/family-contract.js";
 import { directImplementationBrief, implementationBrief } from "../src/handoff.js";
-import type { ImplementationEffortPick, pickImplementationEffort } from "../src/implementation-effort.js";
+import type { pickImplementationEffort } from "../src/implementation-effort.js";
 import planMode from "../src/index.js";
 import { INLINE_ENTRY, MODE_CHANGED, MODE_SET, PLAN_PROVIDER } from "../src/inline-plan.js";
 import type { JevToolPick, pickToolsWithJev } from "../src/jev-tool-picker.js";
 import { type PlannerSessionFactory, readSessionMessages, writeSeededSession } from "../src/planner/session.js";
 import type { PlanModeSettings } from "../src/settings.js";
+import { SETTINGS_REASONING_COMMITTED, settingsCycles } from "../src/settings-cycle.js";
 import { resolveSystem1Target, SYSTEM1_CHANGED } from "../src/system1.js";
+import type { TaskEffortJudgment } from "../src/task-effort.js";
 import { createCustomSelectorHarness, createMockContext, createMockPi } from "./support.js";
 
 initTheme("dark");
@@ -410,12 +414,23 @@ async function implementationScreen(
   return { ...state, app, opened, focus };
 }
 
-function effortPick(thinkingLevel: "low" | "medium" | "high" | "xhigh"): ImplementationEffortPick {
+function effortPick(thinkingLevel: "low" | "medium" | "high" | "xhigh"): TaskEffortJudgment {
   const target = resolveSystem1Target({ provider: "typesafe", model: "jev-latest" });
   assert.ok(target.ok);
   return {
     kind: "system1",
-    thinkingLevel,
+    choice: thinkingLevel,
+    confidence: 0.8,
+    probabilities: {
+      low: Number(thinkingLevel === "low"),
+      medium: Number(thinkingLevel === "medium"),
+      high: Number(thinkingLevel === "high"),
+      xhigh: Number(thinkingLevel === "xhigh"),
+    },
+    waterfall: ["jev"],
+    targetKey: target.key,
+    fallback: false,
+    attempts: [],
     backend: "jev",
     provider: "typesafe",
     model: "jev-latest",
@@ -426,10 +441,213 @@ function effortPick(thinkingLevel: "low" | "medium" | "high" | "xhigh"): Impleme
 function deferredEffort() {
   const calls: Array<{
     input: Parameters<typeof pickImplementationEffort>[0];
-    finish: (result: ImplementationEffortPick) => void;
+    finish: (result: TaskEffortJudgment) => void;
   }> = [];
   const pick: typeof pickImplementationEffort = (input) => new Promise((finish) => calls.push({ input, finish }));
   return { calls, pick };
+}
+
+test("/planners cycles targets during a pending judgment, captures target pressure once and freezes choices", async () => {
+  const cross = { ...OPUS, provider: "openai-codex", id: "gpt-6-sol", name: "Sol" };
+  const pressure = vi.spyOn(usage, "readSelectionPressure").mockImplementation(async (_ctx, target) => ({
+    state: "ready",
+    tier: target.id === OPUS.id ? "critical" : "none",
+    p: target.id === OPUS.id ? 1 : 0,
+  }));
+  onTestFinished(() => pressure.mockRestore());
+  const requests = deferredEffort();
+  const state = await implementationScreen({
+    pickImplementationEffort: requests.pick,
+    settings: {
+      implementationModelMap: {
+        [`${SONNET.provider}/${SONNET.id}`]: [
+          { provider: OPUS.provider, modelId: OPUS.id },
+          { provider: cross.provider, modelId: cross.id },
+        ],
+      },
+    },
+    configureContext: (ctx) =>
+      Object.assign(ctx.modelRegistry, {
+        getAvailable: () => [SONNET, OPUS, cross],
+        find: (provider: string, id: string) =>
+          [SONNET, OPUS, cross].find((m) => m.provider === provider && m.id === id),
+      }),
+  });
+  state.focus("Mode");
+  state.app.handleInput("\u001b[C"); // target-only cancellation: Here -> Opus
+  state.focus("Model");
+  state.app.handleInput("\u001b[C"); // Opus -> cross-provider Sol
+  assert.equal(requests.calls.length, 1);
+  assert.equal(
+    requests.calls[0]?.input.signal?.aborted,
+    false,
+    "target cancellation must not abort the shared judgment",
+  );
+  requests.calls[0]?.finish({
+    ...effortPick("xhigh"),
+    probabilities: { low: 0.1, medium: 0.2, high: 0.3, xhigh: 0.4 },
+  } as TaskEffortJudgment);
+  await flush();
+  assert.match(state.app.render().join("\n"), /Effort\s+high/u);
+  assert.deepEqual(
+    pressure.mock.calls.map(([, target]) => target),
+    [{ provider: cross.provider, id: cross.id }],
+  );
+  state.app.handleInput("\u001b[D"); // return to Opus: its prior cancelled wait is not reusable
+  await flush();
+  assert.match(state.app.render().join("\n"), /Effort\s+medium/u);
+  state.app.handleInput("\u001b[C");
+  await flush();
+  assert.match(state.app.render().join("\n"), /Effort\s+high/u);
+  pressure.mockResolvedValue({ state: "ready", tier: "critical", p: 1 });
+  state.app.handleInput("\u001b[D");
+  await flush();
+  state.app.handleInput("\u001b[C");
+  await flush();
+  assert.match(state.app.render().join("\n"), /Effort\s+high/u, "later telemetry cannot change a captured choice");
+  assert.equal(pressure.mock.calls.length, 2);
+  assert.equal(requests.calls.length, 1);
+  state.app.handleInput("\u001b");
+  for (const handler of state.mock.events.get("session_shutdown") ?? []) await handler({}, state.context.ctx);
+  await state.opened;
+  assert.equal(requests.calls[0]?.input.signal?.aborted, true, "closing approval disposes the shared judgment");
+});
+
+for (const failure of ["throw", "reject", "fallback"] as const) {
+  test(`/planners does not reuse failed judgment outcomes: ${failure}`, async () => {
+    const pressure = vi
+      .spyOn(usage, "readSelectionPressure")
+      .mockResolvedValue({ state: "unavailable", tier: "none", p: 0 });
+    onTestFinished(() => pressure.mockRestore());
+    const pick = vi.fn<typeof pickImplementationEffort>().mockResolvedValue(effortPick("low"));
+    pick.mockImplementationOnce(() => {
+      if (failure === "throw") throw new Error("unavailable");
+      if (failure === "reject") return Promise.reject(new Error("unavailable"));
+      return Promise.resolve({ kind: "fallback", reason: "unavailable" });
+    });
+    const state = await implementationScreen({
+      pickImplementationEffort: pick,
+      settings: {
+        implementationModelMap: {
+          [`${SONNET.provider}/${SONNET.id}`]: [{ provider: OPUS.provider, modelId: OPUS.id }],
+        },
+      },
+    });
+    await flush();
+    assert.match(state.app.render().join("\n"), /Effort\s+high/u);
+    assert.equal(pressure.mock.calls.length, 0, "failed judgments need no quota read");
+    state.focus("Mode");
+    state.app.handleInput("\u001b[C");
+    await flush();
+    assert.equal(pick.mock.calls.length, 2);
+    assert.equal(pressure.mock.calls.length, 1);
+    assert.match(state.app.render().join("\n"), /Effort\s+low/u);
+    for (const handler of state.mock.events.get("session_shutdown") ?? []) await handler({}, state.context.ctx);
+    await state.opened;
+  });
+}
+
+for (const invalidation of ["target", "manual", "dispose"] as const) {
+  test(`/planners cancels a pending quota wait without trusting its late answer: ${invalidation}`, async () => {
+    const reads: Array<{
+      target: { provider: string; id: string };
+      signal?: AbortSignal;
+      finish: (pressure: usage.SelectionPressure) => void;
+    }> = [];
+    const pressure = vi
+      .spyOn(usage, "readSelectionPressure")
+      .mockImplementation(
+        (_ctx, target, options) => new Promise((finish) => reads.push({ target, signal: options?.signal, finish })),
+      );
+    onTestFinished(() => pressure.mockRestore());
+    const pick = vi.fn<typeof pickImplementationEffort>().mockResolvedValue(effortPick("low"));
+    const state = await implementationScreen({
+      pickImplementationEffort: pick,
+      settings: {
+        implementationModelMap: {
+          [`${SONNET.provider}/${SONNET.id}`]: [{ provider: OPUS.provider, modelId: OPUS.id }],
+        },
+      },
+    });
+    await flush();
+    assert.equal(reads.length, 1);
+    if (invalidation === "target") {
+      state.focus("Mode");
+      state.app.handleInput("\u001b[C");
+      await flush();
+      assert.equal(reads.length, 2);
+      assert.equal(reads[0]?.signal?.aborted, true);
+      assert.equal(pick.mock.calls.length, 1, "quota cancellation retains the successful judgment");
+      reads[1]?.finish({ state: "unavailable", tier: "none", p: 0 });
+    } else if (invalidation === "manual") {
+      for (const handler of state.mock.events.get("thinking_level_select") ?? []) await handler({}, state.context.ctx);
+    } else state.app.handleInput("\u001b");
+    assert.equal(reads[0]?.signal?.aborted, true);
+    reads[0]?.finish({ state: "ready", tier: "critical", p: 1 });
+    await flush();
+    if (invalidation === "target") assert.match(state.app.render().join("\n"), /Effort\s+low/u);
+    else assert.doesNotMatch(state.app.render().join("\n"), /Effort\s+low/u);
+    if (invalidation !== "dispose") state.app.handleInput("\u001b");
+    for (const handler of state.mock.events.get("session_shutdown") ?? []) await handler({}, state.context.ctx);
+    await state.opened;
+    assert.deepEqual(state.mock.thinkingLevels, []);
+  });
+}
+
+for (const change of [
+  "manual",
+  "owned",
+  "forged",
+  "malformed",
+  "mismatched",
+  "committed",
+  "committed-owned",
+] as const) {
+  test(`/planners validates reasoning invalidation: ${change}`, async () => {
+    const requests = deferredEffort();
+    const state = await implementationScreen({ pickImplementationEffort: requests.pick });
+    const emitNative = async () => {
+      for (const handler of state.mock.events.get("thinking_level_select") ?? []) await handler({}, state.context.ctx);
+    };
+    if (change === "manual") await emitNative();
+    else if (change === "owned") await withEffortOrigin("flow", emitNative);
+    else if (change === "forged") state.mock.eventBus.emit(SETTINGS_REASONING_COMMITTED, { level: "high" });
+    else {
+      const cycles = settingsCycles(state.mock.pi);
+      const staged = cycles.stage(state.context.ctx, {
+        key: "reasoning",
+        owner: {},
+        read: () => "high",
+        next: () => "medium",
+        format: String,
+        validate: () => undefined,
+        current: () => true,
+        apply: () => {
+          const emit = () =>
+            state.mock.eventBus.emit(
+              SETTINGS_REASONING_COMMITTED,
+              change === "malformed" ? { level: false } : { level: change === "mismatched" ? "low" : "high" },
+            );
+          if (change === "committed-owned") withEffortOrigin("plan-mode", emit);
+          else emit();
+          return true;
+        },
+      });
+      await cycles.flush();
+      await staged;
+    }
+    const invalidated = change === "manual" || change === "committed";
+    assert.equal(requests.calls[0]?.input.signal?.aborted, invalidated);
+    requests.calls[0]?.finish(effortPick("low"));
+    await flush();
+    const screen = state.app.render().join("\n");
+    if (invalidated) assert.doesNotMatch(screen, /Effort\s+low/u);
+    else assert.match(screen, /Effort\s+low/u);
+    state.app.handleInput("\u001b");
+    for (const handler of state.mock.events.get("session_shutdown") ?? []) await handler({}, state.context.ctx);
+    await state.opened;
+    assert.deepEqual(state.mock.thinkingLevels, []);
+  });
 }
 
 for (const manual of [false, true]) {
@@ -515,7 +733,7 @@ for (const clear of [false, true]) {
   });
 }
 
-test("/planners reclassifies authors and caches results without calls on mode, model or context cycling", async () => {
+test("/planners reclassifies changed base keys without calls on mode, model or context cycling", async () => {
   const requests = deferredEffort();
   const state = await implementationScreen({
     pickImplementationEffort: requests.pick,
@@ -539,7 +757,9 @@ test("/planners reclassifies authors and caches results without calls on mode, m
   assert.match(state.app.render().join("\n"), /Effort\s+high/u, "normalize xhigh to supported high");
   state.app.handleInput("\u001b[D");
   await flush();
-  assert.equal(requests.calls.length, 2, "returning to an unchanged plan reuses its cached recommendation");
+  assert.equal(requests.calls.length, 3, "changing the base key disposes its old judgment");
+  requests.calls[2]?.finish(effortPick("low"));
+  await flush();
   assert.match(state.app.render().join("\n"), /Effort\s+low/u);
   for (const handler of state.mock.events.get("session_shutdown") ?? []) await handler({}, state.context.ctx);
   await state.opened;
@@ -588,6 +808,10 @@ test("/planners remembers manual effort per model while configured handoff effor
 });
 
 test("/planners default handoff setting wins and manual choices survive model cycling", async () => {
+  const pressure = vi
+    .spyOn(usage, "readSelectionPressure")
+    .mockResolvedValue({ state: "ready", tier: "critical", p: 1 });
+  onTestFinished(() => pressure.mockRestore());
   const haiku = { ...SONNET, id: "claude-haiku-4-5", name: "Claude Haiku 4.5" };
   const requests = deferredEffort();
   const state = await implementationScreen({
@@ -611,6 +835,10 @@ test("/planners default handoff setting wins and manual choices survive model cy
   });
   requests.calls[0]?.finish(effortPick("high"));
   await flush();
+  assert.deepEqual(
+    pressure.mock.calls.map(([, target]) => target),
+    [{ provider: SONNET.provider, id: SONNET.id }],
+  );
   state.focus("Mode");
   state.app.handleInput("\u001b[C");
   assert.match(state.app.render().join("\n"), /Effort\s+low/u);
@@ -628,6 +856,7 @@ test("/planners default handoff setting wins and manual choices survive model cy
   state.app.handleInput("\u001b[C");
   assert.match(state.app.render().join("\n"), /Effort\s+high/u);
   assert.equal(requests.calls.length, 1);
+  assert.equal(pressure.mock.calls.length, 1, "configured handoffs do not read target pressure");
   for (const handler of state.mock.events.get("session_shutdown") ?? []) await handler({}, state.context.ctx);
   await state.opened;
 });
@@ -1050,6 +1279,7 @@ test("/planners mode uses configured distinct targets and preserves effort acros
   state.focus("Mode");
   state.app.handleInput("\u001b[C");
   assert.match(state.app.render().join("\n"), /Model\s+Claude Sonnet 5\.5/u);
+  await flush(); // Failed judgments are not cached across target waits.
   assert.match(state.app.render().join("\n"), /Effort\s+high/u);
   state.app.handleInput("\u001b[C");
   assert.match(state.app.render().join("\n"), /Effort\s+medium/u);
@@ -1088,6 +1318,7 @@ test("/planners implementation offers available Terra outside the planning short
   assert.match(state.app.render().join("\n"), /Model\s+‹ Terra ›/u);
   state.focus("Mode");
   state.app.handleInput("\u001b[C");
+  await flush();
   state.app.handleInput("\r");
   await state.opened;
 

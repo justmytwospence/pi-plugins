@@ -3,7 +3,7 @@ export const FLOW_CHANNEL = "pi-plugins.workflow-flow.v1";
 export const FLOW_ENTRY = "tool-gate:flow";
 export type OperatingMode = "independent" | "linked";
 export type FlowWorkflow = "work" | "chat" | "plan" | "exec";
-export type FlowAssignment = { provider: string; modelId: string; suggestedThinking?: string };
+export type FlowAssignment = { provider: string; modelId: string; suggestedThinking?: string; thinkingPinned?: true };
 export type ProviderFlow = {
   provider: string;
   anchorModel: string;
@@ -42,6 +42,13 @@ export interface FlowExecution {
   /** Required for replan/resume; optional fences for legacy completion owners. */
   expectedExecutionId?: string;
   expectedPlanRevision?: number;
+  /** Approved effort for the exact worker; omitted by legacy execution owners. */
+  effort?: {
+    provider: string;
+    modelId: string;
+    thinkingLevel?: string;
+    source: "manual" | "configured" | "system1" | "fallback";
+  };
   /** The approved plan's durable identity, not an inferred model difference. */
   planFile: string;
   /** Synchronous final lifecycle update, after authorized model activation and fencing. */

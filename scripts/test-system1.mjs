@@ -81,7 +81,7 @@ try {
   console.log('PASS actual SDK loader and /login system1-openai API-key prompt routing (no credentials or network)');
 
   const adapters = [];
-  for (const name of ['auto-effort', 'copy', 'next-prompt', 'subagents', 'tool-gate']) {
+  for (const name of ['copy', 'next-prompt', 'subagents', 'tool-gate']) {
     const { askJev } = await jiti.import(`../packages/pi-${name}/src/jev.ts`);
     adapters.push({ name, call: reg => askJev(reg, config, { evidence: 'local fixture' }, questions), off: reg => askJev(reg, { ...config, enabled: false }, {}, questions) });
   }
@@ -92,6 +92,19 @@ try {
   const plan = await jiti.import('../packages/pi-plan-mode/src/jev-tool-picker.ts');
   const pickerInput = { task: 'Research this task', conversation: '', cwd: dir, capabilities: [{ id: 'docs', label: 'Docs', description: 'Look up relevant API docs', fallbackSelected: false }] };
   adapters.push({ name: 'plan-mode', call: reg => plan.pickToolsWithJev({ ...pickerInput, registry: reg }), off: reg => plan.pickToolsWithJev({ ...pickerInput, capabilities: [], registry: reg }) });
+  const effortAdapters = [];
+  for (const name of ['plan-mode', 'tool-gate']) {
+    const { judgeTaskEffort } = await jiti.import(`../packages/pi-${name}/src/task-effort.ts`);
+    const input = { phase: 'plan', task: 'Investigate and design a parser fix', conversation: '', cwd: dir };
+    const adapter = {
+      name: `${name} task-effort`,
+      call: (reg, signal) => judgeTaskEffort({ ...input, registry: reg, signal }),
+      off: reg => judgeTaskEffort({ ...input, task: ' ', registry: reg }),
+    };
+    effortAdapters.push(adapter);
+    adapters.push(adapter);
+  }
+  const succeeded = result => result.ok === true || result.kind === 'jev' || result.kind === 'system1';
 
   for (const backend of ['jev', 'openai-decisions']) {
     select(backend);
@@ -99,7 +112,14 @@ try {
     for (const adapter of adapters) {
       const reg = registry();
       const result = await adapter.call(reg);
-      assert.ok(result.ok === true || result.kind === 'jev', `${adapter.name}: ${JSON.stringify(result)}`);
+      assert.ok(succeeded(result), `${adapter.name}: ${JSON.stringify(result)}`);
+      if (effortAdapters.includes(adapter)) {
+        assert.equal(result.kind, 'system1');
+        assert.equal(result.backend, backend, adapter.name);
+        assert.equal(result.provider, expected, adapter.name);
+        assert.equal(result.model, reg.calls[0].model.id, adapter.name);
+        assert.ok(result.selectionKey, `${adapter.name} retains real classifier provenance`);
+      }
       assert.equal(reg.calls.length, 1, adapter.name);
       assert.equal(reg.calls[0].model.provider, expected, adapter.name);
       if (backend === 'openai-decisions') assert.ok(reg.lookups.every(x => x.provider === expected), 'no Jev lookup');
@@ -127,7 +147,13 @@ try {
       for (const adapter of adapters) {
         const failedFirst = registry({ failures: { [first]: 'quota or credits exhausted' } });
         const result = await adapter.call(failedFirst);
-        assert.ok(result.ok === true || result.kind === 'jev', `${adapter.name} must use its configured fallback: ${JSON.stringify(result)}`);
+        assert.ok(succeeded(result), `${adapter.name} must use its configured fallback: ${JSON.stringify(result)}`);
+        if (effortAdapters.includes(adapter)) {
+          assert.equal(result.backend, order[1], adapter.name);
+          assert.equal(result.provider, second, adapter.name);
+          assert.equal(result.model, failedFirst.calls[1].model.id, adapter.name);
+          assert.equal(result.fallback, true, `${adapter.name} retains fallback provenance`);
+        }
         assert.deepEqual(failedFirst.calls.map(call => call.model.provider), [first, second], adapter.name);
         const outcome = events.findLast(event => event.type === 'outcome' && event.registry === failedFirst)?.outcome;
         assert.equal(outcome?.provider, second, `${adapter.name} records the actual winner`);
@@ -164,6 +190,28 @@ try {
     assert.ok(result.ok === false || result.kind === 'fallback', `${adapter.name} must discard a stale backend result`);
   }
 
+  for (const adapter of effortAdapters) {
+    writeFileSync(join(dir, 'system1.json'), JSON.stringify({ waterfall: ['openai-decisions', 'jev'] }));
+    const cancelled = new AbortController();
+    cancelled.abort();
+    const untouched = registry();
+    assert.equal((await adapter.call(untouched, cancelled.signal)).kind, 'fallback');
+    assert.equal(untouched.calls.length, 0, `${adapter.name} skips pre-cancelled requests`);
+
+    const controller = new AbortController();
+    const reg = registry({ pending: true });
+    const pending = adapter.call(reg, controller.signal);
+    for (let i = 0; !reg.calls.length && i < 10; i++) await Promise.resolve();
+    assert.equal(reg.calls.length, 1, adapter.name);
+    controller.abort();
+    const result = await pending;
+    assert.equal(result.kind, 'fallback', `${adapter.name} discards cancelled judgments`);
+    assert.equal(reg.calls[0].options.signal.aborted, true);
+    reg.settle();
+    await Promise.resolve();
+    assert.deepEqual(reg.calls.map(call => call.model.provider), ['system1-openai'], `${adapter.name} cancellation cannot fall through to Jev`);
+  }
+
   // SDK children already copy native registrations. Test that path without constructing a real runtime.
   const childProvider = { id: 'system1-openai' };
   const host = { modelRegistry: { getRegisteredProviderIds: () => ['system1-openai'], getRegisteredNativeProvider: () => childProvider } };
@@ -186,7 +234,7 @@ try {
   `], { cwd: root, encoding: 'utf8', env: childEnv('inherit', process.env) });
   assert.equal(subprocess.status, 0, subprocess.stderr);
   assert.equal(JSON.parse(subprocess.stdout).provider, 'system1-openai');
-  console.log('PASS all eight classifier consumers, off states, missing-provider/no-fallback, stale results and child selection inheritance (offline)');
+  console.log(`PASS ${adapters.length} classifier paths, including both task-effort helpers: configured backends, fallback provenance, off states, missing-provider/no-fallback, stale results, cancellation and child selection inheritance (offline)`);
 } finally {
   if (previous === undefined) delete process.env.PI_CODING_AGENT_DIR; else process.env.PI_CODING_AGENT_DIR = previous;
   rmSync(dir, { recursive: true, force: true });

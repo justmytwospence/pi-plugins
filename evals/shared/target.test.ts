@@ -35,8 +35,8 @@ test("withinFailureLimit is a strict 20% limit and passes with no calls", () => 
 });
 
 test("shortPackage drops the pi- prefix", () => {
-  assert.equal(shortPackage("pi-auto-effort"), "auto-effort");
-  assert.equal(shortPackage("auto-effort"), "auto-effort");
+  assert.equal(shortPackage("pi-tool-gate"), "tool-gate");
+  assert.equal(shortPackage("tool-gate"), "tool-gate");
 });
 
 test("validateTargets accepts a good list and rejects bad ids, repeats and package names", () => {

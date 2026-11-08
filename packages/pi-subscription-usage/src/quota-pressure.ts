@@ -1,14 +1,3 @@
-// Subscription limits: readings of the account's rate-limit windows (Anthropic 5h/7d, Codex
-// primary/secondary, Claude Code's spend limit), a forecast of where each window will be when it
-// resets, and a tier (none, caution, critical) that raises the bar for more effort. This file
-// is copied verbatim into the pi, opencode and Claude Code ports; it is pure (no I/O, no clock),
-// and readings live in process memory only.
-//
-// The forecast weights recent use by how close the reset is: a recent rate (the last hour) and a
-// sustained rate (the last day), with the recent burst decaying toward the sustained rate over
-// `tau`. Near a 5h reset the burst dominates; across a week it fades. Until a window has enough
-// history the linear pace (used / fraction of the window elapsed, as in CodexBar) stands in.
-
 /** One window's state at one moment. `used` is a fraction (1 = the whole allowance). */
 export interface Reading {
   window: string;
@@ -42,7 +31,7 @@ export interface Pressure {
   reason?: string;
 }
 
-/** One window as `/auto-effort status` shows it. */
+/** One assessed window. */
 export interface WindowView {
   window: string;
   label: string;
@@ -89,8 +78,8 @@ export const DEFAULT_LIMITS: LimitsPolicy = {
 };
 
 /** `raw` checked against the defaults: a missing, mistyped or negative value keeps the default. */
-export function limitsPolicy(raw: unknown): LimitsPolicy {
-  return sanitize(DEFAULT_LIMITS, raw) as LimitsPolicy;
+export function limitsPolicy(raw: unknown, fallback: LimitsPolicy = DEFAULT_LIMITS): LimitsPolicy {
+  return sanitize(fallback, raw) as LimitsPolicy;
 }
 
 function sanitize(def: unknown, raw: unknown): unknown {
@@ -195,6 +184,11 @@ export class Tracker {
       last.used = used;
     } else st.history.push({ at: reading.at, used });
     while (st.history.length > 1 && st.history[0]!.at < reading.at - KEEP) st.history.shift();
+  }
+
+  /** Discard windows no longer present in the current snapshot. */
+  retain(names: ReadonlySet<string>): void {
+    for (const name of this.windows.keys()) if (!names.has(name)) this.windows.delete(name);
   }
 
   /** The latest reading of each window. */
@@ -401,151 +395,7 @@ function clamp(x: number, lo: number, hi: number): number {
   return Math.min(hi, Math.max(lo, x));
 }
 
-// Parsers. Each is pure and ignores what it does not recognize.
 
-type HeaderMap = Record<string, string | undefined>;
-
-function lower(headers: HeaderMap): HeaderMap {
-  const out: HeaderMap = {};
-  for (const [k, v] of Object.entries(headers)) out[k.toLowerCase()] = v;
-  return out;
-}
-
-function num(value: unknown): number | undefined {
-  if (typeof value === "number") return Number.isFinite(value) ? value : undefined;
-  if (typeof value === "string" && value.trim() !== "") {
-    const n = Number(value);
-    return Number.isFinite(n) ? n : undefined;
-  }
-  return undefined;
-}
-
-/** Anthropic's unified subscription headers: `anthropic-ratelimit-unified-<w>-utilization` (0-1), `-reset` (epoch s), `-status`. */
-export function readAnthropicHeaders(headers: HeaderMap, now: number): Reading[] {
-  const h = lower(headers);
-  const out: Reading[] = [];
-  for (const key of Object.keys(h)) {
-    const m = /^anthropic-ratelimit-unified-(.+)-utilization$/.exec(key);
-    if (!m) continue;
-    const w = m[1]!;
-    const used = num(h[key]);
-    if (used === undefined) continue;
-    const reset = num(h[`anthropic-ratelimit-unified-${w}-reset`]);
-    const status = h[`anthropic-ratelimit-unified-${w}-status`]?.toLowerCase();
-    const exhausted = status === "rejected" || status === "exceeded";
-    out.push({
-      window: w,
-      used: exhausted ? Math.max(1, used) : used,
-      at: now,
-      ...(reset !== undefined ? { resetsAt: reset * 1000 } : {}),
-      ...(exhausted ? { exhausted } : {}),
-    });
-  }
-  return out;
-}
-
-/** Codex's SSE headers: `x-codex-{primary,secondary}-used-percent`, `-window-minutes`, `-reset-at` (s) or `-reset-after-seconds`. */
-export function readCodexHeaders(headers: HeaderMap, now: number): Reading[] {
-  const h = lower(headers);
-  const out: Reading[] = [];
-  for (const w of ["primary", "secondary"]) {
-    const pct = num(h[`x-codex-${w}-used-percent`]);
-    if (pct === undefined) continue;
-    const minutes = num(h[`x-codex-${w}-window-minutes`]);
-    const at = num(h[`x-codex-${w}-reset-at`]);
-    const after = num(h[`x-codex-${w}-reset-after-seconds`]);
-    const resetsAt = at !== undefined ? at * 1000 : after !== undefined ? now + after * 1000 : undefined;
-    out.push({
-      window: w,
-      used: pct / 100,
-      at: now,
-      ...(resetsAt !== undefined ? { resetsAt } : {}),
-      ...(minutes !== undefined && minutes > 0 ? { lengthMs: minutes * MINUTE } : {}),
-    });
-  }
-  return out;
-}
-
-/** ChatGPT's `GET /backend-api/wham/usage`: `rate_limit.{primary,secondary}_window`. Named pools are ignored. */
-export function readCodexUsage(json: unknown, now: number): Reading[] {
-  const limit = isObject(json) && isObject(json.rate_limit) ? json.rate_limit : undefined;
-  if (!limit) return [];
-  const out: Reading[] = [];
-  for (const w of ["primary", "secondary"]) {
-    const win = limit[`${w}_window`];
-    if (!isObject(win)) continue;
-    const pct = num(win.used_percent);
-    if (pct === undefined) continue;
-    const at = num(win.reset_at);
-    const after = num(win.reset_after_seconds);
-    const seconds = num(win.limit_window_seconds);
-    const resetsAt = at !== undefined ? at * 1000 : after !== undefined ? now + after * 1000 : undefined;
-    out.push({
-      window: w,
-      used: pct / 100,
-      at: now,
-      ...(resetsAt !== undefined ? { resetsAt } : {}),
-      ...(seconds !== undefined && seconds > 0 ? { lengthMs: seconds * 1000 } : {}),
-    });
-  }
-  return out;
-}
-
-/** Claude Code's `rateLimits`: `{ kind, percentUsed (0-100), resetsAt (ISO) }`. */
-export function readClaudeCodeLimits(rateLimits: unknown, now: number): Reading[] {
-  if (!Array.isArray(rateLimits)) return [];
-  const out: Reading[] = [];
-  for (const item of rateLimits) {
-    if (!isObject(item) || typeof item.kind !== "string") continue;
-    const pct = num(item.percentUsed);
-    if (pct === undefined) continue;
-    const reset = typeof item.resetsAt === "string" ? Date.parse(item.resetsAt) : NaN;
-    const spend = item.kind === "spend_limit";
-    out.push({
-      window: item.kind,
-      used: pct / 100,
-      at: now,
-      ...(Number.isFinite(reset) ? { resetsAt: reset } : {}),
-      ...(spend ? { spend } : {}),
-    });
-  }
-  return out;
-}
-
-/** One status line per window: used, elapsed, projected, exhaustion, age, tier. */
-export function describeWindows(views: readonly WindowView[], now: number): string[] {
-  return views.map((v) => {
-    const parts = [`${v.label}: ${pct(v.used)} used`];
-    if (v.elapsed !== undefined) parts.push(`${pct(v.elapsed)} of the window elapsed`);
-    if (v.projected !== undefined) parts.push(`projected ${pct(v.projected)} at reset${v.warming ? " (linear pace, warming up)" : ""}`);
-    if (v.exhaustsAt !== undefined) parts.push(`runs out in ${duration(v.exhaustsAt - now)}`);
-    parts.push(`reading ${duration(v.ageMs)} old`);
-    parts.push(`tier ${v.tier}${v.pending ? ` (${v.pending} pending confirmation)` : ""}`);
-    return parts.join(", ");
-  });
-}
-
-/** `5h 84%`: the limiting window for the status line. */
-export function pressureLabel(p: Pressure): string {
-  return `${p.label ?? p.window ?? "?"} ${pct(p.used ?? 0)}`;
-}
-
-/** A tier-change notice. */
-export function pressureNotice(p: Pressure, now: number): string {
-  if (p.tier === "none") return "auto-effort: usage limit lifted; effort back to normal";
-  const parts = [`${p.label ?? p.window} window ${pct(p.used ?? 0)} used`];
-  if (p.projected !== undefined) parts.push(`projected ${pct(p.projected)} at reset`);
-  const tail = p.exhaustsAt !== undefined && p.exhaustsAt > now ? ` (runs out in ~${duration(p.exhaustsAt - now)})` : "";
-  return `auto-effort: ${parts.join(", ")}${tail}; ${p.tier}: higher effort needs a clearer case`;
-}
-
-function pct(x: number): string {
-  return `${Math.round(x * 100)}%`;
-}
-
-function duration(ms: number): string {
-  const m = Math.max(0, Math.round(ms / MINUTE));
-  if (m < 60) return `${m}m`;
-  if (m < 48 * 60) return `${Math.floor(m / 60)}h${m % 60 ? ` ${m % 60}m` : ""}`;
-  return `${Math.round(m / (24 * 60))}d`;
+export function pressureValue(tier: Tier): 0 | 0.5 | 1 {
+  return tier === "critical" ? 1 : tier === "caution" ? 0.5 : 0;
 }

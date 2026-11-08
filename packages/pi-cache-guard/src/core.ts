@@ -21,6 +21,7 @@ export interface Price {
 
 export interface Settings {
   enabled: boolean;
+  effortUpdates: { enabled: boolean; models: string[] };
   warn: {
     enabled: boolean;
     /** Ask before a prompt whose re-cache costs at least this many dollars (when prices are known). */
@@ -99,6 +100,7 @@ export interface Settings {
 
 export const DEFAULT_SETTINGS: Settings = {
   enabled: true,
+  effortUpdates: { enabled: true, models: ["openai-codex/gpt-6-astra", "openai-codex/gpt-6.1-sol", "openai-codex/gpt-6.1-terra"] },
   warn: { enabled: true, minCost: 0.5, minTokens: 100_000, confirmSeconds: 120, idleMinutes: 180, sound: "Basso" },
   warm: {
     enabled: true,

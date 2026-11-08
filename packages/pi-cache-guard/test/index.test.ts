@@ -5,6 +5,7 @@ import path from "node:path";
 
 import cacheGuard, { JEV_TIP, MODEL_OFFERS, type ModelOffers, OFFER_TIMEOUT_MS, OPTION_MAX, choiceMenu, cleanOffers, coldTitle, modelInfo, statusText } from "../src/index.ts";
 import { lastRequest, view } from "../src/clock.ts";
+import { emptyState, plan } from "../src/effort-updates.ts";
 import * as config from "../src/config.ts";
 import { FOOTER_ACTIONS_CHANNEL, type FooterActionsRequest, queryFooterActions } from "../src/footer-actions.ts";
 import { HerdrReporter, alertHeld, soundFile } from "../src/herdr.ts";
@@ -161,6 +162,71 @@ function harnessWith(entries: unknown[], herdr: HerdrReporter, model: any = opus
 }
 
 const input = (text: string, extra: Record<string, unknown> = {}) => ({ type: "input", text, source: "interactive", ...extra });
+
+describe("effort update transport", () => {
+  const user = (text: string) => ({ role: "user", content: text });
+  const result = { type: "function_call_output", call_id: "1", output: "ok" };
+  const update = (effort: string) => ({ type: "configuration_update", reasoning: { effort } });
+  const entry = (type: string, data: unknown) => ({ type: "custom", customType: `${type}:effort-updates`, data });
+  const request = async (h: ReturnType<typeof harness>, history: unknown[], effort: string, model = codex.id) => {
+    const payload = { model, input: [...history], reasoning: { effort } };
+    await h.emit("before_provider_request", { payload });
+    return payload;
+  };
+
+  test("manual and phase choices replay while warnings are off, including explicit startup effort", async () => {
+    const h = harness([], codex);
+    await h.emit("session_start", {});
+    await h.commands.get("cache-guard").handler("off", h.ctx);
+    expect(await request(h, [user("a")], "low")).toMatchObject({ reasoning: { effort: "low" } });
+    const history = [user("a"), result];
+    expect(await request(h, history, "high")).toMatchObject({ reasoning: { effort: "low" }, input: [...history, update("high")] });
+    const reply = { role: "assistant", content: "done" };
+    const next = [...history, reply, user("next")];
+    expect(await request(h, next, "xhigh")).toMatchObject({ reasoning: { effort: "low" }, input: [...history, update("high"), reply, update("xhigh"), user("next")] });
+    expect(h.appended.filter((e) => e.customType === "cache-guard:effort-updates")).toHaveLength(3);
+    expect(h.sent).toEqual([]);
+    await h.emit("session_shutdown", {});
+  });
+
+  test("restores latest legacy or new entry from selected branch; history rewrites reset", async () => {
+    const history = [user("a"), result];
+    const a = emptyState(); plan(a, history.slice(0, 1), "low"); plan(a, history, "high");
+    const b = emptyState(); plan(b, history.slice(0, 1), "medium"); plan(b, history, "xhigh");
+    const branch = [entry("cache-guard", b), entry("auto-effort", a)];
+    const h = harness(branch, codex);
+    await h.emit("session_start", {});
+    expect(await request(h, history, "high")).toMatchObject({ reasoning: { effort: "low" }, input: [...history, update("high")] });
+    branch.push(entry("cache-guard", b));
+    await h.emit("session_tree", {});
+    expect(await request(h, history, "xhigh")).toMatchObject({ reasoning: { effort: "medium" }, input: [...history, update("xhigh")] });
+    await h.emit("session_compact", { compactionEntry: {} });
+    expect(await request(h, [user("summary")], "high")).toMatchObject({ reasoning: { effort: "high" }, input: [user("summary")] });
+    await h.emit("session_start", {});
+    h.ctx.sessionManager.getBranch = () => [];
+    await h.emit("session_tree", {});
+    expect(await request(h, history, "medium")).toMatchObject({ reasoning: { effort: "medium" }, input: history });
+    await h.emit("session_shutdown", {});
+  });
+
+  test("disabled, unsupported, mismatched and already-owned payloads stay untouched", async () => {
+    const file = path.join(process.env.PI_CODING_AGENT_DIR!, "cache-guard.json");
+    try {
+      writeFileSync(file, JSON.stringify({ effortUpdates: { enabled: false } }));
+      const disabled = harness([], codex); await disabled.emit("session_start", {});
+      await request(disabled, [user("a")], "low");
+      expect(disabled.appended).toEqual([]); await disabled.emit("session_shutdown", {});
+      rmSync(file);
+      const h = harness([], codex); await h.emit("session_start", {});
+      await request(h, [user("a")], "low", "other");
+      await request(h, [update("low"), user("a")], "high");
+      h.ctx.model = { ...codex, provider: "openai" };
+      await request(h, [user("a")], "low");
+      expect(h.appended).toEqual([]); expect(h.sent).toEqual([]);
+      await h.emit("session_shutdown", {});
+    } finally { rmSync(file, { force: true }); }
+  });
+});
 
 describe("extension", () => {
   beforeEach(() => { vi.useFakeTimers(); vi.setSystemTime(NOW); });

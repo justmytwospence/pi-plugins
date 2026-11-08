@@ -71,9 +71,9 @@ test("fresh effort is isolated and retained across Edit and revised recommendati
   );
 });
 
-test("fresh effort precedence preserves setting, recommendation and worker fallback", () => {
+test("fresh unpinned effort recommends before configured defaults and worker fallback", () => {
   for (const [setting, recommendation, expected] of [
-    ["off", "low", "off"],
+    ["off", "low", "low"],
     [undefined, "low", "low"],
     ["off", undefined, "medium"],
   ] as const) {
@@ -87,6 +87,7 @@ test("fresh effort precedence preserves setting, recommendation and worker fallb
     assert.match(current.component.render(120).join("\n"), new RegExp(`effort: ${expected}`));
     current.component.handleInput("\r");
     assert.equal(current.done.mock.calls[0]?.[0]?.thinkingLevel, expected);
+    assert.equal(current.done.mock.calls[0]?.[0]?.effortSource, recommendation ? "system1" : "fallback");
   }
 });
 

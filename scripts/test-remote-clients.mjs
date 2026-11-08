@@ -96,14 +96,13 @@ const flowSnapshot = (workflow, blocked, replanning = false) => ({
   ...(replanning ? { replanning: true } : {}),
 });
 const activity = width => [...renderPill({ label: '1 task' }, false, width, theme), ''];
-function statusFooter(width, statuses, { compact = false, phase = 'idle', flow, autoEffort, providerUsage, providerUsageMore, system1, settingsCycle, readOnly = false } = {}) {
+function statusFooter(width, statuses, { compact = false, phase = 'idle', flow, providerUsage, providerUsageMore, system1, settingsCycle, readOnly = false } = {}) {
   const absorbed = absorbStatuses(statuses, { claudeRow: false });
   const actions = {
     'model.open': {}, 'reasoning.cycle': {},
     ...(absorbed.workflow ? { 'workflow.cycle': {}, 'workflow.open': {}, 'flow.open': {} } : {}),
     ...(absorbed.exec !== undefined ? { 'execution.status': {} } : {}),
     ...(absorbed.mode ? { 'approvals.open': {} } : {}),
-    ...(autoEffort === undefined ? {} : { 'effort.toggle': { active: autoEffort } }),
     ...(system1 ? { 'system1.open': {} } : {}),
     ...(absorbed.headsUp ? { 'headsup.open': { key: "ctrl+'" } } : {}),
   };
@@ -158,8 +157,6 @@ function statusFooter(width, statuses, { compact = false, phase = 'idle', flow, 
     if (preview && width >= 120) {
       const reasoning = preview.settings.find(item => item.key === 'reasoning');
       if (reasoning) assert.ok(plain.some(line => line.includes('reasoning') && line.includes(reasoning.label)), 'normal model row retains the reasoning target');
-      const effort = preview.settings.find(item => item.key === 'auto-effort');
-      if (effort && autoEffort !== undefined) assert.ok(plain.some(line => line.includes('reasoning') && line.includes(effort.target ? 'auto' : 'auto off')), 'normal auto-effort segment retains the target');
     }
     if (linked) {
       assert.equal(lines.length, (absorbed.marimo?.length ?? 0) + 4 + (providerUsage?.length ?? 0), 'Linked removes only the duplicate model row');
@@ -343,7 +340,7 @@ function planNameLines(width, edited = false) {
 }
 
 // pi-cache-guard's cold-cache question as its input handler builds it, with model offers from a
-// listener (pi-auto-effort): Jev's pick first, the current model named, a plain offer after the mute line.
+// optional listener: a picked model first, the current model named, a plain offer after the mute line.
 const coldView = { last: { provider: 'anthropic', model: 'claude-opus-5-5', at: 0, realAt: 0, tokens: 601_000 }, cold: { kind: 'expired', idleMs: 600_000 } };
 const coldOffers = [
   { model: 'anthropic/claude-sonnet-5-5', label: 'Claude Sonnet 5.5', recommended: true, note: 'routine change' },
@@ -833,12 +830,11 @@ const cycleSnapshot = phase => ({
   settings: [
     { key: 'workflow', baseline: 'work', target: 'plan', actual: 'work', label: 'plan' },
     { key: 'reasoning', baseline: 'high', target: 'medium', actual: 'high', label: 'medium' },
-    { key: 'auto-effort', baseline: false, target: true, actual: false, label: 'on' },
     { key: 'approvals', baseline: 'auto', target: 'bypassPermissions', actual: 'auto', label: 'yolo' },
   ],
   ...(phase === 'cancelled' ? { reason: 'interrupted' } : phase === 'interrupted' ? { reason: 'check current settings' } : {}),
 });
-function cycleHistory(phase) {
+function cycleHistory(phase, legacy = false) {
   const renderers = new Map();
   settingsCycles({ events: createEventBus(), on() {},
     registerEntryRenderer: (type, renderer) => renderers.set(type, renderer),
@@ -846,11 +842,18 @@ function cycleHistory(phase) {
   assert.equal(renderers.has('settings:cycle-state'), false, 'state snapshots never render independent history rows');
   const renderer = renderers.get('settings:cycle');
   assert.ok(renderer, 'use the actual helper entry renderer');
-  const component = renderer({ type: 'custom', customType: 'settings:cycle', data: { version: 1, ...cycleSnapshot(phase) } }, {}, theme);
+  const snapshot = cycleSnapshot(phase);
+  if (legacy) {
+    const item = { key: 'auto-effort', baseline: false, target: true, actual: false, label: 'on' };
+    if (legacy === 'only') snapshot.settings = [item];
+    else snapshot.settings.push(item);
+  }
+  const component = renderer({ type: 'custom', customType: 'settings:cycle', data: { version: 1, ...snapshot } }, {}, theme);
   for (const width of [46, 120, 180]) {
     const history = component.render(width).map(stripVTControlCharacters).join('\n');
     assert.ok(history.includes(`Settings ${phase}`), 'the real history component, not the footer, labels phase');
-    if (phase === 'pending' || phase === 'applying') assert.match(history, /Workflow plan/u, 'the real history component retains the latest target');
+    if ((phase === 'pending' || phase === 'applying') && legacy !== 'only') assert.match(history, /Workflow plan/u, 'the real history component retains the latest target');
+    if (legacy && width >= 120) assert.match(history, /Auto on/u, 'retired history remains readable');
   }
   return component;
 }
@@ -910,10 +913,8 @@ const FOOTERS = [
   { name: 'status all high status count', statuses: modeStatuses('plan', 'yolo'), providerUsage: [usageReady, usageUnavailable], providerUsageMore: 3, highStatus: true },
   ...['work', 'chat', 'plan', 'exec'].map(workflow => ({
     name: `Linked ${workflow}`, statuses: modeStatuses(workflow, 'auto', workflow === 'exec' ? 'implementing' : undefined),
-    flow: flowSnapshot(workflow), autoEffort: true,
+    flow: flowSnapshot(workflow),
   })),
-  { name: 'Independent auto off', statuses: modeStatuses('work', 'auto'), autoEffort: false },
-  { name: 'Linked auto off', statuses: modeStatuses('work', 'auto'), flow: flowSnapshot('work'), autoEffort: false },
   { name: 'Linked Exec paused', statuses: modeStatuses('exec', 'auto', 'waiting for answer'), flow: flowSnapshot('exec') },
   ...[false, true].flatMap(independent => [false, true].map(highStatus => ({
     name: `${independent ? 'Independent' : 'Linked'} replanning${highStatus ? ' high status' : ''}`,
@@ -922,10 +923,12 @@ const FOOTERS = [
   }))),
   { name: 'Linked unavailable', statuses: modeStatuses('plan', 'auto'), flow: flowSnapshot('plan', 'Assigned model is unavailable. Use /flow independent.') },
   { name: 'Linked high status count', statuses: modeStatuses('plan', 'yolo'), flow: flowSnapshot('plan'), highStatus: true },
+  { name: 'legacy mixed settings history', statuses: modeStatuses('work', 'auto'), settingsCycle: cycleSnapshot('pending'), history: cycleHistory('pending', true) },
+  { name: 'legacy auto-only settings history', statuses: modeStatuses('work', 'auto'), settingsCycle: cycleSnapshot('pending'), history: cycleHistory('pending', 'only') },
   ...['pending', 'applying', 'cancelled', 'interrupted'].flatMap(phase => [false, true].map(linked => ({
     name: `${linked ? 'Linked' : 'Independent'} settings ${phase}`,
     statuses: modeStatuses('work', 'auto'), ...(linked ? { flow: flowSnapshot('work') } : {}),
-    autoEffort: false, settingsCycle: cycleSnapshot(phase), history: cycleHistory(phase), highStatus: true,
+    settingsCycle: cycleSnapshot(phase), history: cycleHistory(phase), highStatus: true,
   }))),
 ];
 function idleFooter(width, fixture, activityRows = 0) {
@@ -1416,7 +1419,7 @@ if (results.herdr) {
         assert.equal(navigation.state.context, stage === 'choose-context' ? context : 'keep');
       }
     } else {
-      assert.deepEqual(selected, [screen.answer.option_index !== undefined ? { choice: { kind: 'save' } } : 'phone-renamed'], 'client navigation must submit exactly the intended Save action or replacement name');
+      assert.deepEqual(selected, [screen.answer.option_index !== undefined ? { choice: { kind: 'save' }, effortSource: 'fallback' } : 'phone-renamed'], 'client navigation must submit exactly the intended Save action or replacement name');
       component.dispose();
     }
   }

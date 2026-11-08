@@ -80,6 +80,7 @@ type Generation = {
 
 type RuntimeSeed = {
   model: string;
+  effort: { provider: string; modelId: string; thinkingLevel?: string; source: string };
   exec: ExecState;
   consultant: { spec: string; name: string; messages: unknown[] };
 };
@@ -216,6 +217,13 @@ async function fixture(options: { effort?: "high" | "off"; cancelReplacement?: b
               assert.equal(request.expectedRevision, g.flow.revision);
               g.executions.push(request);
               assert.equal(await pi.setModel(worker), true);
+              assert.deepEqual(request.effort, {
+                provider: PROVIDER,
+                modelId: "worker",
+                thinkingLevel: "medium",
+                source: "fallback",
+              });
+              if (request.effort?.thinkingLevel) pi.setThinkingLevel(request.effort.thinkingLevel as never);
               assert.equal(request.commit(), undefined, "consumer commit is synchronous");
               g.flow.workflow = "exec";
             } else {
@@ -571,6 +579,12 @@ for (const effort of ["high", "off"] as const) {
     const seed = branchData<RuntimeSeed>(child.sessionManager, RUNTIME_ENTRY);
     assert.ok(seed);
     assert.equal(seed.model, `${PROVIDER}/worker:medium`);
+    assert.deepEqual(seed.effort, {
+      provider: PROVIDER,
+      modelId: "worker",
+      thinkingLevel: "medium",
+      source: "fallback",
+    });
     assert.equal(seed.consultant.spec, `${PROVIDER}/planner:${effort}`);
     assert.deepEqual(seed.consultant.messages, parentMessages);
     assert.match(JSON.stringify(seed.consultant.messages), new RegExp(LIVE_SEED));

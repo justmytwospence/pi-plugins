@@ -20,7 +20,9 @@ export interface SettingsCycleOptions {
   inputPorts?: Partial<SettingsCycleInputPorts>;
 }
 
-export type SettingKey = "workflow" | "reasoning" | "auto-effort" | "approvals";
+export type SettingKey = "workflow" | "reasoning" | "approvals";
+/** Retired keys remain readable in existing session history, never actionable. */
+export type HistoricalSettingKey = SettingKey | "auto-effort";
 export type SettingValue = string | boolean;
 export const SETTINGS_CYCLE_CHANNEL = "pi-plugins.settings-cycle.v1";
 export const SETTINGS_REASONING_COMMITTED = "pi-plugins.settings-reasoning-committed.v1";
@@ -37,7 +39,7 @@ export interface SettingCycleSnapshot {
   id: string;
   phase: SettingCyclePhase;
   settings: Array<{
-    key: SettingKey;
+    key: HistoricalSettingKey;
     baseline: SettingValue;
     target: SettingValue;
     actual: SettingValue;
@@ -73,9 +75,9 @@ export interface SettingCycles {
   addGuard(check: () => string | undefined): () => void;
 }
 
-const order: SettingKey[] = ["workflow", "auto-effort", "reasoning", "approvals"];
-const display: SettingKey[] = ["workflow", "reasoning", "auto-effort", "approvals"];
-const names: Record<SettingKey, string> = {
+const order: SettingKey[] = ["workflow", "reasoning", "approvals"];
+const display: HistoricalSettingKey[] = ["workflow", "reasoning", "auto-effort", "approvals"];
+const names: Record<HistoricalSettingKey, string> = {
   workflow: "Workflow",
   reasoning: "Effort",
   "auto-effort": "Auto",
@@ -175,8 +177,7 @@ export function settingsCycles(pi: ExtensionAPI, options: SettingsCycleOptions =
     "tool-gate:flow",
     "tool-gate:chat-notice",
     "plan-mode:inline",
-    "auto-effort:state",
-    "auto-effort:manual-level",
+    "tool-gate:phase-effort",
   ]);
   // Check every append, not just the final leaf: a setter may persist its own
   // settings, but it must not hide unrelated output below the editable row.
@@ -420,6 +421,7 @@ export function settingsCycles(pi: ExtensionAPI, options: SettingsCycleOptions =
       change: SettingCycleChange<T>,
       trigger?: SettingCycleTrigger,
     ): Promise<boolean> {
+      if (!order.includes(change.key)) return Promise.resolve(false);
       if (inFlight || burst?.phase === "applying") {
         ctx.ui.notify("Wait for the current settings change to finish.", "warning");
         return Promise.resolve(false);

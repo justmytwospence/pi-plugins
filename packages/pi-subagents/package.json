@@ -22,6 +22,9 @@
     "test": "vitest run",
     "eval": "node ../../scripts/eval.mjs --package pi-subagents"
   },
+  "dependencies": {
+    "@justmytwospence/pi-subscription-usage": "file:../pi-subscription-usage"
+  },
   "peerDependencies": {
     "@earendil-works/pi-agent-core": "*",
     "@earendil-works/pi-ai": "*",

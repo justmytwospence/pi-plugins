@@ -22,6 +22,9 @@
     "test": "vitest run",
     "eval": "node ../../scripts/eval.mjs --package pi-tool-gate"
   },
+  "dependencies": {
+    "@justmytwospence/pi-subscription-usage": "file:../pi-subscription-usage"
+  },
   "peerDependencies": {
     "@earendil-works/pi-coding-agent": "*",
     "@earendil-works/pi-tui": "*",

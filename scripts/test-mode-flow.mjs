@@ -42,7 +42,8 @@ const aliases = Object.fromEntries(['@earendil-works', '@mariozechner'].flatMap(
 const jiti = createJiti(import.meta.url, { alias: aliases });
 const temp = mkdtempSync(resolve(tmpdir(), 'pi-suite-mode-flow-'));
 const cwd = process.cwd();
-const originalEnv = Object.fromEntries(['HOME', 'PI_CODING_AGENT_DIR', 'XDG_CONFIG_HOME', 'PI_OFFLINE'].map(key => [key, process.env[key]]));
+const originalEnv = Object.fromEntries(['HOME', 'PI_CODING_AGENT_DIR', 'XDG_CONFIG_HOME', 'PI_OFFLINE',
+  'PI_SUBAGENT', 'PI_TOOL_GATE_APPROVAL', 'PI_TOOL_GATE_WORKFLOW'].map(key => [key, process.env[key]]));
 const networkAttempts = [];
 const restoreNetwork = [];
 // emit() is synchronous; the provider attaches the actual completion promise to the request.
@@ -73,6 +74,8 @@ try {
   process.env.PI_CODING_AGENT_DIR = temp;
   process.env.XDG_CONFIG_HOME = resolve(temp, 'xdg');
   process.env.PI_OFFLINE = '1';
+  // These fixtures create top-level sessions, even when this script is run by a worker.
+  for (const key of ['PI_SUBAGENT', 'PI_TOOL_GATE_APPROVAL', 'PI_TOOL_GATE_WORKFLOW']) delete process.env[key];
   // Fail even swallowed network attempts, and install the tripwires before loading the SDK.
   for (const [object, key] of [[globalThis, 'fetch'], [http, 'request'], [http, 'get'],
     [https, 'request'], [https, 'get'], [net.Socket.prototype, 'connect'], [tls, 'connect']]) {
@@ -118,8 +121,26 @@ export default function (pi) {
   initTheme('dark', false);
   const models = await ModelRuntime.create({ agentDir: temp, allowModelNetwork: false });
   await models.setRuntimeApiKey('anthropic', 'test-placeholder');
-  // A conservative unavailable-classifier response also ensures no fallback can spend money.
-  models.classify = async () => ({ answers: {}, stopReason: 'error', errorMessage: 'Local integration classifier' });
+  // Classifier transport is local, but System 1 resolution/provenance stays real.
+  // Permission/tool-selection calls are not evidence of effort reclassification.
+  writeFileSync(resolve(temp, 'system1.json'), JSON.stringify({ waterfall: ['jev'] }));
+  const effortCalls = [];
+  const otherClassifierCalls = [];
+  let effortTransport;
+  const effortAnswer = model => ({ model: model.id, stopReason: 'stop', answers: {
+    effort: { type: 'choice', choice: 'high', confidence: 0.4,
+      probabilities: { low: 0.3, medium: 0.25, high: 0.4, xhigh: 0.05 } },
+  } });
+  models.classify = async (model, context, options) => {
+    if (Object.keys(context.questions).length === 1 && context.questions.effort?.type === 'choice') {
+      assert(['general', 'plan', 'exec'].includes(context.state.phase));
+      const call = { model, context: structuredClone(context), options };
+      effortCalls.push(call);
+      return effortTransport ? effortTransport(call) : effortAnswer(model);
+    }
+    otherClassifierCalls.push({ model, context: structuredClone(context) });
+    return { answers: {}, stopReason: 'error', errorMessage: 'Local integration classifier' };
+  };
   models.streamSimple = () => { throw new Error('Unexpected nested model request'); };
   const cases = [
     { names: ['tool-gate'] }, { names: ['plan-mode'] },
@@ -148,6 +169,8 @@ export default function (pi) {
       const notifications = [];
       const workflowEvents = [];
       const approvalEvents = [];
+      const activity = [];
+      const thinkingWrites = [];
       let api;
       let approvalChoice = 'here';
       let approvalCount = 0;
@@ -163,6 +186,9 @@ export default function (pi) {
             api = pi;
             pi.events.on('workflow-mode:changed', event => workflowEvents.push(event));
             pi.events.on('permission-mode:changed', event => approvalEvents.push(event));
+            for (const type of ['input', 'before_agent_start', 'tool_result', 'turn_end']) pi.on(type, event => {
+              activity.push({ type, ...(type === 'tool_result' ? { isError: event.isError } : {}) });
+            });
           }] } });
       assert.deepEqual(services.resourceLoader.getExtensions().errors, [], label);
       const manager = SessionManager.inMemory(dir);
@@ -206,6 +232,17 @@ export default function (pi) {
         },
       }, { get(target, key) { return key in target ? target[key] : () => {}; } });
       await session.bindExtensions({ mode: 'rpc', uiContext: ui, onError: error => errors.push(error) });
+      const nativeThinking = session.setThinkingLevel;
+      session.setThinkingLevel = function (level, ...args) {
+        thinkingWrites.push(level);
+        return nativeThinking.call(this, level, ...args);
+      };
+      const effortState = () => ({ calls: effortCalls.length, writes: [...thinkingWrites], thinking: session.thinkingLevel });
+      const unchangedEffort = async (why, run) => {
+        const before = effortState();
+        await run();
+        assert.deepEqual(effortState(), before, `${label}: ${why} does not classify or write effort`);
+      };
       const hasGate = names.includes('tool-gate');
       const hasPlan = names.includes('plan-mode');
       const branchData = type => manager.getBranch().filter(entry => entry.type === 'custom' && entry.customType === type).at(-1)?.data;
@@ -217,7 +254,11 @@ export default function (pi) {
       let restoring = false;
       const reload = async () => {
         const before = structuredClone(transitions());
+        const calls = effortCalls.length;
+        const thinking = session.thinkingLevel;
         await session.reload();
+        assert.equal(effortCalls.length, calls, `${label}: reload never judges effort`);
+        assert.equal(session.thinkingLevel, thinking, `${label}: reload retains native saved effort`);
         assert.deepEqual(transitions(), before, `${label}: reload must not append visible transitions`);
         restoring = true;
       };
@@ -266,7 +307,9 @@ export default function (pi) {
       const go = async target => {
         const visibleBefore = structuredClone(transitions());
         const before = restoreRecords();
+        const calls = effortCalls.length;
         assert.equal((await session.navigateTree(target.id, { summarize: false })).cancelled, false);
+        assert.equal(effortCalls.length, calls, `${label}: branch restoration never reclassifies effort`);
         assert.deepEqual(restoreRecords(), before, `${label}: restoration must not append workflow or inline records`);
         assert.deepEqual(transitions(), visibleBefore, `${label}: tree navigation must not append visible transitions`);
         restoring = true;
@@ -286,6 +329,14 @@ export default function (pi) {
         api.events.emit('permission-mode:set', { mode: 'auto' });
       }
       check('work', 'auto');
+      await unchangedEffort('ordinary prompts, tool errors and turn ends', async () => {
+        await session.prompt('Investigate a difficult parser bug and design a fix.');
+        const result = await call('read', { path: resolve(dir, 'missing-effort-regression.txt') });
+        assert.equal(result.isError, true, 'exercise a real failed tool result');
+        await session.prompt('Retry the investigation after the failed read.');
+      });
+      for (const type of ['input', 'before_agent_start', 'turn_end']) assert(activity.some(event => event.type === type));
+      assert(activity.some(event => event.type === 'tool_result' && event.isError));
       await emitWorkflow(api, 'workflow-mode:set', { mode: 'work' });
       api.events.emit('permission-mode:set', { mode: 'auto' });
       check('work', 'auto'); // No-op setters must not create transcript markers.
@@ -359,7 +410,10 @@ export default function (pi) {
           assert.equal(manager.getBranch().slice(before).some(entry => entry.customType === 'plan-mode:inline'), false, 'approval changes do not exit or reenter plan');
         }
         selectedEffort = 'high'; // Effort-only approval must remain ordinary work, not exec.
+        const beforeApproval = effortCalls.length;
         let result = await call('exit_plan_mode');
+        assert.equal(effortCalls.length, beforeApproval + 1, 'one Exec judgment at approval, none at commit or continuation');
+        assert.equal(effortCalls.at(-1).context.state.phase, 'exec');
         assert.equal(result.details?.outcome, 'approved', JSON.stringify(result));
         const approvedFile = result.details.planFile;
         assert.equal(approvedFile, inlineActive ? planFile : resolve(dir, 'plans/local-plan.md'));
@@ -372,7 +426,8 @@ export default function (pi) {
         assert(manager.getEntries().some(entry => (entry.type === 'message' ? entry.message : entry).customType === 'plan-mode-notice'),
           'real model turns exercise hidden reminders as well as visible transitions');
         assert.equal(session.model.id, planningId);
-        assert.equal(session.thinkingLevel, 'high');
+        assert.equal(session.thinkingLevel, 'high', 'manual approval overrides cumulative medium recommendation');
+        await unchangedEffort('manual approved effort across routine continuation', () => session.prompt('Continue the approved work without changing phases.'));
         assert(!session.getActiveToolNames().includes('finish_plan'), 'ordinary approval is not exec');
         assert.equal(branchData('plan-mode:exec')?.active, undefined);
         await reload();
@@ -435,6 +490,7 @@ export default function (pi) {
         await reload();
         check('exec');
         assert.equal(branchData('plan-mode:exec')?.active, true, 'reload does not durably complete exec');
+        await unchangedEffort('existing approved execution continuation', () => session.prompt('Resume the selected implementation tuple.'));
         assert(session.getActiveToolNames().includes('finish_plan'));
         await session.prompt('/plan-exec stop');
         check('work');
@@ -693,9 +749,132 @@ export default function (pi) {
       for (const reviewer of reviewers) await reviewer.dispose();
     }
   }
+  // Drive the actual approval app while its one task judgment is still pending.
+  // Target changes cancel target waits, not the shared judgment; manual choices
+  // remain per-target and win even when the late automatic result arrives.
+  const { createCustomSelectorHarness } = await jiti.import('../packages/pi-plan-mode/test/support.ts');
+  const alternateId = 'claude-haiku-4-5';
+  assert(models.getModel('anthropic', alternateId), 'second local implementation target exists');
+  for (const names of [['tool-gate', 'plan-mode'], ['plan-mode', 'tool-gate']]) {
+    const label = `pending-effort-${names.join('+')}`;
+    let opened;
+    let release;
+    try {
+      const dir = resolve(temp, label);
+      mkdirSync(dir, { recursive: true });
+      process.chdir(dir);
+      writeFileSync(resolve(temp, 'tool-gate.json'), JSON.stringify({ defaultApproval: 'yolo' }));
+      writeFileSync(resolve(temp, 'pi-plan-mode.json'), JSON.stringify({
+        thinkingLevel: 'inherit', plansDirectory: resolve(dir, 'plans'), completionReview: false,
+        renderedPlans: false, jevToolSelection: false,
+        implementationModelMap: { [`anthropic/${planningId}`]: [implementationId, alternateId]
+          .map(modelId => ({ provider: 'anthropic', modelId })) },
+      }));
+      const errors = [];
+      const requests = [];
+      const before = effortCalls.length;
+      const pendingAnswer = new Promise(resolve => { release = resolve; });
+      effortTransport = async ({ model }) => { await pendingAnswer; return effortAnswer(model); };
+      const manager = SessionManager.inMemory(dir);
+      manager.appendCustomEntry('plan-run', { id: label, createdAt: 1, task: 'Implement the parser fix', state: 'active',
+        planners: [{ id: 'A', spec: `anthropic/${planningId}`, name: 'Local planner',
+          plan: '# Pending effort plan\n\nImplement the focused parser fix.', revision: 1 }],
+        merged: { plan: '# Pending effort plan\n\nImplement the focused parser fix.', revision: 1,
+          name: 'Local planner', spec: `anthropic/${planningId}` } });
+      const services = await createAgentSessionServices({ cwd: dir, agentDir: temp, modelRuntime: models,
+        settingsManager: SettingsManager.inMemory({ cacheWarming: 'off', compaction: { enabled: false }, retry: { enabled: false } }),
+        resourceLoaderOptions: { noExtensions: true, noSkills: true, noPromptTemplates: true, noThemes: true, noContextFiles: true,
+          additionalExtensionPaths: names.map(name => resolve(root, `packages/pi-${name}/src/index.ts`)) } });
+      assert.deepEqual(services.resourceLoader.getExtensions().errors, [], label);
+      ({ session } = await createAgentSessionFromServices({ services, sessionManager: manager,
+        model: models.getModel('anthropic', planningId), thinkingLevel: 'off' }));
+      session.agent.streamFunction = (model, context) => {
+        requests.push({ model: model.id, messages: structuredClone(context.messages) });
+        const stream = createAssistantMessageEventStream();
+        const message = { role: 'assistant', content: [{ type: 'text', text: 'Local implementation.' }],
+          api: model.api, provider: model.provider, model: model.id, stopReason: 'stop', timestamp: Date.now(),
+          usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0,
+            cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } } };
+        queueMicrotask(() => { stream.push({ type: 'done', reason: 'stop', message }); stream.end(message); });
+        return stream;
+      };
+      let harness;
+      const ui = new Proxy({
+        // SDK prompt wrapping copies enumerable properties, not Proxy fallbacks.
+        setStatus() {},
+        notify() {},
+        custom(factory) { harness = createCustomSelectorHarness(factory, 140, undefined, 40); return harness.resultPromise; },
+      }, { get: (target, key) => key in target ? target[key] : () => {} });
+      await session.bindExtensions({ mode: 'tui', uiContext: ui, onError: error => errors.push(error),
+        commandContextActions: { waitForIdle: () => session.waitForIdle() } });
+      assert.deepEqual(errors, [], `${label}: startup`);
+      opened = session.prompt('/planners');
+      await boundedUntil(() => harness, `${label}: planner app`);
+      const screen = () => harness.render().join('\n');
+      for (let i = 0; i < 5 && !/⏎ do it/u.test(screen()); i++) harness.handleInput('\t');
+      harness.handleInput('\r');
+      assert.match(screen(), /● Implement/u);
+      await boundedUntil(() => effortCalls.length > before, `${label}: shared judgment started`);
+      const call = effortCalls.at(-1);
+      assert.match(screen(), /choosing\.\.\./u);
+      const focus = label => {
+        for (let i = 0; i < 10; i++) {
+          if (new RegExp(`${label}\\s+‹`, 'u').test(screen())) return;
+          harness.handleInput('\u001b[B');
+        }
+        assert.fail(`Missing ${label}: ${screen()}`);
+      };
+      focus('Mode');
+      harness.handleInput('\u001b[C'); // Here → first configured target.
+      focus('Model');
+      harness.handleInput('\u001b[C'); // First → second target, still pending.
+      await new Promise(resolve => setImmediate(resolve));
+      assert.equal(effortCalls.length, before + 1, 'model cycling reuses the in-flight task judgment');
+      assert.equal(call.options.signal.aborted, false, 'target cancellation does not abort the shared judgment');
+      const choose = level => {
+        focus('Effort');
+        for (let i = 0; i < 10 && !new RegExp(`Effort\\s+‹ ${level}\\b`, 'u').test(screen()); i++) harness.handleInput('\u001b[C');
+        assert.match(screen(), new RegExp(`Effort\\s+‹ ${level}\\b`, 'u'));
+      };
+      choose('high');
+      focus('Model');
+      harness.handleInput('\u001b[D');
+      choose('low');
+      focus('Model');
+      harness.handleInput('\u001b[C');
+      focus('Effort');
+      assert.match(screen(), /Effort\s+‹ high\b/u, 'manual effort is remembered for the second target');
+      release();
+      await boundedUntil(() => !screen().includes('choosing...'), `${label}: judgment settles`);
+      await new Promise(resolve => setImmediate(resolve));
+      assert.match(screen(), /Effort\s+‹ high\b/u, 'late automatic medium cannot overwrite manual high');
+      assert.equal(effortCalls.length, before + 1);
+      harness.handleInput('\r');
+      await withDeadline(opened, `${label}: approve`);
+      await boundedUntil(() => requests.length > 0, `${label}: executor starts`);
+      await session.waitForIdle();
+      assert.equal(session.model.id, alternateId);
+      assert.equal(session.thinkingLevel, 'high');
+      assert.equal(effortCalls.length, before + 1, 'commit does not rejudge an already approved tuple');
+      const approvedCalls = effortCalls.length;
+      await session.reload();
+      await session.prompt('Continue this selected implementation.');
+      assert.equal(effortCalls.length, approvedCalls, 'reload and continuation retain approval effort');
+      assert.equal(session.thinkingLevel, 'high');
+      assert.deepEqual(errors, [], label);
+      console.log(`PASS actual Pi pending approval effort: ${label}, one judgment and per-target manual choices`);
+    } catch (error) {
+      failures.push(error);
+      console.error(`FAIL actual Pi pending approval effort: ${label}: ${error.stack}`);
+    } finally {
+      release?.();
+      effortTransport = undefined;
+      await session?.dispose();
+      session = undefined;
+    }
+  }
   // /planners' fresh path really replaces the SDK runtime: do not simulate session_start
   // on the old extension objects (that would hide stale-context and load-order bugs).
-  const { createCustomSelectorHarness } = await jiti.import('../packages/pi-plan-mode/test/support.ts');
   for (const names of [['tool-gate', 'plan-mode'], ['plan-mode', 'tool-gate']]) {
     for (const activation of ['success', 'false', 'invalid', 'throw', 'keep-A', 'keep-M']) {
       const keep = activation.startsWith('keep-');
@@ -828,8 +1007,11 @@ export default function (pi) {
         focus('Context');
         if (!keep) harness.handleInput('\u001b[C');
         assert.match(harness.render().join('\n'), keep ? /this conversation, plus the plan/u : /fresh session with only the plan/u);
+        await boundedUntil(() => !harness.render().join('\n').includes('choosing...'), `${label}: settled effort`);
+        const approvedEffortCalls = effortCalls.length;
         harness.handleInput('\r');
         await opened;
+        assert.equal(effortCalls.length, approvedEffortCalls, 'implementation consumes the selected effort without another judgment');
         if (keep) {
           await boundedUntil(() => requests.length > beforeHandoff, `${label}: implementation request`);
           await original.waitForIdle();
@@ -944,6 +1126,7 @@ export default function (pi) {
         const recoveryNotes = structuredClone(notes);
         for (let i = 0; i < 2; i++) {
           await fresh.reload();
+          assert.equal(effortCalls.length, approvedEffortCalls, 'fresh bootstrap/reload never rejudges the approved tuple');
           assert.deepEqual(visibleTransitions(), initialTransitions, 'fresh reload must not append visible transitions');
           assert.equal(consumed().length, 1, 'reload must not consume or rerun bootstrap again');
           assert.equal(workflow(), activation === 'success' ? 'exec' : 'plan');

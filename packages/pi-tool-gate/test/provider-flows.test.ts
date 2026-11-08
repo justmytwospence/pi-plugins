@@ -4,7 +4,7 @@ import { describe, expect, test, vi } from "vitest";
 import {
   FLOW_BUSY, FLOW_RECOVERY, FLOW_TRANSITION, ROLE_MODEL, ProviderFlowController, isPhysicalChatModel,
   parseFlowState, parseProviderFlow, resolveProviderFlow, restoreFlowState, validateProviderFlow,
-  type FlowHost, type FlowModelLease,
+  type FlowHost, type FlowModelLease, type FlowEffortInput, type PreparedFlowEffort,
 } from "../src/provider-flows.ts";
 import {
   FLOW_ENTRY, type FlowBus, type FlowExecution, type FlowState, type FlowWorkflow, type ProviderFlow,
@@ -15,7 +15,7 @@ const levels = ["off", "minimal", "low", "medium", "high", "xhigh", "max"] as co
 const PLAN = "/project/plans/approved.md";
 type ChatModel = Model<Api>;
 type Role = "general" | "planner" | "worker";
-type RoleReply = { model: string; thinking?: string };
+type RoleReply = { model: string; thinking?: string; thinkingPinned?: true };
 type RoleRequest = {
   role: Role;
   parent: string;
@@ -30,7 +30,7 @@ type Permit = { target: { provider: string; id: string }; revision: number };
 function model(provider = "alpha", id = "general", overrides: Partial<ChatModel> = {}): ChatModel {
   return {
     provider, id, name: id, api: "openai-completions", baseUrl: "https://unused.invalid",
-    input: ["text"], reasoning: true, contextWindow: 100_000, maxTokens: 8_000,
+    input: ["text"], reasoning: true, thinkingLevelMap: { xhigh: "xhigh", max: "max" }, contextWindow: 100_000, maxTokens: 8_000,
     cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, ...overrides,
   };
 }
@@ -158,9 +158,13 @@ function harness() {
     trace.push(`persist:${state.operatingMode}@${state.revision}`);
   });
   const changed = vi.fn();
+  const chooseEffort = vi.fn(async (input: FlowEffortInput, _ctx: ExtensionContext, _signal: AbortSignal): Promise<PreparedFlowEffort> => ({
+    requested: input.fallback, source: input.thinkingPinned ? "configured" : "fallback", isCurrent: () => true,
+  }));
+  const persistEffort = vi.fn();
   const host: FlowHost = {
     events, workflow: () => runtime.workflow, replanning: () => runtime.replanning, lease: () => runtime.guardPresent ? lease : undefined,
-    setModel, getThinking: () => runtime.thinking, setThinking, persist, changed,
+    setModel, getThinking: () => runtime.thinking, setThinking, chooseEffort, persistEffort, persist, changed,
     roleReady: () => runtime.roleReady,
   };
   controller = new ProviderFlowController(host);
@@ -170,7 +174,7 @@ function harness() {
   });
   return {
     runtime, requests, authorizations, trace, events, getAvailable, getAll, manager, ctx, lease, host,
-    controller, setModel, setThinking, persist, changed, append, commitWorkflow,
+    controller, setModel, setThinking, chooseEffort, persistEffort, persist, changed, append, commitWorkflow,
     async start(entries: Entry[] = runtime.entries) {
       runtime.entries = entries;
       return controller.restore(entries, ctx);
@@ -231,6 +235,7 @@ describe("same-task replanning lifecycle", () => {
   test("replan and resume activate planner/worker before commit without replacing the task flow", async () => {
     const h = await setupTask();
     const captured = structuredClone(h.controller.snapshot().selectedFlow);
+    expect(h.chooseEffort).toHaveBeenCalledOnce(); // Initial Plan selection; begin did not infer.
     const suspend = vi.fn(() => {
       expect(h.runtime.model?.id).toBe("planner");
       h.runtime.workflow = "plan";
@@ -239,13 +244,18 @@ describe("same-task replanning lifecycle", () => {
     });
     expect((await h.controller.runExecutionTransition(request(h, "replan"), h.ctx, suspend)).ok).toBe(true);
     expect(h.controller.snapshot()).toMatchObject({ workflow: "plan", replanning: true });
+    expect(h.chooseEffort).toHaveBeenCalledTimes(2);
+    expect(h.chooseEffort.mock.calls.at(-1)![0].phase).toBe("plan");
     const resume = vi.fn(() => {
       expect(h.runtime.model?.id).toBe("worker");
       h.runtime.workflow = "exec";
       h.runtime.replanning = false;
       h.append("custom", { ...task(h), planFile: DRAFT, negotiation: { executionId: "task-1", planRevision: 2 } }, "plan-mode:exec");
     });
-    expect((await h.controller.runExecutionTransition(request(h, "resume"), h.ctx, resume)).ok).toBe(true);
+    expect((await h.controller.runExecutionTransition({ ...request(h, "resume"),
+      effort: { provider: "alpha", modelId: "worker", thinkingLevel: "high", source: "system1" } }, h.ctx, resume)).ok).toBe(true);
+    expect(h.chooseEffort).toHaveBeenCalledTimes(2); // Approved resume never reclassifies.
+    expect(h.runtime.thinking).toBe("high");
     expect(h.controller.snapshot().selectedFlow).toEqual(captured);
     expect(h.controller.snapshot()).not.toHaveProperty("replanning");
     expect(h.persist).toHaveBeenCalledOnce(); // Lifecycle cannot rewrite the provider selection.
@@ -354,7 +364,7 @@ describe("same-task replanning lifecycle", () => {
       release.resolve();
       expect((await pending).ok, boundary + change).toBe(false);
       expect(commit).not.toHaveBeenCalled();
-      if (boundary === "model") expect(h.controller.snapshot().blocked).toMatch(/after model mutation/u);
+      if (boundary === "model") expect(h.controller.snapshot().blocked).toMatch(/after model or effort mutation/u);
     }
   });
   test.each([null, false, true, {}, [], { version: 2, draftFile: DRAFT }, { version: 1, draftFile: "" }, { version: 1, draftFile: PLAN }])("corrupt suspension %j never authorizes implementation or a replacement begin", async marker => {
@@ -805,7 +815,7 @@ describe("selection snapshots, authorized activation, and independent reasoning"
     expect(h.authorizations).toEqual([{ target: { provider: "alpha", id: assignment.modelId }, revision: 0 }]);
     expect(h.trace).toEqual([
       `apply:alpha/${assignment.modelId}@0`, `set:start:alpha/${assignment.modelId}`, `set:end:alpha/${assignment.modelId}`,
-      `thinking:${assignment.suggestedThinking}->${assignment.suggestedThinking}`, "persist:linked@1",
+      ...(assignment.suggestedThinking === "low" ? [] : [`thinking:${assignment.suggestedThinking}->${assignment.suggestedThinking}`]), "persist:linked@1",
     ]);
     expect(h.persist).toHaveBeenCalledExactlyOnceWith(linked(flow(), 1));
     expect(h.runtime.approvals).toEqual({ mode: "default", scope: ["project"] });
@@ -846,13 +856,13 @@ describe("selection snapshots, authorized activation, and independent reasoning"
     expect(h.runtime.model?.id).toBe("planner");
     expect(h.requests).toHaveLength(discoveryCount);
     expect(h.persist).toHaveBeenCalledOnce();
-    expect(h.runtime.thinking).toBe("high");
+    expect(h.runtime.thinking).toBe("low");
     const refreshed = await h.select();
     expect(refreshed.snapshot.revision).toBe(2);
     expect(refreshed.snapshot.selectedFlow!.roles.plan.modelId).toBe("alternate");
     expect(h.runtime.model?.id).toBe("alternate");
     expect(h.runtime.workflow).toBe("plan");
-    expect(h.runtime.thinking).toBe("high");
+    expect(h.runtime.thinking).toBe("low");
     refreshed.snapshot.selectedFlow!.roles.plan.modelId = "mutated-result";
     expect(h.controller.snapshot().selectedFlow!.roles.plan.modelId).toBe("alternate");
   });
@@ -872,9 +882,10 @@ describe("selection snapshots, authorized activation, and independent reasoning"
     expect(commit).toHaveBeenCalledOnce();
   });
 
-  test("later workflow/provider changes preserve current reasoning, using the native clamp rather than role suggestions", async () => {
+  test("later boundaries choose destination effort and apply the native capability clamp", async () => {
     const h = await selected();
     h.runtime.thinking = "max";
+    h.chooseEffort.mockResolvedValue({ requested: "max", source: "system1", isCurrent: () => true });
     h.runtime.ceilings["alpha/planner"] = "high";
     const commit = h.commitWorkflow("plan");
     expect((await h.controller.prepareWorkflow("plan", h.ctx, commit)).ok).toBe(true);
@@ -885,7 +896,7 @@ describe("selection snapshots, authorized activation, and independent reasoning"
     h.runtime.thinking = "xhigh";
     h.runtime.available = h.runtime.available.map(item => item.provider === "beta" && item.id === "planner" ? { ...item, reasoning: false } : item);
     await h.select("beta");
-    expect(h.setThinking).toHaveBeenLastCalledWith("xhigh");
+    expect(h.setThinking).toHaveBeenLastCalledWith("max");
     expect(h.runtime.thinking).toBe("off");
     expect(h.runtime.workflow).toBe("plan");
     expect(h.authorizations.at(-1)).toEqual({ target: { provider: "beta", id: "planner" }, revision: 1 });
@@ -1088,7 +1099,10 @@ describe("preparation and activation failures do not commit metadata or lifecycl
       await originalSetter(target);
       throw new Error("Post-model extension failed");
     });
-    else h.setThinking.mockImplementationOnce(() => { throw new Error("Native thinking setter failed"); });
+    else {
+      h.chooseEffort.mockResolvedValueOnce({ requested: "high", source: "system1", isCurrent: () => true });
+      h.setThinking.mockImplementationOnce(() => { throw new Error("Native thinking setter failed"); });
+    }
     const commit = h.commitWorkflow("plan");
     const result = await h.controller.prepareWorkflow("plan", h.ctx, commit);
     expect(result.ok).toBe(false);
@@ -1158,7 +1172,7 @@ describe("explicit approved execution and Work handoff", () => {
     const commit = vi.fn(() => {
       expect(h.runtime.model?.id).toBe("general");
       expect(h.runtime.workflow).toBe("exec");
-      expect(h.runtime.thinking).toBe("xhigh");
+      expect(h.runtime.thinking).toBe("medium");
       h.runtime.workflow = "work";
       h.append("custom", { active: false, planFile: PLAN, phase }, "plan-mode:exec");
     });
@@ -1666,5 +1680,207 @@ describe("asynchronous fencing, serialization, and shutdown", () => {
     expect(h.persist).toHaveBeenCalledTimes(persists);
     await h.controller.shutdown();
     expect(h.lease.dispose).toHaveBeenCalledOnce();
+  });
+});
+
+describe("one-shot phase effort boundaries", () => {
+  test("canonical General preserves Work/Chat effort, but provider reselection calibrates even on the same model", async () => {
+    const h = await selected();
+    expect(h.chooseEffort).toHaveBeenCalledOnce();
+    expect(h.chooseEffort.mock.calls[0]![0]).toMatchObject({ phase: "general", target: { provider: "alpha", id: "general" } });
+    h.runtime.thinking = "xhigh";
+    const writes = h.setThinking.mock.calls.length;
+    for (const next of ["chat", "work", "work"] as const) {
+      expect((await h.controller.prepareWorkflow(next, h.ctx, h.commitWorkflow(next))).ok).toBe(true);
+    }
+    expect(h.chooseEffort).toHaveBeenCalledOnce();
+    expect(h.setThinking).toHaveBeenCalledTimes(writes);
+    expect(h.runtime.thinking).toBe("xhigh");
+    h.chooseEffort.mockResolvedValueOnce({ requested: "high", source: "system1", isCurrent: () => true });
+    await h.select();
+    expect(h.chooseEffort).toHaveBeenCalledTimes(2);
+    expect(h.setModel).toHaveBeenCalledOnce();
+    expect(h.runtime.thinking).toBe("high");
+    expect((await h.controller.prepareWorkflow("plan", h.ctx, h.commitWorkflow("plan"))).ok).toBe(true);
+    expect(h.chooseEffort.mock.calls.at(-1)![0].phase).toBe("plan");
+    expect(h.chooseEffort).toHaveBeenCalledTimes(3);
+    const before = h.persistEffort.mock.calls.length;
+    for (let i = 0; i < 3; i++) {
+      expect((await h.controller.reconcile(h.ctx)).ok).toBe(true);
+      expect((await h.controller.restore(h.runtime.entries, h.ctx)).ok).toBe(true);
+    }
+    expect(h.chooseEffort).toHaveBeenCalledTimes(3);
+    expect(h.persistEffort).toHaveBeenCalledTimes(before);
+  });
+
+  test("authored effort provenance is validated, captured and forwarded independently of model provenance", async () => {
+    const h = harness();
+    h.runtime.roles.alpha.planner = { model: "alpha/planner", thinking: "high", thinkingPinned: true };
+    h.runtime.workflow = "plan";
+    await h.start();
+    await h.select();
+    expect(h.controller.snapshot().selectedFlow!.roles.plan.thinkingPinned).toBe(true);
+    expect(h.chooseEffort.mock.calls[0]![0]).toMatchObject({ phase: "plan", fallback: "high", thinkingPinned: true });
+    expect(h.persistEffort).toHaveBeenLastCalledWith(expect.objectContaining({ source: "configured", requested: "high" }));
+    for (const bad of [false, undefined, null, "true", 1]) {
+      const value = flow();
+      (value.roles.plan as any).thinkingPinned = bad;
+      expect(parseProviderFlow(value)).toBeUndefined();
+    }
+    expect(parseProviderFlow(flow())).toEqual(flow());
+  });
+
+  test.each(["manual", "configured", "system1", "fallback"] as const)("approved %s effort is applied before Exec commit, with no second preparation", async source => {
+    const h = await selected("plan");
+    const calls = h.chooseEffort.mock.calls.length;
+    const effort = { provider: "alpha", modelId: "worker", thinkingLevel: "high", source };
+    const commit = vi.fn(() => {
+      expect(h.runtime.model?.id).toBe("worker");
+      expect(h.runtime.thinking).toBe("high");
+      h.runtime.workflow = "exec";
+    });
+    expect((await h.controller.runExecutionTransition({ ...execution(h), effort }, h.ctx, commit)).ok).toBe(true);
+    expect(commit).toHaveBeenCalledOnce();
+    expect(h.chooseEffort).toHaveBeenCalledTimes(calls);
+    expect(h.persistEffort).toHaveBeenLastCalledWith({ phase: "exec", target: { provider: "alpha", id: "worker" }, requested: "high", effective: "high", source });
+  });
+
+  test.each([undefined, { provider: "alpha", modelId: "worker", source: "manual" as const }])("legacy or approved undefined effort retains native pretransition effort: %j", async effort => {
+    const h = await selected("plan");
+    h.runtime.thinking = "high";
+    const calls = h.chooseEffort.mock.calls.length;
+    expect((await h.controller.runExecutionTransition({ ...execution(h), ...(effort ? { effort } : {}) }, h.ctx, vi.fn())).ok).toBe(true);
+    expect(h.runtime.thinking).toBe("high");
+    expect(h.chooseEffort).toHaveBeenCalledTimes(calls);
+  });
+
+  test.each([
+    null, false, {}, { provider: "beta", modelId: "worker", source: "manual" },
+    { provider: "alpha", modelId: "planner", source: "manual" },
+    { provider: "alpha", modelId: "worker", source: "automatic" },
+    { provider: "alpha", modelId: "worker", thinkingLevel: "bogus", source: "manual" },
+    { provider: "alpha", modelId: "worker", thinkingLevel: null, source: "manual" },
+  ])("invalid supplied approved tuple fails before mutation: %j", async effort => {
+    const h = await selected("plan");
+    const before = durable(h);
+    const commit = vi.fn();
+    expect(await h.controller.runExecutionTransition({ ...execution(h), effort: effort as any }, h.ctx, commit)).toMatchObject({ ok: false, error: "Invalid approved effort for the assigned worker." });
+    expect(durable(h)).toEqual(before);
+    expect(commit).not.toHaveBeenCalled();
+  });
+
+  test("an approval cannot be retargeted through its mutable bus object while waiting", async () => {
+    const h = await selected("plan");
+    const entered = deferred();
+    const release = deferred();
+    h.getAvailable.mockImplementationOnce(async () => { entered.resolve(); await release.promise; return h.runtime.available; });
+    const effort = { provider: "alpha", modelId: "worker", thinkingLevel: "high", source: "manual" as const };
+    const pending = h.controller.runExecutionTransition({ ...execution(h), effort }, h.ctx, vi.fn());
+    await entered.promise;
+    effort.thinkingLevel = "low";
+    release.resolve();
+    expect((await pending).ok).toBe(true);
+    expect(h.runtime.thinking).toBe("high");
+  });
+
+  test.each(["effort", "model", "isCurrent", "availability"] as const)("a changed %s rejects late prepared effort before mutation", async change => {
+    const h = await selected();
+    const entered = deferred();
+    const answer = deferred<PreparedFlowEffort>();
+    h.chooseEffort.mockImplementationOnce(async () => { entered.resolve(); return answer.promise; });
+    const calls = h.setModel.mock.calls.length;
+    const records = h.persistEffort.mock.calls.length;
+    const commit = h.commitWorkflow("plan");
+    const pending = h.controller.prepareWorkflow("plan", h.ctx, commit);
+    await entered.promise;
+    if (change === "effort") h.runtime.thinking = "xhigh";
+    if (change === "model") h.runtime.model = model("alpha", "alternate");
+    if (change === "availability") h.runtime.available = h.runtime.available.filter(item => item.id !== "planner");
+    answer.resolve({ requested: "high", source: "system1", isCurrent: () => change !== "isCurrent" });
+    expect((await pending).ok).toBe(false);
+    expect(commit).not.toHaveBeenCalled();
+    expect(h.setModel).toHaveBeenCalledTimes(calls);
+    expect(h.persistEffort).toHaveBeenCalledTimes(records);
+  });
+
+  test.each(["explicit", "restore", "shutdown", "supersede"] as const)("%s aborts pending preparation and discards late answers", async action => {
+    const h = await selected();
+    const entered = deferred<AbortSignal>();
+    const answer = deferred<PreparedFlowEffort>();
+    h.chooseEffort.mockImplementationOnce(async (_input, _ctx, signal) => { entered.resolve(signal); return answer.promise; });
+    const commit = h.commitWorkflow("plan");
+    const pending = h.controller.prepareWorkflow("plan", h.ctx, commit);
+    const signal = await entered.promise;
+    let next: Promise<unknown> | undefined;
+    if (action === "explicit") h.controller.invalidateEffort();
+    if (action === "restore") h.controller.restoreState(h.runtime.entries);
+    if (action === "shutdown") next = h.controller.shutdown();
+    if (action === "supersede") next = h.controller.selectProvider("beta", h.ctx);
+    expect(signal.aborted).toBe(true);
+    expect((await pending).ok).toBe(false); // Does not wait for a classifier ignoring cancellation.
+    expect(commit).not.toHaveBeenCalled();
+    answer.resolve({ requested: "max", source: "system1", isCurrent: () => true });
+    await next;
+    expect(h.runtime.workflow).toBe("work");
+    expect(h.runtime.thinking).not.toBe("max");
+  });
+
+  test.each([true, false])("active run cancellation is inherited only when non-idle (idle=%s)", async idle => {
+    const h = await selected();
+    h.runtime.idle = idle;
+    const controller = new AbortController();
+    (h.ctx as any).signal = controller.signal;
+    const entered = deferred<AbortSignal>();
+    const answer = deferred<PreparedFlowEffort>();
+    h.chooseEffort.mockImplementationOnce(async (_input, _ctx, signal) => { entered.resolve(signal); return answer.promise; });
+    const pending = h.controller.prepareWorkflow("plan", h.ctx, h.commitWorkflow("plan"));
+    const signal = await entered.promise;
+    controller.abort();
+    expect(signal.aborted).toBe(!idle);
+    answer.resolve({ requested: "high", source: "system1", isCurrent: () => true });
+    expect((await pending).ok).toBe(idle);
+  });
+
+  test("idle recovery ignores an already aborted prior run", async () => {
+    const h = await selected();
+    (h.ctx as any).signal = AbortSignal.abort();
+    expect((await h.controller.prepareWorkflow("plan", h.ctx, h.commitWorkflow("plan"))).ok).toBe(true);
+  });
+
+  test("an explicit same-level choice during an owned model await prevents stale effort and commit", async () => {
+    const h = await selected();
+    h.runtime.beforeSet = async () => h.controller.invalidateEffort();
+    const commit = h.commitWorkflow("plan");
+    const records = h.persistEffort.mock.calls.length;
+    expect((await h.controller.prepareWorkflow("plan", h.ctx, commit)).ok).toBe(false);
+    expect(h.runtime.model?.id).toBe("planner");
+    expect(h.runtime.thinking).toBe("low"); // Owned model default only.
+    expect(commit).not.toHaveBeenCalled();
+    expect(h.persistEffort).toHaveBeenCalledTimes(records);
+    expect(h.controller.snapshot().blocked).toContain(FLOW_RECOVERY);
+  });
+
+  test("same-model effort-only partial mutation also requires explicit recovery", async () => {
+    const h = await selected();
+    h.chooseEffort.mockResolvedValueOnce({ requested: "high", source: "system1", isCurrent: () => true });
+    h.setThinking.mockImplementationOnce(level => { h.runtime.thinking = level; throw new Error("effort observer failed"); });
+    const records = h.persistEffort.mock.calls.length;
+    expect((await h.controller.selectProvider("alpha", h.ctx)).ok).toBe(false);
+    expect(h.controller.snapshot().blocked).toContain(FLOW_RECOVERY);
+    expect(h.controller.snapshot().revision).toBe(1);
+    expect(h.setModel).toHaveBeenCalledOnce();
+    expect(h.persistEffort).toHaveBeenCalledTimes(records);
+  });
+
+  test("the boundary journal captures only successful detached metadata, never task evidence", async () => {
+    const h = await selected();
+    const pressure = { state: "unavailable" as const, tier: "none" as const, p: 0, reason: "unknown account" };
+    const classifier = { backend: "jev" as const, provider: "typesafe", model: "actual" };
+    h.chooseEffort.mockResolvedValueOnce({ requested: "high", source: "system1", pressure, classifier, isCurrent: () => true });
+    expect((await h.controller.prepareWorkflow("plan", h.ctx, h.commitWorkflow("plan"))).ok).toBe(true);
+    expect(h.persistEffort).toHaveBeenLastCalledWith({ phase: "plan", target: { provider: "alpha", id: "planner" }, requested: "high", effective: "high", source: "system1", pressure, classifier });
+    pressure.reason = "changed later";
+    expect(h.persistEffort.mock.calls.at(-1)![0].pressure!.reason).toBe("unknown account");
+    expect(h.controller.snapshot().revision).toBe(1);
   });
 });

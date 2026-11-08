@@ -11,6 +11,7 @@ import path from "node:path";
 
 import { type CacheView, type LastRequest, type ModelInfo, lastRequest, view } from "./clock.ts";
 import { loadSettings, saveUserSettings } from "./config.ts";
+import { emptyState, globMatch, restoreState, rewritePayload } from "./effort-updates.ts";
 import { type Lean, leanContext, trimStatus } from "./context.ts";
 import { FOOTER_ACTIONS_CHANNEL, type FooterActionsRequest } from "./footer-actions.ts";
 import { HerdrReporter, alertHeld, whileBlocked } from "./herdr.ts";
@@ -92,7 +93,7 @@ export function statusText(v: CacheView | undefined): string | undefined {
   return undefined;
 }
 
-/** The event other extensions read the main session's prompt cache from (pi-auto-effort, for one). */
+/** The event other extensions read the main session's prompt cache from. */
 export const CACHE_STATE = "cache:state";
 
 /**
@@ -223,6 +224,12 @@ export default function cacheGuard(
   let sessionReady = false;
   let generation = 0;
   let settings: Settings = DEFAULT_SETTINGS;
+  let updates = emptyState();
+  const restoreUpdates = (context: ExtensionContext) => {
+    const entry = context.sessionManager.getBranch().findLast((item) => item.type === "custom" &&
+      (item.customType === "cache-guard:effort-updates" || item.customType === "auto-effort:effort-updates"));
+    updates = restoreState(entry?.type === "custom" ? entry.data : undefined);
+  };
   // A miss found at message_end, written at turn_end once the message itself is in the session.
   let pendingMiss: Notice | undefined;
   // Keep-warm refreshes already noted (Pi has no event for them; the tick looks for new ones).
@@ -282,7 +289,10 @@ export default function cacheGuard(
     const model = context.model;
     // Only this session's model: other requests (Jev, for one) go to other models.
     if (request && model && request.model === model.id) wireFor(model.provider, model.id).ttl = request.ttl;
-    return undefined;
+    if (!model || (event.payload as { model?: unknown } | undefined)?.model !== model.id || !settings.effortUpdates.enabled ||
+        !settings.effortUpdates.models.some((glob) => globMatch(glob, `${model.provider}/${model.id}`))) return undefined;
+    if (rewritePayload(updates, event.payload)) pi.appendEntry("cache-guard:effort-updates", { ...updates, transitions: [...updates.transitions] });
+    return event.payload;
   });
   pi.on("provider_stream_event", (event) => {
     const retention = echoedRetention(event.data);
@@ -350,6 +360,7 @@ export default function cacheGuard(
 
   const stop = () => {
     sessionReady = false;
+    updates = emptyState();
     generation++;
     if (timer) clearInterval(timer);
     timer = undefined;
@@ -374,6 +385,7 @@ export default function cacheGuard(
     sessionOn = true;
     askOn = true;
     settings = loadSettings(context.cwd);
+    restoreUpdates(context);
     pendingMiss = undefined;
     seenWarm = new Set(recentWarms(context).map((entry) => entry.id!));
     sessionReady = true;
@@ -395,7 +407,10 @@ export default function cacheGuard(
     publish();
   };
   pi.on("model_select", (_event, context) => refresh(context, false));
-  pi.on("session_tree", (_event, context) => refresh(context, false));
+  pi.on("session_tree", (_event, context) => {
+    restoreUpdates(context);
+    refresh(context, false);
+  });
   pi.on("session_compact", (event, context) => {
     const usage = (event.compactionEntry as { usage?: { input: number; output: number; cacheRead: number; cacheWrite: number; cost: { total: number } } }).usage;
     if (ctx && usage) {
@@ -502,8 +517,8 @@ export default function cacheGuard(
     const picked = await ask(() => context.ui.select(title, menu.map((item) => item.label)));
     const item = menu.find((entry) => entry.label === picked);
     const choice = item?.choice ?? "keep";
-    // Whoever offered the model applies it (pi-auto-effort, at before_agent_start); every other
-    // answer is null, so a listener can drop what it held for this prompt.
+    // Whoever offered the model applies it; every other answer is null, so a listener can drop
+    // what it held for this prompt.
     emitChoice({ text: event.text, model: choice === "model" ? item?.model ?? null : null });
     const keep = () => {
       context.ui.setEditorText(event.text);

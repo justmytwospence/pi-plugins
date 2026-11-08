@@ -1,4 +1,7 @@
-import type { Model, Api } from "@earendil-works/pi-ai";
+import { clampThinkingLevel, getSupportedThinkingLevels, type Model, type Api } from "@earendil-works/pi-ai";
+import type { SelectionPressure } from "@justmytwospence/pi-subscription-usage";
+import type { ClassifierProvenance } from "./system1.ts";
+import { withEffortOrigin } from "./effort-origin.ts";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import {
   FLOW_ENTRY, type FlowAssignment, type FlowAvailability, type FlowBus, type FlowExecution,
@@ -13,6 +16,7 @@ export const FLOW_RECOVERY = "Use /flow independent or select a valid /flow link
 export const ROLE_MODEL = "subagents:role-model";
 export const ROLE_MODEL_READY = "subagents:role-model-ready";
 const phases = ["work", "chat", "plan", "exec"] as const;
+const canonicalPhase = (phase: FlowWorkflow): FlowEffortInput["phase"] => phase === "work" || phase === "chat" ? "general" : phase;
 const thinkingLevels = new Set(["off", "minimal", "low", "medium", "high", "xhigh", "max"]);
 const record = (value: unknown): value is Record<string, unknown> => !!value && typeof value === "object" && !Array.isArray(value);
 const errorText = (error: unknown) => error instanceof Error ? error.message : String(error);
@@ -25,7 +29,8 @@ export function parseProviderFlow(value: unknown): ProviderFlow | undefined {
     const assignment = value.roles[phase];
     if (!record(assignment) || assignment.provider !== value.provider || typeof assignment.modelId !== "string" || !assignment.modelId) return;
     if (assignment.suggestedThinking !== undefined && (typeof assignment.suggestedThinking !== "string" || !thinkingLevels.has(assignment.suggestedThinking))) return;
-    roles[phase] = { provider: value.provider, modelId: assignment.modelId, ...(typeof assignment.suggestedThinking === "string" ? { suggestedThinking: assignment.suggestedThinking } : {}) };
+    if (Object.hasOwn(assignment, "thinkingPinned") && assignment.thinkingPinned !== true) return;
+    roles[phase] = { provider: value.provider, modelId: assignment.modelId, ...(typeof assignment.suggestedThinking === "string" ? { suggestedThinking: assignment.suggestedThinking } : {}), ...(assignment.thinkingPinned === true ? { thinkingPinned: true } : {}) };
   }
   // Work and Chat are a single General resolution, not independently configurable roles.
   if (JSON.stringify(roles.work) !== JSON.stringify(roles.chat)) return;
@@ -67,7 +72,7 @@ export function validateProviderFlow(flow: ProviderFlow, available: readonly Mod
 interface RoleRequest {
   role: string; parent: string; thinking: string; cwd: string;
   availableModels: readonly { provider: string; id: string }[];
-  reply?: { model: string; thinking?: string };
+  reply?: { model: string; thinking?: string; thinkingPinned?: true };
 }
 /** Synchronous role discovery over a previously authenticated catalog; no inference calls. */
 export function resolveProviderFlow(provider: string, anchor: string, available: readonly Model<Api>[], cwd: string, events: FlowBus): ProviderFlow {
@@ -79,7 +84,8 @@ export function resolveProviderFlow(provider: string, anchor: string, available:
     if (!request.reply.model.startsWith(prefix)) throw new Error(`${role}: role default must stay inside ${provider}.`);
     const thinking = request.reply.thinking ?? "medium";
     if (!thinkingLevels.has(thinking)) throw new Error(`${role}: unsupported suggested thinking level ${thinking}.`);
-    return { provider, modelId: request.reply.model.slice(prefix.length), suggestedThinking: thinking };
+    if (Object.hasOwn(request.reply, "thinkingPinned") && request.reply.thinkingPinned !== true) throw new Error(`${role}: invalid authored effort pin.`);
+    return { provider, modelId: request.reply.model.slice(prefix.length), suggestedThinking: thinking, ...(request.reply.thinkingPinned === true ? { thinkingPinned: true } : {}) };
   };
   const general = resolve("general");
   const flow: ProviderFlow = { provider, anchorModel: anchor, roles: { work: general, chat: { ...general }, plan: resolve("planner"), exec: resolve("worker") } };
@@ -96,6 +102,27 @@ export interface FlowModelLease {
   apply<T>(target: { provider: string; id: string }, revision: number, run: () => Promise<T>): Promise<T>;
   dispose(): void;
 }
+export type FlowEffortInput = {
+  phase: "general" | "plan" | "exec";
+  target: { provider: string; id: string };
+  fallback: string;
+  thinkingPinned?: true;
+};
+export type PreparedFlowEffort = {
+  requested: string;
+  source: "manual" | "configured" | "system1" | "fallback";
+  pressure?: SelectionPressure;
+  classifier?: ClassifierProvenance;
+  isCurrent(): boolean;
+};
+export type FlowEffortEntry = Omit<PreparedFlowEffort, "isCurrent"> & {
+  phase: FlowEffortInput["phase"];
+  target: FlowEffortInput["target"];
+  effective: string;
+};
+type ActivationPolicy = "boundary" | "restore" | "approved";
+type ActivatedEffort = { entry?: FlowEffortEntry; check(): void };
+
 export interface FlowHost {
   events: FlowBus;
   workflow(): FlowWorkflow;
@@ -104,6 +131,8 @@ export interface FlowHost {
   setModel(model: Model<Api>): Promise<boolean>;
   getThinking(): string;
   setThinking(thinking: string): void;
+  chooseEffort(input: FlowEffortInput, ctx: ExtensionContext, signal: AbortSignal): Promise<PreparedFlowEffort>;
+  persistEffort(entry: FlowEffortEntry): void;
   persist(state: FlowState): void;
   changed(): void;
   /** False is an explicit teardown. Undefined permits a synchronous readiness probe. */
@@ -122,6 +151,14 @@ export class ProviderFlowController {
   private selecting = false;
   private queue: Promise<unknown> = Promise.resolve();
   private shutdownPromise?: Promise<void>;
+  private effortGeneration = 0;
+  private preparation?: AbortController;
+  /** Explicit choices invalidate pending preparation, never pin later phases. */
+  invalidateEffort(): void {
+    this.effortGeneration++;
+    this.preparation?.abort();
+    this.preparation = undefined;
+  }
   constructor(private readonly host: FlowHost) {}
   snapshot(): FlowSnapshot {
     return { ...copy(this.state), workflow: this.host.workflow(), ...(this.host.replanning?.() ? { replanning: true } : {}), ready: this.ready, guardAvailable: this.host.lease()?.available === true && this.host.lease()?.pauseAvailable === true, ...(this.blocked ? { blocked: this.blocked } : {}), transitioning: this.pending > 0 };
@@ -163,6 +200,8 @@ export class ProviderFlowController {
     };
   }
   private enqueue(ctx: ExtensionContext, operation: (check: () => void) => Promise<void>): Promise<FlowTransitionResult> {
+    // A newer transition supersedes inference, but cannot revoke an entered native setter.
+    if (this.preparation) this.invalidateEffort();
     const check = this.fence(ctx);
     this.pending++;
     this.host.changed();
@@ -176,16 +215,25 @@ export class ProviderFlowController {
     // Snapshot after finally, so consumers do not mistake a completed operation for an active one.
     return next.then(result => ({ ...result, snapshot: this.snapshot() }));
   }
-  private async activate(flow: ProviderFlow, phase: FlowWorkflow, ctx: ExtensionContext, check: () => void, initial = false, probeReadiness = false): Promise<void> {
+  private async activate(flow: ProviderFlow, phase: FlowWorkflow, ctx: ExtensionContext, check: () => void, policy: ActivationPolicy, probeReadiness = false, approved?: FlowExecution["effort"]): Promise<ActivatedEffort> {
     const lease = this.host.lease();
-    if (!lease?.available || !lease.pauseAvailable) throw new Error("Linked mode needs an installed, supported model guard with queue-preserving pause.");
-    if (this.host.roleReady?.() === false) throw new Error("Role defaults unavailable: pi-subagents is not ready.");
-    const available = await this.available(ctx);
-    check();
+    const runSignal = !ctx.isIdle() ? ctx.signal : undefined;
+    const epoch = this.effortGeneration;
+    const previous = { provider: ctx.model?.provider, id: ctx.model?.id, thinking: this.host.getThinking() };
+    const sameModel = (provider: string | undefined, id: string | undefined) => ctx.model?.provider === provider && ctx.model?.id === id;
+    const current = () => {
+      check();
+      if (runSignal?.aborted) throw new Error("Flow transition cancelled: the active run was aborted.");
+      if (epoch !== this.effortGeneration) throw new Error("Flow effort preparation cancelled: an explicit choice or transition changed.");
+      if (!lease?.available || !lease.pauseAvailable || this.host.lease() !== lease) throw new Error("Linked mode needs an installed, supported model guard with queue-preserving pause.");
+      if (this.host.roleReady?.() === false) throw new Error("Role defaults unavailable: pi-subagents is not ready.");
+    };
+    current();
+    let available = await this.available(ctx);
+    current();
     const failure = validateProviderFlow(flow, available);
     if (failure) throw new Error(failure);
-    // Older optional providers may not publish readiness. Probe only for a response;
-    // changed role defaults must not invalidate or replace a durable activation snapshot.
+    // Probe capability, never replace a durable role snapshot with new defaults.
     if (probeReadiness && !this.roleProbed && this.host.roleReady?.() === undefined) {
       const request: RoleRequest = { role: "general", parent: `${flow.provider}/${flow.anchorModel}`, thinking: "medium", cwd: ctx.cwd, availableModels: available.map(({ provider, id }) => ({ provider, id })) };
       this.host.events.emit(ROLE_MODEL, request);
@@ -193,38 +241,88 @@ export class ProviderFlowController {
       this.roleProbed = true;
     }
     const assignment = flow.roles[phase];
-    const model = available.find(model => model.provider === assignment.provider && model.id === assignment.modelId)!;
-    const thinking = initial ? assignment.suggestedThinking ?? "medium" : this.host.getThinking();
-    check();
-    const previous = ctx.model;
+    const target = { provider: assignment.provider, id: assignment.modelId };
+    // Supplied approval data must be exact and valid before any physical mutation.
+    if (approved !== undefined && (policy !== "approved" || !record(approved) || approved.provider !== target.provider || approved.modelId !== target.id ||
+        !["manual", "configured", "system1", "fallback"].includes(approved.source) ||
+        (approved.thinkingLevel !== undefined && !thinkingLevels.has(approved.thinkingLevel)))) {
+      throw new Error("Invalid approved effort for the assigned worker.");
+    }
+    let prepared: PreparedFlowEffort = { requested: approved?.thinkingLevel ?? previous.thinking, source: approved?.source ?? "fallback", isCurrent: () => true };
+    if (policy === "boundary") {
+      const controller = new AbortController();
+      this.preparation = controller;
+      // Idle recovery must not inherit a completed run's aborted signal.
+      const signal = runSignal ? AbortSignal.any([controller.signal, runSignal]) : controller.signal;
+      try {
+        signal.throwIfAborted();
+        prepared = await new Promise<PreparedFlowEffort>((resolve, reject) => {
+          const abort = () => reject(new Error("Flow effort preparation cancelled."));
+          signal.addEventListener("abort", abort, { once: true });
+          Promise.resolve(this.host.chooseEffort({ phase: canonicalPhase(phase), target, fallback: assignment.suggestedThinking ??
+            (getSupportedThinkingLevels(available.find(model => model.provider === target.provider && model.id === target.id)!).includes(previous.thinking as never) ? previous.thinking : "medium"),
+            ...(assignment.thinkingPinned ? { thinkingPinned: true } : {}) }, ctx, signal))
+            .then(resolve, reject).finally(() => signal.removeEventListener("abort", abort));
+        });
+        current();
+        signal.throwIfAborted();
+        // Authentication/catalog may have changed while inference was pending.
+        available = await this.available(ctx);
+        current();
+        signal.throwIfAborted();
+        const failure = validateProviderFlow(flow, available);
+        if (failure) throw new Error(failure);
+      } finally { if (this.preparation === controller) this.preparation = undefined; }
+    }
+    const model = available.find(model => model.provider === target.provider && model.id === target.id)!;
+    const preparedCurrent = () => {
+      current();
+      if (!prepared.isCurrent()) throw new Error("Flow effort preparation cancelled: the selection changed.");
+    };
+    preparedCurrent();
+    if (!thinkingLevels.has(prepared.requested)) throw new Error("Invalid prepared thinking level.");
+    // Compare to the source only before our own model write. Native defaults and clamps
+    // are owned writes, not manual changes, and must not invalidate their preparation.
+    if (!sameModel(previous.provider, previous.id) || this.host.getThinking() !== previous.thinking) throw new Error("Flow effort preparation cancelled: the active model or effort changed.");
     const liveDestination = this.fence(ctx);
     let applied = false;
     this.activation = true;
     try {
-      if (ctx.model?.provider !== model.provider || ctx.model.id !== model.id) {
-        const success = await lease.apply({ provider: model.provider, id: model.id }, this.state.revision, () => this.host.setModel(model));
-        check();
-        if (!success) throw new Error(`Model activation failed: ${model.provider}/${model.id}.`);
+      if (!sameModel(target.provider, target.id)) {
+        const success = await lease!.apply(target, this.state.revision, () => withEffortOrigin("flow", () => this.host.setModel(model)));
+        applied = success;
+        preparedCurrent();
+        if (!success) throw new Error(`Model activation failed: ${target.provider}/${target.id}.`);
+      }
+      preparedCurrent();
+      if (!sameModel(target.provider, target.id)) throw new Error("Flow activation cancelled: the destination model changed.");
+      const desired = clampThinkingLevel(model, prepared.requested as Parameters<typeof clampThinkingLevel>[1]);
+      if (this.host.getThinking() !== desired) {
+        withEffortOrigin("flow", () => this.host.setThinking(prepared.requested));
         applied = true;
       }
-      // Native setModel may apply a per-model default. Restore the user's requested effort,
-      // using the native setter's capability clamp, not another role suggestion.
-      this.host.setThinking(thinking);
-      check();
+      preparedCurrent();
+      if (!sameModel(target.provider, target.id)) throw new Error("Flow activation cancelled: the destination model changed.");
+      const effective = this.host.getThinking();
+      const finalCheck = () => {
+        preparedCurrent();
+        if (!sameModel(target.provider, target.id) || this.host.getThinking() !== effective) throw new Error("Flow transition cancelled: the destination model or effort changed before commit.");
+      };
+      if (policy === "restore") return { check: finalCheck };
+      const { isCurrent: _, ...metadata } = prepared;
+      return { entry: { ...metadata, phase: canonicalPhase(phase), target, effective }, check: finalCheck };
     } catch (error) {
-      // The native setter normally fails before mutation. A post-mutation extension
-      // failure cannot honestly be reported as an unchanged old tuple.
       let live = true;
       try { liveDestination(); } catch { live = false; }
-      if (live && (applied || ctx.model?.provider !== previous?.provider || ctx.model?.id !== previous?.id)) {
+      if (live && (applied || !sameModel(previous.provider, previous.id) || this.host.getThinking() !== previous.thinking)) {
         this.explicitRecovery = true;
-        this.blocked = `Flow activation failed after model mutation: ${errorText(error)}. ${FLOW_RECOVERY}`;
+        this.blocked = `Flow activation failed after model or effort mutation: ${errorText(error)}. ${FLOW_RECOVERY}`;
       }
       throw error;
     } finally { this.activation = false; }
   }
-  private commit(commit: () => void) {
-    try { commit(); }
+  private commit(commit: () => void, effort?: ActivatedEffort) {
+    try { effort?.check(); commit(); if (effort?.entry) this.host.persistEffort(copy(effort.entry)); }
     catch (error) {
       this.explicitRecovery = true;
       this.blocked = `Flow commit failed after model activation: ${errorText(error)}. ${FLOW_RECOVERY}`;
@@ -247,7 +345,7 @@ export class ProviderFlowController {
         check();
         const flow = availability.flows.find(flow => flow.provider === provider);
         if (!flow) throw new Error(availability.failures.find(failure => failure.provider === provider)?.reason ?? `No available authenticated physical models for ${provider}.`);
-        await this.activate(flow, this.host.workflow(), ctx, check, this.state.operatingMode === "independent");
+        const effort = await this.activate(flow, this.host.workflow(), ctx, check, "boundary");
         check();
         this.commit(() => {
           const next: FlowState = { version: 1, operatingMode: "linked", selectedFlow: copy(flow), revision: this.state.revision + 1 };
@@ -256,7 +354,7 @@ export class ProviderFlowController {
           this.roleProbed = true;
           this.blocked = undefined;
           this.explicitRecovery = false;
-        });
+        }, effort);
       } finally { this.selecting = false; }
     });
   }
@@ -291,9 +389,10 @@ export class ProviderFlowController {
       check();
       if (this.blocked) throw new Error(this.blocked);
       if (!this.state.selectedFlow) throw new Error("Linked flow snapshot is missing.");
-      await this.activate(this.state.selectedFlow, next, ctx, check);
+      const policy = canonicalPhase(next) === canonicalPhase(this.host.workflow()) ? "restore" : "boundary";
+      const effort = await this.activate(this.state.selectedFlow, next, ctx, check, policy);
       check();
-      this.commit(commit);
+      this.commit(commit, effort);
     });
   }
   /** A fresh approved child is already overlaid as Exec before its bootstrap commits. */
@@ -320,7 +419,7 @@ export class ProviderFlowController {
   }
   runExecutionTransition(phase: Omit<FlowExecution, "commit">, ctx: ExtensionContext, commit: () => void): Promise<FlowTransitionResult> {
     // The bus request is mutable for its result only, not a moving approval identity.
-    phase = { ...phase };
+    phase = { ...phase, ...(phase.effort !== undefined ? { effort: record(phase.effort) ? { ...phase.effort } : phase.effort } : {}) };
     return this.enqueue(ctx, async fence => {
       const check = () => {
         fence();
@@ -368,14 +467,16 @@ export class ProviderFlowController {
       if (this.blocked && this.explicitRecovery) throw new Error(this.blocked);
       check();
       const destination = phase.phase === "replan" ? "plan" : phase.phase === "begin" || phase.phase === "resume" ? "exec" : "work";
-      await this.activate(this.state.selectedFlow, destination, ctx, check, false, this.blocked !== undefined);
+      const approved = phase.phase === "begin" || phase.phase === "resume";
+      const effort = await this.activate(this.state.selectedFlow, destination, ctx, check, approved ? "approved" : "boundary", this.blocked !== undefined, phase.effort);
       check();
       this.blocked = undefined;
-      this.commit(commit);
+      this.commit(commit, effort);
     });
   }
   /** Synchronously locks the destination before any asynchronous startup work. */
   restoreState(entries: readonly unknown[]): void {
+    this.invalidateEffort();
     this.generation++;
     // The durable selection revision is part of an approved Exec identity. Preserve it
     // on resume/tree/reload; the private generation fences abandoned branch operations.
@@ -396,8 +497,9 @@ export class ProviderFlowController {
       try {
         if (this.explicitRecovery) throw new Error(this.blocked ?? FLOW_RECOVERY);
         if (!this.state.selectedFlow) throw new Error("Linked flow snapshot is missing or invalid.");
-        await this.activate(this.state.selectedFlow, this.host.replanning?.() ? "plan" : this.host.workflow(), ctx, check, false, true);
+        const effort = await this.activate(this.state.selectedFlow, this.host.replanning?.() ? "plan" : this.host.workflow(), ctx, check, "restore", true);
         check();
+        effort.check();
         if (executionReplanning(latestExecution(ctx.sessionManager.getBranch())).invalid) throw new Error(INVALID_REPLANNING);
         this.blocked = undefined;
       } catch (error) {
@@ -410,6 +512,7 @@ export class ProviderFlowController {
   }
   shutdown(): Promise<void> {
     if (this.shutdownPromise) return this.shutdownPromise;
+    this.invalidateEffort();
     this.generation++;
     this.ready = false;
     const lease = this.host.lease();

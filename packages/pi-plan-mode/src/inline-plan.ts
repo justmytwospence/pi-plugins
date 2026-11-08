@@ -37,7 +37,7 @@ import { remoteUi } from "./switchyard-remote.js";
 export { EDIT, HERE, handoffLabel, KEEP, OPTION_MAX, SAVE } from "./approval-picker.js";
 
 import { holdBlocked } from "./herdr-blocked.js";
-import type { ImplementationEffortPick, ImplementationEffortRequest } from "./implementation-effort.js";
+import type { EffortSource, ImplementationEffortRequest } from "./implementation-effort.js";
 import { type ModelSpec, type ModelSpecThinkingLevel, sameModel } from "./implementation-models.js";
 import { PlanMarkdown } from "./mermaid-art.js";
 import { modelCatalog } from "./model-catalog.js";
@@ -99,6 +99,7 @@ export interface Approval {
   planFile: string;
   edited: boolean;
   thinkingLevel?: ModelSpecThinkingLevel;
+  effortSource?: EffortSource;
 }
 
 /** Whether a handoff changes model identity, independent of effort. */
@@ -120,7 +121,7 @@ export interface InlineHost {
     | {
         planning: ModelSpec;
         planningName: string;
-        targets: Array<{ target: ModelSpec; targetName: string }>;
+        targets: Array<{ target: ModelSpec; targetName: string; thinkingPinned?: true }>;
         defaultThinkingLevel?: ModelSpecThinkingLevel;
         intent?: "independent" | "linked-execution";
         flow?: FlowState;
@@ -657,13 +658,13 @@ export function registerInlinePlanMode(pi: ExtensionAPI, host: InlineHost): Inli
       if (approvalFlow?.operatingMode === "linked" && !models?.freshTarget && !host.replanning?.())
         ctx.ui.notify("For a fresh conversation, use /planners.", "info");
       const pickerState = createApprovalState();
-      const effortCache = new Map<string, Promise<ImplementationEffortPick>>();
+      let effortRequest: ImplementationEffortRequest | undefined;
       const catalog = modelCatalog(ctx, "available");
       const reasoning = (spec: ModelSpec | undefined) =>
         spec && catalog.efforts(spec).some((level) => level !== undefined);
       const needsEffortDefault =
         approvalFlow?.operatingMode === "linked"
-          ? models?.targets.some(({ target }) => reasoning(target))
+          ? models?.targets.some(({ target, thinkingPinned }) => !thinkingPinned && reasoning(target))
           : reasoning(
               models?.planning ?? (ctx.model ? { provider: ctx.model.provider, modelId: ctx.model.id } : undefined),
             ) ||
@@ -690,14 +691,31 @@ export function registerInlinePlanMode(pi: ExtensionAPI, host: InlineHost): Inli
             } satisfies ExitDetails,
           } as never);
           const request = needsEffortDefault ? host.implementationEffort?.(ctx, { plan, planFile }) : undefined;
-          let effort: ImplementationEffortPick | undefined;
+          if (effortRequest !== request) {
+            effortRequest?.dispose();
+            effortRequest = request;
+          }
+          const recommendations = new Map<string, ModelSpecThinkingLevel>();
           if (request) {
-            let pending = effortCache.get(request.key);
-            if (!pending) {
-              pending = request.pick(signal);
-              effortCache.set(request.key, pending);
-            }
-            effort = await pending;
+            const targets = [
+              ...(approvalFlow?.operatingMode !== "linked" && models?.planning ? [{ target: models.planning }] : []),
+              ...(models?.targets ?? []),
+            ];
+            await Promise.all(
+              targets.map(async (entry) => {
+                if (
+                  ("thinkingPinned" in entry && entry.thinkingPinned) ||
+                  !reasoning(entry.target) ||
+                  (approvalFlow?.operatingMode !== "linked" &&
+                    entry.target !== models?.planning &&
+                    (entry.target.thinkingLevel !== undefined || models?.defaultThinkingLevel !== undefined))
+                )
+                  return;
+                const effort = await request.pick(entry.target, signal);
+                if (effort.kind === "system1")
+                  recommendations.set(`${entry.target.provider}/${entry.target.modelId}`, effort.thinkingLevel);
+              }),
+            );
             if (!current() || readPlan(planFile) !== plan || (!signal?.aborted && !request.isCurrent()))
               return text(
                 "Plan review expired because the plan, workflow, branch, model or System 1 changed. Approve the plan again.",
@@ -708,7 +726,7 @@ export function registerInlinePlanMode(pi: ExtensionAPI, host: InlineHost): Inli
             {
               ...models,
               ...(request ? { effortDefaultKey: request.key } : {}),
-              ...(effort?.kind === "system1" ? { recommendedThinkingLevel: effort.thinkingLevel } : {}),
+              recommendations,
               ...(approvalFlow?.operatingMode === "linked" ? { intent: "linked-execution" as const } : {}),
               targets: models?.targets ?? [],
             },
@@ -722,6 +740,8 @@ export function registerInlinePlanMode(pi: ExtensionAPI, host: InlineHost): Inli
             );
           const choice = signal?.aborted ? undefined : picked?.choice;
           if (choice?.kind === "edit") {
+            effortRequest?.dispose();
+            effortRequest = undefined;
             // In your external editor when one is set (pi's externalEditor, or $VISUAL / $EDITOR),
             // else in pi's own.
             const command = picked?.remote ? undefined : externalEditorCommand(ctx.cwd);
@@ -852,7 +872,13 @@ export function registerInlinePlanMode(pi: ExtensionAPI, host: InlineHost): Inli
             persist();
             announce();
           }
-          const approval: Approval = { plan, planFile, edited, thinkingLevel: picked?.thinkingLevel };
+          const approval: Approval = {
+            plan,
+            planFile,
+            edited,
+            thinkingLevel: picked?.thinkingLevel,
+            effortSource: picked?.effortSource ?? "fallback",
+          };
           const who =
             choice.kind === "handoff" && models
               ? {
@@ -937,6 +963,7 @@ export function registerInlinePlanMode(pi: ExtensionAPI, host: InlineHost): Inli
           ) as never;
         }
       } finally {
+        effortRequest?.dispose();
         releaseBlocked();
         ctx.ui.setWorkingVisible?.(true);
         reviewViewport.end();

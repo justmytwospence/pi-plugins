@@ -37,13 +37,13 @@ System 1 configures an ordered route for the suite's classifier features. The gl
 
 | Plugin | What the classifier sees | Without it |
 | --- | --- | --- |
-| [Auto effort](/plugins/pi-auto-effort/) | Requests and recent run activity | Keeps the thinking level |
+| [Linked phase effort](/guides/effort/) | Recent task and conversation excerpts | Uses the destination's fallback effort |
 | [Cache guard](/plugins/pi-cache-guard/) | Tool output or conversation items being trimmed/compacted | Warnings and clock still work; normal Pi compaction remains available |
 | [Tool gate](/plugins/pi-tool-gate/) | Proposed calls, recent user intent and rules | Blocks calls that require a classifier verdict; fixed checks and explicitly allowed/read-only paths retain their ordinary behavior |
 | [Subagents](/plugins/pi-subagents/) | Delegation task and candidate choices | Uses agent configuration and parent/default choices |
 | [Copy picker](/plugins/pi-copy/) | Candidate excerpts and recent messages | Recency ordering |
 | [Next prompt](/plugins/pi-next-prompt/) | Suggested next step and answer | Can show the suggestion without vetting |
-| [Plan mode](/plugins/pi-plan-mode/) | Planning task and available tools | You can select tools manually |
+| [Plan mode](/plugins/pi-plan-mode/) | Planning task, plan and conversation excerpts for effort; available tools for preselection | You can select tools and effort manually |
 | [Sidebar](/plugins/pi-sidebar/) | Proposed guarded action | Refuses an unconfirmed call |
 
 The order is global to the Pi agent directory, not a per-project or per-feature backend switch. For most plugins, `"jev": { "enabled": false }` in the plugin’s own configuration still disables that feature's classifier use; plan mode uses `"jevToolSelection": false`. Jev mode retains existing provider/model settings and discovery; Decisions overrides those targets. See the reference pages for filenames and merge precedence.

@@ -125,6 +125,7 @@ test("linked approval defaults to the first worker with keep context, including 
     assert.deepEqual(done.mock.calls, [
       [
         {
+          effortSource: "fallback",
           choice: {
             kind: "handoff",
             target: worker,
@@ -176,7 +177,7 @@ test("linked main and context stages retain effort and never approve on selectio
   component.handleInput(down);
   component.handleInput(down);
   component.handleInput("\r");
-  assert.deepEqual(done.mock.calls, [[{ choice: { kind: "edit" } }]]);
+  assert.deepEqual(done.mock.calls, [[{ effortSource: "fallback", choice: { kind: "edit" } }]]);
   const reopened = fixture({ input: linkedInput(), state });
   assert.match(reopened.component.render(120).join("\n"), /Context: Compact to plan/u);
   assert.match(reopened.component.render(120).join("\n"), /effort: high/u);
@@ -205,6 +206,7 @@ test("linked RPC context selection and cancellation return to main before approv
     })
     .mockResolvedValueOnce("high");
   assert.deepEqual(await pickApproval(rpcContext(select), input, createApprovalState()), {
+    effortSource: "manual",
     choice: {
       kind: "handoff",
       target,
@@ -251,6 +253,7 @@ test("linked nonexecution choices never request effort and a missing worker neve
   ] as const) {
     const select = vi.fn<ExtensionContext["ui"]["select"]>().mockResolvedValueOnce(label);
     assert.deepEqual(await pickApproval(rpcContext(select), linkedInput(), createApprovalState()), {
+      effortSource: "fallback",
       choice: { kind },
     });
     assert.equal(select.mock.calls.length, 1);
@@ -259,12 +262,13 @@ test("linked nonexecution choices never request effort and a missing worker neve
   const { component, done } = fixture({ input: unavailable });
   assert.ok(component.render(120).join("\n").includes("Linked worker unavailable."));
   component.handleInput("\r");
-  assert.deepEqual(done.mock.calls, [[{ choice: { kind: "edit" } }]]);
+  assert.deepEqual(done.mock.calls, [[{ effortSource: "fallback", choice: { kind: "edit" } }]]);
   const select = vi.fn<ExtensionContext["ui"]["select"]>().mockImplementationOnce(async (_question, options) => {
     assert.deepEqual(options, [EDIT, SAVE, KEEP]);
     return KEEP;
   });
   assert.deepEqual(await pickApproval(rpcContext(select), unavailable, createApprovalState()), {
+    effortSource: "fallback",
     choice: { kind: "keep" },
   });
 });
@@ -275,14 +279,32 @@ test("explicit independent approval preserves existing result objects and option
   component.handleInput(down);
   component.handleInput("\r");
   assert.deepEqual(done.mock.calls, [
-    [{ choice: { kind: "handoff", target, targetName: "Worker" }, thinkingLevel: "medium" }],
+    [{ effortSource: "fallback", choice: { kind: "handoff", target, targetName: "Worker" }, thinkingLevel: "medium" }],
   ]);
+});
+
+test("approval source distinguishes untouched automatic defaults, configured pins and manual adjustments", () => {
+  for (const pinned of [false, true]) {
+    for (const manual of [false, true]) {
+      const linked = linkedInput({ ...target, thinkingLevel: "low" });
+      linked.targets[0] = { ...linked.targets[0]!, ...(pinned ? { thinkingPinned: true as const } : {}) };
+      const current = fixture({ input: { ...linked, recommendedThinkingLevel: "high", effortDefaultKey: "one" } });
+      assert.match(current.component.render(120).join("\n"), pinned ? /effort: low/u : /effort: high/u);
+      if (manual) current.component.handleInput(right);
+      current.component.handleInput("\r");
+      const result = current.done.mock.calls[0]?.[0];
+      assert.equal(result?.effortSource, manual ? "manual" : pinned ? "configured" : "system1");
+      assert.equal(result?.thinkingLevel, manual ? (pinned ? "medium" : "low") : pinned ? "low" : "high");
+    }
+  }
 });
 
 test("direct implementation is first/default and selection uses the Pi bindings", () => {
   const first = fixture();
   first.component.handleInput("\r");
-  assert.deepEqual(first.done.mock.calls, [[{ choice: { kind: "here" }, thinkingLevel: "high" }]]);
+  assert.deepEqual(first.done.mock.calls, [
+    [{ effortSource: "fallback", choice: { kind: "here" }, thinkingLevel: "high" }],
+  ]);
   first.component.handleInput(down);
   first.component.handleInput("\r");
   assert.equal(first.done.mock.calls.length, 1);
@@ -290,7 +312,9 @@ test("direct implementation is first/default and selection uses the Pi bindings"
   const compact = fixture();
   compact.component.handleInput(down);
   compact.component.handleInput("\r");
-  assert.deepEqual(compact.done.mock.calls, [[{ choice: { kind: "compact-here" }, thinkingLevel: "high" }]]);
+  assert.deepEqual(compact.done.mock.calls, [
+    [{ effortSource: "fallback", choice: { kind: "compact-here" }, thinkingLevel: "high" }],
+  ]);
   assert.equal(compact.requestRender.mock.calls.length, 1);
 
   const handoff = fixture();
@@ -298,14 +322,14 @@ test("direct implementation is first/default and selection uses the Pi bindings"
   handoff.component.handleInput(down);
   handoff.component.handleInput("\r");
   assert.deepEqual(handoff.done.mock.calls, [
-    [{ choice: { kind: "handoff", target, targetName: "Worker" }, thinkingLevel: "medium" }],
+    [{ effortSource: "fallback", choice: { kind: "handoff", target, targetName: "Worker" }, thinkingLevel: "medium" }],
   ]);
   assert.deepEqual(target, { provider: "test", modelId: "worker" });
 
   const keep = fixture();
   keep.component.handleInput(up);
   keep.component.handleInput("\r");
-  assert.deepEqual(keep.done.mock.calls, [[{ choice: { kind: "keep" } }]]);
+  assert.deepEqual(keep.done.mock.calls, [[{ effortSource: "fallback", choice: { kind: "keep" } }]]);
 });
 
 test("Save for later is between Edit and Keep and ignores effort keys", () => {
@@ -326,7 +350,7 @@ test("Save for later is between Edit and Keep and ignores effort keys", () => {
   assert.equal(state.selectedId, "edit");
   component.handleInput(down);
   component.handleInput("\r");
-  assert.deepEqual(done.mock.calls, [[{ choice: { kind: "save" } }]]);
+  assert.deepEqual(done.mock.calls, [[{ effortSource: "fallback", choice: { kind: "save" } }]]);
 });
 
 test("left/right cycle only supported efforts; both direct rows share effort", () => {
@@ -342,7 +366,9 @@ test("left/right cycle only supported efforts; both direct rows share effort", (
   component.handleInput(left);
   component.handleInput(up);
   component.handleInput("\r");
-  assert.deepEqual(done.mock.calls, [[{ choice: { kind: "compact-here" }, thinkingLevel: "high" }]]);
+  assert.deepEqual(done.mock.calls, [
+    [{ effortSource: "manual", choice: { kind: "compact-here" }, thinkingLevel: "high" }],
+  ]);
   assert.equal(state.efforts.get(JSON.stringify(["test", "worker"])), "low");
   assert.equal(requestRender.mock.calls.length, 6);
 });
@@ -356,7 +382,7 @@ test("selection and per-model effort survive Edit and target reordering", () => 
   first.component.handleInput(right); // worker medium -> high
   first.component.handleInput(down);
   first.component.handleInput("\r");
-  assert.deepEqual(first.done.mock.calls, [[{ choice: { kind: "edit" } }]]);
+  assert.deepEqual(first.done.mock.calls, [[{ effortSource: "fallback", choice: { kind: "edit" } }]]);
 
   const second = fixture({ state });
   assert.equal(state.selectedId, "edit");
@@ -463,7 +489,7 @@ test("nonreasoning models have no effort control or returned level", () => {
   component.handleInput(left);
   assert.equal(requestRender.mock.calls.length, 0);
   component.handleInput("\r");
-  assert.deepEqual(done.mock.calls, [[{ choice: { kind: "here" } }]]);
+  assert.deepEqual(done.mock.calls, [[{ effortSource: "fallback", choice: { kind: "here" } }]]);
 });
 
 test("registry-default direct effort is retained until explicitly changed", () => {
@@ -569,7 +595,7 @@ test("pickApproval uses one TUI component, current session effort, and cleans up
     component.handleInput("\r");
   });
   const result = await pickApproval(ctx, { targets: [] }, state);
-  assert.deepEqual(result, { choice: { kind: "compact-here" }, thinkingLevel: "medium" });
+  assert.deepEqual(result, { effortSource: "manual", choice: { kind: "compact-here" }, thinkingLevel: "medium" });
   const controller = new AbortController();
   const remove = vi.spyOn(controller.signal, "removeEventListener");
   const broken = tuiContext(() => {
@@ -582,7 +608,7 @@ test("pickApproval uses one TUI component, current session effort, and cleans up
 test("RPC selects the action then supported effort; action cancellation declines", async () => {
   const select = vi.fn<ExtensionContext["ui"]["select"]>().mockResolvedValueOnce(HERE).mockResolvedValueOnce("low");
   const result = await pickApproval(rpcContext(select), input, createApprovalState());
-  assert.deepEqual(result, { choice: { kind: "here" }, thinkingLevel: "low" });
+  assert.deepEqual(result, { effortSource: "manual", choice: { kind: "here" }, thinkingLevel: "low" });
   assert.deepEqual(select.mock.calls[0]?.slice(0, 2), [
     APPROVAL_QUESTION,
     [HERE, COMPACT_HERE, handoffLabel("Worker", "medium"), EDIT, SAVE, KEEP],
@@ -604,6 +630,7 @@ test("RPC effort cancellation returns to the retained action and preserves per-m
   const answers = [COMPACT_HERE, undefined, worker, undefined, COMPACT_HERE, "low"];
   const select = vi.fn<ExtensionContext["ui"]["select"]>().mockImplementation(async () => answers.shift());
   assert.deepEqual(await pickApproval(rpcContext(select), input, state), {
+    effortSource: "fallback",
     choice: { kind: "compact-here" },
     thinkingLevel: "low",
   });
@@ -649,7 +676,10 @@ for (const stage of ["action", "effort", "back"] as const) {
 test("RPC Save for later returns without an effort dialog for reasoning models", async () => {
   const select = vi.fn<ExtensionContext["ui"]["select"]>().mockResolvedValueOnce(SAVE);
   const state = createApprovalState();
-  assert.deepEqual(await pickApproval(rpcContext(select), input, state), { choice: { kind: "save" } });
+  assert.deepEqual(await pickApproval(rpcContext(select), input, state), {
+    effortSource: "fallback",
+    choice: { kind: "save" },
+  });
   assert.equal(state.selectedId, "save");
   assert.equal(select.mock.calls.length, 1);
 });
@@ -659,7 +689,10 @@ test("RPC handles nonexecution and nonreasoning choices without another selector
     const select = vi.fn<ExtensionContext["ui"]["select"]>().mockResolvedValueOnce(label);
     const ctx = rpcContext(select, { modelRegistry: { getAvailable: () => [], find: () => undefined } as never });
     const result = await pickApproval(ctx, input, createApprovalState());
-    assert.deepEqual(result, { choice: { kind: label === EDIT ? "edit" : label === KEEP ? "keep" : "here" } });
+    assert.deepEqual(result, {
+      effortSource: "fallback",
+      choice: { kind: label === EDIT ? "edit" : label === KEEP ? "keep" : "here" },
+    });
     assert.equal(select.mock.calls.length, 1);
   }
 });
@@ -677,6 +710,7 @@ test("RPC disambiguates clipped-label collisions and returns the chosen target",
   });
   const ctx = rpcContext(select, { modelRegistry: { getAvailable: () => [], find: () => undefined } as never });
   assert.deepEqual(await pickApproval(ctx, { ...input, targets }, createApprovalState()), {
+    effortSource: "fallback",
     choice: { kind: "handoff", ...targets[1] },
   });
 });
@@ -687,6 +721,7 @@ test("catalog registry fallback supplies the current model's supported effort ou
     modelRegistry: { getAvailable: () => [], find } as never,
   });
   assert.deepEqual(await pickApproval(ctx, { targets: [] }, createApprovalState()), {
+    effortSource: "fallback",
     choice: { kind: "here" },
     thinkingLevel: "medium",
   });
@@ -721,7 +756,11 @@ test("RPC regenerates normalized handoff labels when returning from effort cance
     [{ provider: "test", id: "worker", reasoning: true, thinkingLevelMap: { high: null } }] as never;
   assert.deepEqual(
     await pickApproval(ctx, { ...input, targets: [{ target: configured, targetName: "Worker" }] }, state),
-    { choice: { kind: "handoff", target: configured, targetName: "Worker" }, thinkingLevel: "low" },
+    {
+      effortSource: "configured",
+      choice: { kind: "handoff", target: configured, targetName: "Worker" },
+      thinkingLevel: "low",
+    },
   );
   assert.equal(select.mock.calls.length, 4);
 });
@@ -735,9 +774,39 @@ test("RPC puts the normalized per-model effort first so Enter retains the defaul
       return options[0];
     });
   assert.deepEqual(await pickApproval(rpcContext(select), input, createApprovalState()), {
+    effortSource: "fallback",
     choice: { kind: "handoff", target, targetName: "Worker" },
     thinkingLevel: "medium",
   });
+});
+
+test("Independent handoff default is configured, explicit suffix and manual adjustment take precedence, and direct remains recommended", () => {
+  const base: ApprovalInput = { ...input, defaultThinkingLevel: "low", recommendedThinkingLevel: "high" };
+  const direct = fixture({ input: base });
+  direct.component.handleInput("\r");
+  assert.deepEqual(direct.done.mock.calls[0]?.[0], {
+    choice: { kind: "here" },
+    thinkingLevel: "high",
+    effortSource: "system1",
+  });
+
+  for (const [suffix, manual, expected, source] of [
+    [undefined, false, "low", "configured"],
+    ["medium", false, "medium", "configured"],
+    [undefined, true, "medium", "manual"],
+  ] as const) {
+    const worker = suffix ? { ...target, thinkingLevel: suffix } : target;
+    const handoff = fixture({ input: { ...base, targets: [{ target: worker, targetName: "Worker" }] } });
+    handoff.component.handleInput(down);
+    handoff.component.handleInput(down);
+    if (manual) handoff.component.handleInput(right);
+    handoff.component.handleInput("\r");
+    assert.deepEqual(handoff.done.mock.calls[0]?.[0], {
+      choice: { kind: "handoff", target: worker, targetName: "Worker" },
+      thinkingLevel: expected,
+      effortSource: source,
+    });
+  }
 });
 
 test("recommendations initialize direct rows and normalize per model, including inherited off", () => {

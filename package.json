@@ -34,7 +34,6 @@
       "./packages/pi-subagents/src/index.ts",
       "./packages/pi-tool-gate/src/index.ts",
       "./packages/pi-bg/src/index.ts",
-      "./packages/pi-auto-effort/src/index.ts",
       "./packages/pi-appearance-resync/src/index.ts",
       "./packages/pi-copy/src/index.ts",
       "./packages/pi-cache-guard/src/index.ts",

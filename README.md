@@ -1,12 +1,12 @@
 # Pi Plugins
 
-A modular suite of 37 extensions for [Pi](https://pi.dev): background work, subagents, planning, review, context awareness and terminal ergonomics. Every component can be enabled on its own; one Git ref versions the whole suite. It is not a fork of Pi.
+A modular suite of 36 extensions for [Pi](https://pi.dev): background work, subagents, planning, review, context awareness and terminal ergonomics. Every component can be enabled on its own; one Git ref versions the whole suite. It is not a fork of Pi.
 
 **[Documentation](https://pi-plugins.vercel.app)** · **[Keymap & focus](https://pi-plugins.vercel.app/guides/keyboard/)** · **[Requirements, cost & privacy](https://pi-plugins.vercel.app/guides/requirements/)** · **[Development & testing](https://pi-plugins.vercel.app/development/)**
 
 ## Choose your plugins
 
-All 37 references include activation, controls, defaults, requirements, costs and limitations. Start with the workflow you need; companions are optional.
+All 36 references include activation, controls, defaults, requirements, costs and limitations. Start with the workflow you need; companions are optional.
 
 ### Run & coordinate
 
@@ -39,7 +39,6 @@ All 37 references include activation, controls, defaults, requirements, costs an
 | --- | --- |
 | [pi-system1](https://pi-plugins.vercel.app/plugins/pi-system1/) | Configure an ordered classifier route and request typed judgments. |
 | [pi-cache-guard](https://pi-plugins.vercel.app/plugins/pi-cache-guard/) | Review cold-cache sends and optionally trim context. |
-| [pi-auto-effort](https://pi-plugins.vercel.app/plugins/pi-auto-effort/) | Adjust reasoning effort within your manual ceiling. |
 | [pi-status-footer](https://pi-plugins.vercel.app/plugins/pi-status-footer/) | Read Git, context and provider usage at a glance. |
 | [pi-model-waterfall](https://pi-plugins.vercel.app/plugins/pi-model-waterfall/) | Optionally route verified subscription-only models, failing closed without a paid-API fallback. |
 | [pi-context](https://pi-plugins.vercel.app/plugins/pi-context/) | Inspect what fills the context window, with previews. |

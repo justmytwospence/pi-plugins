@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { beforeEach, onTestFinished, test } from "vitest";
 import { pickImplementationEffort } from "../src/implementation-effort.js";
+import { judgeTaskEffort, recommendTaskEffort } from "../src/task-effort.js";
 
 let agentDir: string;
 beforeEach(() => {
@@ -52,16 +53,27 @@ for (const level of ["low", "medium", "high", "xhigh"]) {
     const pick = await pickImplementationEffort({ ...base, registry, provider: "custom", model: "alias" });
     assert.deepEqual(pick, {
       kind: "system1",
-      thinkingLevel: level,
+      choice: level,
+      confidence: 0.8,
+      probabilities,
+      waterfall: ["jev"],
+      targetKey: JSON.stringify(["jev", "custom", "alias"]),
+      fallback: false,
+      attempts: pick.kind === "system1" ? pick.attempts : [],
       backend: "jev",
       provider: "custom",
       model: "resolved-model",
       selectionKey: JSON.stringify(["jev", "custom", "alias"]),
     });
+    assert.ok(pick.kind === "system1");
+    assert.equal(pick.attempts[0]?.backend, "jev");
+    assert.equal(pick.attempts[0]?.status, "succeeded");
+    assert.equal(pick.attempts[0]?.sdkCalls, 1);
     assert.deepEqual(lookups, ["classifier:custom/alias"]);
     assert.equal(calls.length, 1);
     assert.deepEqual(calls[0]?.context.state, {
-      phase: "implementation",
+      phase: "exec",
+      task_untrusted: "",
       plan_untrusted: base.plan,
       conversation_untrusted: base.conversation,
       working_directory: "project",
@@ -81,6 +93,51 @@ for (const level of ["low", "medium", "high", "xhigh"]) {
   });
 }
 
+test("cumulative recommendations are monotone under pressure and preserve unavailable quota", async () => {
+  const { registry } = fakeRegistry(() => result(answer("xhigh")));
+  const judgment = await pickImplementationEffort({ ...base, registry });
+  const picks = [0, 0.5, 1].map((p) => recommendTaskEffort(judgment, { state: "ready", tier: "none", p }));
+  assert.deepEqual(
+    picks.map((pick) => pick.kind === "system1" && pick.thinkingLevel),
+    ["high", "high", "medium"],
+  );
+  const pressure = { state: "unavailable" as const, tier: "none" as const, p: 0, reason: "unknown" };
+  const pick = recommendTaskEffort(judgment, pressure);
+  assert.equal(pick.kind, "system1");
+  if (pick.kind === "system1") {
+    assert.deepEqual(pick.pressure, pressure);
+    assert.deepEqual(pick.probabilities, probabilities);
+    assert.equal(pick.theta, 0.5);
+  }
+});
+
+for (const phase of ["general", "plan"] as const) {
+  test(`${phase} uses bounded untrusted task evidence and phase-specific instructions`, async () => {
+    const { registry, calls } = fakeRegistry(() => result(answer("low")));
+    await judgeTaskEffort({ ...base, task: "t".repeat(7_000), registry, phase });
+    const call = calls[0];
+    assert.ok(call);
+    assert.equal(call.context.state.phase, phase);
+    assert.equal((call.context.state.task_untrusted as string).length, 6_000);
+    assert.match(
+      calls[0]?.context.questions.effort?.instructions ?? "",
+      phase === "plan" ? /investigation and design/u : /requested work/u,
+    );
+    assert.doesNotMatch(JSON.stringify(calls[0]?.context.state), /quota|pressure/u);
+  });
+}
+
+test("in-flight cancellation falls back without a reusable result", async () => {
+  const { registry, calls } = fakeRegistry(() => new Promise(() => {}));
+  const controller = new AbortController();
+  const pending = pickImplementationEffort({ ...base, registry, signal: controller.signal });
+  controller.abort();
+  const judgment = await pending;
+  assert.equal(judgment.kind, "fallback");
+  assert.deepEqual(recommendTaskEffort(judgment, { state: "unavailable", tier: "none", p: 0 }), judgment);
+  assert.equal(calls.length, 1);
+});
+
 test("caps plan with its head, tail and marker and keeps the conversation tail", async () => {
   const { registry, calls } = fakeRegistry(() => result(answer("medium")));
   const plan = `HEAD${"a".repeat(30_000)}TAIL`;
@@ -98,9 +155,16 @@ test("caps plan with its head, tail and marker and keeps the conversation tail",
 test("Decisions uses its selected target and actual provenance", async () => {
   backend("openai-decisions");
   const { registry, lookups } = fakeRegistry(() => result(answer("high")));
-  assert.deepEqual(await pickImplementationEffort({ ...base, registry, provider: "ignored", model: "ignored" }), {
+  const pick = await pickImplementationEffort({ ...base, registry, provider: "ignored", model: "ignored" });
+  assert.deepEqual(pick, {
     kind: "system1",
-    thinkingLevel: "high",
+    choice: "high",
+    confidence: 0.8,
+    probabilities,
+    waterfall: ["openai-decisions"],
+    targetKey: JSON.stringify(["openai-decisions", "system1-openai", "gpt-6-luna"]),
+    fallback: false,
+    attempts: pick.kind === "system1" ? pick.attempts : [],
     backend: "openai-decisions",
     provider: "system1-openai",
     model: "gpt-6-luna",

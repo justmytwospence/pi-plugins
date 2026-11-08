@@ -9,6 +9,7 @@ import {
   wrapTextWithAnsi,
 } from "@earendil-works/pi-tui";
 import type { FlowState } from "./flow-contract.js";
+import type { EffortSource } from "./implementation-effort.js";
 import { formatModelKey, type ModelSpec, type ModelSpecThinkingLevel } from "./implementation-models.js";
 import { modelCatalog, normalizeEffort } from "./model-catalog.js";
 import { type RemoteUi, raceRemote } from "./switchyard-remote.js";
@@ -60,7 +61,8 @@ export type ApprovalChoice =
 
 export interface ApprovalInput {
   planning?: ModelSpec;
-  targets: Array<{ target: ModelSpec; targetName: string }>;
+  targets: Array<{ target: ModelSpec; targetName: string; thinkingPinned?: true }>;
+  recommendations?: ReadonlyMap<string, ModelSpecThinkingLevel>;
   defaultThinkingLevel?: ModelSpecThinkingLevel;
   recommendedThinkingLevel?: ModelSpecThinkingLevel;
   effortDefaultKey?: string;
@@ -74,6 +76,7 @@ export interface ApprovalInput {
 export interface ApprovalResult {
   choice: ApprovalChoice;
   thinkingLevel?: ModelSpecThinkingLevel;
+  effortSource: EffortSource;
 }
 
 /** Keep this object for one approval, including returns from Edit; not across approvals. */
@@ -83,11 +86,19 @@ export interface ApprovalState {
   stage: "main" | "context";
   efforts: Map<string, ModelSpecThinkingLevel | undefined>;
   manuallyAdjusted: Set<string>;
+  sources: Map<string, EffortSource>;
   effortDefaultKey?: string;
 }
 
 export function createApprovalState(): ApprovalState {
-  return { selectedId: "here", context: "keep", stage: "main", efforts: new Map(), manuallyAdjusted: new Set() };
+  return {
+    selectedId: "here",
+    context: "keep",
+    stage: "main",
+    efforts: new Map(),
+    manuallyAdjusted: new Set(),
+    sources: new Map(),
+  };
 }
 
 const modelId = (spec: ModelSpec) => JSON.stringify([spec.provider, spec.modelId]);
@@ -98,17 +109,14 @@ const effortId = (row: Row) =>
 type Catalog = Pick<ReturnType<typeof modelCatalog>, "efforts">;
 
 function initialEffort(row: Row, input: ApprovalInput, linked: boolean): ModelSpecThinkingLevel | undefined {
-  const recommended = input.recommendedThinkingLevel;
+  const pinned =
+    row.model && input.targets.some((entry) => entry.thinkingPinned && modelId(entry.target) === modelId(row.model!));
+  if (pinned) return row.model?.thinkingLevel;
+  const recommended =
+    (row.model && input.recommendations?.get(formatModelKey(row.model))) ?? input.recommendedThinkingLevel;
   if (row.choice.kind !== "handoff") return recommended ?? input.planning?.thinkingLevel;
   if (!linked) return row.model?.thinkingLevel ?? input.defaultThinkingLevel ?? recommended ?? "medium";
-  if (row.choice.context === "clear") {
-    if (recommended !== undefined)
-      return input.defaultThinkingLevel ?? recommended ?? row.model?.thinkingLevel ?? "medium";
-    return row.model?.thinkingLevel ?? input.defaultThinkingLevel ?? "medium";
-  }
-  // In the new host input the configured setting belongs only to fresh execution.
-  const fallback = input.effortDefaultKey === undefined ? input.defaultThinkingLevel : undefined;
-  return recommended ?? row.model?.thinkingLevel ?? fallback ?? "medium";
+  return recommended ?? row.model?.thinkingLevel ?? input.defaultThinkingLevel ?? "medium";
 }
 
 /** A single inline Pi-layout component, also exported for remote-client rendering fixtures. */
@@ -177,7 +185,10 @@ export class ApprovalPicker implements Component {
     if (!this.rows.some((row) => row.id === state.selectedId)) state.selectedId = this.rows[0].id;
     if (input.effortDefaultKey !== undefined && input.effortDefaultKey !== state.effortDefaultKey) {
       for (const id of state.efforts.keys()) {
-        if (!state.manuallyAdjusted.has(id)) state.efforts.delete(id);
+        if (!state.manuallyAdjusted.has(id)) {
+          state.efforts.delete(id);
+          state.sources.delete(id);
+        }
       }
       state.effortDefaultKey = input.effortDefaultKey;
     }
@@ -187,6 +198,19 @@ export class ApprovalPicker implements Component {
       const levels = this.levels(row);
       const initial = initialEffort(row, input, linked);
       state.efforts.set(id, normalizeEffort(state.efforts.has(id) ? state.efforts.get(id) : initial, levels));
+      if (!state.manuallyAdjusted.has(id)) {
+        const pinned = input.targets.some(
+          (entry) => entry.thinkingPinned && modelId(entry.target) === modelId(row.model!),
+        );
+        const recommended =
+          input.recommendations?.has(formatModelKey(row.model)) || input.recommendedThinkingLevel !== undefined;
+        const configured =
+          row.choice.kind === "handoff" &&
+          !linked &&
+          (row.model.thinkingLevel !== undefined || input.defaultThinkingLevel !== undefined);
+        if (!state.sources.has(id))
+          state.sources.set(id, pinned || configured ? "configured" : recommended ? "system1" : "fallback");
+      }
     }
     signal?.addEventListener("abort", this.onAbort, { once: true });
     if (signal?.aborted) this.onAbort();
@@ -246,7 +270,13 @@ export class ApprovalPicker implements Component {
   private result(row: Row): ApprovalResult {
     const actual = this.linked && row.choice.kind === "handoff" ? (this.activeWorker ?? row) : row;
     const thinkingLevel = this.effort(actual);
-    return { choice: actual.choice, ...(thinkingLevel !== undefined ? { thinkingLevel } : {}) };
+    return {
+      choice: actual.choice,
+      ...(thinkingLevel !== undefined ? { thinkingLevel } : {}),
+      effortSource: this.state.manuallyAdjusted.has(effortId(actual))
+        ? "manual"
+        : (this.state.sources.get(effortId(actual)) ?? "fallback"),
+    };
   }
 
   private finish(result: ApprovalResult | undefined): void {
@@ -432,7 +462,8 @@ export class ApprovalPicker implements Component {
           effortId(effortRow),
           selectedEffort === "Model default" ? undefined : (selectedEffort as ModelSpecThinkingLevel),
         );
-        this.state.manuallyAdjusted.add(effortId(effortRow));
+        if ((selectedEffort === "Model default" ? undefined : selectedEffort) !== current)
+          this.state.manuallyAdjusted.add(effortId(effortRow));
       }
       return this.result(row);
     }
@@ -485,6 +516,7 @@ export async function pickApproval(
         ...state,
         efforts: new Map(state.efforts),
         manuallyAdjusted: new Set(state.manuallyAdjusted),
+        sources: new Map(state.sources),
       };
       const { value, from } = await raceRemote<ApprovalResult>(
         (sig) => terminal(sig),
@@ -511,6 +543,7 @@ export async function pickApproval(
         state.stage = remoteState.stage;
         state.efforts = remoteState.efforts;
         state.manuallyAdjusted = remoteState.manuallyAdjusted;
+        state.sources = remoteState.sources;
         state.effortDefaultKey = remoteState.effortDefaultKey;
       }
       return value ? { ...value, remote: from === "remote" } : undefined;

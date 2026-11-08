@@ -18,13 +18,13 @@ test.skipIf(!existsSync(webStorage))("real web-access state is process-local whi
   const storage = await import(webStorage);
   storage.clearResults();
   storage.storeResult("parent-only", { id: "parent-only", type: "search", timestamp: Date.now(), queries: [] });
-  const invocation = { command: process.execPath, args: [path.join(import.meta.dirname, "fixtures/compat-pi.mjs"), webStorage, path.resolve(import.meta.dirname, "../../pi-auto-effort/src/index.ts"), path.join(import.meta.dirname, "harness.ts")] };
+  const invocation = { command: process.execPath, args: [path.join(import.meta.dirname, "fixtures/compat-pi.mjs"), webStorage] };
   try {
     for (let i = 0; i < 2; i++) {
       const child = new Child({ task: "fixture", cwd, model: "fixture/model", thinking: "low", sessionDir: cwd, invocation }).start();
       const state = await child.done;
       expect(state.status, (child as any).stderr || state.error).toBe("done");
-      expect(JSON.parse(state.output)).toEqual({ parentVisible: false, previousChildVisible: false, childVisible: true, authSeen: true, pinned: true, thinking: "low", classifications: 0, changes: 0, depth: "1" });
+      expect(JSON.parse(state.output)).toEqual({ parentVisible: false, previousChildVisible: false, childVisible: true, authSeen: true, pinned: true, thinking: "low", depth: "1" });
       expect(storage.getResult("parent-only")).not.toBeNull();
       expect(storage.getResult("child-only")).toBeNull();
     }

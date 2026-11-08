@@ -6,7 +6,6 @@ export type FooterActionId =
   | "flow.open"
   | "execution.status"
   | "approvals.open"
-  | "effort.toggle"
   | "context.open"
   | "context.skills"
   | "cache.status"

@@ -14,6 +14,10 @@ import path from "node:path";
 import { readFileSync, realpathSync } from "node:fs";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { truncateToWidth } from "@earendil-works/pi-tui";
+import { getSupportedThinkingLevels } from "@earendil-works/pi-ai";
+import { readSelectionPressure } from "@justmytwospence/pi-subscription-usage";
+import { judgeTaskEffort, recommendTaskEffort } from "./task-effort.ts";
+import { effortOrigin } from "./effort-origin.ts";
 import {
   alwaysAskBash,
   alwaysAskPath,
@@ -128,7 +132,7 @@ import { FLOW_BUSY, FLOW_RECOVERY, FLOW_TRANSITION, ROLE_MODEL_READY, ProviderFl
 import { FOOTER_ACTIONS_CHANNEL, queryFooterActions, type FooterActionsRequest } from "./footer-actions.ts";
 import { installModelGuard } from "./model-guard.ts";
 import { askReadOnlyCall } from "./read-only-call.ts";
-import { settingsCycles, type SettingCycleTrigger } from "./settings-cycle.ts";
+import { SETTINGS_REASONING_COMMITTED, settingsCycles, type SettingCycleTrigger } from "./settings-cycle.ts";
 
 /** A declined call's result (Block). */
 export const DECLINED = "The user declined this call. Do not retry it; continue without it, or ask the user how to proceed.";
@@ -493,6 +497,9 @@ export default function toolGate(pi: ExtensionAPI) {
   let execReplanning = false;
   let execReplanningInvalid = false;
   let revision = 0;
+  // Separate from permission judgments: owned model defaults can change those epochs.
+  let phaseEffortGeneration = 0;
+  const invalidatePhaseEffort = () => { phaseEffortGeneration++; flows.invalidateEffort(); };
   const effectiveWorkflow = (): WorkflowMode => execActive ? execReplanning ? "plan" : "exec" : workflow;
   // Mode and classifier changes cancel decisions, not usage of tools already running on this branch.
   const invalidate = () => { revision++; pushedBackThisTurn.clear(); classifierFailures.clear(); };
@@ -502,6 +509,7 @@ export default function toolGate(pi: ExtensionAPI) {
     const target = resolveSystem1Target(config.jev);
     if (target.key !== system1Key) {
       system1Key = target.key;
+      invalidatePhaseEffort();
       invalidate();
     }
     return target;
@@ -639,8 +647,48 @@ export default function toolGate(pi: ExtensionAPI) {
     setModel: model => pi.setModel(model),
     getThinking: () => pi.getThinkingLevel(),
     setThinking: thinking => pi.setThinkingLevel(thinking as Parameters<ExtensionAPI["setThinkingLevel"]>[0]),
+    chooseEffort: async (input, ctx, signal) => {
+      const epoch = phaseEffortGeneration;
+      const generation = sessionGeneration;
+      const manager = ctx.sessionManager;
+      const session = manager.getSessionId?.();
+      const leaf = manager.getLeafId?.();
+      const selection = resolveSystem1Target(config.jev).key;
+      const isCurrent = () => !signal.aborted && epoch === phaseEffortGeneration && generation === sessionGeneration &&
+        manager === hostCtx?.sessionManager && session === manager.getSessionId?.() &&
+        (!leaf || manager.getBranch().some(entry => entry.id === leaf)) && resolveSystem1Target(config.jev).key === selection;
+      const branch = manager.getBranch();
+      const task = clip(recentUserMessages(branch, 3).join("\n\n"), 6_000);
+      const texts = recentTexts(branch);
+      const conversation = clipTail([texts.user, texts.assistant].filter(Boolean).join("\n\n"), 4_000);
+      const model = ctx.modelRegistry.find?.(input.target.provider, input.target.id) ??
+        (await ctx.modelRegistry.getAvailable()).find(model => model.provider === input.target.provider && model.id === input.target.id);
+      const compatible = model && getSupportedThinkingLevels(model).includes(pi.getThinkingLevel());
+      const fallback = input.fallback || (compatible ? pi.getThinkingLevel() : "medium");
+      if (input.thinkingPinned) return { requested: fallback, source: "configured", isCurrent };
+      if (!task.trim() || !model?.reasoning) return { requested: fallback, source: "fallback", isCurrent };
+      if (!isCurrent()) return { requested: fallback, source: "fallback", isCurrent };
+      const [pressure, judgment] = await Promise.all([
+        readSelectionPressure(ctx, input.target, { cwd: ctx.cwd, signal, scope: "target" }),
+        judgeTaskEffort({ phase: input.phase, task, conversation, cwd: ctx.cwd, registry: ctx.modelRegistry,
+          provider: config.jev.provider, model: config.jev.model, signal }),
+      ]);
+      const pick = recommendTaskEffort(judgment, pressure);
+      return pick.kind === "system1"
+        ? { requested: pick.thinkingLevel, source: "system1", pressure: pick.pressure, classifier: { backend: pick.backend, provider: pick.provider, model: pick.model, waterfall: pick.waterfall,
+          selectionKey: pick.selectionKey, targetKey: pick.targetKey, fallback: pick.fallback, attempts: pick.attempts }, isCurrent }
+        : { requested: fallback, source: "fallback", pressure, isCurrent };
+    },
+    persistEffort: entry => pi.appendEntry("tool-gate:phase-effort", entry),
     persist: state => { pi.appendEntry(FLOW_ENTRY, state); flowRecordSeen = hostCtx ? branchFlowRecord(hostCtx) : undefined; },
     changed: () => status(hostCtx),
+  });
+  pi.on("thinking_level_select", () => { if (!effortOrigin()) invalidatePhaseEffort(); });
+  pi.on("model_select", () => { if (!effortOrigin()) invalidatePhaseEffort(); });
+  pi.events.on(SETTINGS_REASONING_COMMITTED, (data: unknown) => {
+    if (!effortOrigin() && settings.isCommitting("reasoning") && sessionReady && hostCtx && isRecord(data) &&
+        typeof data.level === "string" && ["off", "minimal", "low", "medium", "high", "xhigh", "max"].includes(data.level) &&
+        data.level === pi.getThinkingLevel()) invalidatePhaseEffort();
   });
   const flowResult = async (result: Promise<FlowTransitionResult>, ctx: ExtensionContext) => {
     const generation = sessionGeneration;
@@ -1327,6 +1375,7 @@ export default function toolGate(pi: ExtensionAPI) {
 
   const restore = async (ctx: ExtensionContext, newSession: boolean) => {
     const generation = ++sessionGeneration;
+    invalidatePhaseEffort();
     sessionReady = false;
     flowDisplayClaimed = false;
     flows.restoreState(ctx.sessionManager.getBranch());
@@ -1382,6 +1431,7 @@ export default function toolGate(pi: ExtensionAPI) {
   pi.on("session_start", (_event, ctx) => restore(ctx, true));
 
   pi.on("session_shutdown", async () => {
+    invalidatePhaseEffort();
     sessionGeneration++;
     sessionReady = false;
     invalidate();
@@ -1398,6 +1448,7 @@ export default function toolGate(pi: ExtensionAPI) {
     const record = branchFlowRecord(ctx);
     if (record !== undefined && record !== flowRecordSeen) {
       settings.cancel("Branch settings restored.");
+      invalidatePhaseEffort();
       invalidate();
       const restored = restoreBranchModes(ctx.sessionManager.getBranch(), defaults(config));
       workflow = restored.workflow;
