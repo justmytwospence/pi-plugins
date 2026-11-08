@@ -305,7 +305,7 @@ Planner sessions are stored under `~/.pi/agent/plan-mode/planners/`; runs are sa
 - `scoutModelMap`: planner model to the model its subagents run on.
 - `plannerTimeoutSeconds`: the per-turn time limit (default 2700, 45 minutes).
 - `implementationModelMap`: ordered lists of handoff model specs, keyed by the planning model. Legacy scalar specs are accepted as one-element lists; `[]` disables automatic handoff defaults for that exact model without removing direct execution. Missing entries use the provider-local families above. `scoutModelMap` remains scalar and independent.
-- `defaultImplementationThinkingLevel`: explicit Independent handoff effort when the target has no suffix, and a Linked fresh override when System 1 recommends effort; without a recommendation Linked fresh retains the worker suggestion first.
+- `defaultImplementationThinkingLevel`: explicit Independent handoff effort when the target has no suffix. For an unpinned Linked handoff, the System 1 recommendation wins; if unavailable, the worker suggestion takes precedence over this default.
 - `defaultImplementationContext` (`keep` or `clear`): the Implement step's context default.
 - `defaultPlanExportPath`: the export path (default `PLAN.md`, relative to the project).
 - `toggleShortcut`: a key that toggles plan mode (with pi-tool-gate, it cycles the gate's modes instead, like the gate's own Shift+Tab); none by default. Do not set it to the gate's key. It changes after `/reload`.

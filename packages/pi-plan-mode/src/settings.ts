@@ -100,7 +100,7 @@ export interface PlanModeSettings {
   defaultPlanTools?: string[];
   implementationPlanRetention?: ImplementationPlanRetention;
   defaultImplementationModel?: ImplementationModelOverride;
-  /** Explicit Independent handoff effort after a target suffix, or Linked fresh effort, before System 1. */
+  /** Independent handoff pin after a target suffix; Linked fallback after the recommendation and worker suggestion. */
   defaultImplementationThinkingLevel?: PlanModeFixedThinkingLevel;
   defaultPlanExportPath?: string;
   safeSubcommands?: SafeSubcommands;
