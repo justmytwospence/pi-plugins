@@ -133,12 +133,9 @@ function setup(plan: string, scrollbar: "always" | "hidden" = "always", withTodo
     implementationChoices: () => ({
       planning: { provider: "anthropic", modelId: "claude-opus-5-5", thinkingLevel: "medium" },
       planningName: "Opus",
-      targets: [],
     }),
     compactHere() {},
-    handoff() {},
     implementHere: () => "implement",
-    executing: () => false,
     toggleKey: () => undefined,
   });
   // Registering the inline unit directly still requires the real lifecycle initialization.

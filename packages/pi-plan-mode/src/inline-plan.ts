@@ -1,18 +1,17 @@
 // Inline plan mode, as Claude Code does it: in your own conversation, no extra screen. While it is
 // on, your agent researches read-only and writes its plan to a plan file (the only file it may
-// write), then calls exit_plan_mode, which shows you the plan and asks who implements it: hand it
-// off to a cheaper model in this conversation (keeping its history and switching the model),
-// keep the planning model on it, save a snapshot for later, edit the plan first, or keep planning. The
-// workflow returns to work after approval, without changing approvals.
+// write), then calls exit_plan_mode, which shows you the plan and asks how to implement it: here
+// (optionally after compacting to the plan), save a snapshot for later, edit the plan first, or keep
+// planning. With a plan model pair selected, the worker model takes over on the next request (see
+// pairs.ts). The workflow returns to work after approval, without changing approvals.
 // With pi-tool-gate installed, the gate owns workflow and enforces plan's read-only shell under
 // either approval setting. Without it, this extension enforces a read-only shell and its configured
 // shortcut toggles work/plan.
 // Event bus contract (shared with pi-tool-gate; no sibling imports):
 //   workflow-mode:set           any -> gate { mode: work|chat|plan } requests a base transition
 //   workflow-mode:cycle         any -> gate {} requests the next base workflow
-//   workflow-mode:changed       gate -> all { mode: work|chat|plan|exec, previous?, cycle: BaseWorkflowMode[], key?, source: transition|restore }
+//   workflow-mode:changed       gate -> all { mode: work|chat|plan, previous?, cycle: BaseWorkflowMode[], key?, source: transition|restore }
 //   workflow-mode:plan-provider plan -> gate { planFile? } announces plan support and its file
-//   workflow-mode:exec          plan -> gate { active: boolean, source: transition|restore } (not a public entry action)
 //   workflow-mode:query         any -> gate { entries: readonly unknown[], cwd: string, reply(snapshot): void }
 // Query synchronously reduces the supplied destination branch with cwd defaults, without side effects.
 // Restore publications are metadata snapshots, never requests to transition or persist.
@@ -30,15 +29,14 @@ import {
 import { Container, Spacer, Text } from "@earendil-works/pi-tui";
 import { createApprovalState, pickApproval } from "./approval-picker.js";
 import { editInTerminal, externalEditorCommand } from "./external-editor.js";
-import { type FlowState, queryFlow, requestWorkflow } from "./flow-contract.js";
 import { PLAN_STANDARD } from "./handoff.js";
 import { remoteUi } from "./switchyard-remote.js";
 
-export { EDIT, HERE, handoffLabel, KEEP, OPTION_MAX, SAVE } from "./approval-picker.js";
+export { EDIT, HERE, KEEP, OPTION_MAX, SAVE } from "./approval-picker.js";
 
 import { holdBlocked } from "./herdr-blocked.js";
 import type { EffortSource, ImplementationEffortRequest } from "./implementation-effort.js";
-import { type ModelSpec, type ModelSpecThinkingLevel, sameModel } from "./implementation-models.js";
+import type { ModelSpec, ModelSpecThinkingLevel } from "./implementation-models.js";
 import { PlanMarkdown } from "./mermaid-art.js";
 import { modelCatalog } from "./model-catalog.js";
 import {
@@ -64,8 +62,6 @@ export const MODE_SET = "workflow-mode:set";
 export const MODE_CYCLE = "workflow-mode:cycle";
 export const PLAN_PROVIDER = "workflow-mode:plan-provider";
 export const MODE_STATUS_KEY = "workflow-mode";
-export const EXEC_GUIDANCE =
-  "Exec is active. Use /plan-exec for its status and recovery actions, or /plan-exec stop to leave exec.";
 
 /** Whether plan mode is on, its plan file, and what your agent was last told. */
 export const INLINE_ENTRY = "plan-mode:inline";
@@ -83,17 +79,6 @@ interface InlineState {
   told: boolean;
 }
 
-export interface HandoffTarget {
-  target: ModelSpec;
-  targetName: string;
-  planning: ModelSpec;
-  planningName: string;
-  /** Linked execution is a lifecycle even when planner and worker share a model. */
-  intent?: "independent" | "linked-execution";
-  flow?: FlowState;
-  context?: "keep" | "compact" | "clear";
-}
-
 export interface Approval {
   plan: string;
   planFile: string;
@@ -102,18 +87,13 @@ export interface Approval {
   effortSource?: EffortSource;
 }
 
-/** Whether a handoff changes model identity, independent of effort. */
-export function handsOffToAnotherModel(who: HandoffTarget): boolean {
-  return who.intent === "linked-execution" || !sameModel(who.target, who.planning);
-}
-
 export interface InlineHost {
   safeSubcommands(): SafeSubcommands | undefined;
   /** Where plan files go (default `~/.pi/agent/plans`). */
   plansDirectory(): string | undefined;
   /** Run the plan-complete hook for an approved plan. */
   approved(plan: string, ctx: ExtensionContext): void;
-  /** The model a handoff goes to and the planning model, with names; undefined without a session model. */
+  /** The model whose effort approval sets (the session model, or a plan pair's worker), with names; undefined without a session model. */
   implementationChoices(
     ctx: ExtensionContext,
     plan: Pick<Approval, "plan" | "planFile">,
@@ -121,28 +101,17 @@ export interface InlineHost {
     | {
         planning: ModelSpec;
         planningName: string;
-        targets: Array<{ target: ModelSpec; targetName: string; thinkingPinned?: true }>;
-        defaultThinkingLevel?: ModelSpecThinkingLevel;
-        intent?: "independent" | "linked-execution";
-        flow?: FlowState;
-        freshTarget?: { target: ModelSpec; targetName: string };
-        contextNote?: string;
+        /** A sentence for the approval question, e.g. who implements and who answers its questions. */
+        note?: string;
       }
     | undefined;
   /** A task-level default only; callers retain manual effort choices and approval freshness. */
   implementationEffort?(ctx: ExtensionContext, plan: Pick<Approval, "plan" | "planFile">): ImplementationEffortRequest;
-  compactHere(approval: Approval): void;
-  /** Hand the approved plan off once this turn ends (fresh context, `who.target`'s model). */
-  handoff(approval: Approval, who: HandoffTarget | undefined, ctx: ExtensionContext): void;
+  compactHere(approval: Approval, ctx: ExtensionContext): void;
   /** Implement it here, by the agent that planned it; returns the tool result's text. */
   implementHere(ctx: ExtensionContext, approval: Approval): string;
-  /** Whether an approved plan is being implemented (exec mode). */
-  executing(): boolean;
-  replanning?(): boolean;
-  requestReplan?(ctx: ExtensionContext, origin: "command" | "tool"): Promise<boolean>;
-  approvalRefusal?(): string | undefined;
-  /** The execution menu: what needs the user now, else status. "stopped" when exec ended. */
-  executionMenu?(ctx: ExtensionContext): Promise<"stopped" | "kept">;
+  /** A plan mode on/off change, for the plan model pair runtime. */
+  phaseChanged?(ctx: ExtensionContext): void;
   /** The key that toggles plan mode without pi-tool-gate, for the status line. */
   toggleKey(): string | undefined;
 }
@@ -154,9 +123,6 @@ export interface InlinePlanMode {
   enter(ctx: ExtensionContext, planFile?: string): Promise<void>;
   /** Return to ordinary work without changing approvals. */
   work(ctx: ExtensionContext): Promise<boolean>;
-  /** The flow coordinator calls this only after activating an approved worker. */
-  commitExecution(ctx: ExtensionContext): void;
-  commitReplan(ctx: ExtensionContext, draftFile: string): void;
   /** A token invalidated by workflow/branch changes, for pending handoffs. */
   readonly revision: number;
   /** Toggle (alone) or cycle (with the gate): what the shortcut does. */
@@ -201,11 +167,9 @@ interface ExitDetails {
   plan?: string;
   planFile?: string;
   savedFile?: string;
-  outcome?: "pending" | "approved" | "fresh" | "handoff" | "kept" | "saved";
+  outcome?: "pending" | "approved" | "kept" | "saved";
   /** The permission mode requested on approval (older sessions: the one picked). */
   mode?: string;
-  /** The model the plan was handed off to. */
-  handoff?: string;
   edited?: boolean;
   /** What the user said should change (older sessions typed it in the review). */
   feedback?: string;
@@ -232,11 +196,9 @@ export function registerInlinePlanMode(pi: ExtensionAPI, host: InlineHost): Inli
   let hostCtx: ExtensionContext | undefined;
   /** The plan the user last declined: a revision's review shows what changed since. */
   let declined: string | undefined;
-  let invalidReplan = false;
-  const implementing = () => host.executing() && !host.replanning?.();
   const reviewViewport = new PlanReviewViewport();
   let presentedMode: WorkflowKind | undefined;
-  const effectiveMode = (): WorkflowKind => (implementing() ? "exec" : state.active ? "plan" : "work");
+  const effectiveMode = (): WorkflowKind => (state.active ? "plan" : "work");
   const presentTransition = () => {
     const mode = effectiveMode();
     const previous = presentedMode;
@@ -267,7 +229,7 @@ export function registerInlinePlanMode(pi: ExtensionAPI, host: InlineHost): Inli
     safely(() =>
       ctx.ui.setStatus(
         MODE_STATUS_KEY,
-        `workflow: ${implementing() ? "exec" : state.active ? "plan" : "work"}${key && !host.executing() ? ` (${key} to cycle)` : ""}`,
+        `workflow: ${state.active ? "plan" : "work"}${key ? ` (${key} to cycle)` : ""}`,
       ),
     );
   };
@@ -292,14 +254,12 @@ export function registerInlinePlanMode(pi: ExtensionAPI, host: InlineHost): Inli
   };
 
   const noticeText = () =>
-    invalidReplan
-      ? "Replanning state is invalid; no implementation was resumed. Only read-only actions are permitted."
-      : state.active
-        ? enterPlanText(state.planFile as string, hasPlan(state.planFile))
-        : exitPlanText(state.planFile, gate?.mode);
+    state.active
+      ? enterPlanText(state.planFile as string, hasPlan(state.planFile))
+      : exitPlanText(state.planFile, gate?.mode);
 
   const allocatePlanFile = () => {
-    if (state.planFile || invalidReplan) return;
+    if (state.planFile) return;
     state.planFile = newPlanFile(plansDir());
     state.temporaryDraft = true;
     safely(() => mkdirSync(dirname(state.planFile as string), { recursive: true }));
@@ -319,6 +279,7 @@ export function registerInlinePlanMode(pi: ExtensionAPI, host: InlineHost): Inli
     persist();
     updateStatus();
     presentTransition();
+    if (ctx) safely(() => host.phaseChanged?.(ctx));
   };
 
   const exitLocal = (ctx: ExtensionContext | undefined, told?: boolean) => {
@@ -331,22 +292,11 @@ export function registerInlinePlanMode(pi: ExtensionAPI, host: InlineHost): Inli
     persist();
     updateStatus();
     presentTransition();
+    if (ctx) safely(() => host.phaseChanged?.(ctx));
   };
 
   const requestMode = async (mode: "work" | "plan"): Promise<boolean> => {
     settings.cancel("Workflow selected explicitly.");
-    const coordinated = requestWorkflow(pi.events, mode);
-    if (coordinated) {
-      try {
-        const result = await coordinated;
-        if (!result.ok && result.error) hostCtx?.ui.notify(result.error, "warning");
-        return result.ok;
-      } catch (error: unknown) {
-        hostCtx?.ui.notify(`Workflow transition failed: ${String(error)}`, "warning");
-        return false;
-      }
-    }
-    if (queryFlow(pi.events)?.operatingMode === "linked") return false;
     const request: { mode: string; result?: Promise<{ ok: boolean } | boolean | undefined> } = { mode };
     try {
       pi.events.emit(MODE_SET, request);
@@ -366,23 +316,10 @@ export function registerInlinePlanMode(pi: ExtensionAPI, host: InlineHost): Inli
     const owner = generation;
     toolExitGeneration = owner;
     try {
-      return gate || queryFlow(pi.events) ? await requestMode("work") : true;
+      return gate ? await requestMode("work") : true;
     } finally {
       if (toolExitGeneration === owner) toolExitGeneration = undefined;
     }
-  };
-
-  /**
-   * A user-initiated mode change while exec is active opens the execution menu instead of a warning.
-   * True when exec ended there, so the change can go on.
-   */
-  const execMenu = async (ctx: ExtensionContext): Promise<boolean> => {
-    if (ctx.hasUI && host.executionMenu) {
-      const outcome = await host.executionMenu(ctx);
-      return outcome === "stopped" && !host.executing() && gate?.mode !== "exec";
-    }
-    ctx.ui.notify(EXEC_GUIDANCE, "warning");
-    return false;
   };
 
   const enter = async (ctx: ExtensionContext, planFile?: string): Promise<boolean> => {
@@ -391,14 +328,8 @@ export function registerInlinePlanMode(pi: ExtensionAPI, host: InlineHost): Inli
     // the genuine transition before asking the gate to enter plan mode.
     if (!restored) restore(ctx);
     hostCtx = ctx;
-    if (implementing() || gate?.mode === "exec") {
-      if (queryFlow(pi.events)?.operatingMode === "linked" && host.requestReplan)
-        return host.requestReplan(ctx, "command");
-      if (!(await execMenu(ctx))) return false;
-    }
-    if (host.replanning?.()) return state.active;
     const enteringGeneration = generation;
-    if ((gate || queryFlow(pi.events)) && !(await requestMode("plan"))) return false;
+    if (gate && !(await requestMode("plan"))) return false;
     if (enteringGeneration !== generation || !restored) return false;
     if (planFile && planFile !== state.planFile) {
       state.planFile = planFile;
@@ -412,7 +343,7 @@ export function registerInlinePlanMode(pi: ExtensionAPI, host: InlineHost): Inli
 
   pi.events.on(MODE_CHANGED, (data) => {
     const event = data as { mode?: unknown; cycle?: unknown; source?: unknown } | undefined;
-    if (typeof event?.mode !== "string" || !["work", "chat", "plan", "exec"].includes(event.mode)) return;
+    if (typeof event?.mode !== "string" || !["work", "chat", "plan"].includes(event.mode)) return;
     const previous = gate?.mode;
     if (previous !== event.mode && !settings.isCommitting("workflow")) settings.cancel("Workflow changed externally.");
     gate = {
@@ -448,20 +379,6 @@ export function registerInlinePlanMode(pi: ExtensionAPI, host: InlineHost): Inli
       ...(typeof latest?.planFile === "string" ? { planFile: latest.planFile } : {}),
     };
     declined = lastDeclined(entries);
-    invalidReplan = false;
-    const execution = [...entries]
-      .reverse()
-      .find((entry) => entry.type === "custom" && entry.customType === "plan-mode:exec")?.data as
-      | { active?: unknown; planFile?: unknown; replanning?: { version?: unknown; draftFile?: unknown } }
-      | undefined;
-    if (execution?.active && execution.replanning !== undefined) {
-      const marker = execution.replanning;
-      invalidReplan = marker?.version !== 1 || typeof marker.draftFile !== "string" || !marker.draftFile.trim();
-      state.planFile = invalidReplan ? undefined : (marker.draftFile as string);
-      state.temporaryDraft = false;
-      state.active = true;
-      declined ??= typeof execution.planFile === "string" ? readPlan(execution.planFile) : undefined;
-    }
     // Query the destination itself, never the previous branch's cached gate mode. The
     // responder is registered at factory time, so lifecycle handler order is irrelevant.
     safely(() =>
@@ -480,17 +397,10 @@ export function registerInlinePlanMode(pi: ExtensionAPI, host: InlineHost): Inli
     branchAnchor = ctx.sessionManager.getLeafId?.() ?? undefined;
     updateStatus();
     presentedMode = effectiveMode();
+    safely(() => host.phaseChanged?.(ctx));
   };
   pi.on("session_start", (_event, ctx) => restore(ctx));
   pi.on("session_tree", (_event, ctx) => restore(ctx));
-  pi.events.on("workflow-mode:exec", (data) => {
-    const source = (data as { source?: unknown } | undefined)?.source;
-    if (source === "transition") settings.cancel("Execution changed.");
-    updateStatus();
-    if (source === "restore") presentedMode = effectiveMode();
-    else if (source === "transition") presentTransition();
-  });
-
   pi.on("session_shutdown", () => {
     generation++;
     reviewViewport.end();
@@ -547,23 +457,6 @@ export function registerInlinePlanMode(pi: ExtensionAPI, host: InlineHost): Inli
     parameters: { type: "object", additionalProperties: false, properties: {} } as never,
     async execute(_id, _params, _signal, _onUpdate, ctx) {
       settings.cancel("Plan entry requested by tool.");
-      if (implementing() || gate?.mode === "exec") {
-        if (queryFlow(pi.events)?.operatingMode === "linked" && host.requestReplan) {
-          const scheduled = await host.requestReplan(ctx, "tool");
-          return {
-            content: [
-              {
-                type: "text",
-                text: scheduled
-                  ? "Replanning requested. Stop implementing; planning continues after this turn settles."
-                  : "Replanning is not available right now; no workflow changed.",
-              },
-            ],
-            terminate: scheduled,
-          } as never;
-        }
-        return text(EXEC_GUIDANCE);
-      }
       if (state.active) return text("You are already in plan mode.");
       hostCtx = ctx;
       if (!(await enter(ctx))) return text("Plan mode is not available right now.");
@@ -619,8 +512,6 @@ export function registerInlinePlanMode(pi: ExtensionAPI, host: InlineHost): Inli
       }
       let changes = supplied as string[] | undefined;
       hostCtx = ctx;
-      const refusal = host.approvalRefusal?.();
-      if (refusal) return text(refusal);
       if (!state.active || !state.planFile) {
         return text("You are not in plan mode. This tool only asks the user to approve a plan in plan mode.");
       }
@@ -638,40 +529,24 @@ export function registerInlinePlanMode(pi: ExtensionAPI, host: InlineHost): Inli
       const approvalGeneration = generation;
       const approvalSession = ctx.sessionManager.getSessionId?.();
       const approvalAnchor = ctx.sessionManager.getLeafId?.();
-      const approvalFlow = queryFlow(pi.events);
-      const sameDestination = () => {
-        const flow = queryFlow(pi.events);
-        return (
-          restored &&
-          generation === approvalGeneration &&
-          ctx.sessionManager.getSessionId?.() === approvalSession &&
-          (!approvalSession ||
-            !approvalAnchor ||
-            ctx.sessionManager.getBranch().some((entry) => entry.id === approvalAnchor)) &&
-          flow?.revision === approvalFlow?.revision &&
-          flow?.operatingMode === approvalFlow?.operatingMode
-        );
-      };
-      const current = () => sameDestination() && revision === approvalRevision && state.active && !implementing();
+      const sameDestination = () =>
+        restored &&
+        generation === approvalGeneration &&
+        ctx.sessionManager.getSessionId?.() === approvalSession &&
+        (!approvalSession ||
+          !approvalAnchor ||
+          ctx.sessionManager.getBranch().some((entry) => entry.id === approvalAnchor));
+      const current = () => sameDestination() && revision === approvalRevision && state.active;
       let edited = false;
       const models = host.implementationChoices(ctx, { plan, planFile });
-      if (approvalFlow?.operatingMode === "linked" && !models?.freshTarget && !host.replanning?.())
-        ctx.ui.notify("For a fresh conversation, use /planners.", "info");
       const pickerState = createApprovalState();
       let effortRequest: ImplementationEffortRequest | undefined;
       const catalog = modelCatalog(ctx, "available");
       const reasoning = (spec: ModelSpec | undefined) =>
         spec && catalog.efforts(spec).some((level) => level !== undefined);
-      const needsEffortDefault =
-        approvalFlow?.operatingMode === "linked"
-          ? models?.targets.some(({ target, thinkingPinned }) => !thinkingPinned && reasoning(target))
-          : reasoning(
-              models?.planning ?? (ctx.model ? { provider: ctx.model.provider, modelId: ctx.model.id } : undefined),
-            ) ||
-            models?.targets.some(
-              ({ target }) =>
-                reasoning(target) && target.thinkingLevel === undefined && models.defaultThinkingLevel === undefined,
-            );
+      const needsEffortDefault = reasoning(
+        models?.planning ?? (ctx.model ? { provider: ctx.model.provider, modelId: ctx.model.id } : undefined),
+      );
       reviewViewport.begin(ctx, id);
       const releaseBlocked = holdBlocked(pi.events, "Review the plan");
       // The agent is waiting on the user: the Working row only takes a plan line.
@@ -696,26 +571,10 @@ export function registerInlinePlanMode(pi: ExtensionAPI, host: InlineHost): Inli
             effortRequest = request;
           }
           const recommendations = new Map<string, ModelSpecThinkingLevel>();
-          if (request) {
-            const targets = [
-              ...(approvalFlow?.operatingMode !== "linked" && models?.planning ? [{ target: models.planning }] : []),
-              ...(models?.targets ?? []),
-            ];
-            await Promise.all(
-              targets.map(async (entry) => {
-                if (
-                  ("thinkingPinned" in entry && entry.thinkingPinned) ||
-                  !reasoning(entry.target) ||
-                  (approvalFlow?.operatingMode !== "linked" &&
-                    entry.target !== models?.planning &&
-                    (entry.target.thinkingLevel !== undefined || models?.defaultThinkingLevel !== undefined))
-                )
-                  return;
-                const effort = await request.pick(entry.target, signal);
-                if (effort.kind === "system1")
-                  recommendations.set(`${entry.target.provider}/${entry.target.modelId}`, effort.thinkingLevel);
-              }),
-            );
+          if (request && models?.planning && reasoning(models.planning)) {
+            const effort = await request.pick(models.planning, signal);
+            if (effort.kind === "system1")
+              recommendations.set(`${models.planning.provider}/${models.planning.modelId}`, effort.thinkingLevel);
             if (!current() || readPlan(planFile) !== plan || (!signal?.aborted && !request.isCurrent()))
               return text(
                 "Plan review expired because the plan, workflow, branch, model or System 1 changed. Approve the plan again.",
@@ -724,11 +583,10 @@ export function registerInlinePlanMode(pi: ExtensionAPI, host: InlineHost): Inli
           const picked = await pickApproval(
             ctx,
             {
-              ...models,
+              ...(models?.planning ? { planning: models.planning } : {}),
+              ...(models?.note ? { note: models.note } : {}),
               ...(request ? { effortDefaultKey: request.key } : {}),
               recommendations,
-              ...(approvalFlow?.operatingMode === "linked" ? { intent: "linked-execution" as const } : {}),
-              targets: models?.targets ?? [],
             },
             pickerState,
             signal,
@@ -793,21 +651,6 @@ export function registerInlinePlanMode(pi: ExtensionAPI, host: InlineHost): Inli
                 "error",
               );
               continue;
-            }
-            if (host.replanning?.()) {
-              return transcriptCheckpoint(
-                {
-                  content: [
-                    {
-                      type: "text",
-                      text: `Saved a copy at ${savedFile}. Implementation remains paused in Plan; approve the revised plan to resume, or stop implementation.`,
-                    },
-                  ],
-                  details: { plan, planFile, savedFile, outcome: "saved", edited, mode: "plan" } satisfies ExitDetails,
-                  terminate: true,
-                },
-                { id, kind: "plan" },
-              ) as never;
             }
             if (!(await requestWorkFromTool()))
               return text(
@@ -879,53 +722,15 @@ export function registerInlinePlanMode(pi: ExtensionAPI, host: InlineHost): Inli
             thinkingLevel: picked?.thinkingLevel,
             effortSource: picked?.effortSource ?? "fallback",
           };
-          const who =
-            choice.kind === "handoff" && models
-              ? {
-                  ...models,
-                  target: { ...choice.target, thinkingLevel: picked?.thinkingLevel },
-                  targetName: choice.targetName,
-                  context: choice.context,
-                }
-              : undefined;
-          const linked = who?.intent === "linked-execution";
-          // Keep Plan's guards through a Linked handoff. The settle transaction exits only
-          // after the coordinator activates the worker; never request the Work model here.
-          const mode = linked ? "exec" : "work";
-          if (!linked) {
-            if (!(await requestWorkFromTool()))
-              return text("Work is unavailable. Stay in plan mode and approve the plan again.");
-            if (!sameDestination()) return text("Plan review expired because the workflow or branch changed.");
-            exitLocal(ctx, false);
-          }
+          const mode = "work";
+          if (!(await requestWorkFromTool()))
+            return text("Work is unavailable. Stay in plan mode and approve the plan again.");
+          if (!sameDestination()) return text("Plan review expired because the workflow or branch changed.");
+          exitLocal(ctx, false);
           host.approved(plan, ctx);
           declined = undefined;
-          if (who && handsOffToAnotherModel(who)) {
-            host.handoff(approval, who, ctx);
-            return transcriptCheckpoint(
-              {
-                content: [
-                  {
-                    type: "text",
-                    text: `The user approved the plan and handed it off to ${who.targetName}. ${who.context === "clear" ? "Implementation starts in a fresh conversation after this turn settles." : who.context === "compact" ? "Implementation continues in this conversation after compaction to the approved plan." : "Implementation continues in this conversation with its history."} You stay on call to answer its questions. Stop here and do nothing else.`,
-                  },
-                ],
-                details: {
-                  plan,
-                  planFile,
-                  outcome: "handoff",
-                  ...(previous ? { previous, ...(changes ? { changes: [...changes] } : {}) } : {}),
-                  edited,
-                  ...(who ? { handoff: who.targetName } : {}),
-                  ...(mode ? { mode } : {}),
-                } satisfies ExitDetails,
-                terminate: true,
-              },
-              { id, kind: "plan" },
-            ) as never;
-          }
           if (choice.kind === "compact-here") {
-            host.compactHere(approval);
+            host.compactHere(approval, ctx);
             return transcriptCheckpoint(
               {
                 content: [
@@ -940,7 +745,7 @@ export function registerInlinePlanMode(pi: ExtensionAPI, host: InlineHost): Inli
                   outcome: "approved",
                   edited,
                   ...(previous ? { previous, ...(changes ? { changes: [...changes] } : {}) } : {}),
-                  ...(mode ? { mode } : {}),
+                  mode,
                 } satisfies ExitDetails,
                 terminate: true,
               },
@@ -956,7 +761,7 @@ export function registerInlinePlanMode(pi: ExtensionAPI, host: InlineHost): Inli
                 outcome: "approved",
                 edited,
                 ...(previous ? { previous, ...(changes ? { changes: [...changes] } : {}) } : {}),
-                ...(mode ? { mode } : {}),
+                mode,
               } satisfies ExitDetails,
             },
             { id, kind: "plan" },
@@ -982,46 +787,20 @@ export function registerInlinePlanMode(pi: ExtensionAPI, host: InlineHost): Inli
       await enter(ctx, planFile);
     },
     async work(ctx) {
-      if (host.replanning?.()) return (await execMenu(ctx)) && !state.active;
       settings.cancel("Work selected explicitly.");
       if (!restored) restore(ctx);
       hostCtx = ctx;
       const leavingGeneration = generation;
-      if ((gate || queryFlow(pi.events)) && !(await requestMode("work"))) return false;
+      if (gate && !(await requestMode("work"))) return false;
       if (leavingGeneration !== generation || !restored) return false;
       exitLocal(ctx, false);
       return !state.active;
-    },
-    commitExecution(ctx) {
-      settings.cancel("Execution committed.");
-      exitLocal(ctx, false);
-    },
-    commitReplan(ctx, draftFile) {
-      settings.cancel("Plan revision committed.");
-      const execution = [...ctx.sessionManager.getBranch()]
-        .reverse()
-        .find((entry) => entry.type === "custom" && entry.customType === "plan-mode:exec");
-      const approvedFile =
-        execution?.type === "custom" ? (execution.data as { planFile?: string }).planFile : undefined;
-      declined = approvedFile ? readPlan(approvedFile) : undefined;
-      invalidReplan = false;
-      state.planFile = draftFile;
-      state.temporaryDraft = false;
-      enterLocal(ctx);
-      persist();
-      announce();
     },
     get revision() {
       return revision;
     },
     async toggle(ctx, trigger) {
       hostCtx = ctx;
-      if (host.executing() || gate?.mode === "exec") {
-        if (implementing() && queryFlow(pi.events)?.operatingMode === "linked" && host.requestReplan)
-          return host.requestReplan(ctx, "command");
-        await execMenu(ctx);
-        return false;
-      }
       if (gate) {
         const request: {
           userInitiated: true;
@@ -1048,7 +827,7 @@ export function registerInlinePlanMode(pi: ExtensionAPI, host: InlineHost): Inli
           read: () => (state.active ? "plan" : "work"),
           next: (value) => (value === "plan" ? "work" : "plan"),
           format: (value) => value,
-          validate: () => (host.executing() || gate?.mode === "exec" ? EXEC_GUIDANCE : undefined),
+          validate: () => undefined,
           apply: (value) => {
             if (value === "plan") enterLocal(ctx);
             else exitLocal(ctx);
@@ -1077,8 +856,8 @@ function lastDeclined(entries: readonly unknown[]): string | undefined {
     if (details?.outcome === "kept") return details.plan;
     if (
       details?.outcome === "approved" ||
-      details?.outcome === "handoff" ||
-      details?.outcome === "fresh" ||
+      (details?.outcome as string) === "handoff" ||
+      (details?.outcome as string) === "fresh" ||
       details?.outcome === "saved"
     )
       return undefined;
@@ -1106,25 +885,19 @@ function renderExit(
   if (!plan) return new Container();
   const outcome = details?.outcome ?? "pending";
   const status: ReviewStatus =
-    outcome === "approved" || outcome === "handoff"
+    outcome === "approved" || (outcome as string) === "handoff" || (outcome as string) === "fresh"
       ? {
           tone: "success",
-          text: `✓ Approved${details?.edited ? " (edited)" : ""}${
-            outcome === "handoff"
-              ? `, handed off${details?.handoff ? ` to ${details.handoff}` : ""}`
-              : ", implementing here"
-          }${details?.mode && details.mode !== "work" ? `, ${MODE_WORDS[details.mode] ?? details.mode}` : ""}`,
+          text: `✓ Approved${details?.edited ? " (edited)" : ""}, implementing here${details?.mode && details.mode !== "work" ? `, ${MODE_WORDS[details.mode] ?? details.mode}` : ""}`,
         }
-      : outcome === "fresh"
-        ? { tone: "success", text: "✓ Approved, implementing in a fresh session" }
-        : outcome === "saved"
-          ? { tone: "neutral", text: "Saved for later", context: details?.savedFile }
-          : outcome === "kept"
-            ? {
-                tone: "warning",
-                text: details?.feedback ? `Kept planning: ${details.feedback}` : "Kept planning",
-              }
-            : { tone: "pending", text: "Waiting for approval" };
+      : outcome === "saved"
+        ? { tone: "neutral", text: "Saved for later", context: details?.savedFile }
+        : outcome === "kept"
+          ? {
+              tone: "warning",
+              text: details?.feedback ? `Kept planning: ${details.feedback}` : "Kept planning",
+            }
+          : { tone: "pending", text: "Waiting for approval" };
   const card = reviewBody(theme, plan, status, options, (text) => new PlanMarkdown(text, getMarkdownTheme(), theme));
   // While it waits, one more row of the card's background under the status, above the question.
   const body = new Container();

@@ -5,16 +5,16 @@
 Settings live in `<getAgentDir()>/pi-plan-mode.json` (normally `~/.pi/agent/pi-plan-mode.json`).
 The file may be a symlink; saves write through it, preserve unknown fields, and publish atomically.
 The Settings step of `/planners` edits planners, efforts, subagent models, the time limit, Jev tool
-selection, rendered plans, completion review and revision limit, the default implementation context, the export path, and the shortcut;
+selection, rendered plans, the default implementation context, the export path, and the shortcut;
 everything else is edited in the file. An invalid file is ignored (defaults apply) and never overwritten.
 
 ### System 1 tool selection
 
-`jevToolSelection` (default `true`) controls automatic tool preselection for either System 1 backend; `jevThreshold` remains the preselection threshold. `jevProvider` and `jevModel` are compatibility overrides for Jev only, for both tool selection and implementation-effort recommendations. The latter are independent of `jevToolSelection`. `/system1` configures the suite-wide order of Jev and OpenAI Decisions (Jev only by default); Decisions requires the `pi-system1` component and an isolated `/login system1-openai` API key or `SYSTEM1_OPENAI_API_KEY`, not subscription OAuth. Before selecting Decisions, claim eligible [Pro API credits](https://developers.openai.com/api/docs/guides/chatgpt-api-credits) in an organization with no purchased balance, auto-recharge or paid continuation. Pi cannot verify entitlement or funding. Requests can be billed. Operational failures can advance to the next configured backend with a notification; valid judgments and safety refusals do not trigger failover. The Tools step retains its fallback preselection when the chain is exhausted. Default `alwaysOffer` includes `system1_judge` and legacy `jev`; an explicit list replaces the defaults.
+`jevToolSelection` (default `true`) controls automatic tool preselection for either System 1 backend; `jevThreshold` remains the preselection threshold. `jevProvider` and `jevModel` are compatibility overrides for Jev only, for both tool selection and effort recommendations. The latter are independent of `jevToolSelection`. `/system1` configures the suite-wide order of Jev and OpenAI Decisions (Jev only by default); Decisions requires the `pi-system1` component and an isolated `/login system1-openai` API key or `SYSTEM1_OPENAI_API_KEY`, not subscription OAuth. Before selecting Decisions, claim eligible [Pro API credits](https://developers.openai.com/api/docs/guides/chatgpt-api-credits) in an organization with no purchased balance, auto-recharge or paid continuation. Pi cannot verify entitlement or funding. Requests can be billed. Operational failures can advance to the next configured backend with a notification; valid judgments and safety refusals do not trigger failover. The Tools step retains its fallback preselection when the chain is exhausted. Default `alwaysOffer` includes `system1_judge` and legacy `jev`; an explicit list replaces the defaults.
 
 ### Workflow and shortcut
 
-`toggleShortcut` is unset by default. Without pi-tool-gate it toggles local work/plan; with the gate it cycles workflow, so do not configure it on the gate's own key. Gate's default Shift+Tab requires remapping Pi's stock `app.thinking.cycle`; Pi skips conflicting shortcuts. Gate's Alt+A changes approvals independently, including during planning and exec. Plan mode alone does not enforce approvals.
+`toggleShortcut` is unset by default. Without pi-tool-gate it toggles local work/plan; with the gate it cycles workflow, so do not configure it on the gate's own key. Gate's default Shift+Tab requires remapping Pi's stock `app.thinking.cycle`; Pi skips conflicting shortcuts. Gate's Alt+A changes approvals independently, including during planning. Plan mode alone does not enforce approvals.
 
 ### Plan files and names
 
@@ -42,106 +42,34 @@ new draft.
 Export paths are not replaced by title-derived names, and exporting to an existing file still
 reports a collision rather than overwriting it.
 
-### Implementation choices and effort
+### Plan model pairs
 
-`implementationModelMap` maps an exact planning `provider/modelId` to an ordered list of handoff
-model specs. Specs accept an optional `:off|minimal|low|medium|high|xhigh|max` effort suffix:
+Built-in plan model pairs (`anthropic/fableplan`, `anthropic/opusplan`, `openai-codex/astraplan`, `openai-codex/solplan`, `openai/astraplan`, `openai/solplan`) need no settings; see the README's [Plan model pairs](../README.md#plan-model-pairs). Planner and worker are Fable and Opus, Opus and Sonnet, Astra and Sol, and Sol and Terra. Each family resolves to the highest available generation on the pair's provider (the worker prefers the planner's generation), and a pair whose models are unavailable is not offered.
+
+`modelPairs` adds or replaces pairs. Each key is the `provider/id` the pair registers under in `/model`:
 
 ```json
 {
-  "implementationModelMap": {
-    "anthropic/claude-fable-5-1": [
-      "anthropic/claude-opus-5-5:high",
-      "anthropic/claude-sonnet-5-1:medium"
-    ],
-    "openai-codex/gpt-6-astra": []
-  },
-  "defaultImplementationThinkingLevel": "medium"
+  "modelPairs": {
+    "anthropic/fableplan": {
+      "planner": "anthropic/claude-fable-5-1",
+      "worker": "anthropic/claude-sonnet-5-1",
+      "name": "Fable plan, Sonnet build"
+    },
+    "openai/reviewplan": { "planner": "openai/gpt-6-astra", "worker": "openai/gpt-6.1-terra" }
+  }
 }
 ```
 
-Legacy scalar model specs are still accepted as one-element lists; existing normalized scalar
-objects are accepted too. No automatic rewrite is needed. Lists preserve order, including empty
-lists; invalid members invalidate the settings file. An explicit `[]` disables automatic handoff
-defaults for that exact planning model, not direct execution. A missing entry uses the built-in
-defaults; `null` resets the whole map. `scoutModelMap` remains a separate scalar mapping.
+A key equal to a built-in pair replaces it in place; other keys are added after the built-ins. `name` defaults to `<planner id> plan, <worker id> build`. The whole file is invalid (defaults apply, and it is never overwritten) when:
 
-Built-in defaults are provider-local, in this order:
+- a key is not a `provider/modelId` or has an effort suffix;
+- `planner` or `worker` is missing, not a `provider/modelId`, or has an effort suffix;
+- `planner` and `worker` are the same model;
+- an entry has any key other than `planner`, `worker` and `name`;
+- `name` is not a non-empty string of at most 80 characters.
 
-| Planning family | Handoff families |
-| --- | --- |
-| Astra | Sol, Terra |
-| Sol | Terra |
-| Fable | Opus, Sonnet |
-| Opus | Sonnet |
-| Sonnet, Terra, unrecognized | None |
-
-OpenAI families match `gpt-<numeric dotted generation>-astra|sol|terra` IDs on `openai` or
-`openai-codex`; Anthropic families match `claude-fable|opus|sonnet-<numeric dash generation>`
-IDs on `anthropic`. Defaults never cross provider IDs. Each target family prefers a same-generation
-sibling, otherwise the highest available numeric generation, with lexical model-ID tie breaking.
-Unrecognized aliases or snapshot formats do not generate defaults. Only authenticated available models
-are offered, independently of the cycling shortlist (`enabledModels`/scoped models), even when the available catalog is empty. Inline handoff choices and `/planners` implementation targets use this full availability catalog; the `/planners` planning-model picker remains cycling-scoped. Explicit mappings may cross providers and override
-defaults; unavailable, duplicate and same-model targets are filtered, preserving the first effort
-choice. There is no pi-subagents worker fallback or same-model pseudo-handoff.
-
-Inline approval always starts with **Yes, implement here**, then **Yes, compact plan and implement
-here**, followed by handoffs, Edit and Keep planning. Up/Down navigates, Left/Right adjusts effort
-on every execution option, Enter selects, and Esc/Ctrl+C cancels. Both direct rows share the model's
-effort selection; RPC uses separate action and effort selectors. `/planners` defaults to **Here**
-with the main session model even for a plan written by A or B; **Handoff** is offered only when the
-plan author's targets include a distinct available model. Its model row cycles those targets, and
-its effort row is adjustable with Left/Right in both modes.
-
-Before approval, System 1 can judge implementation effort once, including for the same model; each
-execution target receives its own quota snapshot and recommendation. Authored effort pins and manual
-adjustments take precedence. Configured defaults and existing fallbacks apply when appropriate.
-The approved tuple is applied without another judgment. See [Choosing effort](https://pi-plugins.vercel.app/guides/effort/).
-Unsupported levels normalize to the
-greatest supported level no higher than requested, or the first supported level if none qualifies.
-Nonreasoning models have no effort adjustment. Approval changes are per approval, not saved
-settings; `/planners` retains per-model effort selections when changing modes. Model identity is
-provider plus model ID: changing effort alone is not a handoff.
-
-Direct execution is ordinary chat with normal implementation, verification and a final reply:
-no exec mode, seeded consultant, `ask_planner`, `finish_plan`, completion card/review or planner
-branch return. It may keep the conversation or compact to the approved plan in the same session,
-never a child. Actual distinct-model handoffs retain consultation and the exec/completion workflow.
-Inline handoffs keep current-session history without forced compaction or planner-branch return;
-`/planners` Handoff also supports an explicit fresh child. Plan M has a seeded main-agent consultant
-for both keep-conversation and fresh-child handoffs. The `/planners` Here context choices are
-**keep conversation** and **compact to plan (same session)**; `defaultImplementationContext` (`keep` or `clear`) selects the default context.
-
-Linked inline approval defaults to keeping history; its **Context** submenu offers explicit compaction and, for initial approvals only when supported, a fresh conversation. Changing context does not approve. Revised Linked plans cannot use a fresh child. Independent approval and `/planners` settings are unchanged.
-
-### Completion review
-
-`completionReview` (boolean, default `true`) controls completion review after an actual handoff. Toggle **Completion review** in `/planners` Settings; **Review revisions** cycles `completionMaxRevisions` through 0–5 (default 2). The limit is snapshotted at execution start, so changing it or revising a Linked plan does not reset an active run. Findings, costs and review pauses persist across reapproval; a further retry or revision cycle still requires explicit recovery. Direct execution remains ordinary chat.
-
-**`finish_plan` submits for completion review; it does not itself end exec mode.** The implementer supplies nonempty `report`, `verification` (including checks not run) and `concerns`. Only an explicit structured **Accepted** decision completes reviewed work. The planner reviews the approved plan and amendments, current files and commit history; it does not rerun tests, treat reported checks as independently verified, or introduce new preferences. Changes requested return to the same implementer context for fixes or evidence-backed disputes. Each later submission must respond exactly once to every outstanding finding by ID, with status `addressed`, `disputed` or `blocked` and an explanation.
-
-`completionMaxRevisions` is an integer from 0–5, default **2**: the initial review plus two fix-and-review cycles means at most three reviews before pausing. Zero still performs the initial review. Failures do not consume revision cycles. A review that fails with a provider error or an unusable reply is retried once automatically; timeouts, cancellation, an unavailable planner and reload interruptions are not. Exhausted revisions, unanswered human-only checks, unavailable planners, repeated failures, timeout and cancellation pause visibly with exec mode, model and implementation context intact. Calling `finish_plan` again cannot bypass the pause or reset the budget.
-
-When a reviewer needs your decision or a human-only check, the planner asks you during the review, in a dialog, and your answer is user-provided evidence. If you press Esc the review returns **needs your answer**: the dialog offers **Use recommendation**, **Finish unreviewed** and **Stop implementation**, and typing answers the question; Esc leaves it paused until you reopen it from the footer, `/plan-exec` or the next turn end.
-
-If a review fails twice or is interrupted, a dialog offers **Retry review**, **Finish unreviewed** or **Stop implementation**; if the revision allowance is exhausted it offers **Allow one more revision** instead of retry, and each further revision-and-review cycle requires another explicit choice. Text typed into these dialogs is a question to the planner: it answers in a card and the dialog reopens. For the same plan revision, retrying uses the saved submission without resetting counts or costs. After Linked replanning, an authorized retry needs a fresh report and responses for the current plan. Pressing Esc, or having no UI, leaves the execution paused. Ordinary conversation alone never authorizes a retry, another attempt, or unreviewed completion.
-
-Choosing **Finish without review** requires confirmation in **Finish without planner acceptance?**; **Keep paused** cancels it. Confirmation produces **Completed by user override**, preserving findings and limitations, never **Accepted**. No interactive UI means no override. Stopping produces **Implementation stopped**, without claiming completion or returning to a planning branch. Independent stop keeps the implementation model; Linked stop activates Work's assigned model.
-
-With `completionReview: false`, completion is explicitly **Completed without review**. Accepted, configured no-review and confirmed override are final outcomes. On Independent completion the original main model is restored in place under the existing manual-model-change protection; Linked completion activates Work's assigned model. The workflow returns to work, not plan; approvals stay unchanged. The current session retains its planning, implementation, consultation and review history: completion does not compact it or navigate back to a planning branch. Paused work survives reload; interrupted in-flight exchanges restore paused, without another paid request.
-
-Current-session handoffs retain conversation history by default. Only an explicitly selected **compact to plan** replaces context with the approved plan, and only an explicitly selected **fresh child** starts a separate session with the brief and plan. Pi's normal manual and automatic compaction still apply; plan mode does not replace ordinary compaction with a plan-only summary. `/plan-back` is an explicit-only compatibility command for legacy saved return targets, not an automatic completion step.
-
-Consultation and review cards show the current outcome, the exact question when your answer is needed, and what to do next. Reports and verification are previewed; findings show counts and titles. Pending exchanges show live activity. In Pi's terminal UI, Ctrl+O expands the full recorded details, including evidence, finding responses, errors, revision history and costs. Reported checks are not independently verified. The footer shows the exec phase, including when it is waiting for an answer, a review failed, approval is needed, or implementation is idle but not completed, alongside separate consultation and review costs. An idle or interrupted execution can be continued or redirected in conversation; it is not a completion.
-
-#### Advanced: compatibility commands
-
-Ordinary conversation is the usual recovery path. Bare `/plan-exec` opens relevant choices while paused and shows concise status while active. The explicit command forms remain available:
-
-- `/plan-exec retry`: authorize one retry of a failed or interrupted review.
-- `/plan-exec resume <answer>`: provide a user-needed answer or authorize one additional revision-and-review cycle after exhaustion.
-- `/plan-exec accept`: open the confirmation for an unreviewed override.
-- `/plan-exec stop`: stop implementation without claiming completion.
+A custom pair whose planner or worker is not available is not offered, like a built-in one. Effort is not part of a pair: System 1 judges it at plan entry and at approval, and you can override either (see [Choosing effort](https://pi-plugins.vercel.app/guides/effort/)). `defaultImplementationContext` (`keep` or `clear`) selects the `/planners` Implement step's context default. The earlier `implementationModelMap`, `defaultImplementationThinkingLevel`, `completionReview` and `completionMaxRevisions` keys are ignored.
 
 ### Rendered plans
 

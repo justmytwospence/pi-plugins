@@ -124,92 +124,9 @@ export function planFailureText(id: string, model: string, error: string) {
   return `Planner ${id} (${model}) failed: ${error}. The user can retry it from /planners (talk to it, or reload once the cause is fixed).`;
 }
 
-/** How a question reaches a planner: from your main agent, or from the agent implementing its plan. */
-export function consultMessage(message: string, from: "main" | "implementer" = "main") {
-  if (from === "implementer") {
-    return `[From the implementing agent, which is carrying out your approved plan. Answer it directly; amend the plan file only if your answer changes the plan.]\n\n${message.trim()}`;
-  }
+/** How a question reaches a planner: from your main agent. */
+export function consultMessage(message: string) {
   return `[From the user's main agent, which is talking the plans over with the user. Answer it directly; resubmit your plan with plan_mode_complete only if your answer changes it.]\n\n${message.trim()}`;
-}
-
-/** The planner on call's role, appended to its system prompt. */
-export function consultantSystemPrompt(planFile: string, toolNotes: readonly string[] = []) {
-  return [
-    "## Planner on call",
-    "",
-    `The conversation above is where you planned this task. The user approved your plan, which is in the plan file ${planFile}, and handed it to another model, which is implementing it in a separate session in the same working directory. It asks you when the plan does not fit what it finds; its messages start with "[From the implementing agent".`,
-    "- Check the current files before you answer: they include the implementer's changes. You can read files and run read-only commands; the only file you may write is the plan file.",
-    "- Decide. Answer with what to do, where and why, as concretely as the plan itself; do not hand the decision back.",
-    "- When your answer changes the plan, edit the plan file first: change the affected sections in place, and add a dated line under a `## Amendments` heading at its end saying what changed and why.",
-    "- When a decision belongs to the user (product choice, preference, permission, a check only a human can do), ask the user yourself with plan_mode_question: one to three questions, recommended option first, after one short message giving the context they need. Then answer the implementer with the decision and amend the plan. If the user's answer is a question or pushback rather than a choice, answer it in a short message and ask again. Never tell the implementer to ask the user.",
-    "- The user may also message you through the implementer's questions; treat \"[From the user\" messages as the user's own words.",
-    "- Keep answers short: the implementer has the plan.",
-    ...(toolNotes.length > 0 ? ["", ...toolNotes] : []),
-  ].join("\n");
-}
-
-/** What the planner's question tool returns when the user puts a consultation question off. */
-export const CONSULT_POSTPONED =
-  "The user postponed these questions and will answer later. Do not decide them and do not ask again now. End your turn with one sentence saying what you are waiting for.";
-
-/** What the planner's question tool returns when the user puts a review question off. */
-export const REVIEW_POSTPONED =
-  "The user postponed these questions. Do not decide them. Return user_needed now with the exact question and your recommendation.";
-
-/** The user's answers to questions the planner asked earlier, with the implementer's original question. */
-export function postponedAnswerMessage(
-  answers: readonly import("../question-tool.js").PlanModeQuestionAnswer[],
-  implementerMessage: string,
-) {
-  const lines = answers.map((a) => `${a.header}: ${a.question} → ${a.answer}${a.note ? ` (${a.note})` : ""}`);
-  return `[From the user, answering the questions you asked earlier]\n\n${lines.join("\n")}\n\nNow answer the implementing agent's original question, amending the plan file if the answer changes it:\n\n${implementerMessage.trim()}`;
-}
-
-/** The user talking to the planner directly, from an execution dialog. */
-export function userDiscussionMessage(context: string, text: string) {
-  return `[From the user, about: ${context}]\n\n${text.trim()}\n\nAnswer the user directly and briefly. Do not modify files.`;
-}
-
-/** Steers the planner on call when its time is almost up. */
-export const CONSULT_WRAP_UP =
-  "Time is almost up. Stop investigating and answer now with your best decision; amend the plan file first if your answer changes the plan.";
-
-/** Completion gate: only the strict JSON accepted outcome authorizes completion. */
-export function reviewRequest(
-  report: string,
-  context?: {
-    verification: string;
-    concerns: string;
-    planFile: string;
-    changes: string;
-    previousFindings?: import("../negotiation.js").Finding[];
-    responses?: import("../negotiation.js").FindingResponse[];
-    remainingRevisions?: number;
-    userEvidence?: string[];
-  },
-) {
-  return [
-    "[Implementation submitted for completion review against the approved plan and approved amendments only.]",
-    "",
-    "Inspect relevant current tracked files and commit history, git status and working-tree diff; committed work may not appear in git diff HEAD. Do not modify any files, including the plan, or run tests, even if tools/grants permit. No new preferences, scope expansion or plan changes. Distinguish implementer-reported checks from evidence you actually inspected; do not claim independent verification of reported tests. Give reasons supporting acceptance as well as problems. For human-only verification, permissions and product/scope decisions, ask the user with plan_mode_question during this review and use the answers as user-provided evidence (not independent verification). Return user_needed (exact question and recommendation) only if the user postponed the question.",
-    'Return ONLY one JSON object (optionally in one json fence), no prose outside: {"outcome":"accepted|changes_requested|user_needed","summary":"nonempty","evidence":["inspected evidence"],"limitations":["limitations"],"findings":[{"id":"stable unique ID","title":"nonempty","detail":"nonempty","requestedChange":"nonempty"}]}. Use exact enum values. Accepted requires no findings; changes_requested requires at least one. user_needed additionally requires nonempty question and recommendation. Evidence/limitations are arrays of nonempty strings (empty arrays allowed). At most 30 findings, total response at most 64 KiB. Retained findings keep their IDs; new findings must use fresh IDs. Evaluate implementer responses and evidence-backed disputes explicitly.',
-    ...(context
-      ? [
-          `Remaining automatic revision allowance: ${context.remainingRevisions ?? 0}`,
-          `User-provided answers (not independently verified): ${JSON.stringify(context.userEvidence ?? [])}`,
-          `Previous findings: ${JSON.stringify(context.previousFindings ?? [])}`,
-          `Implementer responses: ${JSON.stringify(context.responses ?? [])}`,
-        ]
-      : []),
-    ...(context ? ["", `Plan file: ${context.planFile}`, "", "Change summary:", context.changes] : []),
-    "",
-    "The implementer's report (what changed):",
-    "",
-    report.trim(),
-    ...(context
-      ? ["", "Implementer-reported verification:", context.verification, "", "Outstanding issues:", context.concerns]
-      : []),
-  ].join("\n");
 }
 
 /** What Write plan M (or Revise plan M, once there is one) asks your main agent to do. */

@@ -7,168 +7,145 @@ import { MAX_PENDING_IMPLEMENTATION_MODEL_IDENTIFIER_LENGTH } from "../src/imple
 import {
   awaitPlanModeSettingsWrites,
   configuredAlwaysOffer,
-  configuredCompletionMaxRevisions,
   configuredImplementationModel,
-  configuredImplementationModelMap,
   configuredImplementationPlanRetention,
-  configuredImplementationThinkingLevel,
+  configuredModelPairs,
   configuredPlanExportPath,
   configuredPlanModeToggleShortcut,
   configuredScoutModel,
   DEFAULT_ALWAYS_OFFER,
   normalizePlanModeSettings,
   readPlanModeSettings,
-  serializeImplementationModelListMap,
   serializeImplementationModelMap,
   updatePlanModeSettings,
 } from "../src/settings.js";
 
-test("completion revision limits default, validate, persist and reset", async () => {
-  assert.equal(configuredCompletionMaxRevisions({ thinkingLevel: "inherit" }), 2);
-  for (const maximum of [0, 1, 2, 3, 4, 5]) {
-    assert.equal(normalizePlanModeSettings({ completionMaxRevisions: maximum })?.completionMaxRevisions, maximum);
-  }
-  for (const maximum of [-1, 6, 1.5, NaN, Infinity, null, "2", true, []]) {
-    assert.equal(normalizePlanModeSettings({ completionMaxRevisions: maximum }), undefined);
-  }
-  const directory = await mkdtemp(join(tmpdir(), "revision-settings-"));
-  const settingsPath = join(directory, "settings.json");
-  try {
-    await writeFile(settingsPath, JSON.stringify({ unrelated: true }));
-    for (const maximum of [0, 5]) {
-      const saved = await updatePlanModeSettings({ completionMaxRevisions: maximum }, { settingsPath });
-      assert.equal(configuredCompletionMaxRevisions(saved), maximum);
-      assert.deepEqual(JSON.parse(await readFile(settingsPath, "utf8")), {
-        unrelated: true,
-        completionMaxRevisions: maximum,
-      });
-    }
-    await assert.rejects(updatePlanModeSettings({ completionMaxRevisions: 6 }, { settingsPath }));
-    const reset = await updatePlanModeSettings({ completionMaxRevisions: null }, { settingsPath });
-    assert.equal(configuredCompletionMaxRevisions(reset), 2);
-    assert.deepEqual(JSON.parse(await readFile(settingsPath, "utf8")), { unrelated: true });
-  } finally {
-    await rm(directory, { recursive: true, force: true });
-  }
-});
-
-test("implementation model maps migrate scalar strings and normalized objects to lists", () => {
-  const normalized = normalizePlanModeSettings({
-    implementationModelMap: {
-      " planner/one ": " provider/first:high ",
-      "planner/two": { provider: " provider ", modelId: " second ", thinkingLevel: "low" },
-      "planner/three": { provider: "provider", modelId: "third" },
-    },
-  });
+test("scout model maps normalize scalar specs and reject lists and objects", async () => {
+  const normalized = normalizePlanModeSettings({ scoutModelMap: { " planner/one ": " scout/model:high " } });
   assert.ok(normalized);
-  assert.deepEqual(configuredImplementationModelMap(normalized), {
-    "planner/one": [{ provider: "provider", modelId: "first", thinkingLevel: "high" }],
-    "planner/two": [{ provider: "provider", modelId: "second", thinkingLevel: "low" }],
-    "planner/three": [{ provider: "provider", modelId: "third" }],
-  });
-  assert.deepEqual(configuredImplementationModelMap({ thinkingLevel: "inherit" }), {});
-});
-
-test("implementation model lists preserve order, duplicates, empty overrides, and scalar scouts", () => {
-  const normalized = normalizePlanModeSettings({
-    implementationModelMap: {
-      "planner/one": ["provider/second:low", { provider: "provider", modelId: "first" }, "provider/second:high"],
-      "planner/disabled": [],
-    },
-    scoutModelMap: { "planner/one": "scout/model:high" },
-  });
-  assert.ok(normalized);
-  assert.deepEqual(normalized.implementationModelMap, {
-    "planner/one": [
-      { provider: "provider", modelId: "second", thinkingLevel: "low" },
-      { provider: "provider", modelId: "first" },
-      { provider: "provider", modelId: "second", thinkingLevel: "high" },
-    ],
-    "planner/disabled": [],
-  });
   assert.deepEqual(configuredScoutModel(normalized, { provider: "planner", modelId: "one" }), {
     provider: "scout",
     modelId: "model",
     thinkingLevel: "high",
   });
-  assert.deepEqual(normalizePlanModeSettings({ implementationModelMap: {} })?.implementationModelMap, {});
   for (const scout of [[], ["scout/model"], { provider: "scout", modelId: "model" }]) {
     assert.equal(normalizePlanModeSettings({ scoutModelMap: { "planner/one": scout } }), undefined);
   }
-});
-
-test("implementation model maps reject invalid maps, keys, scalar targets, and list members", () => {
-  for (const implementationModelMap of [null, [], "provider/model", { invalid: [] }, { "planner/one:high": [] }]) {
-    assert.equal(normalizePlanModeSettings({ implementationModelMap }), undefined);
-  }
-  for (const target of [
-    null,
-    undefined,
-    42,
-    true,
-    "",
-    "invalid",
-    {},
-    [],
-    { provider: "provider", modelId: "" },
-    { provider: "provider", modelId: "model", thinkingLevel: "inherit" },
-    { provider: "provider", modelId: "model", thinkingLevel: null },
-    { provider: "provider", modelId: "model", extra: true },
-  ]) {
-    assert.equal(
-      normalizePlanModeSettings({ implementationModelMap: { "planner/one": ["provider/valid", target] } }),
-      undefined,
-    );
-    if (!Array.isArray(target)) {
-      assert.equal(normalizePlanModeSettings({ implementationModelMap: { "planner/one": target } }), undefined);
-    }
-  }
-});
-
-test("implementation model lists serialize and round trip independently of scalar scouts and whole-map resets", async () => {
-  const map = {
-    "planner/one": [
-      { provider: "provider", modelId: "second", thinkingLevel: "low" as const },
-      { provider: "provider", modelId: "first" },
-    ],
-    "planner/disabled": [],
-  };
-  const serialized = { "planner/one": ["provider/second:low", "provider/first"], "planner/disabled": [] };
   const scouts = { "planner/one": { provider: "scout", modelId: "model", thinkingLevel: "high" as const } };
-  assert.deepEqual(serializeImplementationModelListMap(map), serialized);
   assert.deepEqual(serializeImplementationModelMap(scouts), { "planner/one": "scout/model:high" });
-  assert.deepEqual(normalizePlanModeSettings({ implementationModelMap: serialized })?.implementationModelMap, map);
-
-  const directory = await mkdtemp(join(tmpdir(), "pi-plan-mode-model-lists-"));
+  const directory = await mkdtemp(join(tmpdir(), "pi-plan-mode-scouts-"));
   const settingsPath = join(directory, "pi-plan-mode.json");
-  const legacy = { implementationModelMap: { "planner/old": "provider/old" }, future: true };
   try {
-    await writeFile(settingsPath, JSON.stringify(legacy));
-    assert.equal((await readPlanModeSettings(settingsPath)).kind, "loaded");
-    assert.deepEqual(JSON.parse(await readFile(settingsPath, "utf8")), legacy);
-    await updatePlanModeSettings({ implementationModelMap: map, scoutModelMap: scouts }, { settingsPath });
+    await writeFile(settingsPath, JSON.stringify({ future: true }));
+    await updatePlanModeSettings({ scoutModelMap: scouts }, { settingsPath });
     assert.deepEqual(JSON.parse(await readFile(settingsPath, "utf8")), {
       future: true,
-      implementationModelMap: serialized,
       scoutModelMap: { "planner/one": "scout/model:high" },
     });
     const loaded = await readPlanModeSettings(settingsPath);
-    assert.equal(loaded.kind, "loaded");
-    assert.deepEqual(loaded.kind === "loaded" && loaded.settings.implementationModelMap, map);
     assert.deepEqual(loaded.kind === "loaded" && loaded.settings.scoutModelMap, scouts);
-    for (const reset of [null, {}]) {
-      await updatePlanModeSettings({ implementationModelMap: map }, { settingsPath });
-      await updatePlanModeSettings({ implementationModelMap: reset }, { settingsPath });
-      assert.deepEqual(JSON.parse(await readFile(settingsPath, "utf8")), {
-        future: true,
-        scoutModelMap: { "planner/one": "scout/model:high" },
-      });
-    }
-    await updatePlanModeSettings({ implementationModelMap: map, scoutModelMap: null }, { settingsPath });
-    assert.deepEqual(JSON.parse(await readFile(settingsPath, "utf8")), {
-      future: true,
-      implementationModelMap: serialized,
+    await updatePlanModeSettings({ scoutModelMap: null }, { settingsPath });
+    assert.deepEqual(JSON.parse(await readFile(settingsPath, "utf8")), { future: true });
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("modelPairs accepts valid pairs, trims names, and configures pair definitions", () => {
+  const normalized = normalizePlanModeSettings({
+    modelPairs: {
+      "anthropic/mixplan": { planner: "anthropic/claude-opus-5-5", worker: "openai/gpt-6.1-sol", name: "  Mixed  " },
+      "anthropic/opusplan": { planner: "anthropic/claude-opus-5-5", worker: "anthropic/claude-haiku-5" },
+    },
+  });
+  assert.ok(normalized);
+  assert.deepEqual(normalized.modelPairs, {
+    "anthropic/mixplan": {
+      planner: { provider: "anthropic", modelId: "claude-opus-5-5" },
+      worker: { provider: "openai", modelId: "gpt-6.1-sol" },
+      name: "Mixed",
+    },
+    "anthropic/opusplan": {
+      planner: { provider: "anthropic", modelId: "claude-opus-5-5" },
+      worker: { provider: "anthropic", modelId: "claude-haiku-5" },
+    },
+  });
+  const definitions = configuredModelPairs(normalized);
+  const mix = definitions.find((definition) => `${definition.provider}/${definition.id}` === "anthropic/mixplan");
+  assert.equal(mix?.name, "Mixed");
+  assert.deepEqual(mix?.worker, { spec: { provider: "openai", modelId: "gpt-6.1-sol" } });
+  const replaced = definitions.filter(
+    (definition) => `${definition.provider}/${definition.id}` === "anthropic/opusplan",
+  );
+  assert.equal(replaced.length, 1);
+  assert.deepEqual(replaced[0]?.worker, { spec: { provider: "anthropic", modelId: "claude-haiku-5" } });
+  assert.equal(normalizePlanModeSettings({ modelPairs: {} })?.modelPairs !== undefined, true);
+  assert.equal(normalizePlanModeSettings({})?.modelPairs, undefined);
+  assert.ok(configuredModelPairs({ thinkingLevel: "inherit" }).length > 0, "built-in pairs remain without settings");
+});
+
+test("modelPairs rejects invalid shapes", () => {
+  const pair = { planner: "a/planner", worker: "a/worker" };
+  const invalid: [string, unknown][] = [
+    ["a non-object", null],
+    ["an array", []],
+    ["a key without a provider", { plan: pair }],
+    ["a key with a thinking suffix", { "a/pair:high": pair }],
+    ["a planner with a thinking suffix", { "a/pair": { ...pair, planner: "a/planner:high" } }],
+    ["a worker with a thinking suffix", { "a/pair": { ...pair, worker: "a/worker:low" } }],
+    ["the planner equal to the worker", { "a/pair": { planner: "a/same", worker: "a/same" } }],
+    ["an unparseable planner", { "a/pair": { ...pair, planner: "planner" } }],
+    ["a missing worker", { "a/pair": { planner: "a/planner" } }],
+    ["an extra key", { "a/pair": { ...pair, extra: true } }],
+    ["a non-object member", { "a/pair": "a/planner" }],
+    ["an empty name", { "a/pair": { ...pair, name: "" } }],
+    ["a blank name", { "a/pair": { ...pair, name: "   " } }],
+    ["a name over 80 characters", { "a/pair": { ...pair, name: "n".repeat(81) } }],
+    ["a non-string name", { "a/pair": { ...pair, name: 7 } }],
+  ];
+  for (const [label, modelPairs] of invalid) {
+    assert.equal(normalizePlanModeSettings({ modelPairs }), undefined, label);
+  }
+  assert.ok(normalizePlanModeSettings({ modelPairs: { "a/pair": { ...pair, name: "n".repeat(80) } } }));
+});
+
+test("modelPairs invalidates the whole settings file and loads from disk", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "pi-plan-mode-pairs-"));
+  const settingsPath = join(directory, "pi-plan-mode.json");
+  try {
+    await writeFile(settingsPath, JSON.stringify({ modelPairs: { "a/pair": { planner: "a/x", worker: "a/x" } } }));
+    assert.equal((await readPlanModeSettings(settingsPath)).kind, "invalid");
+    await writeFile(settingsPath, JSON.stringify({ modelPairs: { "a/pair": { planner: "a/x", worker: "a/y" } } }));
+    const loaded = await readPlanModeSettings(settingsPath);
+    assert.equal(loaded.kind, "loaded");
+    assert.deepEqual(loaded.kind === "loaded" && loaded.settings.modelPairs, {
+      "a/pair": { planner: { provider: "a", modelId: "x" }, worker: { provider: "a", modelId: "y" } },
     });
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("removed implementation and completion keys load fine and are ignored, and survive updates", async () => {
+  const removed = {
+    implementationModelMap: { "planner/one": ["provider/worker:high"], "planner/bad": 42 },
+    defaultImplementationThinkingLevel: "extreme",
+    completionReview: "yes",
+    completionMaxRevisions: 99,
+  };
+  assert.deepEqual(normalizePlanModeSettings({ thinkingLevel: "low", ...removed }), { thinkingLevel: "low" });
+  const directory = await mkdtemp(join(tmpdir(), "pi-plan-mode-removed-keys-"));
+  const settingsPath = join(directory, "pi-plan-mode.json");
+  try {
+    await writeFile(settingsPath, JSON.stringify({ thinkingLevel: "high", ...removed }));
+    assert.deepEqual(await readPlanModeSettings(settingsPath), {
+      kind: "loaded",
+      settings: { thinkingLevel: "high" },
+    });
+    await updatePlanModeSettings({ thinkingLevel: "medium" }, { settingsPath });
+    assert.deepEqual(JSON.parse(await readFile(settingsPath, "utf8")), { thinkingLevel: "medium", ...removed });
+    const settings = normalizePlanModeSettings(removed) as unknown as Record<string, unknown>;
+    for (const key of Object.keys(removed)) assert.equal(settings[key], undefined, key);
   } finally {
     await rm(directory, { recursive: true, force: true });
   }
@@ -296,17 +273,15 @@ test("Plan-mode settings validate implementation retention and export defaults",
   }
 });
 
-test("Plan-mode settings validate fresh implementation runtime defaults", () => {
+test("Plan-mode settings validate the default implementation model", () => {
   const configured = normalizePlanModeSettings({
     defaultImplementationModel: { provider: "provider", modelId: "model" },
-    defaultImplementationThinkingLevel: "high",
   });
   assert.ok(configured);
   assert.deepEqual(configuredImplementationModel(configured), {
     provider: "provider",
     modelId: "model",
   });
-  assert.equal(configuredImplementationThinkingLevel(configured), "high");
   const trimmed = normalizePlanModeSettings({
     defaultImplementationModel: {
       provider: "  provider  ",
@@ -322,7 +297,6 @@ test("Plan-mode settings validate fresh implementation runtime defaults", () => 
   const defaults = normalizePlanModeSettings({});
   assert.ok(defaults);
   assert.equal(configuredImplementationModel(defaults), undefined);
-  assert.equal(configuredImplementationThinkingLevel(defaults), undefined);
 
   for (const defaultImplementationModel of [
     null,
@@ -337,41 +311,6 @@ test("Plan-mode settings validate fresh implementation runtime defaults", () => 
     },
   ]) {
     assert.equal(normalizePlanModeSettings({ defaultImplementationModel }), undefined);
-  }
-  for (const defaultImplementationThinkingLevel of ["inherit", "extreme", null, 42]) {
-    assert.equal(normalizePlanModeSettings({ defaultImplementationThinkingLevel }), undefined);
-  }
-});
-
-test("completion review defaults on, validates booleans, and persists without losing other settings", async () => {
-  assert.notEqual(normalizePlanModeSettings({})?.completionReview, false);
-  for (const completionReview of [true, false]) {
-    assert.equal(normalizePlanModeSettings({ completionReview })?.completionReview, completionReview);
-  }
-  for (const completionReview of [null, "false", 0, [], {}]) {
-    assert.equal(normalizePlanModeSettings({ completionReview }), undefined);
-  }
-  const directory = await mkdtemp(join(tmpdir(), "pi-plan-mode-completion-review-"));
-  const settingsPath = join(directory, "pi-plan-mode.json");
-  try {
-    await writeFile(settingsPath, '{"future":{"kept":true},"thinkingLevel":"high"}\n');
-    for (const completionReview of [false, true]) {
-      await updatePlanModeSettings({ completionReview }, { settingsPath });
-      assert.deepEqual(JSON.parse(await readFile(settingsPath, "utf8")), {
-        future: { kept: true },
-        thinkingLevel: "high",
-        completionReview,
-      });
-      const loaded = await readPlanModeSettings(settingsPath);
-      assert.equal(loaded.kind === "loaded" && loaded.settings.completionReview, completionReview);
-    }
-    await updatePlanModeSettings({ completionReview: null }, { settingsPath });
-    assert.deepEqual(JSON.parse(await readFile(settingsPath, "utf8")), {
-      future: { kept: true },
-      thinkingLevel: "high",
-    });
-  } finally {
-    await rm(directory, { recursive: true, force: true });
   }
 });
 
@@ -469,7 +408,6 @@ test("Plan-mode settings patch implementation defaults, retention, and export fi
       {
         implementationPlanRetention: "clear-after-first-run",
         defaultImplementationModel: { provider: "  provider  ", modelId: "  model  " },
-        defaultImplementationThinkingLevel: "high",
         defaultPlanExportPath: "docs/PLAN.md",
       },
       { settingsPath },
@@ -479,13 +417,11 @@ test("Plan-mode settings patch implementation defaults, retention, and export fi
       future: { kept: true },
       implementationPlanRetention: "clear-after-first-run",
       defaultImplementationModel: { provider: "provider", modelId: "model" },
-      defaultImplementationThinkingLevel: "high",
       defaultPlanExportPath: "docs/PLAN.md",
     });
     await updatePlanModeSettings(
       {
         defaultImplementationModel: null,
-        defaultImplementationThinkingLevel: null,
         defaultPlanExportPath: null,
       },
       { settingsPath },

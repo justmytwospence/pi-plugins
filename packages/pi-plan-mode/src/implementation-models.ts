@@ -1,5 +1,4 @@
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
-import type { FlowSnapshot, FlowState } from "./flow-contract.js";
 
 export const MAX_PENDING_IMPLEMENTATION_MODEL_IDENTIFIER_LENGTH = 512;
 
@@ -131,56 +130,11 @@ export function subagentRoleModel(
   };
 }
 
-export type ImplementationSource = "map" | "default" | "linked";
-export interface ImplementationChoice {
-  spec: ModelSpec;
-  source: ImplementationSource;
-  thinkingPinned?: true;
-  intent?: "independent" | "linked-execution";
-  flow?: FlowState;
-}
+export type ModelFamily = "astra" | "sol" | "terra" | "fable" | "opus" | "sonnet";
 
-/** The selected flow's worker only; same-model execution is still an explicit linked handoff. */
-export function linkedImplementationChoice(
-  snapshot: FlowSnapshot | undefined,
-  available: readonly AvailableImplementationModel[],
-): ImplementationChoice | undefined {
-  if (snapshot?.operatingMode !== "linked" || !snapshot.ready || snapshot.blocked || !snapshot.guardAvailable) {
-    return undefined;
-  }
-  const flow = snapshot.selectedFlow;
-  const worker = flow?.roles.exec;
-  if (
-    !worker ||
-    worker.provider !== flow.provider ||
-    !available.some((model) => model.provider === worker.provider && model.id === worker.modelId)
-  ) {
-    return undefined;
-  }
-  const thinkingLevel = (MODEL_SPEC_THINKING_LEVELS as readonly unknown[]).includes(worker.suggestedThinking)
-    ? (worker.suggestedThinking as ModelSpecThinkingLevel)
-    : undefined;
-  return {
-    spec: {
-      provider: worker.provider,
-      modelId: worker.modelId,
-      ...(thinkingLevel ? { thinkingLevel } : {}),
-    },
-    source: "linked",
-    ...(worker.thinkingPinned ? { thinkingPinned: true as const } : {}),
-    intent: "linked-execution",
-    flow: structuredClone({
-      version: snapshot.version,
-      operatingMode: snapshot.operatingMode,
-      selectedFlow: flow,
-      revision: snapshot.revision,
-    }),
-  };
-}
-
-type ModelFamily = "astra" | "sol" | "terra" | "fable" | "opus" | "sonnet";
-
-function familyOf(model: ImplementationModelOverride): { family: ModelFamily; generation: number[] } | undefined {
+export function familyOf(
+  model: ImplementationModelOverride,
+): { family: ModelFamily; generation: number[] } | undefined {
   const match =
     model.provider === "openai" || model.provider === "openai-codex"
       ? /^gpt-(\d+(?:\.\d+)*)-(astra|sol|terra)$/u.exec(model.modelId)
@@ -198,73 +152,10 @@ function familyOf(model: ImplementationModelOverride): { family: ModelFamily; ge
   };
 }
 
-function compareGeneration(left: number[], right: number[]) {
+export function compareGeneration(left: number[], right: number[]) {
   for (let index = 0; index < Math.max(left.length, right.length); index++) {
     const difference = (left[index] ?? 0) - (right[index] ?? 0);
     if (difference !== 0) return difference;
   }
   return 0;
-}
-
-const LOWER_FAMILIES: Partial<Record<ModelFamily, ModelFamily[]>> = {
-  astra: ["sol", "terra"],
-  sol: ["terra"],
-  fable: ["opus", "sonnet"],
-  opus: ["sonnet"],
-};
-
-/** Ordered, available, distinct handoff targets; explicit entries (including []) replace defaults. */
-export function implementationChoices(input: {
-  planModel: ModelSpec | undefined;
-  map: Readonly<Record<string, readonly ModelSpec[]>> | undefined;
-  available: readonly AvailableImplementationModel[];
-}): ImplementationChoice[] {
-  const planner = input.planModel;
-  if (!planner) return [];
-  const key = formatModelKey(planner);
-  const mapped = input.map !== undefined && Object.hasOwn(input.map, key);
-  let candidates: readonly ModelSpec[];
-  if (mapped) {
-    candidates = input.map?.[key] ?? [];
-  } else {
-    const planningFamily = familyOf(planner);
-    if (!planningFamily) return [];
-    candidates = (LOWER_FAMILIES[planningFamily.family] ?? []).flatMap((family) => {
-      const siblings = input.available.flatMap((model) => {
-        if (model.provider !== planner.provider) return [];
-        const spec = { provider: model.provider, modelId: model.id };
-        const recognized = familyOf(spec);
-        return recognized?.family === family ? [{ spec, generation: recognized.generation }] : [];
-      });
-      siblings.sort((left, right) => {
-        const leftSame = compareGeneration(left.generation, planningFamily.generation) === 0;
-        const rightSame = compareGeneration(right.generation, planningFamily.generation) === 0;
-        return (
-          Number(rightSame) - Number(leftSame) ||
-          compareGeneration(right.generation, left.generation) ||
-          (left.spec.modelId < right.spec.modelId ? -1 : left.spec.modelId > right.spec.modelId ? 1 : 0)
-        );
-      });
-      return siblings[0] ? [siblings[0].spec] : [];
-    });
-  }
-  const seen = new Set<string>();
-  return candidates.flatMap((spec) => {
-    const identity = formatModelKey(spec);
-    if (
-      sameModel(planner, spec) ||
-      seen.has(identity) ||
-      !input.available.some((model) => model.provider === spec.provider && model.id === spec.modelId)
-    ) {
-      return [];
-    }
-    seen.add(identity);
-    return [
-      {
-        spec,
-        source: mapped ? ("map" as const) : ("default" as const),
-        ...(mapped && spec.thinkingLevel ? { thinkingPinned: true as const } : {}),
-      },
-    ];
-  });
 }

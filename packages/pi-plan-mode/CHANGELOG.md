@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+### Plan model pairs replace handoffs, exec mode and completion review
+
+- Added plan model pairs: virtual models (`anthropic/fableplan`, `anthropic/opusplan`, `openai-codex/astraplan`, `openai-codex/solplan`, `openai/astraplan`, `openai/solplan`, plus custom pairs from the `modelPairs` setting) that route each request to the planner while plan mode is on or a consultation is open, and to the worker otherwise. Approving a plan continues the same agent loop on the worker. A phase switch re-reads the conversation on the other model without its prompt cache.
+- Added `ask_planner` and `planner_answer`: an in-transcript consultation under a read-only guard (the plan file excepted), with recovery at settle when the planner does not call `planner_answer`. The unplanned-file note stays.
+- System 1 chooses effort at plan entry (once, skipped if you changed it) and at approval, where the picker's effort row targets the worker.
+- Approval rows are now **Yes, implement here**, **Yes, compact plan and implement here**, **Edit the plan**, **Save for later** and **No, keep planning**. With a pair selected the question names the worker and the planner.
+- Removed exec mode, `finish_plan`, `continue_plan`, `/plan-exec`, `/plan-back`, completion review (`completionReview`, `completionMaxRevisions`), `implementationModelMap`, `defaultImplementationThinkingLevel`, handoff approval rows, fresh-child handoffs and the `/planners` Handoff mode. Old settings keys are ignored. A session with an unfinished exec implementation continues as ordinary work, with a one-time notice.
+- `/planners` Implement keeps the Plan, Context (keep conversation or compact to plan, same session) and Effort rows.
+- pi-tool-gate's Linked flows and `/flow` are removed (see its README); pi-plan-mode no longer reacts to them.
+
 - Linked inline approval now separates **Approve and implement** from its Context selector, retaining history by default and limiting fresh conversation to supported initial handoffs.
 - Idle Linked execution can revisit a separate plan draft and resume the same supervised task without resetting findings, review limits or pauses. Busy requests do not cancel work; explicit stop ends the task without claiming completion.
 

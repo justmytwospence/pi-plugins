@@ -98,7 +98,7 @@ export interface PlannerAgentOptions {
   createSession?: PlannerSessionFactory;
   /** Optional family service; only its observer is loaded in the planner session. */
   family?: FamilyService;
-  familyKind?: "planner" | "consultant" | "reviewer";
+  familyKind?: "planner";
   /** Stable logical operation across restoration, unlike this runtime's stop token. */
   familyOperationId?: string;
   observation?: PreparedAgent;

@@ -6,8 +6,6 @@ import { stripVTControlCharacters } from "node:util";
 import { type ExtensionContext, initTheme, type ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { Text, visibleWidth } from "@earendil-works/pi-tui";
 import { onTestFinished, test } from "vitest";
-import { ASK_TOOL, EXEC_ENTRY, type ExecState, FINISH_TOOL } from "../src/exec.js";
-import planMode from "../src/index.js";
 import { EXIT_TOOL, registerInlinePlanMode } from "../src/inline-plan.js";
 import {
   ASK_PLANNER_TOOL,
@@ -17,7 +15,6 @@ import {
   registerMainChat,
   SUBMIT_MERGED_TOOL,
 } from "../src/main-chat.js";
-import type { PlannerSessionFactory } from "../src/planner/session.js";
 import { createMockContext, createMockPi } from "./shared/support.js";
 
 initTheme("dark");
@@ -256,12 +253,10 @@ test("inline review marks the final displayed plan, not validation, progress or 
   const inline = registerInlinePlanMode(mock.pi, {
     plansDirectory: () => dir,
     safeSubcommands: () => undefined,
-    executing: () => false,
     toggleKey: () => undefined,
     implementationChoices: () => undefined,
     approved: () => {},
     compactHere: () => {},
-    handoff: () => {},
     implementHere: () => "implement",
   });
   for (const handler of mock.events.get("session_start") ?? []) await handler({}, ctx);
@@ -278,145 +273,4 @@ test("inline review marks the final displayed plan, not validation, progress or 
   assert.equal(result.details?.plan, "# Checkpoint plan\n\nDo the work.");
   assert.deepEqual(annotation(reload(result)), { version: 1, checkpoint: { id: "review-1", kind: "plan" } });
   for (const { message } of mock.sentMessages) assert.equal(annotation(message as Result), undefined);
-});
-
-test("exec consultation declares its final reply, not its progress", async () => {
-  const mock = createMockPi();
-  const dir = directory();
-  const planFile = join(dir, "plan.md");
-  writeFileSync(planFile, "# Plan\n");
-  const factory: PlannerSessionFactory = async () => {
-    const listeners = new Set<(event: unknown) => void>();
-    const emit = (event: unknown) => {
-      for (const listener of listeners) listener(event);
-    };
-    return {
-      session: {
-        isStreaming: false,
-        prompt: async () => {
-          emit({ type: "agent_start" });
-          emit({
-            type: "message_end",
-            message: {
-              role: "assistant",
-              content: [{ type: "text", text: "Use the cache." }],
-              usage: { totalTokens: 10, cost: { total: 0 } },
-            },
-          });
-          emit({ type: "agent_settled" });
-        },
-        steer: async () => undefined,
-        abort: async () => undefined,
-      } as never,
-      file: "/sessions/planner.jsonl",
-      subscribe: (listener) => {
-        listeners.add(listener as never);
-        return () => listeners.delete(listener as never);
-      },
-      dispose: () => {},
-    };
-  };
-  await planMode(mock.pi, {
-    readSettings: async () => ({ thinkingLevel: "inherit" as const, jevToolSelection: false }),
-    createSession: factory,
-  });
-  const model = { provider: "anthropic", id: "claude-sonnet-5-5", name: "Sonnet", reasoning: true };
-  const context = createMockContext({
-    mode: "tui",
-    hasUI: true,
-    cwd: dir,
-    model,
-    modelRegistry: {
-      getApiKeyAndHeaders: async () => ({ ok: false, error: "missing" }),
-      getAvailable: () => [model],
-      getAll: () => [model],
-      find: () => model,
-      isUsingOAuth: () => false,
-    },
-    sessionManager: {
-      getSessionId: () => "s",
-      getLeafId: () => `entry-${mock.entries.length}`,
-      getBranch: () => mock.entries.map((entry) => ({ type: "custom", ...entry })),
-      getEntries: () => [],
-      getSessionFile: () => "/main.jsonl",
-    },
-  });
-  mock.entries.push({
-    customType: EXEC_ENTRY,
-    data: {
-      active: true,
-      planFile,
-      implementer: "Worker",
-      implementerModel: "anthropic/claude-sonnet-5-5",
-      planner: { spec: "anthropic/claude-sonnet-5-5", name: "Sonnet", sessionFile: join(dir, "planner.jsonl") },
-      asks: 0,
-      costUsd: 0,
-    } satisfies ExecState,
-  });
-  for (const handler of mock.events.get("session_start") ?? []) await handler({ reason: "startup" }, context.ctx);
-  const updates: Result[] = [];
-  const result = await tool(mock, ASK_TOOL).execute(
-    "consult-1",
-    { message: "Where?" },
-    undefined,
-    (update: Result) => updates.push(update),
-    context.ctx,
-  );
-  assert.match(result.content[0]?.text ?? "", /Use the cache/u);
-  assert.ok(updates.length > 0);
-  assert.ok(updates.every((update) => annotation(update) === undefined));
-  assert.deepEqual(annotation(reload(result)), { version: 1, checkpoint: { id: "consult-1", kind: "report" } });
-});
-
-test("exec marks a completed report but not inactive, validation or progress results", async () => {
-  const mock = createMockPi();
-  const dir = directory();
-  const planFile = join(dir, "plan.md");
-  writeFileSync(planFile, "# Plan\n\nDo the work.\n");
-  await planMode(mock.pi, {
-    readSettings: async () => ({ thinkingLevel: "inherit" as const, jevToolSelection: false, completionReview: false }),
-  });
-  const context = createMockContext({
-    mode: "tui",
-    hasUI: true,
-    cwd: dir,
-    sessionManager: {
-      getSessionId: () => "s",
-      getLeafId: () => `entry-${mock.entries.length}`,
-      getBranch: () => mock.entries.map((entry) => ({ type: "custom", ...entry })),
-      getEntries: () => [],
-      getSessionFile: () => "/main.jsonl",
-    },
-  });
-  const ctx = context.ctx as ExtensionContext;
-  const finish = tool(mock, FINISH_TOOL);
-  const inactive = await finish.execute("inactive", {}, undefined, undefined, ctx);
-  assert.equal(annotation(inactive), undefined);
-  const state: ExecState = {
-    active: true,
-    planFile,
-    implementer: "Worker",
-    implementerModel: "test/worker",
-    asks: 0,
-    costUsd: 0,
-  };
-  mock.entries.push({ customType: EXEC_ENTRY, data: state });
-  for (const handler of mock.events.get("session_start") ?? []) await handler({ reason: "startup" }, ctx);
-  assert.equal(
-    annotation(await tool(mock, ASK_TOOL).execute("no-planner", { message: "x" }, undefined, undefined, ctx)),
-    undefined,
-  );
-  assert.equal(annotation(await finish.execute("invalid", {}, undefined, undefined, ctx)), undefined);
-  const updates: Result[] = [];
-  const result = await finish.execute(
-    "finish-1",
-    { report: "Implemented.", verification: "Tests passed.", concerns: "None" },
-    undefined,
-    (update: Result) => updates.push(update),
-    ctx,
-  );
-  assert.ok(updates.every((update) => annotation(update) === undefined));
-  assert.match(result.content[0]?.text ?? "", /Implemented/u);
-  assert.deepEqual(annotation(reload(result)), { version: 1, checkpoint: { id: "finish-1", kind: "report" } });
-  assert.equal(annotation(reload(inactive)), undefined);
 });

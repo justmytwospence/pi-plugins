@@ -8,10 +8,8 @@ import {
   ACTIVITY_SECTION,
   type ActivitySection,
 } from "../src/activity.js";
-import { EXEC_ENTRY, type ExecState } from "../src/exec.js";
 import { FAMILY_CHANNEL, type FamilyRequest, type FamilyService, type PreparedAgent } from "../src/family-contract.js";
 import planMode from "../src/index.js";
-import { INLINE_ENTRY } from "../src/inline-plan.js";
 import type { PlannerSessionFactory, PlannerSessionHandle, PlannerSessionOptions } from "../src/planner/session.js";
 import { settingsCycles } from "../src/settings-cycle.js";
 import { SUBAGENT_PROGRESS_KIND } from "../src/subagent-progress.js";
@@ -328,34 +326,15 @@ test("shutdown during planner creation disposes the late handle without promptin
   await f.event("session_shutdown");
 });
 
-function bootstrapRecord(model: unknown = "test/implementer:high") {
-  return {
-    customType: "plan-implementation-runtime",
-    data: {
-      model,
-      exec: {
-        active: true,
-        planFile: "/fixture/approved.md",
-        implementerModel: "test/implementer",
-        implementer: "Implementer",
-        asks: 0,
-        costUsd: 0,
-      },
-    },
-  };
-}
-
-async function bootstrapRuntime(entries: ReturnType<typeof createMockPi>["entries"]) {
+async function legacyExecRuntime(entries: Array<{ customType: string; data: unknown }>, hasUI = true) {
   const mock = createMockPi();
-  mock.rawPi.appendEntry = (customType, data) => {
-    entries.push({ customType, data });
-  };
   const context = createMockContext({
     mode: "tui",
-    hasUI: true,
-    model: { provider: "test", id: "planner", name: "Planner" },
-    modelRegistry: { find: () => ({ provider: "test", id: "implementer", name: "Implementer" }) },
-    sessionManager: { getBranch: () => entries.map((entry) => ({ type: "custom", ...entry })) },
+    hasUI,
+    sessionManager: {
+      getSessionId: () => "legacy-session",
+      getBranch: () => entries.map((entry) => ({ type: "custom", ...entry })),
+    },
   });
   await planMode(mock.pi, { readSettings: async () => settings });
   const event = async (name: string) => {
@@ -364,122 +343,37 @@ async function bootstrapRuntime(entries: ReturnType<typeof createMockPi>["entrie
   return { mock, context, event };
 }
 
-for (const superseded of ["branch", "shutdown", "workflow"] as const) {
-  test(`fresh bootstrap deferred activation cannot mutate after ${superseded}`, async () => {
-    const entries: ReturnType<typeof createMockPi>["entries"] = [bootstrapRecord()];
-    const f = await bootstrapRuntime(entries);
-    let resolve!: (result: boolean) => void;
-    const activation = new Promise<boolean>((done) => {
-      resolve = done;
-    });
-    let switches = 0;
-    f.mock.rawPi.setModel = () => {
-      switches++;
-      return activation;
-    };
-    const publications: unknown[] = [];
-    f.mock.eventBus.on("workflow-mode:exec", (data) => publications.push(data));
-    await f.event("session_start");
-    assert.equal(switches, 0, "bootstrap waits until all providers finish session_start");
-    assert.equal(
-      entries.some((entry) => entry.customType === "plan-implementation-runtime-consumed"),
-      false,
-    );
-    // Suspend the awaited post-start boundary, as replacement can interrupt discovery too.
-    const starting = f.event("resources_discover");
-    await tick();
-    assert.equal(switches, 1);
-    assert.equal(entries.filter((entry) => entry.customType === "plan-implementation-runtime-consumed").length, 1);
-    if (superseded === "branch") {
-      entries.splice(0, entries.length);
-      await f.event("session_tree");
-    } else if (superseded === "workflow") {
-      f.mock.eventBus.emit("workflow-mode:changed", { mode: "chat", source: "transition" });
-    } else await f.event("session_shutdown");
-    const saved = structuredClone(entries);
-    const notices = structuredClone(f.context.notifications);
-    resolve(false);
-    await starting;
-    assert.deepEqual(entries, saved);
-    assert.deepEqual(f.context.notifications, notices);
-    assert.ok(!entries.some((entry) => entry.customType === EXEC_ENTRY || entry.customType === INLINE_ENTRY));
-    assert.ok(!publications.some((data) => (data as { source: string }).source === "transition"));
-  });
-}
+const warnings = (f: { context: { notifications: Array<{ message: string; level?: string }> } }) =>
+  f.context.notifications.filter(({ message }) => /Exec mode was removed/u.test(message));
 
-test("a consumed fresh bootstrap restores exec in a new runtime without activating or beginning again", async () => {
-  const entries: ReturnType<typeof createMockPi>["entries"] = [bootstrapRecord()];
-  const first = await bootstrapRuntime(entries);
-  await first.event("session_start");
-  assert.equal(
-    entries.some((entry) => entry.customType === EXEC_ENTRY),
-    false,
-  );
-  await first.event("resources_discover");
-  const snapshots = entries.filter((entry) => entry.customType === EXEC_ENTRY);
-  assert.ok(snapshots.length >= 1);
-  const latest = snapshots.at(-1)?.data as ExecState;
-  assert.ok(latest.negotiation?.executionId);
-  assert.equal(latest.negotiation.maxRevisions, 2);
-  await first.event("session_shutdown");
-  const saved = structuredClone(entries);
-  const reloaded = await bootstrapRuntime(entries);
-  reloaded.mock.rawPi.setModel = () => {
-    assert.fail("consumed bootstrap must not activate again");
-  };
-  const publications: unknown[] = [];
-  reloaded.mock.eventBus.on("workflow-mode:exec", (data) => publications.push(data));
-  await reloaded.event("session_start");
-  await reloaded.event("resources_discover");
-  assert.deepEqual(entries.slice(0, saved.length), saved);
-  const restored = entries.filter((entry) => entry.customType === EXEC_ENTRY).at(-1)?.data as typeof latest;
-  assert.deepEqual(restored, latest);
-  assert.equal(restored.negotiation?.executionId, latest.negotiation.executionId);
-  assert.equal(restored.negotiation?.maxRevisions, latest.negotiation.maxRevisions);
-  assert.equal(entries.filter((entry) => entry.customType === "plan-implementation-runtime-consumed").length, 1);
-  assert.ok(
-    publications.some((data) => {
-      const event = data as { active: boolean; source: string };
-      return event.active && event.source === "restore";
-    }),
-  );
-  assert.ok(!publications.some((data) => (data as { source: string }).source === "transition"));
+test("a session with an unfinished legacy exec notes its removal once and continues as plain work", async () => {
+  const entries = [
+    { customType: "plan-mode:exec", data: { active: true, planFile: "/fixture/approved.md" } },
+    { customType: "plan-implementation-runtime", data: { model: "test/implementer:high" } },
+  ];
+  const f = await legacyExecRuntime(entries);
+  await f.event("session_start");
+  await f.event("session_tree");
+  const notes = warnings(f);
+  assert.equal(notes.length, 1);
+  assert.equal(notes[0]?.level, "warning");
+  assert.match(notes[0]?.message ?? "", /plan is \/fixture\/approved\.md/u);
+  assert.match(f.context.statuses.get("workflow-mode") ?? "", /^workflow: work/u);
+  const tools = f.mock.rawPi.getActiveTools();
+  assert.ok(!tools.includes("finish_plan") && !tools.includes("continue_plan"));
+  assert.deepEqual(f.mock.setModels, [], "the model is never switched on restore");
+  assert.equal(f.mock.sentUserMessages.length, 0);
+  assert.equal(entries.length, 2, "restore writes nothing");
 });
 
-test("reload leaves an interrupted legacy exchange paused with its identity and budget intact", async () => {
-  const entries: ReturnType<typeof createMockPi>["entries"] = [bootstrapRecord()];
-  const first = await bootstrapRuntime(entries);
-  await first.event("session_start");
-  await first.event("resources_discover");
-  const saved = structuredClone(entries.filter((entry) => entry.customType === EXEC_ENTRY).at(-1)?.data as ExecState);
-  saved.returnTo = "legacy-planning-leaf";
-  const negotiation = saved.negotiation!;
-  negotiation.phase = "consulting";
-  negotiation.attempts = 2;
-  negotiation.revisionsUsed = 1;
-  negotiation.reviewCostUsd = 0.25;
-  negotiation.history = [1, 2].map((round) => ({
-    id: `${negotiation.executionId}:review:${round}`,
-    report: { report: "Implemented.", verification: "Unit tests passed.", concerns: "Live check not run." },
-    responses: [],
-    costUsd: 0.125,
-  }));
-  entries.push({ customType: EXEC_ENTRY, data: saved });
-  await first.event("session_shutdown");
-  const reloaded = await bootstrapRuntime(entries);
-  reloaded.mock.rawPi.setModel = () => assert.fail("reload must not change the model");
-  await reloaded.event("session_start");
-  await reloaded.event("resources_discover");
-  const restored = entries.filter((entry) => entry.customType === EXEC_ENTRY).at(-1)?.data as ExecState;
-  assert.equal(restored.active, true);
-  assert.equal(restored.pendingReturn, undefined);
-  assert.equal(restored.returnTo, saved.returnTo);
-  assert.deepEqual(restored.negotiation, {
-    ...negotiation,
-    phase: "paused",
-    pause: { reason: "interrupted", action: "Exchange interrupted by reload; no paid request was retried." },
-  });
-  await reloaded.event("agent_settled");
-  assert.equal(reloaded.mock.sentUserMessages.length, 0);
-  assert.ok(reloaded.mock.rawPi.getActiveTools().includes("finish_plan"));
+test("no removal notice for finished legacy exec, a missing exec entry, or without a UI", async () => {
+  for (const [entries, hasUI] of [
+    [[{ customType: "plan-mode:exec", data: { active: false, planFile: "/fixture/approved.md" } }], true],
+    [[], true],
+    [[{ customType: "plan-mode:exec", data: { active: true, planFile: "/fixture/approved.md" } }], false],
+  ] as const) {
+    const f = await legacyExecRuntime([...entries], hasUI);
+    await f.event("session_start");
+    assert.equal(warnings(f).length, 0);
+  }
 });

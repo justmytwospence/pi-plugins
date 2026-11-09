@@ -14,6 +14,7 @@ import {
   type ModelSpec,
   parseModelSpec,
 } from "./implementation-models.js";
+import { pairDefinitions } from "./model-pairs.js";
 import type { PlannerToolset } from "./planners.js";
 import type { SafeSubcommands } from "./tool-policy.js";
 
@@ -100,16 +101,14 @@ export interface PlanModeSettings {
   defaultPlanTools?: string[];
   implementationPlanRetention?: ImplementationPlanRetention;
   defaultImplementationModel?: ImplementationModelOverride;
-  /** Independent handoff pin after a target suffix; Linked fallback after the recommendation and worker suggestion. */
-  defaultImplementationThinkingLevel?: PlanModeFixedThinkingLevel;
   defaultPlanExportPath?: string;
   safeSubcommands?: SafeSubcommands;
   /** Toggles inline plan mode (with pi-tool-gate, cycles its permission modes). */
   toggleShortcut?: KeyId;
   /** Where inline plan mode writes plan files (default `~/.pi/agent/plans`). */
   plansDirectory?: string;
-  /** Planning model (`provider/modelId`) to ordered implementation choices; `[]` disables defaults. */
-  implementationModelMap?: Record<string, ModelSpec[]>;
+  /** Custom plan model pairs (`provider/id` of the virtual model) with their planner and worker. */
+  modelPairs?: Record<string, { planner: ModelSpec; worker: ModelSpec; name?: string }>;
   /** Whether implementation keeps the planning conversation or starts a fresh session. */
   defaultImplementationContext?: ImplementationContextChoice;
   /** Planners A and B, preselected in /planners. */
@@ -132,10 +131,6 @@ export interface PlanModeSettings {
   jevToolSelection?: boolean;
   /** /planners: a finished plan's lane shows it as a rendered page (terminal-browser embed); default true. */
   renderedPlans?: boolean;
-  /** Require structured acceptance from the planner on call before completion; default true. */
-  completionReview?: boolean;
-  /** Automatic fix cycles after the initial completion review (0–5, default 2). */
-  completionMaxRevisions?: number;
   /**
    * Tools planners are always offered: preselected, and Jev scores them but never deselects them.
    * Each entry names a toolset, command grant, MCP server, or Other tool by id or name (`web`,
@@ -157,18 +152,14 @@ export interface PlanModeSettingsPatch {
   defaultPlanTools?: readonly string[] | null;
   implementationPlanRetention?: ImplementationPlanRetention;
   defaultImplementationModel?: ImplementationModelOverride | null;
-  defaultImplementationThinkingLevel?: PlanModeFixedThinkingLevel | null;
   defaultPlanExportPath?: string | null;
   toggleShortcut?: KeyId | null;
-  implementationModelMap?: Readonly<Record<string, ModelSpec[]>> | null;
   defaultImplementationContext?: ImplementationContextChoice | null;
   planners?: readonly ModelSpec[] | null;
   scoutModelMap?: Readonly<Record<string, ModelSpec>> | null;
   plannerTimeoutSeconds?: number | null;
   jevToolSelection?: boolean | null;
   renderedPlans?: boolean | null;
-  completionReview?: boolean | null;
-  completionMaxRevisions?: number | null;
 }
 export interface UpdatePlanModeSettingsOptions {
   settingsPath?: string;
@@ -223,13 +214,6 @@ export function normalizePlanModeSettings(value: unknown): PlanModeSettings | un
     if (!defaultImplementationModel) return undefined;
     settings.defaultImplementationModel = defaultImplementationModel;
   }
-  if (Object.hasOwn(value, "defaultImplementationThinkingLevel")) {
-    const defaultImplementationThinkingLevel = Reflect.get(value, "defaultImplementationThinkingLevel");
-    if (!IMPLEMENTATION_THINKING_LEVELS.includes(defaultImplementationThinkingLevel as PlanModeFixedThinkingLevel)) {
-      return undefined;
-    }
-    settings.defaultImplementationThinkingLevel = defaultImplementationThinkingLevel as PlanModeFixedThinkingLevel;
-  }
   if (Object.hasOwn(value, "defaultPlanExportPath")) {
     const defaultPlanExportPath = normalizePlanExportPath(Reflect.get(value, "defaultPlanExportPath"));
     if (!defaultPlanExportPath) return undefined;
@@ -250,10 +234,10 @@ export function normalizePlanModeSettings(value: unknown): PlanModeSettings | un
     if (!safeSubcommands) return undefined;
     settings.safeSubcommands = safeSubcommands;
   }
-  if (Object.hasOwn(value, "implementationModelMap")) {
-    const implementationModelMap = normalizeImplementationModelListMap(Reflect.get(value, "implementationModelMap"));
-    if (!implementationModelMap) return undefined;
-    settings.implementationModelMap = implementationModelMap;
+  if (Object.hasOwn(value, "modelPairs")) {
+    const modelPairs = normalizeModelPairs(Reflect.get(value, "modelPairs"));
+    if (!modelPairs) return undefined;
+    settings.modelPairs = modelPairs;
   }
   if (Object.hasOwn(value, "defaultImplementationContext")) {
     const context = Reflect.get(value, "defaultImplementationContext");
@@ -314,16 +298,6 @@ export function normalizePlanModeSettings(value: unknown): PlanModeSettings | un
     if (typeof enabled !== "boolean") return undefined;
     settings.renderedPlans = enabled;
   }
-  if (Object.hasOwn(value, "completionReview")) {
-    const enabled = Reflect.get(value, "completionReview");
-    if (typeof enabled !== "boolean") return undefined;
-    settings.completionReview = enabled;
-  }
-  if (Object.hasOwn(value, "completionMaxRevisions")) {
-    const maximum = Reflect.get(value, "completionMaxRevisions");
-    if (typeof maximum !== "number" || !Number.isInteger(maximum) || maximum < 0 || maximum > 5) return undefined;
-    settings.completionMaxRevisions = maximum;
-  }
   if (Object.hasOwn(value, "jevThreshold")) {
     const threshold = Reflect.get(value, "jevThreshold");
     if (typeof threshold !== "number" || !(threshold >= 0 && threshold <= 1)) return undefined;
@@ -347,37 +321,25 @@ export function normalizePlanModeSettings(value: unknown): PlanModeSettings | un
   return settings;
 }
 
-function normalizeImplementationModelListMap(value: unknown): Record<string, ModelSpec[]> | undefined {
+function normalizeModelPairs(value: unknown): NonNullable<PlanModeSettings["modelPairs"]> | undefined {
   if (!isSettingsDocument(value)) return undefined;
-  const entries: [string, ModelSpec[]][] = [];
-  for (const [key, target] of Object.entries(value)) {
-    const source = parseModelSpec(key);
-    if (!source || source.thinkingLevel) return undefined;
-    const specs: ModelSpec[] = [];
-    for (const item of Array.isArray(target) ? target : [target]) {
-      let spec: ModelSpec | undefined;
-      if (typeof item === "string") {
-        spec = parseModelSpec(item);
-      } else if (
-        isSettingsDocument(item) &&
-        !Object.keys(item).some((key) => key !== "provider" && key !== "modelId" && key !== "thinkingLevel")
-      ) {
-        const model = normalizeImplementationModel({ provider: item.provider, modelId: item.modelId });
-        if (!model) return undefined;
-        if (Object.hasOwn(item, "thinkingLevel")) {
-          if (!IMPLEMENTATION_THINKING_LEVELS.includes(item.thinkingLevel as PlanModeFixedThinkingLevel))
-            return undefined;
-          spec = { ...model, thinkingLevel: item.thinkingLevel as PlanModeFixedThinkingLevel };
-        } else {
-          spec = model;
-        }
-      }
-      if (!spec) return undefined;
-      specs.push(spec);
+  const pairs: NonNullable<PlanModeSettings["modelPairs"]> = {};
+  for (const [key, entry] of Object.entries(value)) {
+    const identity = parseModelSpec(key);
+    if (!identity || identity.thinkingLevel || !isSettingsDocument(entry)) return undefined;
+    if (Object.keys(entry).some((name) => name !== "planner" && name !== "worker" && name !== "name")) return undefined;
+    const planner = parseModelSpec(entry.planner);
+    const worker = parseModelSpec(entry.worker);
+    if (!planner || !worker || planner.thinkingLevel || worker.thinkingLevel) return undefined;
+    if (planner.provider === worker.provider && planner.modelId === worker.modelId) return undefined;
+    const pair: { planner: ModelSpec; worker: ModelSpec; name?: string } = { planner, worker };
+    if (Object.hasOwn(entry, "name")) {
+      if (typeof entry.name !== "string" || !entry.name.trim() || entry.name.length > 80) return undefined;
+      pair.name = entry.name.trim();
     }
-    entries.push([`${source.provider}/${source.modelId}`, specs]);
+    pairs[key] = pair;
   }
-  return Object.fromEntries(entries);
+  return pairs;
 }
 
 function normalizeImplementationModelMap(value: unknown): Record<string, ModelSpec> | undefined {
@@ -493,10 +455,6 @@ function normalizeCommand(value: unknown): string[] | undefined {
     return undefined;
   }
   return [...value];
-}
-
-export function serializeImplementationModelListMap(map: Readonly<Record<string, ModelSpec[]>>) {
-  return Object.fromEntries(Object.entries(map).map(([key, specs]) => [key, specs.map(formatModelSpec)]));
 }
 
 export function serializeImplementationModelMap(map: Readonly<Record<string, ModelSpec>>) {
@@ -637,11 +595,6 @@ export function updatePlanModeSettings(
       if (!model) throw invalidSettingsError(settingsPath, "invalid implementation model");
       updated.defaultImplementationModel = model;
     }
-    if (patch.defaultImplementationThinkingLevel === null) {
-      delete updated.defaultImplementationThinkingLevel;
-    } else if (patch.defaultImplementationThinkingLevel !== undefined) {
-      updated.defaultImplementationThinkingLevel = patch.defaultImplementationThinkingLevel;
-    }
     if (patch.defaultPlanExportPath === null) delete updated.defaultPlanExportPath;
     else if (patch.defaultPlanExportPath !== undefined) {
       updated.defaultPlanExportPath = patch.defaultPlanExportPath;
@@ -649,14 +602,6 @@ export function updatePlanModeSettings(
     if (patch.toggleShortcut === null) delete updated.toggleShortcut;
     else if (patch.toggleShortcut !== undefined) {
       updated.toggleShortcut = patch.toggleShortcut;
-    }
-    if (
-      patch.implementationModelMap === null ||
-      (patch.implementationModelMap && !Object.keys(patch.implementationModelMap).length)
-    ) {
-      delete updated.implementationModelMap;
-    } else if (patch.implementationModelMap !== undefined) {
-      updated.implementationModelMap = serializeImplementationModelListMap(patch.implementationModelMap);
     }
     if (patch.defaultImplementationContext === null) delete updated.defaultImplementationContext;
     else if (patch.defaultImplementationContext !== undefined) {
@@ -676,19 +621,11 @@ export function updatePlanModeSettings(
     else if (patch.jevToolSelection !== undefined) updated.jevToolSelection = patch.jevToolSelection;
     if (patch.renderedPlans === null) delete updated.renderedPlans;
     else if (patch.renderedPlans !== undefined) updated.renderedPlans = patch.renderedPlans;
-    if (patch.completionReview === null) delete updated.completionReview;
-    else if (patch.completionReview !== undefined) updated.completionReview = patch.completionReview;
-    if (patch.completionMaxRevisions === null) delete updated.completionMaxRevisions;
-    else if (patch.completionMaxRevisions !== undefined) updated.completionMaxRevisions = patch.completionMaxRevisions;
     const settings = normalizePlanModeSettings(updated);
     if (!settings) throw invalidSettingsError(settingsPath, "invalid settings shape");
     await publishSettings(settingsPath, updated, options.signal, options.beforeRename);
     return settings;
   });
-}
-
-export function configuredCompletionMaxRevisions(settings: PlanModeSettings): number {
-  return settings.completionMaxRevisions ?? 2;
 }
 
 export async function awaitPlanModeSettingsWrites(settingsPath = planModeSettingsPath()): Promise<void> {
@@ -882,14 +819,8 @@ export function configuredImplementationModel(settings: PlanModeSettings): Imple
   return settings.defaultImplementationModel;
 }
 
-export function configuredImplementationThinkingLevel(
-  settings: PlanModeSettings,
-): PlanModeFixedThinkingLevel | undefined {
-  return settings.defaultImplementationThinkingLevel;
-}
-
-export function configuredImplementationModelMap(settings: PlanModeSettings): Record<string, ModelSpec[]> {
-  return settings.implementationModelMap ?? {};
+export function configuredModelPairs(settings: PlanModeSettings) {
+  return pairDefinitions(settings.modelPairs);
 }
 
 export function configuredImplementationContext(settings: PlanModeSettings): ImplementationContextChoice {

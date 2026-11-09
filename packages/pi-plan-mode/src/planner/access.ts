@@ -13,7 +13,7 @@ import type { SafeSubcommands } from "../tool-policy.js";
 import { isBuiltinTool } from "../tool-policy.js";
 import { buildToolTree, leaves, type ToolNode, treeToSelection } from "../tool-tree.js";
 import type { PlannerAccessConfig } from "./agent.js";
-import { consultantSystemPrompt, plannerSystemPrompt, plannerToolNotes } from "./prompt.js";
+import { plannerSystemPrompt } from "./prompt.js";
 
 const READ_TOOLS = ["read", "grep", "find", "ls"];
 /** Tools that make no sense in a planner: it asks you with plan_mode_question instead. */
@@ -141,60 +141,6 @@ export function resolveAccess(input: ResolveAccessInput): ResolvedAccess {
     ...(access.mcpAllow ? { mcpAllow: access.mcpAllow } : {}),
     grants,
     ...(scouts ? { scoutLabel: formatModelSpec(scouts) } : {}),
-  };
-}
-
-export interface ConsultantAccessInput {
-  planFile: string;
-  toolsets: Readonly<Record<string, PlannerToolset>>;
-  grants: Readonly<Record<string, CommandGrant>>;
-  /** MCP servers and their tools, for an MCP toolset. */
-  mcpCatalog: readonly McpServerCatalog[];
-  /** The model its read-only subagents run on; none without one. */
-  scout: ModelSpec | undefined;
-  safeSubcommands?: SafeSubcommands;
-  guardExtensionPath: string;
-  expandPath(path: string): string;
-  scoutProviderExtensions?: readonly string[];
-}
-
-/**
- * What the planner on call may use: everything a /planners planner can be given (every configured
- * toolset, such as web research and MCP servers, every command grant, and read-only subagents), all
- * selected, plus edit and write limited to the plan file. Other extensions' tools are left out: the
- * read-only policy does not cover them, and the implementer is changing the same files.
- */
-export function consultantAccess(input: ConsultantAccessInput): PlannerAccessConfig {
-  const roots = buildToolTree({
-    toolsets: input.toolsets,
-    mcpCatalog: input.mcpCatalog,
-    scoutTargets: input.scout ? [formatModelSpec(input.scout)] : [],
-    grants: input.grants,
-  });
-  for (const leaf of leaves(roots)) leaf.selected = true;
-  const access = resolveAccess({
-    roots,
-    toolsets: input.toolsets,
-    grants: input.grants,
-    others: [],
-    scout: input.scout,
-    ...(input.safeSubcommands ? { safeSubcommands: input.safeSubcommands } : {}),
-    guardExtensionPath: input.guardExtensionPath,
-    expandPath: input.expandPath,
-    ...(input.scoutProviderExtensions ? { scoutProviderExtensions: input.scoutProviderExtensions } : {}),
-  });
-  const tools = [...access.config.tools.filter((tool) => tool !== PLAN_MODE_COMPLETE_TOOL_NAME), "edit", "write"];
-  const notes = plannerToolNotes({
-    tools: access.extraTools,
-    grants: access.grants,
-    ...(access.mcpAllow ? { mcpAllow: access.mcpAllow } : {}),
-    ...(access.scoutLabel ? { scoutLabel: access.scoutLabel } : {}),
-  });
-  return {
-    ...access.config,
-    tools,
-    systemPrompt: [consultantSystemPrompt(input.planFile, notes)],
-    policy: { ...access.config.policy, tools: new Set(tools), planFile: input.planFile },
   };
 }
 
