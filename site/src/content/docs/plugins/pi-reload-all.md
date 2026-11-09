@@ -17,7 +17,7 @@ plugin: pi-reload-all
 
 Nothing is typed into other panes. Typing `/reload` with `herdr agent prompt` would append to a half-written draft, and Pi ignores `/reload` while a turn runs. Instead `/reload-all` writes a small request file, atomically, on each machine, and every session running this entry watches that file (with a 30-second poll as a fallback) and reloads itself:
 
-1. A request written after the session started shows `reload pending` in the footer.
+1. A request written after the session started shows `reload pending` in the footer (with pi-status-footer, as its top row).
 2. The session waits, rechecking every two seconds, until nothing a reload would break is in progress. The footer names what it waits on (for example `reload pending: subagents (2)`):
    - a running turn, a queued message, or a draft in the editor;
    - a keystroke anywhere in the terminal within the last five seconds;

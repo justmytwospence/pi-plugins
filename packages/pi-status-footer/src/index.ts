@@ -95,6 +95,8 @@ export interface Snapshot {
   /** pi-plan-mode's exec workflow detail after `exec mode on · `, empty when no detail is published. */
   exec?: string;
   lean?: string; cache?: string; extraBilled?: number;
+  /** pi-reload-all's pending reload; reason is why it is waiting (typing, a question, ...), empty when none is given. */
+  reload?: { reason: string };
   /** A prompt stashed by @saadjs/pi-stash; text is its content when readable. */
   stash?: { text?: string };
   /** pi-sidebar's latest waiting heads-up note (Sidebar closed); more counts the earlier ones. */
@@ -271,7 +273,7 @@ export function parseModeStatus(text: string): PermissionModeStatus | undefined 
   return { kind: MODE_KINDS[match[2]], label: `${glyph} ${match[2]} on`, ...(match[3] ? { key: match[3] } : {}) };
 }
 
-export interface AbsorbedStatuses { workflow?: WorkflowStatus; mode?: PermissionModeStatus; permissionPrompts?: "on" | "off"; exec?: string; lean?: string; cache?: string; extraBilled?: number; stashed?: boolean; headsUp?: { kind: string; text: string; more: number }; marimo?: MarimoStatus[]; lens?: LensStatus; bg?: BgItem[]; pressure?: PressureItem[]; /** Another extension owns the `mcp` status. */ mcp?: boolean; rest: string[] }
+export interface AbsorbedStatuses { reload?: { reason: string }; workflow?: WorkflowStatus; mode?: PermissionModeStatus; permissionPrompts?: "on" | "off"; exec?: string; lean?: string; cache?: string; extraBilled?: number; stashed?: boolean; headsUp?: { kind: string; text: string; more: number }; marimo?: MarimoStatus[]; lens?: LensStatus; bg?: BgItem[]; pressure?: PressureItem[]; /** Another extension owns the `mcp` status. */ mcp?: boolean; rest: string[] }
 // Statuses from our own companion extensions that read better inside the footer
 // rows they describe. Each is optional: absent extensions publish nothing, and a
 // status whose text no longer matches the expected shape falls through to the
@@ -280,6 +282,7 @@ export interface AbsorbedStatuses { workflow?: WorkflowStatus; mode?: Permission
 //   lean-context      (pi-cache-guard's Jev)    "lean: −12k tok"       -> context row
 //   cache-guard       (pi-cache-guard)          "cache 4:12"           -> context row
 //   anthropic-billing (anthropic-billing-guard) "extra usage x3"       -> Claude limits row
+//   reload-all        (pi-reload-all)           "reload pending: typing" -> the top row, just under the editor
 //   prompt-stash      (@saadjs/pi-stash)        "prompt stashed"       -> its own row under the editor
 //   sidebar-headsup   (pi-sidebar)              "✦ heads up (2) · tradeoff: text" -> its own row under the editor
 //   marimo, marimo-N  (pi-marimo)               "marimo: nb.py · ..."  -> a row per notebook under the context row
@@ -301,6 +304,8 @@ export function absorbStatuses(statuses: ReadonlyMap<string, string>, options: {
     if (cache) { result.cache = cache[1]; continue; }
     const billed = key === "anthropic-billing" ? /^extra usage x(\d+)$/.exec(plainText) : null;
     if (billed && options.claudeRow) { result.extraBilled = +billed[1]; continue; }
+    const reload = key === "reload-all" ? /^reload pending(?:: (\S.*))?$/u.exec(plainText) : null;
+    if (reload) { result.reload = { reason: reload[1] ?? "" }; continue; }
     if (key === "prompt-stash" && plainText === "prompt stashed") { result.stashed = true; continue; }
     const headsUp = key === "sidebar-headsup" ? /^✦ heads up(?: \((\d+)\))? · ([a-z][a-z ]*): (.+)$/u.exec(plainText) : null;
     if (headsUp) { result.headsUp = { kind: headsUp[2], text: headsUp[3], more: headsUp[1] ? +headsUp[1] - 1 : 0 }; continue; }
@@ -794,6 +799,7 @@ function pressureRow(items: PressureItem[], width: number, theme: Paint): string
 // one cell wide) icons that lead each footer row. Without a Nerd Font they draw as
 // placeholders; the row text stays readable.
 export const ICONS = {
+  reload: "\uf021", // refresh
   stash: "\uf187", // archive
   headsUp: "\u2726", // ✦, pi-sidebar's heads-up mark
   project: "\uf07b", // folder
@@ -872,6 +878,15 @@ export function layoutFooter(snapshot: Snapshot, width: number, theme: Paint): F
     }
     rows.push(text);
   };
+  // A pending reload leads the footer: it is waiting on the user (or an open
+  // dialog) and changes everything below it once it runs.
+  if (s.reload) {
+    const reason = clean(s.reload.reason);
+    rows.push(row(ICONS.reload, (w) => fitSegments([
+      { text: theme.fg("warning", "Reload pending"), priority: 100 },
+      { text: reason ? theme.fg("muted", reason) : "", priority: 50 },
+    ], w, theme)));
+  }
   if (s.stash) rows.push(row(ICONS.stash, (w) => stashRow(s.stash?.text, w, theme)));
   if (s.headsUp) {
     const h = s.headsUp, act = action("headsup.open");
@@ -1743,6 +1758,7 @@ export default function statusFooter(pi: ExtensionAPI): void {
       totals, cacheHit, git: { ...git, branch: git.branch ?? branch ?? undefined },
       quotas, unavailableQuota, providerUsage: usage.rows, providerUsageMore: usage.more,
       statuses: absorbed.rest, workflow: absorbed.workflow, mode: absorbed.mode, permissionPrompts: absorbed.permissionPrompts, exec: absorbed.exec, lean: absorbed.lean, cache: absorbed.cache, extraBilled: absorbed.extraBilled,
+      reload: absorbed.reload,
       stash: absorbed.stashed ? { text: stashedPrompt() } : undefined,
       headsUp: absorbed.headsUp,
       marimo: absorbed.marimo, lens: absorbed.lens, bg: absorbed.bg, pressure: absorbed.pressure, borderGauge, compact: blockedHolds > 0,

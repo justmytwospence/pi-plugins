@@ -14,8 +14,8 @@ accounts and statuses (channel `pi-plugins.session-chrome.v1`, `src/session-chro
 Every footer row
 leads with a dim Nerd Font icon: folder (project), git branch, robot
 (model) with a brain before the reasoning level, sitemap (workflow), shield (approvals),
-tachometer (context), book (marimo), cogs (background), microchip (pressure), archive
-(stash), a four-pointed star (heads-up), and hourglass (limits). On the context row a plug marks MCP and a magic
+tachometer (context), book (marimo), cogs (background), microchip (pressure), refresh
+(pending reload), archive (stash), a four-pointed star (heads-up), and hourglass (limits). On the context row a plug marks MCP and a magic
 wand skills. In the notices row, the tool gate's shield marks its own notices; the first notice's icon leads the row, a
 bell otherwise. Without a Nerd Font they draw as placeholders;
 all labels and readings remain readable. Other status text is preserved.
@@ -116,7 +116,8 @@ System 1's optional Context chip shows only the classifier in use (`S1 Jev` or `
 | pi-plan-mode | workflow status and `plan-exec` detail | standalone work/plan workflow; during exec the Workflow row shows phase, counts and costs, while any Approvals row remains independent |
 | pi-cache-guard (Jev trimming, key `lean-context`) | `lean: −12k tok` | `Lean −12k tok` on the context row |
 | anthropic-billing-guard | `extra usage x3` | `3 requests billed to extra usage` on the Claude limits row |
-| @saadjs/pi-stash | `prompt stashed` | `Stashed · "first line…" +2 lines · ctrl+s to restore` as the top row, just under the editor |
+| pi-reload-all | `reload pending: typing` | `Reload pending · typing` as the top row, just under the editor, until the reload runs |
+| @saadjs/pi-stash | `prompt stashed` | `Stashed · "first line…" +2 lines · ctrl+s to restore` just under the editor (below Reload pending) |
 | pi-sidebar (key `sidebar-headsup`) | `✦ heads up (2) · tradeoff: text` | `Heads up +1 · tradeoff · "text…" · ctrl+' to read` on its own row under the editor (below Stashed) while notes wait in a closed Sidebar; the text fills the row, and clicking the label, text or key opens Sidebar |
 | pi-marimo (keys `marimo`, `marimo-2`, ...) | `marimo: fit.py · running Data loading › Model fit (12s) · 1 error` | `Marimo fit.py · …` on a row per notebook under the context row, in key order: the notebook (bold) and its kernel; when narrow, the section becomes its deepest heading. A notebook that is `not open` (pi-marimo's server waiting for you) is dimmed, and when pi-marimo links its name (OSC 8) the row keeps the link, which Pi's fullscreen TUI opens on a click. An older pi-marimo's single row also names the other notebooks after `also` (a count when narrow) |
 | pi-marimo (key `marimo-lens`) | `lens: fit.py · S1 "make this blue" · S2` | `Lens fit.py · S1 make this blue · S2` on its own row under the marimo row (eye icon), only while marimo-lens selections are open; when narrow, notes go first |

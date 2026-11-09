@@ -467,6 +467,21 @@ test("a stashed prompt gets its own row under the editor, with a preview when re
   assert.deepEqual(mod.absorbStatuses(new Map([["prompt-stash", "2 prompts stashed"]]), { claudeRow: true }).rest, ["2 prompts stashed"]);
 });
 
+test("a pending reload leads the footer, above every other row", () => {
+  const absorbed = mod.absorbStatuses(new Map([["reload-all", "reload pending: typing"], ["prompt-stash", "prompt stashed"]]), { claudeRow: true });
+  assert.deepEqual(absorbed, { reload: { reason: "typing" }, stashed: true, rest: [] });
+  assert.deepEqual(mod.absorbStatuses(new Map([["reload-all", "reload pending"]]), { claudeRow: true }), { reload: { reason: "" }, rest: [] });
+  const s = { ...fixture(), statuses: absorbed.rest, reload: absorbed.reload, stash: {} };
+  const rows = mod.renderFooter(s, 120, theme).map(plain);
+  assert.equal(rows[0], " \uf021  Reload pending \u00b7 typing");
+  assert.match(rows[1], /^ \uf187  Stashed/);
+  assert.doesNotMatch(rows.slice(1).join("\n"), /reload pending/i);
+  assert.equal(plain(mod.renderFooter({ ...fixture(), reload: { reason: "" } }, 120, theme)[0]), " \uf021  Reload pending");
+  for (let width = 1; width <= 120; width++) assert.ok(mod.renderFooter(s, width, theme).every((row) => visibleWidth(row) <= width));
+  // Unrecognized text from the reload extension stays in the status row.
+  assert.deepEqual(mod.absorbStatuses(new Map([["reload-all", "reloading 3 sessions"]]), { claudeRow: true }).rest, ["reloading 3 sessions"]);
+});
+
 test("a waiting heads-up note gets its own row under the editor, filling the width", () => {
   const text = "Chose SQLite over Postgres without saying why";
   const absorbed = mod.absorbStatuses(new Map([["sidebar-headsup", `\u2726 heads up (3) \u00b7 tradeoff: ${text}`]]), { claudeRow: true });
