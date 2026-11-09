@@ -70,7 +70,6 @@ import {
 } from "./main-chat.js";
 import { buildMcpCatalog, readConfiguredMcpServers } from "./mcp-tools.js";
 import { modelCatalog, normalizeEffort } from "./model-catalog.js";
-import { BUILTIN_PAIRS } from "./model-pairs.js";
 import { registerPairs } from "./pairs.js";
 import { exportPlanToFile } from "./plan-export.js";
 import { plansDirectoryPath, planTitle, readPlan, writePlanFile } from "./plan-file.js";
@@ -99,6 +98,7 @@ import { routedModel } from "./routed-model.js";
 import {
   configuredAlwaysOffer,
   configuredImplementationContext,
+  configuredModelPairs,
   configuredPlanExportPath,
   configuredPlanModeToggleShortcut,
   configuredPlanners,
@@ -270,13 +270,17 @@ export default async function plan(pi: ExtensionAPI, dependencies: PlanDependenc
   const notifiedPlans = new Map<string, number>();
   const notifiedQuestions = new WeakSet<object>();
 
+  /** Registers the plan model pairs once they exist; custom ones come from the settings. */
+  let definePairs: (() => void) | undefined;
   const loadSettings = async () => {
     if (dependencies.readSettings) {
       settings = await dependencies.readSettings();
-      return;
+    } else {
+      const loaded = await readPlanModeSettings();
+      settings = loaded.kind === "loaded" ? loaded.settings : { thinkingLevel: "inherit" };
     }
-    const loaded = await readPlanModeSettings();
-    settings = loaded.kind === "loaded" ? loaded.settings : { thinkingLevel: "inherit" };
+    // Custom plan model pairs from the settings join (or replace) the built-in ones.
+    definePairs?.();
   };
 
   const saveSettings = (patch: Parameters<typeof updatePlanModeSettings>[0]) => {
@@ -918,7 +922,8 @@ export default async function plan(pi: ExtensionAPI, dependencies: PlanDependenc
     safeSubcommands: () => settings.safeSubcommands,
     judgePlanEffort,
   });
-  pairs.define([...BUILTIN_PAIRS]);
+  definePairs = () => pairs.define(configuredModelPairs(settings));
+  definePairs();
 
   // Inline plan mode in your own conversation (Claude Code's): /plan, Shift+Tab, enter_plan_mode.
   const inline = registerInlinePlanMode(pi, {

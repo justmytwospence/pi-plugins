@@ -253,3 +253,58 @@ test("an unplanned file gets one note per approval", async () => {
   assert.equal(await t.fire("tool_result", event), undefined);
   assert.equal(await t.fire("tool_result", { ...event, input: { path: "/repo/src/a.ts" } }), undefined);
 });
+
+test("the plan factory registers the built-in pairs, then custom pairs from the settings", async () => {
+  const { default: planMode } = await import("../src/index.js");
+  const mock = createMockPi();
+  const registered = new Map<string, { name: string; route(request: unknown, ctx: unknown): unknown }>();
+  const raw = mock.rawPi as unknown as Record<string, unknown>;
+  raw.registerVirtualModel = (model: {
+    provider: string;
+    id: string;
+    name: string;
+    route(request: unknown, ctx: unknown): unknown;
+  }) => {
+    registered.set(`${model.provider}/${model.id}`, model);
+  };
+  raw.unregisterVirtualModel = (provider: string, id: string) => registered.delete(`${provider}/${id}`);
+  await planMode(mock.pi, {
+    readSettings: async () => ({
+      thinkingLevel: "inherit" as const,
+      modelPairs: {
+        "anthropic/opusplan": {
+          planner: { provider: "anthropic", modelId: "claude-opus-4-5" },
+          worker: { provider: "anthropic", modelId: "claude-haiku-4-5" },
+          name: "Mine",
+        },
+        "openai/deep": {
+          planner: { provider: "openai", modelId: "gpt-6-astra" },
+          worker: { provider: "openai", modelId: "gpt-6-terra" },
+        },
+      },
+    }),
+  });
+  const session = mock.events.get("session_start") as Handler[];
+  const available = [
+    { provider: "anthropic", id: "claude-opus-4-5", name: "Opus 4.5" },
+    { provider: "anthropic", id: "claude-haiku-4-5", name: "Haiku 4.5" },
+    { provider: "anthropic", id: "claude-sonnet-4-5", name: "Sonnet 4.5" },
+  ];
+  const ctx = {
+    cwd: "/repo",
+    hasUI: false,
+    model: undefined,
+    modelRegistry: {
+      getAvailable: () => available,
+      find: (provider: string, id: string) => available.find((model) => model.provider === provider && model.id === id),
+    },
+    sessionManager: { getBranch: () => [], getSessionId: () => "s", getLeafId: () => null },
+  };
+  assert.ok(registered.has("openai/deep"), "a custom pair is registered");
+  assert.equal(registered.get("anthropic/opusplan")?.name, "Mine", "a built-in key is replaced by the custom pair");
+  assert.ok(registered.has("anthropic/fableplan"), "the other built-ins stay");
+  assert.ok(session.length > 0);
+  const request = { model: { provider: "anthropic", id: "opusplan" }, thinkingLevel: "medium", reason: "user" };
+  const routed = registered.get("anthropic/opusplan")?.route(request, ctx) as { model: { id: string } };
+  assert.equal(routed.model.id, "claude-haiku-4-5", "the replacement's worker routes the build phase");
+});
