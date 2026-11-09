@@ -95,6 +95,46 @@ test('registers its commands, tool and hooks', () => {
   assert.equal(typeof f.handlers.get('session_shutdown'), 'function');
 });
 
+test('reports logical session cwd on lifecycle boundaries, including rebuilt sessions', () => {
+  const f = fakePi();
+  const output = [];
+  const terminal = { isTTY: true, writable: true, write: (s) => output.push(s) };
+  createWorktree(f.pi, { terminal });
+  let cwd = '/repo';
+  const ctx = { mode: 'tui', hasUI: true, sessionManager: { getCwd: () => cwd } };
+  const processCwd = process.cwd();
+  const originalChdir = process.chdir;
+  process.chdir = () => { throw new Error('must not change process cwd'); };
+  try {
+    f.handlers.get('session_start')({}, ctx);
+    cwd = '/repo/.worktrees/a space/雪\n\u001b';
+    f.handlers.get('before_agent_start')({}, ctx);
+    f.handlers.get('agent_settled')({ aborted: false }, ctx);
+    // A rebuilt runtime registers a new handler and starts with its own logical cwd.
+    const rebuilt = fakePi();
+    createWorktree(rebuilt.pi, { terminal });
+    rebuilt.handlers.get('session_start')({}, ctx);
+    assert.deepEqual(output, [
+      '\x1b]7;file:///repo\x07',
+      ...Array(3).fill('\x1b]7;file:///repo/.worktrees/a%20space/%E9%9B%AA%0A%1B\x07'),
+    ]);
+    assert.equal(process.cwd(), processCwd);
+  } finally { process.chdir = originalChdir; }
+});
+
+test('suppresses cwd reports without an interactive writable terminal', () => {
+  for (const [mode, hasUI, isTTY, writable] of [
+    ['json', true, true, true], ['tui', false, true, true], ['tui', true, false, true], ['tui', true, true, false],
+  ]) {
+    const f = fakePi();
+    const output = [];
+    createWorktree(f.pi, { terminal: { isTTY, writable, write: (s) => output.push(s) } });
+    const ctx = { mode, hasUI, sessionManager: { getCwd: () => '/repo' } };
+    for (const event of ['session_start', 'before_agent_start', 'agent_settled']) f.handlers.get(event)({ aborted: false }, ctx);
+    assert.deepEqual(output, []);
+  }
+});
+
 test('completes subcommands', async () => {
   assert.deepEqual((await completions('')).map((c) => c.value), ['new', 'move', 'open', 'done', 'ls']);
   assert.deepEqual((await completions('d')).map((c) => c.value), ['done']);

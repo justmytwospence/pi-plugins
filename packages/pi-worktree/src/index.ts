@@ -4,7 +4,8 @@
 // the worktree's Herdr space and closes this one; a Switchyard adapter can answer the same
 // contract), and with no provider an interactive Pi switches the session in place.
 import { randomUUID } from "node:crypto";
-import { basename } from "node:path";
+import { basename, isAbsolute } from "node:path";
+import { pathToFileURL } from "node:url";
 import { getAgentDir, type ExtensionAPI, type ExtensionCommandContext, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
@@ -76,6 +77,7 @@ interface Deps {
   agentDir?: string;
   env?: NodeJS.ProcessEnv;
   placeTimeoutMs?: number;
+  terminal?: Pick<NodeJS.WriteStream, "isTTY" | "writable" | "write">;
 }
 
 export default function (pi: ExtensionAPI) {
@@ -88,6 +90,15 @@ export function createWorktree(pi: ExtensionAPI, deps: Deps): void {
   const env = deps.env ?? process.env;
   const placeTimeoutMs = deps.placeTimeoutMs ?? 120_000;
   const underSwitchyard = !!(env.SWITCHYARD_BRIDGE_SOCKET || env.SWITCHYARD_CONTROL_SOCKET);
+  const terminal = deps.terminal ?? process.stdout;
+  const reportCwd = (ctx: ExtensionContext) => {
+    if (ctx.mode !== "tui" || !ctx.hasUI || !terminal.isTTY || !terminal.writable) return;
+    const cwd = ctx.sessionManager.getCwd();
+    // A sentinel prevents URL parsing from trimming trailing control characters in the path.
+    if (isAbsolute(cwd)) terminal.write(`\x1b]7;${pathToFileURL(`${cwd}x`).href.slice(0, -1)}\x07`);
+  };
+  pi.on("session_start", (_event, ctx) => reportCwd(ctx));
+  pi.on("before_agent_start", (_event, ctx) => { reportCwd(ctx); });
 
   const holds = new Holds();
   for (const channel of HOLD_CHANNELS) pi.events.on(channel, (e) => holds.apply(channel, e as never));
@@ -382,6 +393,7 @@ export function createWorktree(pi: ExtensionAPI, deps: Deps): void {
   declareReadOnlyCalls(pi.events, TOOL, (input) => input.action === "list");
 
   pi.on("agent_settled", (event, ctx) => {
+    reportCwd(ctx);
     const next = pending;
     if (!next) return;
     pending = undefined;
