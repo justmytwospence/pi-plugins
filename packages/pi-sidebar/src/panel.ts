@@ -2,7 +2,7 @@
 // Pi's working row while Sidebar answers, a one-line notice or confirmation, the composer, and a hint
 // row. It lives in Pi's fullscreen layout next to main (see layout.ts). Keys follow Pi's own
 // keybindings (`getKeybindings()`), so whatever you bound for main works here too.
-import { getSelectListTheme, keyHint, rawKeyHint, type Theme } from "@earendil-works/pi-coding-agent";
+import { getSelectListTheme, keyText, type Theme } from "@earendil-works/pi-coding-agent";
 import {
   Editor,
   getKeybindings,
@@ -94,6 +94,29 @@ export interface PickerOptions {
 type Notice = { kind: "info" | "warning" | "error"; text: string } | { kind: "confirm"; title: string; message: string; text: string };
 
 /** A row drawn from state on every render; clicking it focuses Sidebar. */
+interface Hint {
+  key: string;
+  action: string;
+}
+
+/** Lay hints out as columns: actions on the first row, their keys under them on the second. */
+export function hintColumns(hints: Hint[], width: number, lead: string | undefined, action: (s: string) => string, key: (s: string) => string): string[] {
+  const sep = "  ";
+  const budget = Math.max(0, width - 1);
+  const colWidth = (h: Hint) => Math.max(visibleWidth(h.action), visibleWidth(h.key));
+  const leadWidth = lead ? visibleWidth(lead) + sep.length : 0;
+  const total = (cols: Hint[]) => leadWidth + cols.reduce((n, h, i) => n + colWidth(h) + (i ? sep.length : 0), 0);
+  let cols = hints;
+  // Drop from the end, but keep the last hint (close) as long as anything else fits beside it.
+  while (cols.length > 1 && total(cols) > budget) cols = cols.length > 2 ? [...cols.slice(0, -2), cols[cols.length - 1]!] : cols.slice(0, 1);
+  const pad = (s: string, w: number) => s + " ".repeat(Math.max(0, w - visibleWidth(s)));
+  const top = cols.map((h) => action(pad(h.action, colWidth(h)))).join(sep);
+  const bottom = cols.map((h) => key(pad(h.key, colWidth(h)))).join(sep);
+  const prefix = lead ? `${lead}${sep}` : "";
+  const blank = " ".repeat(leadWidth);
+  return [truncateToWidth(` ${prefix}${top}`, width), truncateToWidth(` ${blank}${bottom}`, width)];
+}
+
 class Row implements Component {
   constructor(private readonly draw: (width: number) => string[], private readonly onClick: () => void) {}
   render(width: number): string[] {
@@ -392,7 +415,7 @@ export class SidebarPanel {
     const focus = () => host.focusSidebar();
     const title = new Row((width) => [this.titleLine(width)], focus);
     const notice = new Row((width) => this.noticeLines(width), focus);
-    const hint = new Row((width) => [this.hintLine(width)], focus);
+    const hint = new Row((width) => this.hintLines(width), focus);
     // Main's editor dock always has one blank row above the editor (Pi's empty widgets-above
     // container is a Spacer(1)), below the working row; notices sit after it, as widgets do.
     const spacer = new Row(() => [""], focus);
@@ -585,20 +608,29 @@ export class SidebarPanel {
     return [truncateToWidth(t.fg(color, ` ${note.text}`), width)];
   }
 
-  private hintLine(width: number): string {
-    const sep = "  ";
-    let text: string;
-    const stashed = this.host.stash?.()?.stashed ? `${this.theme().fg("accent", "stashed")}${sep}` : "";
-    if (this.picker && this.focused) text = [rawKeyHint("↑↓", "navigate"), keyHint("tui.select.confirm", "select"), keyHint("tui.select.cancel", "cancel")].join(sep);
-    else if (this.note?.kind === "confirm") text = [rawKeyHint("enter", "send anyway"), keyHint("app.interrupt", "keep the question")].join(sep);
-    else if (!this.focused) return truncateToWidth(` ${stashed}${rawKeyHint(this.host.toggleLabel, "close")}`, width);
+  /**
+   * Key hints as columns over two rows, the action above its key, so more fit across a narrow
+   * pane than in one `key action` row. Unbound actions are left out; columns that do not fit are
+   * dropped from the end, keeping the close key.
+   */
+  private hintLines(width: number): string[] {
+    const t = this.theme();
+    const raw = (key: string, action: string): Hint => ({ key: process.platform === "darwin" ? key.replace(/\balt\b/g, "option") : key, action });
+    const bound = (id: Parameters<typeof keyText>[0], action: string): Hint => ({ key: keyText(id), action });
+    const close = raw(this.host.toggleLabel, "close");
+    let hints: Hint[];
+    if (this.picker && this.focused) hints = [raw("↑↓", "navigate"), bound("tui.select.confirm", "select"), bound("tui.select.cancel", "cancel")];
+    else if (this.note?.kind === "confirm") hints = [raw("enter", "send anyway"), bound("app.interrupt", "keep the question")];
+    else if (!this.focused) hints = [close];
     else {
       // Your own scroll keys, as in main: pi-vim's Ctrl+U/D in Normal mode, and the transcript's end key.
-      const scroll = [...(this.input.vim ? [rawKeyHint("ctrl+u/d", "scroll")] : []), keyHint("tui.altScreen.bottom", "end")];
-      text = this.host.isBusy()
-        ? [keyHint("app.interrupt", "stop"), ...scroll, rawKeyHint(this.host.toggleLabel, "close")].join(sep)
-        : [rawKeyHint("enter", "ask"), ...scroll, keyHint("app.tools.expand", "expand"), keyHint("app.thinking.toggle", "thinking"), rawKeyHint("/new", "fresh thread"), rawKeyHint(this.host.toggleLabel, "close")].join(sep);
+      const scroll = [...(this.input.vim ? [raw("ctrl+u/d", "scroll")] : []), bound("tui.altScreen.bottom", "end")];
+      hints = this.host.isBusy()
+        ? [bound("app.interrupt", "stop"), ...scroll, close]
+        : [raw("enter", "ask"), ...scroll, bound("app.tools.expand", "expand"), bound("app.thinking.toggle", "thinking"), raw("/new", "fresh thread"), close];
     }
-    return truncateToWidth(` ${stashed}${text}`, width);
+    hints = hints.filter((h) => h.key);
+    const stashed = this.host.stash?.()?.stashed ? t.fg("accent", "stashed") : undefined;
+    return hintColumns(hints, width, stashed, (s) => t.fg("muted", s), (s) => t.fg("dim", s));
   }
 }

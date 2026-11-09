@@ -73,7 +73,7 @@ While Sidebar has focus, your keys do what they do in main. They are resolved th
   - transcript search (`tui.altScreen.search`, Ctrl+Shift+F);
   - the scroll-to-end indicator and pi-copy's copy mode.
 
-  With main focused, they act on main again. The mouse wheel scrolls only the half under the pointer, and never spills into the other half at a transcript's top or end. The hint row shows your keys.
+  With main focused, they act on main again. The mouse wheel scrolls only the half under the pointer, and never spills into the other half at a transcript's top or end. The hint rows show your keys: each action, with its key under it.
 - **Editing.** The composer is Pi's editor, or pi-vim's embedded editor when pi-vim is installed, so editor keys, history and autocomplete follow your bindings. Your `tui.select.*` keys (such as Ctrl+J/K) move through autocomplete lists.
 - **Skills and prompt templates.** `/skill:name` and your prompt templates run in Sidebar as in main. Other slash commands are main's.
 - **App actions.**
