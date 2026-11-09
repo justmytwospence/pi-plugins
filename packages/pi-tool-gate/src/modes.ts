@@ -4,11 +4,9 @@
 //   workflow-mode:cycle         any -> gate { result?: Promise<boolean> } requests the next base workflow
 //     The gate assigns result synchronously. Await that promise, never event emission itself.
 //     Legacy callers may ignore it; the gate handles failures internally.
-//   workflow-mode:changed       gate -> all { mode: work|chat|plan|exec, previous?, cycle: BaseWorkflowMode[], key?, source: transition|restore }
+//   workflow-mode:changed       gate -> all { mode: work|chat|plan, previous?, cycle: BaseWorkflowMode[], key?, source: transition|restore }
 //     Restore/capability announcements are snapshots, never user transitions.
 //   workflow-mode:plan-provider plan -> gate { planFile? } announces plan support and its file
-//   workflow-mode:exec          plan -> gate { active: boolean, replanning?: boolean, source: transition|restore } publishes the exec lifecycle
-//     Gate ignores restore publications; its own lifecycle hook folds the destination branch.
 //   workflow-mode:query         any -> gate { entries: readonly unknown[], cwd: string, reply(snapshot): void }
 //     Synchronously replies with { mode, cycle, key?, source: restore } using destination entries/cwd defaults.
 //     Registered at factory time; no mutations, persistence, notices, or further events.
@@ -16,8 +14,8 @@
 //   permission-mode:cycle       any -> gate {} toggles auto/yolo
 //   permission-mode:changed     gate -> all { mode, previous?, cycle } publishes approvals only
 
-export type WorkflowMode = "work" | "chat" | "plan" | "exec";
-export type BaseWorkflowMode = Exclude<WorkflowMode, "exec">;
+export type WorkflowMode = "work" | "chat" | "plan";
+export type BaseWorkflowMode = WorkflowMode;
 export interface WorkflowSetRequest { mode: BaseWorkflowMode; result?: Promise<boolean> }
 export interface WorkflowCycleRequest { result?: Promise<boolean> }
 export const APPROVAL_MODES = ["auto", "bypassPermissions", "default", "acceptEdits"] as const;
@@ -39,14 +37,12 @@ export interface WorkflowSnapshot {
 }
 export const WORKFLOW_CYCLE = "workflow-mode:cycle";
 export const PLAN_PROVIDER = "workflow-mode:plan-provider";
-export const EXEC_CHANGED = "workflow-mode:exec";
 export const MODE_STATUS_KEY = "permission-mode";
 export const WORKFLOW_STATUS_KEY = "workflow-mode";
 export const MODE_ENTRY = "tool-gate:mode"; // legacy migration only
 export const WORKFLOW_ENTRY = "tool-gate:workflow";
 export const APPROVAL_ENTRY = "tool-gate:approvals";
 export const APPROVAL_CYCLE: ApprovalMode[] = ["auto", "bypassPermissions"];
-export const EXEC_GUIDANCE = "Exec is active. Use /plan-exec for its status and recovery actions, or /plan-exec stop to leave exec.";
 
 export const MODE_NAMES: Record<ApprovalMode, string> = {
   default: "manual (legacy)", acceptEdits: "accept edits (legacy)", auto: "auto", bypassPermissions: "yolo",
@@ -83,7 +79,6 @@ export function workflowCycle(planAvailable: boolean): BaseWorkflowMode[] {
   return planAvailable ? ["work", "chat", "plan"] : ["work", "chat"];
 }
 export function nextWorkflow(current: WorkflowMode, planAvailable: boolean): WorkflowMode {
-  if (current === "exec") return current;
   const cycle = workflowCycle(planAvailable);
   return cycle[(cycle.indexOf(current) + 1) % cycle.length]!;
 }
@@ -94,31 +89,9 @@ export function modeStatus(mode: ApprovalMode, shortcut: string | undefined): st
   return `${MODE_LABELS[mode]}${shortcut ? ` (${shortcut} to cycle)` : ""}`;
 }
 export function workflowStatus(mode: WorkflowMode, shortcut: string | undefined): string {
-  return `workflow: ${mode}${shortcut && mode !== "exec" ? ` (${shortcut} to cycle)` : ""}`;
+  return `workflow: ${mode}${shortcut ? ` (${shortcut} to cycle)` : ""}`;
 }
-export interface BranchModes { workflow: BaseWorkflowMode; approval: ApprovalMode; execActive: boolean; execReplanning: boolean }
-export const INVALID_REPLANNING = "Replanning state is invalid; no implementation was resumed.";
-/** Presence of a corrupt suspension marker is still Plan, never permission to implement. */
-export function executionReplanning(data: unknown): { replanning: boolean; invalid: boolean; draftFile?: string } {
-  if (!data || typeof data !== "object") return { replanning: false, invalid: false };
-  const execution = data as Record<string, unknown>;
-  if (execution.active !== true || !Object.hasOwn(execution, "replanning")) return { replanning: false, invalid: false };
-  const marker = execution.replanning as Record<string, unknown> | null;
-  if (!marker || typeof marker !== "object" || Array.isArray(marker) || marker.version !== 1 ||
-      typeof marker.draftFile !== "string" || !marker.draftFile.trim() || marker.draftFile === execution.planFile) {
-    return { replanning: true, invalid: true };
-  }
-  return { replanning: true, invalid: false, draftFile: marker.draftFile };
-}
-export function latestExecution(entries: readonly unknown[]): Record<string, unknown> | undefined {
-  for (let i = entries.length - 1; i >= 0; i--) {
-    const entry = entries[i] as { type?: unknown; customType?: unknown; data?: unknown } | null;
-    if (entry?.type === "custom" && entry.customType === "plan-mode:exec") {
-      return entry.data && typeof entry.data === "object" && !Array.isArray(entry.data)
-        ? entry.data as Record<string, unknown> : undefined;
-    }
-  }
-}
+export interface BranchModes { workflow: BaseWorkflowMode; approval: ApprovalMode }
 
 /** Fold only the active branch, in chronological order. Invalid records never escalate permissions. */
 export function restoreBranchModes(entries: readonly unknown[], defaults: BranchModes): BranchModes {
@@ -140,10 +113,6 @@ export function restoreBranchModes(entries: readonly unknown[], defaults: Branch
     } else if (customType === "plan-mode:inline" && typeof data.active === "boolean") {
       if (data.active) state.workflow = "plan";
       else if (state.workflow === "plan") state.workflow = "work";
-    } else if (customType === "plan-mode:exec" && typeof data.active === "boolean") {
-      if (state.execActive && !data.active) state.workflow = "work";
-      state.execActive = data.active;
-      state.execReplanning = executionReplanning(data).replanning;
     }
   }
   return state;

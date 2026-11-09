@@ -140,7 +140,6 @@ export default function (pi) {
 const paths = ['pi-vim', 'pi-stash', 'pi-status-footer', 'pi-cc-render', 'pi-sidebar']
   .map(name => resolve(root, `packages/${name}/src/index.ts`));
 const actionsChannel = 'pi-plugins.footer-actions.v1';
-const flowChannel = 'pi-plugins.workflow-flow.v1';
 const previousKeys = getKeybindings();
 initTheme('dark', false);
 
@@ -205,8 +204,8 @@ const settings = f => { const request = { type: 'query' }; f.bus.emit('test:sett
 const stage = (f, key) => { const request = { type: 'stage', key }; f.bus.emit('test:settings-cycle', request); return request.result; };
 const plain = value => stripVTControlCharacters(value).replace(/\x1b_pi:[^\x07]*\x07/gu, '');
 
-async function fixture(width, flow, sidebar, { transport = 'legacy', mainScreen = false, vim = true } = {}) {
-  const cwd = mkdtempSync(join(temp, `project-${width}-${flow}-${sidebar}-`));
+async function fixture(width, workflow, sidebar, { transport = 'legacy', mainScreen = false, vim = true } = {}) {
+  const cwd = mkdtempSync(join(temp, `project-${width}-${workflow}-${sidebar}-`));
   const bus = createEventBus();
   const raw = new EventEmitter(), exitSource = new EventEmitter();
   const terminal = new MemoryTerminal(width, raw, transport);
@@ -216,16 +215,10 @@ async function fixture(width, flow, sidebar, { transport = 'legacy', mainScreen 
   });
   const calls = [];
   let generation = 0;
-  const flowState = () => flow === 'linked' ? {
-    version: 1, operatingMode: 'linked', workflow: 'work', revision: 1,
-    selectedFlow: { provider: 'anthropic', anchorModel: 'claude-sonnet-4-5', roles: {} },
-    ready: true, guardAvailable: true, transitioning: false,
-  } : undefined;
-  bus.on(flowChannel, request => { if (request.kind === 'query') request.snapshot = flowState(); });
   bus.on(actionsChannel, request => {
     const ownerGeneration = generation;
-    for (const [id, key] of [['flow.open', 'alt+f'], ['workflow.cycle', 'alt+w'],
-      ['approvals.open', 'alt+a'], ['cache.status', undefined], ['execution.status', '/plan-exec']]) {
+    for (const [id, key] of [['workflow.cycle', 'alt+w'],
+      ['approvals.open', 'alt+a'], ['cache.status', undefined]]) {
       request.actions[id] = { label: id, key, run() { calls.push({ generation: ownerGeneration, action: id }); } };
     }
   });
@@ -308,10 +301,9 @@ async function fixture(width, flow, sidebar, { transport = 'legacy', mainScreen 
       assert.equal(mode.ui.getFocusedComponent(), mode.editor, 'main regains focus while Sidebar stays open');
       assert.notEqual(mode.renderer.layoutRoot, viewport.root, 'Sidebar mounts a real split');
     } else if (!mainScreen) assert.equal(mode.renderer.layoutRoot, viewport.root, 'closed Sidebar does not mount a split');
-    mode.createExtensionUIContext().setStatus('workflow-mode', flow === 'exec' ? 'workflow: exec' : 'workflow: work');
+    mode.createExtensionUIContext().setStatus('workflow-mode', `workflow: ${workflow}`);
     mode.createExtensionUIContext().setStatus('permission-mode', '⏵⏵ auto mode on (alt+a to cycle)');
     mode.createExtensionUIContext().setStatus('cache-guard', 'cache cold?');
-    if (flow === 'exec') mode.createExtensionUIContext().setStatus('plan-exec', 'exec mode on · implementing');
     await tick();
     mode.renderer.renderNow();
     await tick();
@@ -392,7 +384,7 @@ const reasoningRecords = f => f.runtime.session.sessionManager.getEntries().filt
 
 async function terminalCycles() {
   for (const mainScreen of [false, true]) {
-    const f = await fixture(120, 'independent', 'absent', { transport: 'supported', mainScreen, vim: false });
+    const f = await fixture(120, 'work', 'absent', { transport: 'supported', mainScreen, vim: false });
     try {
       const api = settings(f);
       const original = snapshot(f);
@@ -505,7 +497,7 @@ async function terminalCycles() {
   }
 
   for (const transport of ['legacy', 'unsupported', 'partial', 'unknown', 'dropped', 'supported']) {
-    const f = await fixture(120, 'independent', 'absent', { transport, vim: false });
+    const f = await fixture(120, 'work', 'absent', { transport, vim: false });
     try {
       const api = settings(f), before = reasoningRecords(f).length;
       const started = Date.now();
@@ -532,7 +524,7 @@ async function terminalCycles() {
     } finally { await f.close(); }
   }
 
-  const f = await fixture(120, 'independent', 'absent', { transport: 'unknown', vim: false });
+  const f = await fixture(120, 'work', 'absent', { transport: 'unknown', vim: false });
   try {
     const api = settings(f), before = reasoningRecords(f).length;
     f.terminal.send('\x1b[116;5u');
@@ -547,7 +539,7 @@ async function terminalCycles() {
 }
 
 async function shortcutModelCancellation() {
-  const f = await fixture(120, 'independent', 'absent');
+  const f = await fixture(120, 'work', 'absent');
   try {
     const original = f.runtime.session.model;
     f.terminal.send('\x1bj'); // The SDK constructs a real snapshot shortcut context.
@@ -572,7 +564,7 @@ async function shortcutModelCancellation() {
 }
 
 async function journalCheckpoint() {
-  const f = await fixture(120, 'independent', 'absent');
+  const f = await fixture(120, 'work', 'absent');
   try {
     const api = settings(f);
     const beforeContext = structuredClone(f.runtime.session.sessionManager.buildSessionContext().messages);
@@ -798,9 +790,9 @@ try {
   await terminalCycles();
   await shortcutModelCancellation();
   await journalCheckpoint();
-  for (const width of [46, 120, 180]) for (const flow of ['independent', 'linked', 'exec']) {
+  for (const width of [46, 120, 180]) for (const workflow of ['work', 'chat', 'plan']) {
     for (const sidebar of ['absent', 'closed', 'open']) {
-      const f = await fixture(width, flow, sidebar);
+      const f = await fixture(width, workflow, sidebar);
       let caseFailure;
       try {
         const cache = target(f, 'Cache');
@@ -828,8 +820,7 @@ try {
         requireOne(f, approval, 'approvals.open');
         await tick(); f.frame();
         const model = target(f, 'haiku-4.5');
-        if (flow === 'linked') requireOne(f, model, 'flow.open');
-        else {
+        {
           // The native selector is deliberately cancelled, never confirmed.
           const draft = f.mode.editor.getExpandedText();
           const originalFocus = f.mode.ui.getFocusedComponent();
@@ -862,7 +853,7 @@ try {
           mouseTarget = preview.settings.find(item => item.key === 'reasoning')?.target;
           assert.equal(mouseTarget, nextReasoning(beforeReasoning.thinking), 'mouse uses the native supported-level order');
           assert.equal(f.calls.length, beforeReasoning.calls, 'reasoning needs no provider capability action');
-        } else assert.equal(width, 46, 'only the narrow linked row may omit reasoning');
+        } else assert.equal(width, 46, 'only the narrow row may omit reasoning');
         f.terminal.send('\x14'); // configured ctrl+t, not a hardcoded wrapper shortcut
         assert.equal(f.runtime.session.thinkingLevel, beforeReasoning.thinking, 'keyboard preview also leaves effective reasoning unchanged');
         const preview = settings(f).cycles.snapshot();
@@ -891,15 +882,10 @@ try {
         const beforeKeyboard = f.calls.length;
         const beforeKeyboardEditor = f.mode.editorContainer.children[0];
         f.terminal.send('\x1bp');
-        if (flow === 'linked') {
-          assert.equal(f.calls.length, beforeKeyboard + 1);
-          assert.equal(f.calls.at(-1)?.action, 'flow.open');
-          assert.equal(f.mode.editorContainer.children[0], beforeKeyboardEditor, 'linked key routes to flow, not model');
-        } else {
-          assert.notEqual(f.mode.editorContainer.children[0], beforeKeyboardEditor, 'model key opens native selector');
-          f.terminal.send('\x1b');
-          assert.equal(f.mode.editorContainer.children[0], beforeKeyboardEditor, 'Escape closes keyboard selector');
-        }
+        assert.equal(f.calls.length, beforeKeyboard, 'the model key never reaches a provider action');
+        assert.notEqual(f.mode.editorContainer.children[0], beforeKeyboardEditor, 'model key opens native selector');
+        f.terminal.send('\x1b');
+        assert.equal(f.mode.editorContainer.children[0], beforeKeyboardEditor, 'Escape closes keyboard selector');
         assert.equal(f.mode.editor.getExpandedText(), beforeReasoning.draft);
         assert.equal(f.mode.ui.getFocusedComponent(), beforeReasoning.focus);
         // Use the SDK's actual /reload path: shutdown old owners, reload resources, bind new owners.
@@ -933,15 +919,10 @@ try {
         const freshEditor = f.mode.editorContainer.children[0];
         const freshCalls = f.calls.length;
         f.terminal.send('\x1bp');
-        if (flow === 'linked') {
-          assert.equal(f.calls.length, freshCalls + 1, 'reloaded model key uses the new flow owner');
-          assert.equal(f.calls.at(-1).generation, 1);
-          assert.equal(f.mode.editorContainer.children[0], freshEditor);
-        } else {
-          assert.notEqual(f.mode.editorContainer.children[0], freshEditor, 'reloaded model key opens selector');
-          f.terminal.send('\x1b');
-          assert.equal(f.mode.editorContainer.children[0], freshEditor);
-        }
+        assert.equal(f.calls.length, freshCalls, 'the reloaded model key never reaches a provider action');
+        assert.notEqual(f.mode.editorContainer.children[0], freshEditor, 'reloaded model key opens selector');
+        f.terminal.send('\x1b');
+        assert.equal(f.mode.editorContainer.children[0], freshEditor);
         assert.equal(f.mode.editor.getExpandedText(), beforeReasoning.draft);
         assert.equal(f.mode.ui.getFocusedComponent(), f.mode.editor);
         const restoredReasoning = f.runtime.session.thinkingLevel;
@@ -954,7 +935,7 @@ try {
         assert.equal(f.mode.editor.getExpandedText(), beforeReasoning.draft);
         assert.equal(f.mode.ui.getFocusedComponent(), f.mode.editor);
         assert.deepEqual(f.errors, [], 'native footer input and reload must not swallow extension errors');
-        console.log(`PASS footer ${width} ${flow} Sidebar ${sidebar}`);
+        console.log(`PASS footer ${width} ${workflow} Sidebar ${sidebar}`);
       } catch (error) { caseFailure = error; }
       finally { try { await f.close(); } catch (error) { caseFailure ??= error; } }
       if (caseFailure) throw caseFailure;

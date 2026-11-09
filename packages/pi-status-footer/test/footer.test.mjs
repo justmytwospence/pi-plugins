@@ -725,10 +725,9 @@ test("pi-marimo's Lens selections get their own row under the marimo row", () =>
 });
 
 test("settings previews show targets without phase suffixes or changes to effective state and row budget", () => {
-  for (const linked of [false, true]) for (const phase of ["pending", "applying"]) for (const width of [46, 120, 180]) {
+  for (const phase of ["pending", "applying"]) for (const width of [46, 120, 180]) {
     const s = { ...fixture(), workflow: { kind: "work", key: "alt+w" }, mode: { kind: "auto", key: "alt+a" },
-      actions: { "workflow.cycle": {}, "reasoning.cycle": {}, "approvals.open": {} },
-      ...(linked ? { flow: { operatingMode: "linked", workflow: "work", ready: true, guardAvailable: true, selectedFlow: { provider: "anthropic" } } } : {}) };
+      actions: { "workflow.cycle": {}, "reasoning.cycle": {}, "approvals.open": {} } };
     const before = mod.layoutFooter(s, width, theme);
     s.settingsCycle = { id: "preview", phase, settings: [
       { key: "workflow", baseline: "work", target: "plan", actual: "work", label: "plan" },
@@ -744,7 +743,7 @@ test("settings previews show targets without phase suffixes or changes to effect
     assert.doesNotMatch(text, /pending|applying/);
     if (width >= 120) {
       assert.match(text, /high/);
-      assert.match(text, /opus-5\.5/, "Linked preview retains the effective physical model");
+      assert.match(text, /opus-5\.5/, "the preview retains the effective physical model");
     }
     assert.equal(s.workflow.kind, "work"); assert.equal(s.mode.kind, "auto");
     for (const hit of layout.hits) assert.ok(hit.startCol >= 0 && hit.endCol <= width);
@@ -753,8 +752,6 @@ test("settings previews show targets without phase suffixes or changes to effect
     assert.doesNotMatch(blocked.lines.join("\n"), /pending|applying/);
     const child = mod.renderFooter({ ...s, readOnly: true }, width, theme).join("\n");
     assert.doesNotMatch(child, /pending|applying/);
-    const exec = mod.renderFooter({ ...s, flow: undefined, workflow: { kind: "exec" }, exec: "" }, width, theme).join("\n");
-    assert.match(exec, new RegExp(`${mod.ICONS.workflow}\\s+exec\\b`)); assert.doesNotMatch(exec, new RegExp(`${mod.ICONS.workflow}\\s+plan\\b`));
   }
 });
 
@@ -1967,11 +1964,10 @@ test("permission prompting is exact, optional, and prioritized on the approvals 
   for (const disposition of ["on", "off"]) {
     const a = absorb(`permission prompts: ${disposition}`);
     assert.deepEqual(a, { permissionPrompts: disposition, rest: [] });
-    for (const workflow of ["work", "exec"]) for (const linked of [false, true]) for (const width of [46, 120, 180]) {
+    for (const width of [46, 120, 180]) {
       const s = { ...fixture(), ...a, statuses: ["Gate 100 auto · 200 pushed back · 300 asked"],
-        workflow: { kind: workflow }, mode: mod.parseModeStatus("⏵⏵ auto mode on (alt+a to cycle)"),
-        actions: { "approvals.open": {} },
-        ...(linked ? { flow: { version: 1, operatingMode: "linked", workflow, ready: true, selectedFlow: { provider: "test" } } } : {}) };
+        workflow: { kind: "work" }, mode: mod.parseModeStatus("⏵⏵ auto mode on (alt+a to cycle)"),
+        actions: { "approvals.open": {} } };
       const rows = mod.renderFooter(s, width, theme).map(plain);
       const row = rows.find(line => line.includes(`prompts ${disposition}`));
       assert.ok(row && row.includes("auto"), `${width}: ${rows.join("\n")}`);
@@ -1988,61 +1984,15 @@ test("permission prompting is exact, optional, and prioritized on the approvals 
   assert.ok(!mod.renderFooter({ ...fixture(), mode: mod.parseModeStatus("⏵⏵ auto mode on") }, 120, theme).map(plain).some(line => line.includes("prompts")));
 });
 
-test("pi-plan-mode's exec workflow preserves a separate approvals row", () => {
+test("the removed plan-exec status is no longer absorbed and never draws a workflow", () => {
   const absorbed = mod.absorbStatuses(new Map([
     ["permission-mode", "⏵⏵ auto mode on (shift+tab to cycle)"],
-    ["plan-exec", "exec mode on · Claude Opus 5.5 on call"],
+    ["plan-exec", "exec mode on · review 2"],
   ]), { claudeRow: false });
-  assert.equal(absorbed.exec, "Claude Opus 5.5 on call");
-  assert.deepEqual(absorbed.rest, []);
-  const s = { ...fixture(), mode: absorbed.mode, exec: absorbed.exec, statuses: absorbed.rest };
-  const rows = mod.renderFooter(s, 160, theme).map(plain);
-  assert.match(rows[2], /\bexec\b · Claude Opus 5.5 on call · \/plan-exec$/);
-  assert.doesNotMatch(rows[2], /implementing approved plan/);
-  assert.match(rows[3], /auto · shift\+tab$/);
-  // Without a mode, or a planner on call, the row is still drawn.
-  const standalone = mod.renderFooter({ ...s, mode: undefined }, 160, theme).map(plain);
-  assert.match(standalone[2], /\bexec\b · Claude Opus 5.5 on call/);
-  assert.ok(!standalone.some(row => row.includes(mod.ICONS.gate)));
-  assert.equal(mod.absorbStatuses(new Map([["plan-exec", "exec mode on"]]), { claudeRow: false }).exec, "");
-  assert.match(mod.renderFooter({ ...s, exec: "" }, 160, theme).map(plain)[2], /\bexec\b · implementing approved plan · \/plan-exec$/);
-  assert.deepEqual(mod.absorbStatuses(new Map([["plan-exec", "something else"]]), { claudeRow: false }).rest, ["something else"]);
-});
-
-test("phase-only exec statuses supersede the static explanation", () => {
-  for (const phase of ["paused · user needed", "review 2", "implementing"]) {
-    for (const width of [46, 120]) {
-      const row = plain(mod.renderFooter({ ...fixture(), exec: phase }, width, theme)[2]);
-      assert.ok(row.includes("exec"), row);
-      assert.ok(row.includes(phase), row);
-      assert.doesNotMatch(row, /implementing approved plan/);
-    }
-  }
-});
-
-test("exec negotiation phases stay on the workflow row, ahead of counts and costs", () => {
-  for (const phase of ["implementing", "consulting", "review 1", "review 3", "revising · 2 findings", "paused · user needed", "paused · review unavailable"]) {
-    for (const count of [0, 2]) {
-      const detail = `${phase} · ${count} consultations · $0.31 consult · $0.42 review`;
-      const absorbed = mod.absorbStatuses(new Map([
-        ["permission-mode", "⏵⏵ auto mode on (shift+tab to cycle)"],
-        ["plan-exec", `exec mode on · ${detail}`],
-      ]), { claudeRow: false });
-      assert.equal(absorbed.exec, detail);
-      assert.deepEqual(absorbed.rest, []);
-      const s = { ...fixture(), mode: absorbed.mode, exec: absorbed.exec, statuses: absorbed.rest };
-      for (const width of [46, 120]) {
-        const rows = mod.renderFooter(s, width, theme).map(plain);
-        assert.equal(rows.length, mod.renderFooter({ ...s, exec: "" }, width, theme).length);
-        assert.ok(rows.every(row => visibleWidth(row) <= width));
-        assert.match(rows[2], /\bexec\b/);
-        assert.match(rows[3], /auto/);
-        assert.ok(rows[2].includes(phase.split(" · ")[0]), `${width}: ${rows[2]}`);
-        if (width === 120) assert.ok(rows[2].includes(detail), rows[2]);
-        assert.equal(mod.renderFooter({ ...s, compact: true }, width, theme).length, 1);
-      }
-    }
-  }
+  assert.equal(absorbed.exec, undefined);
+  assert.deepEqual(absorbed.rest, ["exec mode on · review 2"]);
+  assert.equal(absorbed.workflow, undefined);
+  assert.equal(mod.parseWorkflowStatus("workflow: exec"), undefined);
 });
 
 test("independent axes cover all workflows and approvals at phone and desktop widths", () => {
@@ -2051,9 +2001,9 @@ test("independent axes cover all workflows and approvals at phone and desktop wi
   assert.notEqual(mod.ICONS.workflow, mod.ICONS.gate);
   assert.equal(visibleWidth(mod.ICONS.workflow), 1);
   assert.equal(visibleWidth(mod.ICONS.gate), 1);
-  for (const workflow of ["work", "chat", "plan", "exec"]) for (const approval of ["auto", "yolo"]) {
+  for (const workflow of ["work", "chat", "plan"]) for (const approval of ["auto", "yolo"]) {
     const absorbed = mod.absorbStatuses(new Map([
-      ["workflow-mode", `workflow: ${workflow}${workflow === "exec" ? "" : " (shift+tab to cycle)"}`],
+      ["workflow-mode", `workflow: ${workflow} (shift+tab to cycle)`],
       ["permission-mode", `⏵⏵ ${approval} mode on (alt+a to cycle)`],
       ["tool-gate", "gate: 2 auto · 0 pushed back · 1 asked"],
     ]), { claudeRow: false });
@@ -2067,9 +2017,9 @@ test("independent axes cover all workflows and approvals at phone and desktop wi
       assert.ok(rows.every(row => visibleWidth(row) <= width));
       assert.equal(rows.filter(row => row.includes("Gate")).length, 1);
       if (width === 120) {
-        assert.match(rows[2], workflow === "exec" ? /\/plan-exec/ : /shift\+tab/);
+        assert.match(rows[2], /shift\+tab/);
         assert.match(rows[3], /alt\+a/);
-        assert.ok(rows[2].includes({ work: "edits and actions", chat: "read-only discussion", plan: "research and plan only", exec: "implementing approved plan" }[workflow]), rows[2]);
+        assert.ok(rows[2].includes({ work: "edits and actions", chat: "read-only discussion", plan: "research and plan only" }[workflow]), rows[2]);
       }
       assert.equal(rows.length, mod.renderFooter(fixture(), width, theme).length + 2);
       assert.equal(rows.filter(row => row.includes(workflow)).length, 1);
@@ -2088,7 +2038,7 @@ test("independent axes cover all workflows and approvals at phone and desktop wi
       roles.length = bold.length = 0;
       mod.renderFooter({ ...s, compact }, 120, paint);
       const badge = workflow;
-      const role = { work: "success", chat: "thinkingLow", plan: "customMessageLabel", exec: "warning" }[workflow];
+      const role = { work: "success", chat: "thinkingLow", plan: "customMessageLabel" }[workflow];
       assert.ok(roles.some(([r, text]) => r === role && text === badge), `${workflow}: ${role}`);
       assert.ok(bold.includes(badge), `${workflow} badge is bold`);
       if (!compact) assert.ok(roles.some(([r, text]) => r === (approval === "yolo" ? "error" : "warning") && text === approval));
@@ -2097,7 +2047,7 @@ test("independent axes cover all workflows and approvals at phone and desktop wi
 });
 
 test("compact workflow badges survive long identity and activity content", () => {
-  for (const kind of ["work", "chat", "plan", "exec"]) {
+  for (const kind of ["work", "chat", "plan"]) {
     const s = { ...fixture(), compact: true, workflow: { kind },
       model: "a-model-with-a-very-long-name-".repeat(10), sessionName: "long session ".repeat(30),
       phase: "working ".repeat(30), statuses: ["notice ".repeat(30)] };
@@ -2113,7 +2063,7 @@ test("compact workflow badges survive long identity and activity content", () =>
   }
 });
 
-test("legacy workflow fallback never invents approvals; explicit workflow and exec detail win", () => {
+test("legacy workflow fallback never invents approvals; and the explicit workflow wins", () => {
   const absorb = entries => mod.absorbStatuses(new Map(entries), { claudeRow: false });
   for (const kind of ["chat", "plan"]) {
     const legacy = absorb([["permission-mode", `⏸ ${kind} mode on (ctrl+w to cycle)`]]);
@@ -2125,13 +2075,13 @@ test("legacy workflow fallback never invents approvals; explicit workflow and ex
     assert.match(rows[2], /\b(chat|plan)\b.*ctrl\+w/);
     assert.ok(!rows.some(row => row.includes(mod.ICONS.gate)));
   }
-  for (const entries of [[], [["workflow-mode", "workflow: plan"]], [["plan-exec", "exec mode on · review 2"]]]) {
+  for (const entries of [[], [["workflow-mode", "workflow: plan"]]]) {
     const a = absorb(entries);
     for (const width of [46, 120]) {
       const rows = mod.renderFooter({ ...fixture(), ...a, statuses: a.rest }, width, theme).map(plain);
       assert.ok(!rows.some(row => row.includes(mod.ICONS.gate)));
-      if (entries.length) assert.match(rows[2], /\b(plan|exec)\b/);
-      else assert.ok(!rows.some(row => /\b(work|chat|plan|exec)\b/.test(row)));
+      if (entries.length) assert.match(rows[2], /\bplan\b/);
+      else assert.ok(!rows.some(row => /\b(work|chat|plan)\b/.test(row)));
       if (entries.length) assert.ok(rows[2].trimStart().startsWith(`${mod.ICONS.workflow} `), rows[2]);
       assert.ok(rows.every(row => visibleWidth(row) <= width));
       assert.equal(mod.renderFooter({ ...fixture(), ...a, statuses: a.rest, compact: true }, width, theme).length, 1);
@@ -2140,7 +2090,7 @@ test("legacy workflow fallback never invents approvals; explicit workflow and ex
   const a = absorb([["permission-mode", "⏵⏵ auto mode on (ctrl+a to cycle)"]]);
   const rows = mod.renderFooter({ ...fixture(), ...a, statuses: a.rest }, 46, theme).map(plain);
   assert.match(rows[2], /auto · ctrl\+a$/);
-  assert.ok(!rows.some(row => /\b(work|chat|plan|exec)\b/.test(row)));
+  assert.ok(!rows.some(row => /\b(work|chat|plan)\b/.test(row)));
   for (const width of [46, 120]) {
     const custom = absorb([["workflow-mode", "workflow: work (alt+w to cycle)"], ["permission-mode", "⏵⏵ auto mode on (ctrl+a to cycle)"]]);
     const rows = mod.renderFooter({ ...fixture(), ...custom, statuses: custom.rest }, width, theme).map(plain);
@@ -2157,15 +2107,11 @@ test("legacy workflow fallback never invents approvals; explicit workflow and ex
     const explicit = absorb(entries);
     assert.deepEqual(explicit.workflow, { kind: "work", key: "alt+w" });
     assert.equal(explicit.mode, undefined);
-    for (const exec of [undefined, "", "review 2 · 3 consultations"]) for (const width of [46, 120]) {
-      const rows = mod.renderFooter({ ...fixture(), ...explicit, exec, statuses: explicit.rest }, width, theme).map(plain);
-      assert.ok(rows[2].includes(exec === undefined ? "work" : "exec"), rows[2]);
+    for (const width of [46, 120]) {
+      const rows = mod.renderFooter({ ...fixture(), ...explicit, statuses: explicit.rest }, width, theme).map(plain);
+      assert.ok(rows[2].includes("work"), rows[2]);
       assert.doesNotMatch(rows.join("\n"), new RegExp(`${mod.ICONS.workflow}\\s+plan\\b|${mod.ICONS.gate}`));
       assert.ok(rows.every(row => visibleWidth(row) <= width));
-      if (exec !== undefined) {
-        assert.doesNotMatch(rows[2], /alt\+w|ctrl\+w/);
-        if (width === 120) assert.match(rows[2], /\/plan-exec/);
-      }
     }
   }
   // Render-state fallback also supports callers that have not absorbed legacy statuses.
@@ -2178,7 +2124,7 @@ test("legacy workflow fallback never invents approvals; explicit workflow and ex
   }
   assert.deepEqual(mod.parseWorkflowStatus("workflow: chat"), { kind: "chat" });
   assert.equal(mod.parseWorkflowStatus("workflow: unknown"), undefined);
-  for (const key of ["workflow-mode", "permission-mode", "plan-exec"]) assert.deepEqual(absorb([[key, "unknown status"]]).rest, ["unknown status"]);
+  for (const key of ["workflow-mode", "permission-mode"]) assert.deepEqual(absorb([[key, "unknown status"]]).rest, ["unknown status"]);
 });
 
 test("a waiting dialog compacts the footer to one row for herdr-web-ui", () => {
@@ -2337,23 +2283,25 @@ test("ordinary low-usage session and weekly windows retain routine reset countdo
 
 const controlState = () => Object.fromEntries([
   ["model.open", {}], ["reasoning.cycle", {}],
-  ["workflow.cycle", { key: "ctrl+w" }], ["workflow.open", {}], ["flow.open", {}],
-  ["execution.status", {}], ["approvals.open", { key: "ctrl+a" }],
+  ["workflow.cycle", { key: "ctrl+w" }], ["workflow.open", {}],
+  ["approvals.open", { key: "ctrl+a" }],
   ["context.open", {}], ["context.skills", {}], ["cache.status", {}], ["mcp.open", {}],
 ]);
-const flowState = (workflow = "work", extra = {}) => ({
-  version: 1, operatingMode: "linked", revision: 7, workflow,
-  ready: true, guardAvailable: true, transitioning: false,
-  selectedFlow: { provider: "anthropic", anchorModel: "claude-opus-5-5", roles: Object.fromEntries(
-    ["work", "chat", "plan", "exec"].map((role) => [role, { provider: "anthropic", modelId: "claude-opus-5-5" }])) },
-  ...extra,
-});
 const controlledFixture = () => ({
   ...fixture(), quotas: [], actions: controlState(), primaryKeys: { model: "alt+p", workflow: "ctrl+w", approvals: "ctrl+a" },
   workflow: { kind: "work" }, mode: { kind: "auto", label: "auto" },
   cache: "cold (model)", skills: 7, mcp: { connected: 2, total: 3 }, borderGauge: true,
 });
 const hitText = (layout, hit) => plain(sliceByColumn(layout.lines[hit.row], hit.startCol, hit.endCol - hit.startCol));
+
+test("a plan model pair shows the model behind it and drops it first when narrow", () => {
+  const s = { ...controlledFixture(), model: "opusplan", routedTo: "claude-sonnet-4-5" };
+  assert.match(plain(mod.renderFooter(s, 120, theme)[1] ?? ""), /opusplan → sonnet-4\.5/u);
+  const narrow = mod.renderFooter(s, 46, theme).map(plain).join("\n");
+  assert.match(narrow, /opusplan/u);
+  assert.doesNotMatch(narrow, /→ sonnet/u);
+  assert.doesNotMatch(mod.renderFooter({ ...s, routedTo: undefined }, 120, theme).map(plain).join("\n"), /→/u);
+});
 
 test("final cell metadata selects only explicit values, never labels, icons, separators or inline-hint gaps", () => {
   const s = controlledFixture();
@@ -2399,79 +2347,31 @@ test("control-row hint reservation has the exact 18-cell threshold and never sac
   assert.ok(!narrow.hits.some((hit) => hit.action === "reasoning.cycle"), "dropped reasoning has no invisible controls");
 });
 
-test("Linked combines model/workflow while reasoning and approvals stay independent", () => {
-  for (const workflow of ["work", "chat", "plan", "exec"]) {
-    const independent = { ...controlledFixture(), workflow: { kind: workflow },
-      exec: workflow === "exec" ? "review 2 · 3 consultations · $0.31 consult · $0.42 review" : undefined };
+test("model, workflow, reasoning and approvals keep separate rows for every workflow", () => {
+  for (const workflow of ["work", "chat", "plan"]) {
+    const s = { ...controlledFixture(), workflow: { kind: workflow } };
     for (const width of [46, 120, 180]) {
-      const separate = mod.layoutFooter(independent, width, theme);
-      const joined = mod.layoutFooter({ ...independent, flow: flowState(workflow) }, width, theme);
-      assert.equal(separate.lines.length, 5);
-      assert.equal(joined.lines.length, 4);
-      assert.ok(joined.lines[1].includes(workflow));
-      assert.match(joined.lines[2], /auto/);
-      assert.ok(!joined.lines.some((line) => line.includes(mod.ICONS.model)));
-      assert.equal(joined.lines.filter((line) => line.includes(workflow)).length, 1);
-      assert.equal(separate.lines[2].endsWith(workflow === "exec" ? "/plan-exec" : "ctrl+w"), true);
-      assert.equal(joined.lines[1].endsWith("alt+p"), true);
-      if (width >= 120) {
-        assert.match(joined.lines[1], /anthropic · opus-5\.5 · .*reasoning xhigh/);
-        if (workflow === "exec") {
-          assert.match(joined.lines[1], /review 2/);
-          assert.equal(joined.hits.find((hit) => hitText(joined, hit) === "exec").action, "execution.status");
-        }
-      }
-      if (width === 180 && workflow === "exec") assert.ok(joined.lines[1].includes(independent.exec));
+      const layout = mod.layoutFooter(s, width, theme);
+      assert.equal(layout.lines.length, 5);
+      assert.ok(layout.lines[1].includes(mod.ICONS.model));
+      assert.ok(!layout.lines[1].includes(workflow));
+      assert.ok(layout.lines[2].includes(workflow));
+      assert.match(layout.lines[3], /auto/);
+      assert.equal(layout.lines.filter((line) => line.includes(workflow)).length, 1);
+      assert.equal(layout.lines[2].endsWith("ctrl+w"), true);
+      assert.equal(layout.lines[1].endsWith("alt+p"), true);
+      assert.equal(layout.hits.find((hit) => hitText(layout, hit) === workflow).action, "workflow.cycle");
+      if (width >= 120) assert.match(layout.lines[1], /opus-5\.5 · .*reasoning xhigh/);
+      const compact = mod.layoutFooter({ ...s, compact: true, stash: { text: "draft" }, bg: [{ kind: "job", name: "tests", elapsed: "2:14" }] }, width, theme);
+      assert.equal(compact.lines.length, 1);
+      assert.deepEqual(compact.hits, []);
+      assert.doesNotMatch(compact.lines[0], /alt\+p|ctrl\+w|ctrl\+a/);
+      assert.ok(compact.lines[0].includes(workflow));
     }
   }
-  const layout = mod.layoutFooter({ ...controlledFixture(), flow: flowState() }, 180, theme);
+  const layout = mod.layoutFooter(controlledFixture(), 180, theme);
   assert.match(layout.lines[1], /reasoning xhigh/);
   assert.ok(!layout.hits.some((hit) => hit.action === "effort.toggle"));
-});
-
-test("Linked replanning keeps Plan, physical model and task action across widths and failure states", () => {
-  for (const extra of [{}, { blocked: "Activation failed" }, { ready: false }, { guardAvailable: false }]) {
-    for (const width of [46, 120, 180]) {
-      const s = { ...controlledFixture(), model: "actual-worker", flow: flowState("plan", { replanning: true, ...extra }),
-        exec: "implementing · 3 consultations · $0.42 review",
-        settingsCycle: { id: "stale", phase: "pending", settings: [{ key: "workflow", target: "work" }] } };
-      const layout = mod.layoutFooter(s, width, theme);
-      const row = plain(layout.lines[1]);
-      assert.match(row, /plan/); assert.match(row, /replanning/);
-      assert.doesNotMatch(row, /implementing|\bexec\b|\bwork\b/);
-      assert.equal(layout.hits.find(hit => hitText(layout, hit) === "plan")?.action, "execution.status");
-      assert.ok(!layout.hits.some(hit => hit.action === "workflow.cycle"));
-      if (width >= 120) {
-        assert.match(row, /actual-worker/); assert.doesNotMatch(row, /opus-5\.5/);
-        assert.ok(layout.hits.some(hit => hit.action === "reasoning.cycle"));
-      }
-      if (width === 180) {
-        assert.match(row, /3 consultations/);
-        const published = mod.layoutFooter({ ...s, exec: "replanning · 3 consultations · $0.42 review" }, width, theme);
-        assert.match(plain(published.lines[1]), /replanning · 3 consultations/);
-        assert.equal((plain(published.lines[1]).match(/replanning/g) ?? []).length, 1);
-      }
-      assert.ok(layout.hits.some(hit => hit.action === "approvals.open"));
-      const compact = mod.layoutFooter({ ...s, compact: true }, width, theme);
-      assert.equal(compact.lines.length, 1); assert.deepEqual(compact.hits, []);
-      assert.match(plain(compact.lines[0]), /plan/); assert.match(plain(compact.lines[0]), /replanning/);
-      assert.doesNotMatch(plain(compact.lines[0]), /implementing|\bexec\b/);
-      const absent = mod.layoutFooter({ ...s, actions: undefined }, width, theme);
-      assert.deepEqual(absent.hits, []);
-    }
-  }
-});
-
-test("unlinking a suspended Linked task retains Plan and its task-status control", () => {
-  for (const width of [46, 120, 180]) {
-    const s = { ...controlledFixture(), flow: { ...flowState("plan", { replanning: true }), operatingMode: "independent" },
-      exec: "replanning · 3 consultations · $0.42 review" };
-    const layout = mod.layoutFooter(s, width, theme);
-    const workflow = layout.lines.map(plain).find(line => /\bplan\b/.test(line));
-    assert.ok(workflow); assert.match(workflow, /replanning/); assert.match(workflow, /\/plan-exec/);
-    assert.equal(layout.hits.find(hit => hitText(layout, hit) === "plan")?.action, "execution.status");
-    assert.ok(!layout.hits.some(hit => hit.action === "workflow.cycle"));
-  }
 });
 
 test("context owns cold/unknown/timed cache, telemetry actions and no speculative controls", () => {
@@ -2492,30 +2392,14 @@ test("context owns cold/unknown/timed cache, telemetry actions and no speculativ
   assert.doesNotMatch(unknown.lines[4], /0%/);
 });
 
-test("blocked/unavailable Linked states are explicit; held dialogs remain one row with no primary keys or hits", () => {
-  for (const [extra, label] of [[{ blocked: "Assigned model unavailable" }, "Linked blocked"], [{ ready: false }, "Linked unavailable"], [{ guardAvailable: false }, "Linked unavailable"], [{ transitioning: true }, "Linked changing"]]) {
-    const s = { ...controlledFixture(), flow: flowState("plan", extra) };
-    for (const width of [46, 120, 180]) {
-      const layout = mod.layoutFooter(s, width, theme);
-      assert.ok(layout.lines[1].includes(label), layout.lines[1]);
-      const compact = mod.layoutFooter({ ...s, compact: true, stash: { text: "draft" }, bg: [{ kind: "job", name: "tests", elapsed: "2:14" }] }, width, theme);
-      assert.equal(compact.lines.length, 1);
-      assert.deepEqual(compact.hits, []);
-      assert.doesNotMatch(compact.lines[0], /alt\+p|ctrl\+w|ctrl\+a/);
-      assert.ok(compact.lines[0].includes("plan"));
-    }
-  }
-});
-
-test("Independent/Linked/Exec final layouts and hit bounds fit all widths 1..240 in both ANSI themes", () => {
-  for (const name of ["light", "dark"]) for (const kind of ["work", "chat", "plan", "exec"]) for (const linked of [false, true]) {
+test("Final layouts and hit bounds fit all widths 1..240 in both ANSI themes", () => {
+  for (const name of ["light", "dark"]) for (const kind of ["work", "chat", "plan"]) {
     const paint = getThemeByName(name);
-    const s = { ...controlledFixture(), model: "日本語-e\u0301-physical-model", workflow: { kind },
-      flow: linked ? flowState(kind) : undefined, exec: kind === "exec" ? "paused · review unavailable · 3 consultations · $0.42 review" : undefined };
+    const s = { ...controlledFixture(), model: "日本語-e\u0301-physical-model", workflow: { kind } };
     for (let width = 1; width <= 240; width++) {
       const layout = mod.layoutFooter(s, width, paint);
-      assert.equal(layout.lines.length, linked ? 4 : 5);
-      assert.ok(layout.lines.every((line) => visibleWidth(line) <= width && !/[\r\n\t]/.test(plain(line))), `${name} ${kind} ${linked} ${width}`);
+      assert.equal(layout.lines.length, 5);
+      assert.ok(layout.lines.every((line) => visibleWidth(line) <= width && !/[\r\n\t]/.test(plain(line))), `${name} ${kind} ${width}`);
       for (const hit of layout.hits) {
         assert.ok(hit.startCol >= 0 && hit.endCol > hit.startCol && hit.endCol <= visibleWidth(layout.lines[hit.row]));
         assert.ok(hitText(layout, hit).length > 0);
@@ -2531,7 +2415,6 @@ test("snapshot and action discovery run outside render, coalesce, and retire old
   h.ctx.model = { provider: "test", id: "test", contextWindow: 1000 };
   let rendering = false, queries = 0;
   const assertOutside = () => { assert.equal(rendering, false); queries++; };
-  h.pi.events.on("pi-plugins.workflow-flow.v1", (request) => { assertOutside(); request.snapshot = flowState(); });
   h.pi.events.on("pi-plugins.footer-actions.v1", (request) => { assertOutside(); request.actions["cache.status"] = { label: "Cache", run() {} }; });
   const getCommands = h.pi.getCommands;
   h.pi.getCommands = () => { assertOutside(); return getCommands(); };
@@ -2543,7 +2426,7 @@ test("snapshot and action discovery run outside render, coalesce, and retire old
     finally { rendering = false; }
     assert.equal(queries, before);
     await new Promise((resolve) => setImmediate(resolve));
-    assert.equal(queries, before + 3, "one deferred flow/actions/commands snapshot for the entire burst");
+    assert.equal(queries, before + 2, "one deferred actions/commands snapshot for the entire burst");
     const old = h.footer;
     old.render(120);
     await h.handlers.get("session_shutdown")({}, h.ctx);
@@ -3026,17 +2909,15 @@ test("OpenAI's single Codex row preserves ready, unavailable, stale, reset-due a
   }
 });
 
-test("child chrome clears main flow, mutable workflow and key metadata", async () => {
+test("child chrome clears main mutable workflow and key metadata", async () => {
   const h = host();
   h.ctx.model = { provider: "test", id: "test", contextWindow: 1000 };
-  h.pi.events.on("pi-plugins.workflow-flow.v1", (request) => { request.snapshot = flowState("exec"); });
   h.pi.events.on("pi-plugins.footer-actions.v1", (request) => {
     request.actions["workflow.cycle"] = { label: "workflow", key: "ctrl+w", run() {} };
     request.actions["approvals.open"] = { label: "approvals", key: "ctrl+a", run() {} };
   });
-  h.statuses.set("workflow-mode", "workflow: exec");
+  h.statuses.set("workflow-mode", "workflow: plan");
   h.statuses.set("permission-mode", "⏵⏵ auto mode on (ctrl+a to cycle)");
-  h.statuses.set("plan-exec", "exec mode on · review 2");
   try {
     await h.handlers.get("session_start")({}, h.ctx);
     const request = { version: 1 };
@@ -3048,7 +2929,7 @@ test("child chrome clears main flow, mutable workflow and key metadata", async (
       assert.equal(lines.length, 4, "read-only children select their own provider usage state");
       assert.match(lines[1], /child-model · .*reasoning low/);
       assert.match(lines[3], /test · limits unavailable/);
-      assert.doesNotMatch(lines.join("\n"), /exec|work|plan|Approvals|auto|ctrl\+w|ctrl\+a|alt\+p|plan-exec/);
+      assert.doesNotMatch(lines.join("\n"), /work|plan|Approvals|auto|ctrl\+w|ctrl\+a|alt\+p/);
       assert.ok(lines.every((line) => visibleWidth(line) <= width));
     }
   } finally { await h.handlers.get("session_shutdown")({}, h.ctx); }
@@ -3074,8 +2955,8 @@ test("scoped Antigravity rows retain the binding limit without adding rows or in
     [[100, 100, 100, 100], "Argon high 100%"],
     [[10, 20, 95, 30], "Argon weekly 95%"],
   ]) for (const width of [46, 120, 180]) {
-    for (const flow of [undefined, flowState("plan"), flowState("exec")]) {
-      const base = { ...fixture(), quotas: [], providerUsage: [scopedGoogleReading(values)], flow };
+    {
+      const base = { ...fixture(), quotas: [], providerUsage: [scopedGoogleReading(values)] };
       const rows = mod.renderFooter(base, width, theme).map(plain);
       const withoutQuota = mod.renderFooter({ ...base, providerUsage: [] }, width, theme);
       assert.equal(rows.length, withoutQuota.length + 1);

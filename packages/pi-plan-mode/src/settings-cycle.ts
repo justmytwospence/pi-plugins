@@ -174,10 +174,8 @@ export function settingsCycles(pi: ExtensionAPI, options: SettingsCycleOptions =
   const settingRecords = new Set([
     "tool-gate:workflow",
     "tool-gate:approvals",
-    "tool-gate:flow",
     "tool-gate:chat-notice",
     "plan-mode:inline",
-    "tool-gate:phase-effort",
   ]);
   // Check every append, not just the final leaf: a setter may persist its own
   // settings, but it must not hide unrelated output below the editable row.

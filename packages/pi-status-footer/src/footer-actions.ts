@@ -3,8 +3,6 @@ export const FOOTER_ACTIONS_CHANNEL = "pi-plugins.footer-actions.v1";
 export type FooterActionId =
   | "workflow.cycle"
   | "workflow.open"
-  | "flow.open"
-  | "execution.status"
   | "approvals.open"
   | "context.open"
   | "context.skills"

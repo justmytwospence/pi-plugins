@@ -24,12 +24,12 @@ import { SHOW_TIMER_AFTER_MS, WORKING_REFRESH_MS, WORKING_STATS_CHANNEL, working
 import { WORKING_MESSAGE_EVENT, type WorkingMessageClaim } from "./working-message.ts";
 import { SESSION_CHROME_CHANNEL, type SessionChromeOverrides, type SessionChromeRequest } from "./session-chrome.ts";
 import { WORKFLOW_EXPLANATIONS, workflowBadge } from "./workflow-ui.ts";
-import { queryFlow, type FlowSnapshot } from "./flow-contract.ts";
 import { queryFooterActions, type FooterAction, type FooterActionId } from "./footer-actions.ts";
 import { querySystem1State, type System1Status } from "./system1-contract.ts";
 import { settingsCycles, SETTINGS_REASONING_COMMITTED, type SettingCycleSnapshot, type SettingKey } from "./settings-cycle.ts";
 import { createFooterActionController, createFooterComponent, type FooterEditor, type FooterTui, type FooterHit, type FooterLayout } from "./interactions.ts";
 import { ARGON_MODEL, argonQuotaVariant, createProviderUsageCollector, dispatchProviderUsage, isUsageStale, selectGooglePool, type ArgonQuotaVariant, type ProviderUsage, type UsageSource } from "./provider-usage.ts";
+import { isVirtual, routedModel } from "./routed-model.ts";
 import { queryWaterfall } from "./waterfall-contract.ts";
 import { parseClaudeQuota, codexRateLimitsEvent, mergeQuota, parseClaudeHeaders, readCodexUsage, readPiAnthropicUsage, claudeCodeUserAgent, type Quota } from "@justmytwospence/pi-subscription-usage";
 export { parseClaudeQuota, parseCodexUsage, codexRateLimitsEvent, codexAccountId, mergeQuota, parseCodexHeaders, parseClaudeHeaders, codexWindowLabel } from "@justmytwospence/pi-subscription-usage";
@@ -76,14 +76,13 @@ export type FooterControlId = FooterActionId | "model.open" | "reasoning.cycle";
 /** Detached presentation metadata, never provider callbacks. */
 export type FooterControlState = Partial<Record<FooterControlId, Pick<FooterAction, "key" | "active">>>;
 export interface Snapshot {
-  flow?: FlowSnapshot;
   system1?: System1Status;
   actions?: FooterControlState;
   settingsCycle?: SettingCycleSnapshot;
   primaryKeys?: { model?: string; reasoning?: string; workflow?: string; approvals?: string };
   /** Other-session chrome is string-only: no inherited controls or primary hints. */
   readOnly?: boolean;
-  cwd: string; model: string; provider: string; thinking?: string; oauth: boolean;
+  cwd: string; model: string; /** The physical model behind a virtual selection (a plan model pair), once it has answered. */ routedTo?: string; provider: string; thinking?: string; oauth: boolean;
   sessionName?: string; phase?: string; queued: boolean;
   context: { tokens: number | null; contextWindow: number; percent: number | null };
   totals: Totals; cacheHit?: number; git: GitInfo;
@@ -92,8 +91,6 @@ export interface Snapshot {
   mode?: PermissionModeStatus;
   permissionPrompts?: "on" | "off";
   workflow?: WorkflowStatus;
-  /** pi-plan-mode's exec workflow detail after `exec mode on · `, empty when no detail is published. */
-  exec?: string;
   lean?: string; cache?: string; extraBilled?: number;
   /** pi-reload-all's pending reload; reason is why it is waiting (typing, a question, ...), empty when none is given. */
   reload?: { reason: string };
@@ -243,11 +240,11 @@ export function parseMarimoStatus(text: string): MarimoStatus | undefined {
 }
 
 export interface WorkflowStatus {
-  kind: "work" | "chat" | "plan" | "exec";
+  kind: "work" | "chat" | "plan";
   key?: string;
 }
 export function parseWorkflowStatus(text: string): WorkflowStatus | undefined {
-  const match = /^workflow: (work|chat|plan|exec)(?: \((.+) to cycle\))?$/u.exec(text);
+  const match = /^workflow: (work|chat|plan)(?: \((.+) to cycle\))?$/u.exec(text);
   return match ? { kind: match[1] as WorkflowStatus["kind"], ...(match[2] ? { key: match[2] } : {}) } : undefined;
 }
 
@@ -273,7 +270,7 @@ export function parseModeStatus(text: string): PermissionModeStatus | undefined 
   return { kind: MODE_KINDS[match[2]], label: `${glyph} ${match[2]} on`, ...(match[3] ? { key: match[3] } : {}) };
 }
 
-export interface AbsorbedStatuses { reload?: { reason: string }; workflow?: WorkflowStatus; mode?: PermissionModeStatus; permissionPrompts?: "on" | "off"; exec?: string; lean?: string; cache?: string; extraBilled?: number; stashed?: boolean; headsUp?: { kind: string; text: string; more: number }; marimo?: MarimoStatus[]; lens?: LensStatus; bg?: BgItem[]; pressure?: PressureItem[]; /** Another extension owns the `mcp` status. */ mcp?: boolean; rest: string[] }
+export interface AbsorbedStatuses { reload?: { reason: string }; workflow?: WorkflowStatus; mode?: PermissionModeStatus; permissionPrompts?: "on" | "off"; lean?: string; cache?: string; extraBilled?: number; stashed?: boolean; headsUp?: { kind: string; text: string; more: number }; marimo?: MarimoStatus[]; lens?: LensStatus; bg?: BgItem[]; pressure?: PressureItem[]; /** Another extension owns the `mcp` status. */ mcp?: boolean; rest: string[] }
 // Statuses from our own companion extensions that read better inside the footer
 // rows they describe. Each is optional: absent extensions publish nothing, and a
 // status whose text no longer matches the expected shape falls through to the
@@ -291,7 +288,6 @@ export interface AbsorbedStatuses { reload?: { reason: string }; workflow?: Work
 //   pressure          (pi-pressure)             "pressure: cpu 97 ↑ hot · ..." -> its own row under that
 //   workflow-mode    (pi-tool-gate, pi-plan-mode) "workflow: plan (shift+tab to cycle)" -> Workflow
 //   permission-mode  (pi-tool-gate) "⏵⏵ auto mode on (alt+a to cycle)" -> Approvals
-//   plan-exec        (pi-plan-mode) "exec mode on · review 2" -> Workflow phase/detail
 // Everything else (plan, gate, mcp, ...) stays in the status row.
 export function absorbStatuses(statuses: ReadonlyMap<string, string>, options: { claudeRow: boolean }): AbsorbedStatuses {
   const result: AbsorbedStatuses = { rest: [] };
@@ -336,8 +332,6 @@ export function absorbStatuses(statuses: ReadonlyMap<string, string>, options: {
       else result.mode = mode;
       continue;
     }
-    const exec = key === "plan-exec" ? /^exec mode on(?: · (\S.*))?$/u.exec(plainText) : null;
-    if (exec) { result.exec = exec[1] ?? ""; continue; }
     const plan = key === "plan" ? /^plan: (.+) \((\/plan(?:ners)?)\)$/.exec(plainText) : null;
     if (plan) {
       result.rest.push(`Plan ${plan[1].replace(/cut off \(resume in (\/plan(?:ners)?)\)/g, "cut off · resume in $1")} · ${plan[2]}`);
@@ -926,15 +920,10 @@ export function layoutFooter(snapshot: Snapshot, width: number, theme: Paint): F
     ? { ...s.mode, kind: approvalTarget as PermissionModeStatus["kind"] } : s.mode;
   const modeColor = shownMode ? MODE_COLORS[shownMode.kind] : "muted";
   const approval = shownMode && shownMode.kind !== "chat" && shownMode.kind !== "plan" ? shownMode : undefined;
-  // A defined exec detail (even empty) takes precedence over explicit and legacy workflow status.
   const legacyWorkflow = s.mode?.kind === "chat" || s.mode?.kind === "plan" ? { kind: s.mode.kind, key: s.mode.key } : undefined;
-  const linked = !s.readOnly && s.flow?.operatingMode === "linked";
-  const replanning = !s.readOnly && s.flow?.replanning === true;
-  const flowState = linked ? s.flow!.blocked ? "Linked blocked" : !s.flow!.ready || !s.flow!.guardAvailable ? "Linked unavailable" : s.flow!.transitioning ? "Linked changing" : "" : "";
-  const flowStateText = flowState ? theme.fg(s.flow!.blocked || !s.flow!.guardAvailable ? "error" : "warning", flowState) : "";
-  const effectiveWorkflow: WorkflowStatus | undefined = replanning ? { kind: "plan" } : linked ? { kind: s.flow!.workflow } : s.exec !== undefined ? { kind: "exec" } : s.workflow ?? legacyWorkflow;
+  const effectiveWorkflow: WorkflowStatus | undefined = s.workflow ?? legacyWorkflow;
   const workflowTarget = pending("workflow")?.target;
-  const workflow: WorkflowStatus | undefined = effectiveWorkflow && !replanning && effectiveWorkflow.kind !== "exec" && (workflowTarget === "work" || workflowTarget === "chat" || workflowTarget === "plan")
+  const workflow: WorkflowStatus | undefined = effectiveWorkflow && (workflowTarget === "work" || workflowTarget === "chat" || workflowTarget === "plan")
     ? { ...effectiveWorkflow, kind: workflowTarget } : effectiveWorkflow;
   rows.push(row(ICONS.project, (w) => fitSegments([
     { text: project, priority: 60 },
@@ -948,12 +937,11 @@ export function layoutFooter(snapshot: Snapshot, width: number, theme: Paint): F
     const ctx = used === null ? "" : `${theme.fg("muted", "Context")} ${theme.bold(theme.fg(used < 70 ? "muted" : heat(used), percent(used)))}${theme.fg("dim", " used")}`;
     const compact = row(ICONS.project, (w) => fitSegments([
       { text: workflow ? workflowBadge(theme, workflow.kind) : "", priority: 130 },
-      { text: flowStateText, priority: 140 },
       { text: project, priority: 60 },
       { text: branch, short: branchShort, priority: 40 },
       { text: identity, short: model, priority: 100 },
       { text: ctx, priority: 90 },
-      { text: replanning ? theme.fg("muted", "replanning") : phaseText, priority: 120 },
+      { text: phaseText, priority: 120 },
     ], w, theme));
     return { lines: [" ".repeat(inset) + truncateToWidth(compact, width)], hits: [] };
   }
@@ -961,12 +949,15 @@ export function layoutFooter(snapshot: Snapshot, width: number, theme: Paint): F
   // Gate judgments (including plan+yolo) attach only to the approvals row.
   const gateStatus = approval ? s.statuses.find((status) => /^Gate /.test(stripVTControlCharacters(status))) : undefined;
   const statuses = gateStatus ? s.statuses.filter((status) => status !== gateStatus) : s.statuses;
-  const negotiation = s.exec ? /^(implementing|consulting|review \d+|revising(?: · \d+ findings)?|paused(?: · (?:user needed|review unavailable))?)(?: · (.*))?$/u.exec(clean(s.exec)) : null;
-  const execPhase = replanning ? "replanning" : negotiation?.[1] ?? (s.exec ? clean(s.exec).split(" · ")[0] : "");
-  const execDetail = negotiation ? negotiation[2] : s.exec ? clean(s.exec).split(" · ").slice(1).join(" · ") : "";
-  const workflowAction = action(replanning || workflow?.kind === "exec" ? "execution.status" : "workflow.cycle");
+  const workflowAction = action("workflow.cycle");
   const identitySegments = [
-    partsSegment([{ text: model, action: action("model.open") }], 100),
+    s.routedTo
+      ? partsSegment(
+          [{ text: model, action: action("model.open") }, { text: theme.fg("dim", ` → ${shortModel(s.routedTo)}`) }],
+          100,
+          [{ text: model, action: action("model.open") }],
+        )
+      : partsSegment([{ text: model, action: action("model.open") }], 100),
     { ...partsSegment(reasoningParts, 65), atomic: !!pending("reasoning") },
     { text: phaseText, priority: 120 },
     { text: s.queued ? theme.fg("warning", "queued") : "", priority: 115 },
@@ -975,25 +966,11 @@ export function layoutFooter(snapshot: Snapshot, width: number, theme: Paint): F
   const reasoningKey = s.thinking ? s.primaryKeys?.reasoning : undefined;
   const modelKey = s.primaryKeys?.model || reasoningKey;
   const modelKeyAction = s.primaryKeys?.model ? action("model.open") : reasoningKey ? action("reasoning.cycle") : undefined;
-  if (linked && workflow) {
-    const flow = s.flow!;
-    controlRow(ICONS.workflow, [
-      { ...partsSegment([{ text: workflowBadge(theme, workflow.kind), action: workflowAction }], 130), atomic: !!pending("workflow") },
-      { text: flowStateText, priority: 140 },
-      partsSegment([{ text: theme.fg("muted", clean(flow.selectedFlow?.provider ?? s.provider)), action: action("model.open") }], 75),
-      ...identitySegments,
-      { text: execPhase ? theme.fg("muted", execPhase) : "", short: theme.fg("muted", execPhase.split(" · ")[0]), priority: 120 },
-      { text: execDetail ? theme.fg("muted", execDetail) : "", priority: 60 },
-      { text: flow.blocked ? theme.fg("error", clean(flow.blocked)) : "", priority: 20 },
-    ], replanning && width < 60 ? undefined : modelKey, modelKeyAction);
-  } else {
-    controlRow(ICONS.model, identitySegments, modelKey, modelKeyAction);
-    if (workflow) controlRow(ICONS.workflow, [
-      { ...partsSegment([{ text: workflowBadge(theme, workflow.kind), action: workflowAction }], 130), atomic: !!pending("workflow") },
-      { text: execPhase ? theme.fg("muted", execPhase) : "", short: theme.fg("muted", execPhase.split(" · ")[0]), priority: 120 },
-      { text: theme.fg("muted", execDetail || (execPhase ? "" : WORKFLOW_EXPLANATIONS[workflow.kind])), priority: 70 },
-    ], replanning || workflow.kind === "exec" ? "/plan-exec" : s.primaryKeys?.workflow ?? workflow.key, workflowAction);
-  }
+  controlRow(ICONS.model, identitySegments, modelKey, modelKeyAction);
+  if (workflow) controlRow(ICONS.workflow, [
+    { ...partsSegment([{ text: workflowBadge(theme, workflow.kind), action: workflowAction }], 130), atomic: !!pending("workflow") },
+    { text: theme.fg("muted", WORKFLOW_EXPLANATIONS[workflow.kind]), priority: 70 },
+  ], s.primaryKeys?.workflow ?? workflow.key, workflowAction);
   if (approval) controlRow(ICONS.gate, [
     { ...partsSegment([
       { text: theme.bold(theme.fg(modeColor, MODE_NAMES[approval.kind])) + (approval.kind === "manual" || approval.kind === "acceptEdits" ? theme.fg("muted", " (legacy)") : ""), action: action("approvals.open") },
@@ -1201,7 +1178,6 @@ export default function statusFooter(pi: ExtensionAPI): void {
   let releaseCycleGuard: (() => void) | undefined;
   let promptDepth = 0, interactionGeneration = 0;
   let discoveredActions: ReturnType<typeof queryFooterActions> = {};
-  let discoveredFlow: FlowSnapshot | undefined;
   let discoveredSystem1: System1Status | undefined;
   let prepared: Snapshot | undefined;
   let liveStatuses: (() => ReadonlyMap<string, string>) | undefined;
@@ -1243,13 +1219,6 @@ export default function statusFooter(pi: ExtensionAPI): void {
     isCurrent: () => active && enabled && !!ctx,
     getBlocked: () => blockedHolds, getPromptDepth: () => promptDepth,
     isIdle: () => ctx?.isIdle() === true,
-    // Keyboard dispatch must see the current coordinator state, not the last
-    // painted snapshot. This is interaction-time discovery, never rendering.
-    isLinked: () => {
-      if (!active || !ctx) return false;
-      try { return queryFlow(pi.events)?.operatingMode === "linked"; }
-      catch { return true; } // Never turn a failed coordinator query into a free model picker.
-    },
     getActions: () => discoveredActions,
     cycleReasoning: stageReasoning,
     captureCycleTrigger: () => cycles.captureTrigger(),
@@ -1381,7 +1350,8 @@ export default function statusFooter(pi: ExtensionAPI): void {
   const account = () => {
     if (!active || !ctx) return;
     totals = collectTotals(ctx.sessionManager.getEntries(), Date.now());
-    cacheHit = latestCacheHit(ctx.sessionManager.getBranch(), ctx.model?.provider ?? "", ctx.model?.id ?? "");
+    const cached = routedModel(ctx) ?? ctx.model;
+    cacheHit = latestCacheHit(ctx.sessionManager.getBranch(), cached?.provider ?? "", cached?.id ?? "");
   };
   const updateGit = async (force = false) => {
     if (!active || !ctx || gitBusy || (!force && Date.now() - gitChecked < GIT_TTL_MS)) return;
@@ -1717,7 +1687,7 @@ export default function statusFooter(pi: ExtensionAPI): void {
     const current = ctx;
     const routed = current.model?.provider === "waterfall" ? queryWaterfall(pi.events)?.physical : undefined;
     const provider = routed?.provider ?? current.model?.provider ?? "no provider";
-    let physicalModel = current.model;
+    let physicalModel = isVirtual(current.model) ? (routedModel(current) ?? current.model) : current.model;
     if (routed) {
       try { physicalModel = current.modelRegistry.find(routed.provider, routed.id); }
       catch { physicalModel = undefined; }
@@ -1739,11 +1709,10 @@ export default function statusFooter(pi: ExtensionAPI): void {
     // never advertises a button that would have to rewrite a draft to work.
     const nativeControls = typeof mainTui?.getFocusedComponent === "function" && typeof mainTui?.hasOverlay === "function" &&
       typeof mainEditor?.actionHandlers?.get === "function";
-    if (nativeControls && mainEditor?.actionHandlers?.get("app.model.select") &&
-      (discoveredFlow?.operatingMode !== "linked" || discoveredActions["flow.open"])) controls["model.open"] = {};
+    if (nativeControls && mainEditor?.actionHandlers?.get("app.model.select")) controls["model.open"] = {};
     if (nativeControls && mainEditor?.actionHandlers?.get("app.thinking.cycle")) controls["reasoning.cycle"] = {};
     const main: Snapshot = {
-      flow: discoveredFlow, system1: discoveredSystem1, actions: controls, settingsCycle: cycles.snapshot(),
+      system1: discoveredSystem1, actions: controls, settingsCycle: cycles.snapshot(),
       primaryKeys: {
         model: controls["model.open"] ? mainKeys?.getKeys?.("app.model.select")?.[0] : undefined,
         reasoning: controls["reasoning.cycle"] ? mainKeys?.getKeys?.("app.thinking.cycle")?.[0] : undefined,
@@ -1751,13 +1720,14 @@ export default function statusFooter(pi: ExtensionAPI): void {
         approvals: discoveredActions["approvals.open"] ? discoveredActions["approvals.open"].key ?? "" : absorbed.mode?.key,
       },
       cwd: current.cwd, provider, model: routed && physicalModel ? `auto → ${routed.id}` : current.model?.id ?? "no model",
+      ...(isVirtual(current.model) && physicalModel && physicalModel !== current.model ? { routedTo: physicalModel.id } : {}),
       thinking: current.model?.reasoning ? pi.getThinkingLevel() : undefined,
       oauth: physicalModel ? current.modelRegistry.isUsingOAuth(physicalModel) : false,
       sessionName: ownName(pi.getSessionName(), recapName), phase, queued: current.hasPendingMessages(),
       context: current.getContextUsage() ?? { tokens: null, contextWindow: physicalModel?.contextWindow ?? 0, percent: null },
       totals, cacheHit, git: { ...git, branch: git.branch ?? branch ?? undefined },
       quotas, unavailableQuota, providerUsage: usage.rows, providerUsageMore: usage.more,
-      statuses: absorbed.rest, workflow: absorbed.workflow, mode: absorbed.mode, permissionPrompts: absorbed.permissionPrompts, exec: absorbed.exec, lean: absorbed.lean, cache: absorbed.cache, extraBilled: absorbed.extraBilled,
+      statuses: absorbed.rest, workflow: absorbed.workflow, mode: absorbed.mode, permissionPrompts: absorbed.permissionPrompts, lean: absorbed.lean, cache: absorbed.cache, extraBilled: absorbed.extraBilled,
       reload: absorbed.reload,
       stash: absorbed.stashed ? { text: stashedPrompt() } : undefined,
       headsUp: absorbed.headsUp,
@@ -1781,8 +1751,8 @@ export default function statusFooter(pi: ExtensionAPI): void {
     return {
       ...main,
       // Main's mutable controls and policy are not the viewed agent's state.
-      flow: undefined, system1: undefined, actions: undefined, settingsCycle: undefined, primaryKeys: undefined, readOnly: true,
-      workflow: undefined, mode: undefined, permissionPrompts: undefined, exec: undefined,
+      system1: undefined, actions: undefined, settingsCycle: undefined, primaryKeys: undefined, readOnly: true,
+      workflow: undefined, mode: undefined, permissionPrompts: undefined,
       cache: undefined, lean: undefined,
       cwd: session.cwd, provider: session.provider, model: session.model, thinking: session.thinking,
       oauth: false, quotas, unavailableQuota, providerUsage: usage.rows, providerUsageMore: usage.more,
@@ -1808,7 +1778,6 @@ export default function statusFooter(pi: ExtensionAPI): void {
       liveStatuses = getStatuses;
       const refresh = (clock = true) => {
         if (!current()) return;
-        discoveredFlow = queryFlow(pi.events, true);
         discoveredSystem1 = querySystem1State(pi.events);
         discoveredActions = queryFooterActions(pi.events);
         const next = snapshot(branch, footerData.getExtensionStatuses());
@@ -1927,7 +1896,7 @@ export default function statusFooter(pi: ExtensionAPI): void {
     active = false; generation++; interactionGeneration++;
     ctx = undefined; requestRender = undefined;
     mainEditor = undefined; mainTui = undefined; mainKeys = undefined; releaseInput = undefined;
-    refreshSnapshot = undefined; prepared = undefined; discoveredActions = {}; discoveredFlow = undefined; discoveredSystem1 = undefined;
+    refreshSnapshot = undefined; prepared = undefined; discoveredActions = {}; discoveredSystem1 = undefined;
     promptDepth = 0; blockedHolds = 0;
     timer = undefined; codexAbort = undefined; quotaFlight = undefined;
     workingTimer = undefined; mcpTimer = undefined; runStarted = 0; workingShown = undefined; working.reset();

@@ -8,7 +8,7 @@ When adding or changing plugin functionality, inspect its user-visible states, c
 
 ## Information architecture
 
-One concern per row. Context owns usage, cache state/timer, MCP and skills. Independent keeps model and workflow on separate rows; Linked combines them and cannot silently unlink. Approvals remain independent. Exec represents an approved lifecycle, not a freely cycled model setting. Reasoning remains independently adjustable in either model/workflow mode.
+One concern per row. Context owns usage, cache state/timer, MCP and skills. Model and workflow stay on separate rows; a plan model pair shows its routed model on the model row. Approvals remain independent. Reasoning remains independently adjustable.
 
 ## Controls and hints
 
@@ -30,13 +30,13 @@ Hit regions derive from final ANSI/cell-aware layout. Measurement renders at ano
 
 ## Verification and client contracts
 
-Read [client constraints](../../docs/clients.md) before layout/control changes. Test Independent, Linked, Exec, missing providers, blocked dialogs and stale/unavailable states at 46/120/180 columns, including Sidebar and activity rows. Preserve the single blocked-footer row and existing 13-status-row budget. Run footer/component checks, root integration checks and `npm run check:clients`; fix every FAIL/KNOWN rather than adding exceptions. Use real renderer/input tests for interaction changes, not only render snapshots.
+Read [client constraints](../../docs/clients.md) before layout/control changes. Test physical and plan-pair models, missing providers, blocked dialogs and stale/unavailable states at 46/120/180 columns, including Sidebar and activity rows. Preserve the single blocked-footer row and existing 13-status-row budget. Run footer/component checks, root integration checks and `npm run check:clients`; fix every FAIL/KNOWN rather than adding exceptions. Use real renderer/input tests for interaction changes, not only render snapshots.
 
 ## Pointers
 
 - [Public behavior](../../site/src/content/docs/plugins/pi-status-footer.md)
 - [Client parser constraints](../../docs/clients.md)
 - [Layout and snapshots](src/index.ts), [interaction controller](src/interactions.ts)
-- [Action contract](src/footer-actions.ts), [flow contract](src/flow-contract.ts)
+- [Action contract](src/footer-actions.ts)
 - [Footer tests](test/footer.test.mjs), [interaction tests](test/interactions.test.mjs)
 - [Repository checks, publication and rollout](../../AGENTS.md)

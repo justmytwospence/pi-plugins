@@ -46,11 +46,9 @@ const { subagentScreens } = await import('./remote-clients/subagents.mjs');
 const { TerminalPanel } = await jiti.import('../packages/pi-interactive-shell/src/panel.ts');
 const { HistoryPicker } = await jiti.import('../packages/pi-history-search/src/picker.ts');
 const { default: historySearch } = await jiti.import('../packages/pi-history-search/src/index.ts');
-const { ApprovalPicker, pickApproval, createApprovalState, handoffLabel, HERE: IMPLEMENT_HERE, COMPACT_HERE, APPROVE, CONTEXT_KEEP, CONTEXT_COMPACT, CONTEXT_FRESH, EDIT, SAVE, KEEP } = await jiti.import('../packages/pi-plan-mode/src/approval-picker.ts');
+const { ApprovalPicker, pickApproval, createApprovalState, HERE: IMPLEMENT_HERE, COMPACT_HERE, EDIT, SAVE, KEEP } = await jiti.import('../packages/pi-plan-mode/src/approval-picker.ts');
 const { PlanNameInput } = await jiti.import('../packages/pi-plan-mode/src/plan-name-input.ts');
-const { registerExec, FINISH_MESSAGE_TYPE } = await jiti.import('../packages/pi-plan-mode/src/exec.ts');
 const { default: askUserQuestion } = await jiti.import('../packages/pi-ask-user-question/src/index.ts');
-const { createNegotiation } = await jiti.import('../packages/pi-plan-mode/src/negotiation.ts');
 const { renderFooter, layoutFooter, absorbStatuses } = await jiti.import('../packages/pi-status-footer/src/index.ts');
 const { settingsCycles } = await jiti.import('../packages/pi-status-footer/src/settings-cycle.ts');
 const { renderPill } = await jiti.import('../packages/pi-bg/src/pill.ts');
@@ -77,32 +75,17 @@ const tui = { terminal: { rows: 40, columns: 120 }, requestRender() {} };
 
 // What stands under a dialog while it waits: pi-status-footer's one row, alone or under pi-bg's pill.
 const NOW = Date.now();
-const modeStatuses = (workflow, approval, phase, prompting) => new Map([
-  ...(workflow ? [['workflow-mode', `workflow: ${workflow}${workflow === 'exec' ? '' : ' (shift+tab to cycle)'}`]] : []),
+const modeStatuses = (workflow, approval, prompting) => new Map([
+  ...(workflow ? [['workflow-mode', `workflow: ${workflow} (shift+tab to cycle)`]] : []),
   ...(approval ? [['permission-mode', `⏵⏵ ${approval} mode on (alt+a to cycle)`]] : []),
   ...(prompting ? [['permission-prompting', `permission prompts: ${prompting}`]] : []),
-  ...(phase ? [['plan-exec', `exec mode on · ${phase} · 2 consultations · $0.02 consult · $0.01 review`]] : []),
 ]);
-// Detached protocol snapshots, never a second renderer or a copy of role-default policy.
-const flowSnapshot = (workflow, blocked, replanning = false) => ({
-  version: 1, operatingMode: 'linked', revision: 1, workflow,
-  ready: true, guardAvailable: true, transitioning: false,
-  selectedFlow: {
-    provider: 'anthropic', anchorModel: 'claude-opus-5-5',
-    roles: Object.fromEntries(['work', 'chat', 'plan', 'exec'].map(phase => [phase, {
-      provider: 'anthropic', modelId: 'claude-opus-5-5', suggestedThinking: 'high',
-    }])),
-  },
-  ...(blocked ? { blocked } : {}),
-  ...(replanning ? { replanning: true } : {}),
-});
 const activity = width => [...renderPill({ label: '1 task' }, false, width, theme), ''];
-function statusFooter(width, statuses, { compact = false, phase = 'idle', flow, providerUsage, providerUsageMore, system1, settingsCycle, readOnly = false } = {}) {
+function statusFooter(width, statuses, { compact = false, phase = 'idle', providerUsage, providerUsageMore, system1, settingsCycle, readOnly = false } = {}) {
   const absorbed = absorbStatuses(statuses, { claudeRow: false });
   const actions = {
     'model.open': {}, 'reasoning.cycle': {},
-    ...(absorbed.workflow ? { 'workflow.cycle': {}, 'workflow.open': {}, 'flow.open': {} } : {}),
-    ...(absorbed.exec !== undefined ? { 'execution.status': {} } : {}),
+    ...(absorbed.workflow ? { 'workflow.cycle': {}, 'workflow.open': {} } : {}),
     ...(absorbed.mode ? { 'approvals.open': {} } : {}),
     ...(system1 ? { 'system1.open': {} } : {}),
     ...(absorbed.headsUp ? { 'headsup.open': { key: "ctrl+'" } } : {}),
@@ -113,7 +96,7 @@ function statusFooter(width, statuses, { compact = false, phase = 'idle', flow, 
     git: { project: 'pi-plugins', branch: 'main' },
     totals: { input: 23000, output: 1500, cacheRead: 90000, cacheWrite: 400, cost: 1.24, compactions: 1, started: NOW - 60000 },
     quotas: [], now: NOW, queued: false, borderGauge: true, phase,
-    ...absorbed, statuses: absorbed.rest, compact, flow, actions, providerUsage, providerUsageMore, system1, settingsCycle, readOnly,
+    ...absorbed, statuses: absorbed.rest, compact, actions, providerUsage, providerUsageMore, system1, settingsCycle, readOnly,
     primaryKeys: { model: kb.getKeys('app.model.select')[0], workflow: absorbed.workflow?.key, approvals: absorbed.mode?.key },
   };
   const layout = layoutFooter(snapshot, width, theme);
@@ -124,14 +107,11 @@ function statusFooter(width, statuses, { compact = false, phase = 'idle', flow, 
   const plain = lines.map(stripVTControlCharacters);
   assert.doesNotMatch(plain.join('\n'), /\bpending\b|\bapplying\b/iu,
     'footer values do not duplicate the transcript phase indicator');
-  const linked = !readOnly && flow?.operatingMode === 'linked';
-  const replanning = !readOnly && flow?.replanning === true;
-  const effectiveKind = replanning ? 'plan' : linked ? flow.workflow : absorbed.exec !== undefined ? 'exec' : absorbed.workflow?.kind;
+  const effectiveKind = absorbed.workflow?.kind;
   const preview = !compact && !readOnly && ['pending', 'applying'].includes(settingsCycle?.phase) ? settingsCycle : undefined;
-  const kind = effectiveKind && !replanning && effectiveKind !== 'exec'
-    ? preview?.settings.find(item => item.key === 'workflow')?.target ?? effectiveKind : effectiveKind;
+  const kind = effectiveKind ? preview?.settings.find(item => item.key === 'workflow')?.target ?? effectiveKind : effectiveKind;
   const badge = kind;
-  assert.doesNotMatch(plain.join('\n'), /workflow: (work|chat|plan|exec)/iu, 'raw provider status must not leak into the footer');
+  assert.doesNotMatch(plain.join('\n'), /workflow: (work|chat|plan)/iu, 'raw provider status must not leak into the footer');
   if (compact) {
     assert.equal(lines.length, 1, 'blocked footer must stay one row');
     assert.deepEqual(layout.hits, [], 'waiting dialogs must not leave live footer controls');
@@ -140,15 +120,12 @@ function statusFooter(width, statuses, { compact = false, phase = 'idle', flow, 
   } else {
     const workflow = plain.filter(line => line.includes('\uf0e8'));
     const approvals = plain.filter(line => line.includes('\uf510'));
-    assert.equal(workflow.length, kind ? 1 : 0, 'workflow badge keeps its own row, including exec fallback');
+    assert.equal(workflow.length, kind ? 1 : 0, 'workflow badge keeps its own row');
     if (badge) {
       assert.match(workflow[0], new RegExp(`\uf0e8\\s+${badge}\\b`, 'u'), 'workflow row leads with the mode badge');
       // Hints yield before critical state at narrow widths; Sidebar also probes smaller widths.
-      if (!preview && !linked && !absorbed.exec && width >= (kind === 'exec' ? 120 : 46)) assert.ok(workflow[0].includes(WORKFLOW_EXPLANATIONS[kind]), `workflow row explains ${kind} when space permits: ${workflow[0]}`);
+      if (!preview && width >= 46) assert.ok(workflow[0].includes(WORKFLOW_EXPLANATIONS[kind]), `workflow row explains ${kind} when space permits: ${workflow[0]}`);
       if (preview && width >= 46) assert.ok(workflow[0].includes(badge), 'draft workflow retains the target badge in its existing semantic row');
-      if (!linked && (kind === 'exec' || replanning) && width >= 46) assert.match(workflow[0], /\/plan-exec\s*$/u, 'an unfinished Independent task offers status, never a workflow cycle');
-      if (replanning && width >= 46) assert.match(workflow[0], /replanning/u, 'effective Plan describes the suspended task');
-      if (linked && !absorbed.exec && !flow.blocked && width >= 120) assert.match(workflow[0], /anthropic/u, 'Linked combines provider and workflow on one row');
     }
     assert.equal(approvals.length, absorbed.mode ? 1 : 0, 'Approvals keeps its own row');
     if (absorbed.permissionPrompts && approvals.length && !readOnly && width >= 46) assert.match(approvals[0], new RegExp(`prompts ${absorbed.permissionPrompts}\\b`, 'u'), 'prompt disposition stays in the existing Approvals row');
@@ -160,14 +137,10 @@ function statusFooter(width, statuses, { compact = false, phase = 'idle', flow, 
       const reasoning = preview.settings.find(item => item.key === 'reasoning');
       if (reasoning) assert.ok(plain.some(line => line.includes('reasoning') && line.includes(reasoning.label)), 'normal model row retains the reasoning target');
     }
-    if (linked) {
-      assert.equal(lines.length, (absorbed.marimo?.length ?? 0) + 4 + (providerUsage?.length ?? 0), 'Linked removes only the duplicate model row');
-      if (flow.blocked && width >= 46) assert.match(plain.join('\n'), /blocked/iu, 'an unavailable Linked flow must not look healthy');
-    }
     // At full width each effective key follows its content directly, not a padded rail.
     if (width >= 120 && !readOnly) {
-      const controls = [[linked ? workflow[0] : plain.find(line => line.includes('reasoning')), snapshot.primaryKeys.model]];
-      if (!linked && workflow.length) controls.push([workflow[0], kind === 'exec' || replanning ? '/plan-exec' : snapshot.primaryKeys.workflow]);
+      const controls = [[plain.find(line => line.includes('reasoning')), snapshot.primaryKeys.model]];
+      if (workflow.length) controls.push([workflow[0], snapshot.primaryKeys.workflow]);
       if (approvals.length) controls.push([approvals[0], snapshot.primaryKeys.approvals]);
       for (const [line, key] of controls) {
         if (!key || !line) continue;
@@ -189,10 +162,10 @@ const UNDERS = {
   footer: (width) => footer(width),
   'pill+footer': (width) => [...activity(width), ...footer(width)],
   ...Object.fromEntries(['on', 'off'].flatMap(prompting => {
-    const rows = width => statusFooter(width, modeStatuses('plan', 'auto', undefined, prompting), { compact: true, phase: 'waiting' });
+    const rows = width => statusFooter(width, modeStatuses('plan', 'auto', prompting), { compact: true, phase: 'waiting' });
     return [[`prompts ${prompting} blocked footer`, rows], [`prompts ${prompting} blocked pill+footer`, width => [...activity(width), ...rows(width)]]];
   })),
-  ...Object.fromEntries(['work', 'chat', 'plan', 'exec'].flatMap(workflow => {
+  ...Object.fromEntries(['work', 'chat', 'plan'].flatMap(workflow => {
     return ['idle', 'waiting'].flatMap(phase => {
       const rows = width => statusFooter(width, modeStatuses(workflow, 'auto'), { compact: true, phase });
       return [
@@ -201,36 +174,13 @@ const UNDERS = {
       ];
     });
   })),
-  ...Object.fromEntries(['needs your answer', 'review failed', 'needs your decision', 'idle', 'planner asks you'].flatMap(phase => {
-    const rows = width => statusFooter(width, modeStatuses('exec', 'auto', phase), { compact: true, phase });
-    return [
-      [`exec ${phase} footer`, rows],
-      [`exec ${phase} pill+footer`, width => [...activity(width), ...rows(width)]],
-    ];
-  })),
-  ...Object.fromEntries(['work', 'chat', 'plan', 'exec'].flatMap(workflow => {
-    const rows = width => statusFooter(width, modeStatuses(workflow, 'auto', workflow === 'exec' ? 'implementing' : undefined), {
-      compact: true, phase: 'waiting', flow: flowSnapshot(workflow),
-    });
-    return [
-      [`Linked ${workflow} blocked footer`, rows],
-      [`Linked ${workflow} blocked pill+footer`, width => [...activity(width), ...rows(width)]],
-    ];
-  })),
 };
 
 for (const width of [46, 120, 180]) {
   for (const prompting of ['on', 'off']) {
-    const noProvider = statusFooter(width, modeStatuses('plan', undefined, undefined, prompting));
+    const noProvider = statusFooter(width, modeStatuses('plan', undefined, prompting));
     assert.doesNotMatch(noProvider.map(stripVTControlCharacters).join('\n'), /prompts (on|off)/u, 'prompt status alone must not invent an Approvals row');
   }
-}
-
-for (const independent of [false, true]) {
-  const flow = { ...flowSnapshot('plan', undefined, true), ...(independent ? { operatingMode: 'independent' } : {}) };
-  const rows = width => statusFooter(width, modeStatuses('plan', 'auto', 'replanning'), { compact: true, phase: 'waiting', flow });
-  UNDERS[`${independent ? 'Independent' : 'Linked'} replanning blocked footer`] = rows;
-  UNDERS[`${independent ? 'Independent' : 'Linked'} replanning blocked pill+footer`] = width => [...activity(width), ...rows(width)];
 }
 
 const question = (multiSelect, options = 3) => ({
@@ -290,20 +240,16 @@ async function approvalLines(width, spec = {}) {
   return lines;
 }
 
-// Render the actual approval component, including the live effort key path.
-const PLAN_TARGETS = [
-  { target: { provider: 'anthropic', modelId: 'claude-opus-5-5', thinkingLevel: 'high' }, targetName: 'Claude Opus 5.5' },
-  { target: { provider: 'anthropic', modelId: 'claude-sonnet-5-5', thinkingLevel: 'high' }, targetName: 'Claude Sonnet 5.5' },
-];
-function planLabels(count) {
-  return [IMPLEMENT_HERE, COMPACT_HERE, ...PLAN_TARGETS.slice(0, count).map(t => handoffLabel(t.targetName, t.target.thinkingLevel)), EDIT, SAVE, KEEP];
-}
-async function selectorLines(width, count, changed, linked = false, fresh = false, recommendedThinkingLevel, effortDefaultKey, view = 'main', context = 'keep', contextNote) {
+// Render the actual approval component, including the live effort key path. With a plan model pair
+// selected the question carries a note naming who implements and who answers its questions.
+const PAIR_NOTE = 'Claude Sonnet 5.5 implements; Claude Opus 5.5 answers its questions.';
+const planLabels = () => [IMPLEMENT_HERE, COMPACT_HERE, EDIT, SAVE, KEEP];
+async function selectorLines(width, changed, note, recommendedThinkingLevel, effortDefaultKey) {
   let lines, component;
   const selected = [];
   const controller = new AbortController();
   const state = createApprovalState();
-  const models = [{ provider: 'anthropic', id: 'claude-fable-5-5', reasoning: true }, ...PLAN_TARGETS.map(t => ({ provider: t.target.provider, id: t.target.modelId, reasoning: true }))];
+  const models = [{ provider: 'anthropic', id: 'claude-fable-5-5', reasoning: true }, { provider: 'anthropic', id: 'claude-sonnet-5-5', reasoning: true }];
   const ctx = {
     hasUI: true, mode: 'tui',
     modelRegistry: { getAvailable: () => models, find: (p, id) => models.find(m => m.provider === p && m.id === id) },
@@ -311,30 +257,16 @@ async function selectorLines(width, count, changed, linked = false, fresh = fals
     ui: { custom: factory => new Promise(resolve => {
       component = factory(tui, theme, kb, value => { selected.push(value); resolve(value); });
       if (changed) component.handleInput('\x1b[C');
-      if (linked && (view === 'context' || context !== 'keep')) {
-        component.handleInput('\x1b[B');
-        component.handleInput('\r');
-        assert.equal(state.stage, 'context', 'Context opens its own stage, not an approval');
-        if (context !== 'keep') {
-          component.handleInput('\x1b[B');
-          if (context === 'clear') component.handleInput('\x1b[B');
-          component.handleInput('\r');
-          assert.equal(state.context, context);
-          assert.equal(state.stage, 'main', 'context selection returns to the primary approval');
-        }
-      }
-      assert.deepEqual(selected, [], 'opening/changing Context never submits approval');
+      assert.deepEqual(selected, [], 'changing effort never submits approval');
       lines = component.render(width);
     }) },
   };
   void pickApproval(ctx, {
-    planning: { provider: 'anthropic', modelId: linked ? PLAN_TARGETS[0].target.modelId : 'claude-fable-5-5', thinkingLevel: 'high' },
-    targets: PLAN_TARGETS.slice(0, count),
-    recommendedThinkingLevel, effortDefaultKey,
-    ...(linked ? { intent: 'linked-execution', flow: flowSnapshot('plan'), ...(fresh ? { freshTarget: PLAN_TARGETS[0] } : {}), ...(contextNote ? { contextNote } : {}) } : {}),
+    planning: { provider: 'anthropic', modelId: note ? 'claude-sonnet-5-5' : 'claude-fable-5-5', thinkingLevel: 'high' },
+    recommendedThinkingLevel, effortDefaultKey, ...(note ? { note } : {}),
   }, state, controller.signal);
   await new Promise(resolve => setTimeout(resolve, 0));
-  assert.deepEqual(selected, [], 'rendering a returned main screen still requires explicit approval');
+  assert.deepEqual(selected, [], 'rendering a main screen still requires explicit approval');
   controller.abort();
   component?.dispose();
   return lines;
@@ -365,132 +297,6 @@ function coldCacheLines(width, menu = coldMenu) {
   const title = coldTitle(coldView, { ready: true, filtered: true }, menu === coldMenu ? coldOffers[0] : undefined);
   const selector = new ExtensionSelectorComponent(title, menu, () => {}, () => {});
   return selector.render(width);
-}
-
-// Exercise real registerExec command/tool selects, not copies of their questions/options.
-const EXEC_SELECTS = [
-  { name: 'override confirmation', reason: 'user_needed', command: 'accept', question: 'Finish without planner acceptance?', labels: ['Finish without review', 'Keep paused'] },
-  { name: 'stop confirmation', reason: 'user_needed', tool: 'stop', question: 'Stop implementation?', labels: ['Stop implementation', 'Keep working'] },
-];
-async function execSelectLines(width, spec) {
-  const commands = new Map();
-  const handlers = new Map();
-  const tools = new Map();
-  const events = new EventEmitter();
-  let blocked = false, lines, selected = false, status;
-  events.on('herdr:blocked', ({ active }) => { blocked = active; });
-  const pi = {
-    on: (name, handler) => handlers.set(name, handler),
-    registerTool: spec => tools.set(spec.name, spec), registerMessageRenderer() {},
-    registerCommand: (name, spec) => commands.set(name, spec),
-    getActiveTools: () => [], setActiveTools() {}, appendEntry() {},
-    events,
-  };
-  const ctx = {
-    hasUI: true, mode: 'tui', isIdle: () => true,
-    ui: {
-      setStatus: (key, value) => { if (key === 'plan-exec') status = value; },
-      notify: () => {}, // A canceled bare-command menu reports its paused status.
-      select: async (title, options) => {
-        assert.equal(selected, false, 'execution fixture must open exactly one select');
-        selected = true;
-        assert.ok(blocked, 'execution select must hold herdr:blocked');
-        assert.deepEqual(options, spec.labels);
-        assert.ok(!wrapsRow(options, 46), 'execution select labels must fit the phone width');
-        assert.equal(title, spec.question, 'execution select must explain the current pause or confirmation');
-        lines = new ExtensionSelectorComponent(title, options, () => {}, () => {}).render(width);
-        return undefined;
-      },
-    },
-  };
-  const exec = registerExec(pi, { completionReview: () => true, completionMaxRevisions: () => 2 });
-  const negotiation = createNegotiation('remote-client-fixture', 2);
-  negotiation.phase = 'paused';
-  negotiation.pause = { reason: spec.reason, action: spec.reason === 'failure' ? 'The review service was unavailable.' : 'Provide human verification.', ...(spec.reason === 'user_needed' ? { question: 'Did the browser readiness check pass?' } : {}) };
-  if (spec.reason === 'exhausted') negotiation.revisionsUsed = 2;
-  const before = structuredClone(negotiation);
-  ctx.sessionManager = { getBranch: () => [{ type: 'custom', customType: 'plan-mode:exec', data: { active: true, planFile: '/tmp/client-plan.md', implementer: 'Terra', implementerModel: 'openai-codex/gpt-6.1-terra', asks: 0, costUsd: 0, negotiation } }] };
-  await handlers.get('session_start')({}, ctx);
-  if (spec.tool) await tools.get('continue_plan').execute('client-stop', { action: spec.tool }, undefined, undefined, ctx);
-  else await commands.get('plan-exec').handler(spec.command, ctx);
-  assert.ok(selected, 'actual execution action must open a select');
-  assert.ok(exec.active, 'canceling the fixture select must leave execution paused');
-  assert.deepEqual(negotiation, before, 'canceling must not authorize recovery or alter the pause');
-  assert.equal(blocked, false, 'execution select must release herdr:blocked');
-  const phase = spec.reason === 'user_needed' ? 'needs your answer' : spec.reason === 'exhausted' ? 'needs your decision' : 'review failed';
-  assert.ok(status.startsWith(`exec mode on · ${phase} ·`), 'actual execution status must describe its pause');
-  return lines;
-}
-
-
-// Exec's handoffs are pi-ask-user-question dialogs: drive the real registerExec and the real
-// ask extension (its service channel) and render the dialog it opens; cancelling must change nothing.
-const EXEC_DIALOGS = [
-  { name: 'failure pause', labels: ['Retry review', 'Finish unreviewed', 'Stop implementation'], negotiation: n => { n.phase = 'paused'; n.pause = { reason: 'failure', action: 'The review service was unavailable.' }; }, open: 'command' },
-  { name: 'exhausted pause', labels: ['Allow one more revision', 'Finish unreviewed', 'Stop implementation'], negotiation: n => { n.phase = 'paused'; n.revisionsUsed = 2; n.pause = { reason: 'exhausted', action: 'Automatic revision budget exhausted.' }; }, open: 'command' },
-  { name: 'reviewer question', question: 'Did the browser readiness check pass on staging after the last migration, including login, billing and the export job?', labels: ['Use recommendation', 'Finish unreviewed', 'Stop implementation'], negotiation: n => { n.phase = 'paused'; n.pause = { reason: 'user_needed', action: 'Provide human verification.', question: 'Did the browser readiness check pass on staging after the last migration, including login, billing and the export job?' }; }, open: 'command' },
-  { name: 'pending planner question', labels: ['Staging', 'Production'], pendingQuestion: { id: 'q1', implementerMessage: 'Which account?', questions: [{ id: 'acct', header: 'Account', question: 'Which account should the migration use?', options: [{ label: 'Staging', description: 'Safe to rerun' }, { label: 'Production', description: 'Live data' }] }] }, open: 'command' },
-  { name: 'implementer stopped', labels: ['Continue', 'Submit for review', 'Stop implementation'], open: 'settle' },
-  { name: 'execution menu', labels: ['Continue', 'Submit for review', 'Stop implementation'], open: 'footer' },
-  { name: 'Linked execution menu with Revisit plan', labels: ['Continue', 'Submit for review', 'Revisit plan', 'Stop implementation'], linked: true, open: 'footer' },
-  { name: 'replanning task menu', labels: ['Keep planning', 'Stop implementation'], linked: true, replanning: true, open: 'command' },
-];
-const tick = () => new Promise(resolve => setTimeout(resolve, 20));
-async function execDialogLines(width, spec) {
-  const handlers = new Map(), commands = new Map(), events = new EventEmitter();
-  let blocked = false, held = false, lines, shown = 0;
-  events.on('herdr:blocked', ({ active }) => { blocked = active; if (active) held = true; });
-  const pi = {
-    on: (name, handler) => handlers.set(name, [...(handlers.get(name) ?? []), handler]),
-    registerTool() {}, registerMessageRenderer() {}, registerShortcut() {},
-    registerCommand: (name, command) => commands.set(name, command),
-    getActiveTools: () => [], setActiveTools() {}, appendEntry() {}, sendMessage() {}, sendUserMessage() {},
-    events,
-  };
-  askUserQuestion(pi);
-  if (spec.linked) events.on('pi-plugins.workflow-flow.v1', request => {
-    if (request.kind === 'query') request.snapshot = { ...flowSnapshot(spec.replanning ? 'plan' : 'exec'), ...(spec.replanning ? { replanning: true } : {}) };
-  });
-  const exec = registerExec(pi, { completionReview: () => true, completionMaxRevisions: () => 2,
-    ...(spec.linked ? { replan: async () => assert.fail('canceling a rendered task menu must not revisit the plan') } : {}) });
-  const negotiation = createNegotiation('remote-client-dialog', 2);
-  spec.negotiation?.(negotiation);
-  const state = { active: true, planFile: '/tmp/client-plan.md', implementer: 'Terra', implementerModel: 'openai-codex/gpt-6.1-terra', asks: 0, costUsd: 0, negotiation,
-    ...(spec.linked ? { linkedFlow: flowSnapshot('exec') } : {}),
-    ...(spec.replanning ? { replanning: { version: 1, draftFile: '/tmp/client-revision.md' } } : {}), planner: { spec: 'anthropic/claude-opus-5-5:high', name: 'Claude Opus 5.5', sessionFile: '/tmp/client-planner.jsonl' }, ...(spec.pendingQuestion ? { pendingQuestion: spec.pendingQuestion } : {}) };
-  const ctx = {
-    hasUI: true, mode: 'tui', cwd: '/tmp', isIdle: () => true, hasPendingMessages: () => false, abort() {},
-    sessionManager: { getBranch: () => [{ type: 'custom', customType: 'plan-mode:exec', data: state }] },
-    ui: {
-      setStatus() {}, notify() {}, getEditorText: () => '',
-      select: async () => { throw new Error('an exec handoff must use the ask dialog, not a Pi select'); },
-      custom: async (factory) => {
-        assert.equal(shown++, 0, 'execution fixture must open exactly one dialog');
-        assert.ok(blocked, 'the ask service must hold herdr:blocked while the dialog is open');
-        const component = factory(tui, theme, kb, () => {});
-        lines = component.render(width);
-        component.dispose?.();
-        return { cancelled: true, answers: [] };
-      },
-    },
-  };
-  for (const handler of handlers.get('session_start') ?? []) await handler({}, ctx);
-  const before = structuredClone(exec.state);
-  if (spec.open === 'command') await commands.get('plan-exec').handler('', ctx);
-  else if (spec.open === 'footer') {
-    const request = { version: 1, actions: {} };
-    events.emit('pi-plugins.footer-actions.v1', request);
-    await request.actions['execution.status'].run();
-  } else for (const handler of handlers.get('agent_settled') ?? []) await handler({ aborted: false }, ctx);
-  await tick();
-  assert.equal(shown, 1, `${spec.name} must open its dialog`);
-  assert.ok(held && !blocked, 'the dialog must release herdr:blocked');
-  assert.ok(exec.active, 'cancelling must leave execution active');
-  assert.deepEqual(exec.state, before, 'cancelling must not change the execution');
-  assert.ok(!wrapsRow(spec.labels, 46), 'dialog labels must fit the phone width');
-  const plain = stripVTControlCharacters(lines.join('\n'));
-  for (const label of spec.labels) assert.ok(plain.includes(label), `dialog must show ${label}`);
-  return lines;
 }
 
 // Render through the actual fork commands, cancelling before any file or pane creation.
@@ -623,17 +429,6 @@ function historyLines(width, variant) {
 
 // Each dialog, and what each client must make of it.
 const DIALOGS = [
-  ...EXEC_SELECTS.map(spec => ({
-    name: `plan exec ${spec.name}`, lines: width => execSelectLines(width, spec), question: spec.question.replace(/\s+/gu, ' ').trim(),
-    herdr: { options: spec.labels.length, multi: false, labels: spec.labels },
-    collie: { kind: 'prompt-select', options: spec.labels.length + 1, labels: spec.labels, wraps: spec.labels },
-  })),
-  ...EXEC_DIALOGS.map(spec => ({
-    name: `plan exec ${spec.name}`, lines: width => execDialogLines(width, spec),
-    ...(spec.question ? { question: spec.question } : {}),
-    herdr: { options: spec.labels.length + 1, multi: false },
-    collie: { kind: 'prompt-select', options: spec.labels.length + 1 },
-  })),
   ...await gatePickerDialogs({
     // Read-only picker capture does not display history, but its extension API
     // still supports registration of the shared public custom-entry renderer.
@@ -668,46 +463,20 @@ const DIALOGS = [
       herdr: { options: rows.length, multi: false, labels: rows }, collie: { kind: 'prompt-select', wraps: rows },
     };
   }),
-  ...[0, 1, 2].flatMap(count => [false, true].map(changed => ({
-    name: `plan approval (${count} targets${changed ? ', effort changed' : ''})`,
-    lines: w => selectorLines(w, count, changed),
-    question: `Implement this plan? ←/→ effort: ${changed ? 'off' : 'high'}`,
-    herdr: { options: 5 + count, multi: false, labels: planLabels(count) },
-    collie: { kind: 'prompt-select', options: 6 + count, labels: planLabels(count), wraps: planLabels(count) },
+  ...[false, true].flatMap(changed => [undefined, PAIR_NOTE].map(note => ({
+    name: `plan approval (${note ? 'plan model pair' : 'physical model'}${changed ? ', effort changed' : ''})`,
+    lines: w => selectorLines(w, changed, note),
+    question: `Implement this plan? ${note ? `${note} ` : ''}←/→ effort: ${changed ? 'off' : 'high'}`,
+    herdr: { options: 5, multi: false, labels: planLabels() },
+    collie: { kind: 'prompt-select', options: 6, labels: planLabels(), wraps: planLabels() },
   }))),
-  ...[false, true].flatMap(fresh => [false, true].map(changed => {
-    const labels = [APPROVE, `Context: ${CONTEXT_KEEP}`, EDIT, SAVE, KEEP];
-    return {
-      name: `linked plan approval (same-model worker${fresh ? ', fresh available' : ''}${changed ? ', effort changed' : ''})`,
-      lines: w => selectorLines(w, 1, changed, true, fresh),
-      question: `Implement this plan? Linked worker: anthropic/claude-opus-5-5. Context: ${CONTEXT_KEEP}. ←/→ effort: ${changed ? 'off' : 'high'}`,
-      herdr: { options: labels.length, multi: false, labels },
-      collie: { kind: 'prompt-select', options: labels.length + 1, labels, wraps: labels },
-    };
-  })),
-  ...[false, true].flatMap(linked => [false, true].map(changed => {
-    const labels = linked ? [APPROVE, `Context: ${CONTEXT_KEEP}`, EDIT, SAVE, KEEP] : planLabels(1);
-    return {
-      name: `${linked ? 'linked plan approval (same-model worker' : 'plan approval (1 target'}, recommended${changed ? ', effort changed' : ''})`,
-      lines: w => selectorLines(w, 1, changed, linked, false, 'low', 'recommended-fixture'),
-      question: `Implement this plan? ${linked ? `Linked worker: anthropic/claude-opus-5-5. Context: ${CONTEXT_KEEP}. ` : ''}←/→ effort: ${changed ? 'medium' : 'low'}`,
-      herdr: { options: labels.length, multi: false, labels },
-      collie: { kind: 'prompt-select', options: labels.length + 1, labels, wraps: labels },
-    };
-  })),
-  ...[
-    { name: 'linked plan context (fresh unavailable)', view: 'context', fresh: false, labels: [CONTEXT_KEEP, CONTEXT_COMPACT] },
-    { name: 'linked plan context (fresh available)', view: 'context', fresh: true, labels: [CONTEXT_KEEP, CONTEXT_COMPACT, CONTEXT_FRESH] },
-    { name: 'linked plan approval (compact selected)', context: 'compact', labels: [APPROVE, 'Context: Compact to plan', EDIT, SAVE, KEEP] },
-    { name: 'linked plan approval (fresh selected)', context: 'clear', fresh: true, labels: [APPROVE, `Context: ${CONTEXT_FRESH}`, EDIT, SAVE, KEEP] },
-    { name: 'linked resumed approval (fresh unavailable)', contextNote: 'Fresh conversation is unavailable while revisiting this task. Preserved review pause: exhausted.', labels: [APPROVE, `Context: ${CONTEXT_KEEP}`, EDIT, SAVE, KEEP] },
-  ].map(spec => ({
-    name: spec.name,
-    lines: width => selectorLines(width, 1, false, true, spec.fresh, undefined, undefined, spec.view, spec.context, spec.contextNote),
-    questionIncludes: ['Implement this plan?', 'Linked worker: anthropic/claude-opus-5-5.', `Context: ${spec.context === 'compact' ? CONTEXT_COMPACT : spec.context === 'clear' ? CONTEXT_FRESH : CONTEXT_KEEP}.`, '←/→ effort: high', ...(spec.contextNote ? [spec.contextNote] : [])],
-    herdr: { options: spec.labels.length, multi: false, labels: spec.labels },
-    collie: { kind: 'prompt-select', options: spec.labels.length + 1, labels: spec.labels, wraps: spec.labels },
-  })),
+  ...[false, true].flatMap(changed => [undefined, PAIR_NOTE].map(note => ({
+    name: `plan approval (${note ? 'plan model pair' : 'physical model'}, recommended${changed ? ', effort changed' : ''})`,
+    lines: w => selectorLines(w, changed, note, 'low', 'recommended-fixture'),
+    question: `Implement this plan? ${note ? `${note} ` : ''}←/→ effort: ${changed ? 'medium' : 'low'}`,
+    herdr: { options: 5, multi: false, labels: planLabels() },
+    collie: { kind: 'prompt-select', options: 6, labels: planLabels(), wraps: planLabels() },
+  }))),
   ...[false, true].map(edited => ({
     name: `plan save filename (${edited ? 'edited' : 'prefilled'})`, question: 'Save plan as',
     lines: width => planNameLines(width, edited),
@@ -728,52 +497,10 @@ for (const width of [46, 120, 180]) {
     const lines = await dialog.lines(width);
     for (const [under, rows] of Object.entries(UNDERS)) {
       screens.push({ name: dialog.name, width, under, ansi: [...lines, ...rows(width)].join('\n'),
-        ...(width === 46 && under === 'footer' && dialog.name === 'plan approval (0 targets)' ? { answer: { option_index: 3 } } : {}),
+        ...(width === 46 && under === 'footer' && dialog.name === 'plan approval (physical model)' ? { answer: { option_index: 3 } } : {}),
         ...(width === 46 && under === 'footer' && dialog.name === 'plan save filename (prefilled)' ? { answer: { custom_text: 'phone-renamed' } } : {}) });
     }
   }
-}
-
-// Replay the phone's parsed answer keys across all three real Linked stages.
-// Intermediate Enter presses must never count as approval; only returned main's
-// explicit primary action can produce a handoff.
-function linkedNavigationFixture(fresh) {
-  const state = createApprovalState(), selected = [];
-  const input = {
-    planning: PLAN_TARGETS[0].target, targets: [PLAN_TARGETS[0]],
-    intent: 'linked-execution', flow: flowSnapshot('plan'),
-    ...(fresh ? { freshTarget: PLAN_TARGETS[0] } : {}),
-  };
-  const component = new ApprovalPicker(input, state, { efforts: () => ['off', 'minimal', 'low', 'medium', 'high'] }, theme, kb, () => {}, choice => selected.push(choice));
-  return { component, state, selected };
-}
-for (const width of [46, 120, 180]) for (const context of ['compact', 'clear']) {
-  const fresh = context === 'clear';
-  const { component, state, selected } = linkedNavigationFixture(fresh);
-  for (const stage of ['open-context', 'choose-context', 'approve']) {
-    const labels = stage === 'choose-context'
-      ? [CONTEXT_KEEP, CONTEXT_COMPACT, ...(fresh ? [CONTEXT_FRESH] : [])]
-      : [APPROVE, `Context: ${stage === 'approve' ? fresh ? CONTEXT_FRESH : 'Compact to plan' : CONTEXT_KEEP}`, EDIT, SAVE, KEEP];
-    const optionIndex = stage === 'open-context' ? 1 : stage === 'choose-context' ? fresh ? 2 : 1 : 0;
-    const contextLabel = stage === 'approve' ? fresh ? CONTEXT_FRESH : CONTEXT_COMPACT : CONTEXT_KEEP;
-    screens.push({ name: `linked parsed navigation ${context} ${stage}`, width, under: 'footer',
-      ansi: [...component.render(width), ...footer(width)].join('\n'),
-      answer: { option_index: optionIndex }, answerFlow: { id: `${width}-${context}`, stage, context, fresh },
-      dialog: { questionIncludes: ['Linked worker: anthropic/claude-opus-5-5.', `Context: ${contextLabel}.`, '←/→ effort: high'],
-        herdr: { options: labels.length, multi: false, labels },
-        collie: { kind: 'prompt-select', options: labels.length + 1, labels, wraps: labels } },
-    });
-    if (stage === 'approve') component.handleInput('\r');
-    else {
-      for (let i = 0; i < optionIndex; i++) component.handleInput('\x1b[B');
-      component.handleInput('\r');
-      assert.deepEqual(selected, [], 'context-only fixture navigation must never approve');
-      assert.equal(state.stage, stage === 'open-context' ? 'context' : 'main');
-    }
-  }
-  assert.equal(selected.length, 1, 'the explicit main approval alone submits');
-  assert.equal(selected[0].choice.context, context);
-  component.dispose();
 }
 
 // Sidebar open: below main under 161 columns, beside it from there (its default share and minimum).
@@ -874,7 +601,7 @@ for (const width of [46, 120, 180]) for (const phase of ['pending', 'applying'])
   for (const compact of [false, true]) {
     const guarded = statusFooter(width, modeStatuses('work', 'auto'), {
       ...(compact ? { compact: true, phase: 'waiting' } : { readOnly: true }),
-      flow: flowSnapshot('work'), settingsCycle: cycleSnapshot(phase),
+      settingsCycle: cycleSnapshot(phase),
     });
     assert.doesNotMatch(guarded.map(stripVTControlCharacters).join('\n'), /pending|applying/u,
       'blocked and other-session chrome must not advertise main preview values');
@@ -891,64 +618,45 @@ const system1Fixture = (status, lastBackend, nextRetryAt) => ({
   ...(nextRetryAt === undefined ? {} : { nextRetryAt }),
 });
 const FOOTERS = [
-  ...['ready', 'fallback', 'unknown', 'unavailable', 'cooldown expired'].flatMap(state => [false, true].map(linked => ({
-    name: `System 1 ${state}${linked ? ' Linked' : ''}`, statuses: modeStatuses('plan', 'auto'),
-    ...(linked ? { flow: flowSnapshot('plan') } : {}),
+  ...['ready', 'fallback', 'unknown', 'unavailable', 'cooldown expired'].map(state => ({
+    name: `System 1 ${state}`, statuses: modeStatuses('plan', 'auto'),
     system1: system1Fixture(state === 'cooldown expired' ? 'unavailable' : state, state === 'fallback' ? 'openai-decisions' : undefined,
       state === 'cooldown expired' ? NOW - 1 : state === 'unavailable' ? NOW + 300000 : undefined),
+  })),
+  ...['work', 'chat', 'plan'].flatMap(workflow => ['auto', 'yolo'].map(approval => ({
+    name: `${workflow}/${approval}`, statuses: modeStatuses(workflow, approval),
   }))),
-  ...['work', 'chat', 'plan', 'exec'].flatMap(workflow => ['auto', 'yolo'].map(approval => ({
-    name: `${workflow}/${approval}`, statuses: modeStatuses(workflow, approval, workflow === 'exec' ? 'implementing' : undefined),
-  }))),
-  ...['consulting', 'review 2', 'revising · 3 findings', 'waiting for answer', 'review failed', 'approval needed', 'idle · not completed'].flatMap(phase => ['auto', 'yolo'].map(approval => ({
-    name: `exec/${approval} ${phase}`, statuses: modeStatuses('exec', approval, phase),
-  }))),
-  ...['work', 'chat', 'plan', 'exec'].map(workflow => ({ name: `standalone ${workflow}`, statuses: modeStatuses(workflow) })),
-  { name: 'standalone exec', statuses: modeStatuses(undefined, undefined, 'review 2') },
+  ...['work', 'chat', 'plan'].map(workflow => ({ name: `standalone ${workflow}`, statuses: modeStatuses(workflow) })),
   { name: 'approval provider only', statuses: modeStatuses(undefined, 'auto') },
   { name: 'no mode providers', statuses: new Map() },
   // Notebook status slots plus the five core rows reach the deployed 13-row allowance
   // (including any activity pill/separator), rather than comparing unreadable baselines.
   { name: 'high status count', statuses: modeStatuses('plan', 'yolo'), highStatus: true },
-  ...['on', 'off'].flatMap(prompting => ['Independent', 'Linked', 'Exec'].map(mode => ({
-    name: `${mode} permission prompts ${prompting}`,
-    statuses: modeStatuses(mode === 'Exec' ? 'exec' : 'plan', 'auto', mode === 'Exec' ? 'implementing' : undefined, prompting),
-    ...(mode === 'Independent' ? {} : { flow: flowSnapshot(mode === 'Exec' ? 'exec' : 'plan') }),
+  ...['on', 'off'].map(prompting => ({
+    name: `permission prompts ${prompting}`,
+    statuses: modeStatuses('plan', 'auto', prompting),
     highStatus: true,
-  }))),
+  })),
   { name: 'heads-up waiting', statuses: new Map([...modeStatuses('plan', 'auto'), ['sidebar-headsup', '\u2726 heads up (2) \u00b7 risk: Main skipped the failing integration tests and reported green']]) },
   { name: 'provider ready', statuses: modeStatuses('plan', 'auto'), providerUsage: [usageReady] },
-  ...scopedArgonFixtures.flatMap(({ label, usage }) => ['Independent', 'Linked', 'Exec'].flatMap(mode => [false, true].map(highStatus => ({
-    name: `${mode} ${label} 100%${highStatus ? ' high status' : ''}`,
-    statuses: modeStatuses(mode === 'Exec' ? 'exec' : 'plan', 'auto', mode === 'Exec' ? 'implementing' : undefined),
-    ...(mode === 'Independent' ? {} : { flow: flowSnapshot(mode === 'Exec' ? 'exec' : 'plan') }),
+  ...scopedArgonFixtures.flatMap(({ label, usage }) => [false, true].map(highStatus => ({
+    name: `${label} 100%${highStatus ? ' high status' : ''}`,
+    statuses: modeStatuses('plan', 'auto'),
     providerUsage: [usage], scopedQuota: label, highStatus,
-  })))),
+  }))),
   { name: 'Fable 71%', statuses: modeStatuses('plan', 'auto'), providerUsage: [fable71] },
   { name: 'Fable 100% high status', statuses: modeStatuses('plan', 'yolo'), providerUsage: [fable100], highStatus: true },
   { name: 'provider unavailable', statuses: modeStatuses('plan', 'auto'), providerUsage: [usageUnavailable] },
   { name: 'provider local', statuses: modeStatuses('plan', 'auto'), providerUsage: [usageLocal] },
   { name: 'status all providers', statuses: modeStatuses('plan', 'auto'), providerUsage: [usageReady, usageUnavailable], providerUsageMore: 3 },
   { name: 'status all high status count', statuses: modeStatuses('plan', 'yolo'), providerUsage: [usageReady, usageUnavailable], providerUsageMore: 3, highStatus: true },
-  ...['work', 'chat', 'plan', 'exec'].map(workflow => ({
-    name: `Linked ${workflow}`, statuses: modeStatuses(workflow, 'auto', workflow === 'exec' ? 'implementing' : undefined),
-    flow: flowSnapshot(workflow),
-  })),
-  { name: 'Linked Exec paused', statuses: modeStatuses('exec', 'auto', 'waiting for answer'), flow: flowSnapshot('exec') },
-  ...[false, true].flatMap(independent => [false, true].map(highStatus => ({
-    name: `${independent ? 'Independent' : 'Linked'} replanning${highStatus ? ' high status' : ''}`,
-    statuses: modeStatuses('plan', 'auto', 'replanning'), highStatus,
-    flow: { ...flowSnapshot('plan', undefined, true), ...(independent ? { operatingMode: 'independent' } : {}) },
-  }))),
-  { name: 'Linked unavailable', statuses: modeStatuses('plan', 'auto'), flow: flowSnapshot('plan', 'Assigned model is unavailable. Use /flow independent.') },
-  { name: 'Linked high status count', statuses: modeStatuses('plan', 'yolo'), flow: flowSnapshot('plan'), highStatus: true },
   { name: 'legacy mixed settings history', statuses: modeStatuses('work', 'auto'), settingsCycle: cycleSnapshot('pending'), history: cycleHistory('pending', true) },
   { name: 'legacy auto-only settings history', statuses: modeStatuses('work', 'auto'), settingsCycle: cycleSnapshot('pending'), history: cycleHistory('pending', 'only') },
-  ...['pending', 'applying', 'cancelled', 'interrupted'].flatMap(phase => [false, true].map(linked => ({
-    name: `${linked ? 'Linked' : 'Independent'} settings ${phase}`,
-    statuses: modeStatuses('work', 'auto'), ...(linked ? { flow: flowSnapshot('work') } : {}),
+  ...['pending', 'applying', 'cancelled', 'interrupted'].map(phase => ({
+    name: `settings ${phase}`,
+    statuses: modeStatuses('work', 'auto'),
     settingsCycle: cycleSnapshot(phase), history: cycleHistory(phase), highStatus: true,
-  }))),
+  })),
 ];
 function idleFooter(width, fixture, activityRows = 0) {
   if (!fixture.highStatus) return statusFooter(width, fixture.statuses, fixture);
@@ -957,7 +665,7 @@ function idleFooter(width, fixture, activityRows = 0) {
   // pi-bg's pill and separator, not just renderFooter's output. status_blank_rows
   // permits that separator within the region; it does not extend the row budget.
   const coreRows = statusFooter(width, fixture.statuses, fixture).length;
-  assert.equal(coreRows, (fixture.flow?.operatingMode === 'linked' ? 4 : 5) + (fixture.providerUsage?.length ?? 0), 'provider rows count within the existing core row budget');
+  assert.equal(coreRows, 5 + (fixture.providerUsage?.length ?? 0), 'provider rows count within the existing core row budget');
   const notebooks = 13 - coreRows - activityRows;
   for (let i = 1; i <= notebooks; i++) statuses.set(i === 1 ? 'marimo' : `marimo-${i}`, `marimo: analysis-${i}.py · disconnected`);
   const absorbed = absorbStatuses(statuses, { claudeRow: false });
@@ -990,7 +698,7 @@ for (const width of [46, 120, 180]) {
         if (fixture.providerUsage.includes(usageReady)) assert.match(rendered, /Antigravity.*Gemini 5h.*25%/u, 'ready usage keeps its account, scoped label and measured percentage');
         if (fixture.scopedQuota) {
           assert.match(rendered, new RegExp(`Antigravity.*${fixture.scopedQuota} 100%`, 'u'), 'the exhausted Argon scope wins over healthy shared detail, even at 46 columns');
-          assert.equal(footerLines.length + (withActivity ? 2 : 0), fixture.highStatus ? 13 : (fixture.flow ? 5 : 6) + (withActivity ? 2 : 0), 'scoped quota stays within the existing row budget');
+          assert.equal(footerLines.length + (withActivity ? 2 : 0), fixture.highStatus ? 13 : 6 + (withActivity ? 2 : 0), 'scoped quota stays within the existing row budget');
         }
         if (fixture.providerUsage.includes(usageUnavailable)) assert.match(rendered, /OpenAI.*limits unavailable/u, 'unavailable usage is explicit');
         if (fixture.providerUsage.includes(usageLocal)) assert.match(rendered, /Local.*no account quota/u, 'local usage is not presented as a subscription');
@@ -1026,18 +734,18 @@ for (const width of [46, 120, 180]) {
 // The startup map/resources stay above the real editor and the native MCP manager dock.
 // Both parsers must find only the actual editor when idle, never a map tile or manager control.
 const splashFooterVariants = [
-  ...FOOTERS.filter(fixture => ['plan/auto', 'exec/auto', 'high status count', 'Linked work', 'Linked plan', 'Linked exec', 'Linked unavailable', 'Linked high status count'].includes(fixture.name)).flatMap(fixture => [
+  ...FOOTERS.filter(fixture => ['plan/auto', 'work/auto', 'high status count'].includes(fixture.name)).flatMap(fixture => [
     { name: fixture.name, idleFooter: width => idleFooter(width, fixture) },
     { name: `${fixture.name} + activity`, idleFooter: width => [...activity(width), ...idleFooter(width, fixture, 2)] },
   ]),
-  ...[false, true].flatMap(linked => [false, true].map(withActivity => ({
-    name: `${linked ? 'Linked' : 'Independent'} blocked${withActivity ? ' + activity' : ''}`,
+  ...[false, true].map(withActivity => ({
+    name: `blocked${withActivity ? ' + activity' : ''}`,
     herdrModelCard: true,
     idleFooter: width => [
       ...(withActivity ? activity(width) : []),
-      ...statusFooter(width, modeStatuses('plan', 'auto'), { compact: true, phase: 'waiting', ...(linked ? { flow: flowSnapshot('plan') } : {}) }),
+      ...statusFooter(width, modeStatuses('plan', 'auto'), { compact: true, phase: 'waiting' }),
     ],
-  }))),
+  })),
 ];
 const splashModels = [
   { name: 'default' },
@@ -1093,105 +801,6 @@ screens.push(...(await subagentScreens({
     git: { project: 'pi-plugins', branch: 'main' },
   }, width, childTheme),
 })).map(screen => screen.idle === undefined ? screen : { ...screen, idle: screen.idle + subagentsStart }));
-
-// Capture the returned completion renderer from the real registerExec API, rather than drawing a
-// lookalike card or calling renderFinish directly. Both expansion states live ahead of the idle
-// composer, through the same layout and reader checks as the normal-footer fixtures above.
-const messageRenderers = new Map();
-const completionTools = new Map();
-registerExec({
-  on() {}, registerTool: tool => completionTools.set(tool.name, tool), registerCommand() {},
-  registerMessageRenderer: (name, renderer) => messageRenderers.set(name, renderer),
-  events: new EventEmitter(),
-}, { completionReview: () => true, completionMaxRevisions: () => 2 });
-const renderCompletion = messageRenderers.get(FINISH_MESSAGE_TYPE);
-assert.equal(typeof renderCompletion, 'function', 'registerExec must register its returned completion renderer');
-const completionDetails = {
-  completion: 'accepted', planFile: '/tmp/client-plan.md', implementer: 'Terra',
-  report: 'Updated the completion transcript fixture.\n\nThe registered message now appears above the idle editor, with both remote readers checking the composer. '.repeat(4),
-  verification: 'Ran the remote-client compatibility checks at narrow and wide widths.\n\nChecked Sidebar with main and Sidebar focus. '.repeat(4),
-  concerns: 'No outstanding implementation issues reported.',
-  asks: 2, costUsd: 0.02,
-  decision: {
-    outcome: 'accepted', summary: 'The compatibility fixture is complete.',
-    evidence: ['Expanded evidence marker: both remote readers checked.'],
-    limitations: ['No live phone interaction was performed.'], findings: [],
-  },
-  changes: { edited: ['scripts/test-remote-clients.mjs'], outside: [] },
-  negotiation: { attempts: 1, reviewCostUsd: 0.01, phase: 'accepted', history: [] },
-};
-for (const expanded of [false, true]) {
-  for (const width of [46, 120, 180]) {
-    const transcript = renderCompletion({
-      customType: FINISH_MESSAGE_TYPE, content: 'Returned implementation completion',
-      details: completionDetails, display: true,
-    }, { expanded }, theme);
-    const rendered = transcript.render(width).map(stripVTControlCharacters).join('\n');
-    assert.match(rendered.replace(/\s+/gu, ' '), /Updated the completion transcript fixture/u, 'actual returned message renders the implementer report');
-    assert.equal(rendered.includes('Expanded evidence marker'), expanded, 'only expanded completion shows detailed evidence');
-    assert.equal(/ctrl\+o (?:to expand|for full report)/iu.test(rendered), !expanded, 'concise completion offers expansion');
-    const baseline = screens.length;
-    for (const [under, options] of IDLE) {
-      const { lines: screen } = sidebarScreen({
-        width, height: HEIGHT, transcript, dock: w => editor.render(w),
-        footer: w => idleFooter(w, { statuses: modeStatuses('plan', 'auto') }), ...options,
-      });
-      const ansi = screen.join('\n');
-      assert.match(stripVTControlCharacters(ansi).replace(/\s+/gu, ' '), /Updated the completion transcript fixture/u, 'completion must be visible ahead of the composer, including with Sidebar');
-      screens.push({ name: `returned completion ${expanded ? 'expanded' : 'concise'}`, width, under, idle: baseline, ansi });
-    }
-  }
-}
-
-// Compact transcript cards must not steal the actual waiting dialog's question or options.
-// Reuse command selects and their existing parser contracts rather than lookalike dialogs.
-const renderReview = completionTools.get('finish_plan')?.renderResult;
-assert.equal(typeof renderReview, 'function', 'registerExec must register its review result renderer');
-const pausedDetails = {
-  planFile: completionDetails.planFile, implementer: 'Terra', round: 1,
-  report: 'Implemented the readiness check.', verification: 'Automated checks passed.',
-  concerns: 'Human verification is still needed.',
-  decision: {
-    outcome: 'user_needed', summary: 'Human verification is required.',
-    question: 'Did the browser readiness check pass?', recommendation: 'Provide human verification.',
-    evidence: ['Paused evidence marker: automated checks passed.'], limitations: [], findings: [],
-  },
-  negotiation: {
-    attempts: 1, reviewCostUsd: 0.01, phase: 'paused', history: [],
-    pause: { reason: 'user_needed', question: 'Did the browser readiness check pass?', action: 'Provide human verification.' },
-  },
-};
-for (const width of [46, 120]) {
-  tui.terminal.columns = width;
-  for (const paused of [false, true]) {
-    const dialog = DIALOGS.find(item => item.name === (paused ? 'plan exec reviewer question' : '/mode picker'));
-    const lines = await dialog.lines(width);
-    const transcript = paused
-      ? renderReview({ content: [], details: pausedDetails }, { expanded: false, isPartial: false }, theme)
-      : renderCompletion({ customType: FINISH_MESSAGE_TYPE, content: 'Returned implementation completion', details: completionDetails, display: true }, { expanded: false }, theme);
-    const rendered = transcript.render(width).map(stripVTControlCharacters).join('\n').replace(/\s+/gu, ' ');
-    if (paused) {
-      assert.ok(rendered.includes(pausedDetails.decision.question), 'collapsed review keeps the exact human question');
-      assert.ok(rendered.includes(pausedDetails.decision.recommendation), 'collapsed review keeps the requested human action');
-      assert.ok(!rendered.includes('Paused evidence marker'), 'collapsed review hides detailed evidence');
-    } else {
-      assert.match(rendered, /Updated the completion transcript fixture/u, 'compact accepted completion keeps its report preview');
-      assert.ok(!rendered.includes('Expanded evidence marker'), 'compact accepted completion hides detailed evidence');
-    }
-    for (const open of [false, true]) {
-      const { lines: screen } = sidebarScreen({
-        width, height: Math.max(HEIGHT, transcript.render(width).length + lines.length + footer(width).length + 2),
-        transcript, dock: () => lines, footer, open, collapsed: true,
-      });
-      const ansi = screen.join('\n');
-      const plain = stripVTControlCharacters(ansi).replace(/\s+/gu, ' ');
-      const marker = paused ? pausedDetails.decision.question : 'Updated the completion transcript fixture.';
-      assert.ok(plain.includes(marker), 'compact transcript remains visible above the actual dialog');
-      assert.ok(plain.indexOf(marker) < plain.lastIndexOf(dialog.question), 'transcript precedes the waiting dialog');
-      screens.push({ name: dialog.name, width, under: `${paused ? 'paused user-needed review' : 'compact accepted completion'} transcript, ${open ? 'Sidebar open' : 'without Sidebar'}`, ansi });
-    }
-  }
-}
 
 // Retained next-prompt offers use the real editor and ghost/fallback widgets, never extra inputs.
 const nextPromptStart = screens.length;
@@ -1394,20 +1003,14 @@ if (colliePresent) results.collie = probe('Collie', 'collie.ts', path.join(colli
 else console.log('SKIP Collie: no checkout with frames.toml support (COLLIE_DIR)');
 
 if (results.herdr) {
-  const linkedNavigations = new Map();
   for (const [index, screen] of screens.entries()) {
     if (!screen.answer) continue;
     const steps = results.herdr[index]?.answerSteps;
     assert.ok(Array.isArray(steps), 'Client navigation must come from the parsed card');
-    if (screen.answerFlow && !linkedNavigations.has(screen.answerFlow.id)) {
-      assert.equal(screen.answerFlow.stage, 'open-context');
-      linkedNavigations.set(screen.answerFlow.id, linkedNavigationFixture(screen.answerFlow.fresh));
-    }
-    const navigation = screen.answerFlow ? linkedNavigations.get(screen.answerFlow.id) : undefined;
-    const selected = navigation?.selected ?? [];
-    const component = navigation?.component ?? (screen.answer.option_index !== undefined
-      ? new ApprovalPicker({ targets: [] }, createApprovalState(), { efforts: () => [] }, theme, kb, () => {}, choice => selected.push(choice))
-      : new PlanNameInput({ suggestion: 'client-plan', directory: '/tmp/plans' }, theme, kb, () => {}, value => selected.push(value)));
+    const selected = [];
+    const component = screen.answer.option_index !== undefined
+      ? new ApprovalPicker({}, createApprovalState(), { efforts: () => [] }, theme, kb, () => {}, choice => selected.push(choice))
+      : new PlanNameInput({ suggestion: 'client-plan', directory: '/tmp/plans' }, theme, kb, () => {}, value => selected.push(value));
     for (const step of steps) {
       if ('text' in step) {
         assert.equal(typeof step.text, 'string');
@@ -1421,28 +1024,9 @@ if (results.herdr) {
         component.handleInput(key);
       }
     }
-    if (navigation) {
-      const { stage, context } = screen.answerFlow;
-      if (stage === 'approve') {
-        assert.equal(selected.length, 1, 'phone must approve only once, from returned main');
-        assert.equal(selected[0].choice.kind, 'handoff');
-        assert.equal(selected[0].choice.context, context);
-        assert.equal(selected[0].choice.intent, 'linked-execution');
-        assert.deepEqual(selected[0].choice.target, PLAN_TARGETS[0].target);
-        assert.equal(selected[0].thinkingLevel, 'high');
-        component.dispose();
-        linkedNavigations.delete(screen.answerFlow.id);
-      } else {
-        assert.deepEqual(selected, [], 'parser-generated Context answers must not approve or implement');
-        assert.equal(navigation.state.stage, stage === 'open-context' ? 'context' : 'main');
-        assert.equal(navigation.state.context, stage === 'choose-context' ? context : 'keep');
-      }
-    } else {
-      assert.deepEqual(selected, [screen.answer.option_index !== undefined ? { choice: { kind: 'save' }, effortSource: 'fallback' } : 'phone-renamed'], 'client navigation must submit exactly the intended Save action or replacement name');
-      component.dispose();
-    }
+    assert.deepEqual(selected, [screen.answer.option_index !== undefined ? { choice: { kind: 'save' }, effortSource: 'fallback' } : 'phone-renamed'], 'client navigation must submit exactly the intended Save action or replacement name');
+    component.dispose();
   }
-  assert.equal(linkedNavigations.size, 0, 'every parsed Context flow reaches an explicit main approval');
 }
 
 let failures = 0;

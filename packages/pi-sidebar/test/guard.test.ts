@@ -157,7 +157,7 @@ describe("judgeCall", () => {
   });
 
   it("refuses process control and workflow authority regardless of hints or Jev", async () => {
-    const tools = ["bg_kill", "ask_planner", "finish_plan", "continue_plan", "plan_ask_planner", "plan_submit_merged", "plan_mode_question", "plan_mode_complete"];
+    const tools = ["bg_kill", "ask_planner", "planner_answer", "plan_ask_planner", "plan_submit_merged", "plan_mode_question", "plan_mode_complete"];
     const h = host({ probability: 0, tools: Object.fromEntries(tools.map((name) => [name, { annotations: { readOnlyHint: true } }])) });
     for (const tool of tools) expect((await judgeCall(tool, {}, h.host)).allowed, tool).toBe(false);
     expect(h.asked).toEqual([]);

@@ -80,7 +80,7 @@ function fixture({ width = 120, sidebar = false, vim = false, regular = false, b
   const editor = vim ? new MainEditor(tui, getEditorTheme(), kb) : new CustomEditor(tui, getEditorTheme(), kb);
   if (vim) editor.setClipboardMirrorPolicy("never");
   editor.setText("unsent 界 draft\nsecond line");
-  const state = { generation: 1, active: true, blocked: 0, promptDepth: 0, idle: true, linked: false, editor, tui, actions: {} };
+  const state = { generation: 1, active: true, blocked: 0, promptDepth: 0, idle: true, editor, tui, actions: {} };
   const calls = [];
   const cancellations = [];
   const scopes = [];
@@ -97,7 +97,7 @@ function fixture({ width = 120, sidebar = false, vim = false, regular = false, b
   const controller = createFooterActionController({
     getEditor: () => state.editor, getTui: () => state.tui, getGeneration: () => state.generation,
     isCurrent: () => state.active, getBlocked: () => state.blocked, getPromptDepth: () => state.promptDepth,
-    isIdle: () => state.idle, isLinked: () => state.linked, getActions: () => state.actions, notify, refresh,
+    isIdle: () => state.idle, getActions: () => state.actions, notify, refresh,
     cycleReasoning: () => { calls.push("native.reasoning"); reasoningTriggers.push(state.cycleTrigger); },
     captureCycleTrigger, withCycleTrigger,
     cancelSettings: reason => { cancellations.push(reason); },
@@ -122,9 +122,7 @@ function fixture({ width = 120, sidebar = false, vim = false, regular = false, b
   editor.actionHandlers.set("app.model.select", native);
   editor.actionHandlers.set("app.thinking.cycle", () => { calls.push("native.reasoning.immediate"); });
   state.actions = {
-    "flow.open": { label: "Flow", run() { calls.push("flow"); } },
     "cache.status": { label: "Cache", run() { calls.push("cache"); } },
-    "execution.status": { label: "Execution", run() { calls.push("execution"); } },
     "approvals.open": { label: "Approvals", run() { calls.push("approvals"); } },
     "context.open": { label: "Context", run() { calls.push("context"); } },
     "context.skills": { label: "Skills", run() { calls.push("skills"); } },
@@ -363,25 +361,16 @@ test("native selector focus (without prompt events), overlay, prompts and blocke
 });
 
 for (const vim of [false, true]) {
-  test(`${vim ? "pi-vim" : "CustomEditor"}: actual keyboard routes current model action in Linked, native picker in Independent`, async () => {
+  test(`${vim ? "pi-vim" : "CustomEditor"}: actual keyboard opens the current native model picker`, async () => {
     const f = fixture({ vim });
     const draft = f.editor.getText();
-    f.state.linked = true;
     const updatedNative = () => { f.calls.push("replacement native"); f.native(); };
     f.editor.actionHandlers.set("app.model.select", updatedNative);
+    if (vim) f.terminal.send("\x1b"); // normal mode uses the same native action path
     f.terminal.send("\x1bp");
     assert.equal(f.editor.actionHandlers.get("app.model.select"), updatedNative, "restored immediately, not after the dialog promise");
     await tick();
-    assert.deepEqual(f.calls, ["flow"]);
-    f.state.actions["flow.open"] = { label: "Fresh provider", run() { f.calls.push("fresh flow"); } };
-    if (vim) f.terminal.send("\x1b"); // normal mode uses the same native action path
-    f.terminal.send("\x1bp");
-    await tick();
-    assert.deepEqual(f.calls, ["flow", "fresh flow"]);
-    f.state.linked = false;
-    f.terminal.send("\x1bp");
-    await tick();
-    assert.deepEqual(f.calls, ["flow", "fresh flow", "replacement native", "native.model"]);
+    assert.deepEqual(f.calls, ["replacement native", "native.model"]);
     assert.equal(f.tui.getFocusedComponent(), f.selector);
     assert.equal(f.controller.available("model.open"), false);
     f.terminal.send("\x1b");
@@ -472,7 +461,6 @@ test("pointer provider scope covers only synchronous invocation, not an awaited 
 
 test("native history and registered shortcut precedence are retained; unrelated model cycle is untouched", async () => {
   const f = fixture({ bindings: { "tui.editor.historyPrevious": "alt+p" } });
-  f.state.linked = true;
   f.editor.addToHistory("previous prompt");
   f.terminal.send("\x1bp");
   await tick();
@@ -487,9 +475,8 @@ test("native history and registered shortcut precedence are retained; unrelated 
   assert.equal(f.captureCycleTrigger.mock.calls.length, 0);
 });
 
-test("native autocomplete Escape precedence survives a colliding Linked model binding", async () => {
+test("native autocomplete Escape precedence survives a colliding model binding", async () => {
   const f = fixture({ bindings: { "app.model.select": "escape" } });
-  f.state.linked = true;
   f.editor.setText("");
   f.editor.setAutocompleteProvider({
     getSuggestions: async () => ({ prefix: "", items: [{ label: "alpha", value: "alpha" }, { label: "beta", value: "beta" }] }),
@@ -507,53 +494,47 @@ test("native autocomplete Escape precedence survives a colliding Linked model bi
 
 test("pi-vim Normal commands retain precedence over a colliding model binding", async () => {
   const f = fixture({ vim: true, bindings: { "app.model.select": "x" } });
-  f.state.linked = true;
   f.terminal.send("\x1b", "0", "x");
   await tick();
   assert.deepEqual(f.calls, []);
-  assert.notEqual(f.editor.getText(), "unsent 界 draft\nsecond line", "Vim x remains an edit, not a flow picker");
+  assert.notEqual(f.editor.getText(), "unsent 界 draft\nsecond line", "Vim x remains an edit, not a model picker");
   assert.deepEqual(f.scopes, [], "Vim edits never enter the settings scope");
 });
 
-test("Linked keyboard routing denies unavailable/busy/prompt/blocked actions rather than falling through to native", async () => {
+test("keyboard routing never opens the native picker while a prompt or a blocked hold is active", async () => {
   const f = fixture();
-  f.state.linked = true;
-  for (const [key, value] of [["idle", false], ["blocked", 1], ["promptDepth", 1]]) {
+  for (const [key, value] of [["blocked", 1], ["promptDepth", 1]]) {
     const old = f.state[key]; f.state[key] = value;
     f.terminal.send("\x1bp"); await tick(); f.state[key] = old;
   }
-  delete f.state.actions["flow.open"];
-  f.terminal.send("\x1bp"); await tick();
   assert.deepEqual(f.calls, []);
-  assert.match(f.notify.mock.calls.at(-1)[0], /\/flow/);
   assert.equal(f.editor.actionHandlers.get("app.model.select"), f.native);
 });
 
-test("regular-terminal mouse is not intercepted, while linked keyboard routing remains usable", async () => {
+test("regular-terminal mouse is not intercepted, while keyboard routing remains usable", async () => {
   const f = fixture({ regular: true });
-  f.state.linked = true;
   f.terminal.click(4, 8);
   f.terminal.pointer(64, 4, 8);
   assert.deepEqual(f.calls, []);
   assert.equal(f.terminal.writes.some((write) => /\x1b\[\?100[0236]h/.test(write)), false, "no mouse ownership enabled");
   f.terminal.send("\x1bp"); await tick();
-  assert.deepEqual(f.calls, ["flow"]);
+  assert.deepEqual(f.calls, ["native.model"]);
 });
 
 test("busy controls explain why pickers wait; reversible settings and inspections remain usable", async () => {
   const f = fixture();
   f.state.idle = false;
-  for (const action of ["model.open", "workflow.cycle", "workflow.open", "flow.open", "approvals.open", "context.open", "context.skills", "mcp.open"]) {
+  for (const action of ["model.open", "workflow.cycle", "workflow.open", "approvals.open", "context.open", "context.skills", "mcp.open"]) {
     assert.equal(f.controller.available(action), true, action);
     await f.controller.activate(action);
     assert.match(f.notify.mock.calls.at(-1)[0], /Wait for the current turn/);
   }
   assert.deepEqual(f.calls, []);
-  for (const action of ["reasoning.cycle", "cache.status", "execution.status", "headsup.open"]) {
+  for (const action of ["reasoning.cycle", "cache.status", "headsup.open"]) {
     assert.equal(f.controller.available(action), true, action);
     await f.controller.activate(action);
   }
-  assert.deepEqual(f.calls, ["native.reasoning", "cache", "execution", "headsup"]);
+  assert.deepEqual(f.calls, ["native.reasoning", "cache", "headsup"]);
 });
 
 test("serialization, errors, stale completion and recaptured generation are session-owned", async () => {
@@ -609,11 +590,6 @@ test("absent native handlers/focus API omit controls and report command paths on
     await f.controller.activate(action);
     assert.ok(f.notify.mock.calls.at(-1)[0].includes(command));
   }
-  f.state.linked = true;
-  assert.equal(f.controller.available("model.open"), false, "a flow provider without the native model entry cannot advertise the model key");
-  await f.controller.activate("model.open");
-  assert.match(f.notify.mock.calls.at(-1)[0], /\/flow/);
-  assert.deepEqual(f.calls, [], "missing native Linked entry must not invoke its flow provider");
   f.tui.getFocusedComponent = undefined;
   assert.equal(f.controller.available("cache.status"), false);
   await f.controller.activate("cache.status");
@@ -632,9 +608,8 @@ test("temporary action-map ownership is reentrancy-safe and restored on throw wi
   };
   const beforeWrap = f.editor.handleInput;
   f.controller.wrapEditor(f.editor, f.tui);
-  f.state.linked = true;
   f.terminal.send("\x1bp"); await tick();
-  assert.deepEqual(f.calls, ["flow"]);
+  assert.deepEqual(f.calls, ["native.model"]);
   assert.equal(f.editor.actionHandlers.get("app.model.select"), f.native);
   f.controller.dispose();
   assert.equal(f.editor.handleInput, beforeWrap);
@@ -649,7 +624,6 @@ test("temporary action-map ownership is reentrancy-safe and restored on throw wi
   };
   const thirdPartyInput = g.editor.handleInput;
   const undo = g.controller.wrapEditor(g.editor, g.tui);
-  g.state.linked = true;
   assert.throws(() => g.terminal.send("\x1bp"), /input error/);
   assert.equal(g.editor.actionHandlers.get("app.model.select"), g.native);
   throws = false;
@@ -669,15 +643,13 @@ for (const width of [46, 120, 180]) for (const sidebar of [false, true]) {
     const entries = [{ type: "custom", customType: "personal-status-footer", data: { working: false, mcp: false } }];
     const statuses = new Map([["workflow-mode", "workflow: work (alt+w to cycle)"], ["permission-mode", "⏵⏵ auto mode on (alt+a to cycle)"], ["permission-prompting", "permission prompts: off"]]);
     let renderDepth = 0, discoveries = 0, mounted, editorFactory = () => f.editor;
-    const flow = { version: 1, operatingMode: "independent", revision: 0, workflow: "work", ready: true, guardAvailable: true, transitioning: false };
     const bus = {
       on(channel, listener) { listeners.set(channel, [...(listeners.get(channel) ?? []), listener]); return () => {}; },
       emit(channel, request) {
-        if (channel === "pi-plugins.workflow-flow.v1" || channel === "pi-plugins.footer-actions.v1") {
+        if (channel === "pi-plugins.footer-actions.v1") {
           assert.equal(renderDepth, 0, "provider discovery must never run on the footer render stack");
           discoveries++;
-          if (channel === "pi-plugins.workflow-flow.v1") request.snapshot = { ...flow };
-          else Object.assign(request.actions, f.state.actions);
+          Object.assign(request.actions, f.state.actions);
         }
         for (const listener of listeners.get(channel) ?? []) listener(request);
       },
@@ -773,35 +745,25 @@ for (const width of [46, 120, 180]) for (const sidebar of [false, true]) {
     assert.equal(f.tui.getFocusedComponent(), f.selector);
     assert.equal(f.editor.getText(), draft);
     f.terminal.send("\x1b");
-    // Change the live flow without rendering. The keyboard must not use the old painted mode.
-    flow.operatingMode = "linked";
-    flow.revision++;
-    flow.selectedFlow = { provider: "test", anchorModel: "physical", roles: Object.fromEntries(["work", "chat", "plan", "exec"].map((role) => [role, { provider: "test", modelId: "physical" }])) };
-    f.terminal.send("\x1bp"); await tick();
-    assert.equal(f.calls.at(-1), "flow");
-    await flush();
-    const linkedPaint = f.tui.getScreenLines().map(plain).join("\n");
-    assert.match(linkedPaint, /work/);
-    assert.equal((linkedPaint.match(/physical/g) ?? []).length, 1, "combined linked row has no duplicated model");
-    flow.workflow = "plan"; flow.replanning = true; flow.revision++;
-    f.state.actions["execution.status"] = { label: "Task status", run() { f.calls.push("task menu"); } };
+    // Workflow statuses repaint without a discovery, and the badge keeps its own action.
+    statuses.set("workflow-mode", "workflow: plan (alt+w to cycle)");
     f.state.actions["workflow.cycle"] = { label: "Cycle", run() { f.calls.push("workflow cycle"); } };
     await flush();
     const planPoint = pointFor("plan");
     const beforeTask = f.calls.length;
     f.terminal.click(planPoint.x, planPoint.y); await tick();
-    assert.deepEqual(f.calls.slice(beforeTask), ["task menu"]);
+    assert.deepEqual(f.calls.slice(beforeTask), ["workflow cycle"]);
     assert.equal(f.editor.getText(), draft);
     f.tui.setFocus(f.side);
     f.terminal.click(planPoint.x, planPoint.y); await tick();
-    assert.equal(f.calls.length, beforeTask + 1, "non-main focus cannot activate task control");
+    assert.equal(f.calls.length, beforeTask + 1, "non-main focus cannot activate the workflow control");
     f.tui.setFocus(f.editor);
     bus.emit("herdr:blocked", { active: true }); await flush();
     f.terminal.click(planPoint.x, planPoint.y); await tick();
     f.terminal.click(promptPoint.x, promptPoint.y); await tick();
     assert.equal(f.calls.length, beforeTask + 1, "blocked layout retires old hits");
     bus.emit("herdr:blocked", { active: false });
-    flow.workflow = "work"; delete flow.replanning; flow.revision++;
+    statuses.set("workflow-mode", "workflow: work (alt+w to cycle)");
     await flush();
     const request = { version: 1 };
     bus.emit(footerModule.SESSION_CHROME_CHANNEL, request);
@@ -831,20 +793,26 @@ for (const width of [46, 120, 180]) for (const sidebar of [false, true]) {
     await flush();
     f.terminal.send("\x1bp"); await tick();
     assert.equal(f.calls.length, count + 1);
+    assert.equal(f.calls.at(-1), "native.model");
+    f.terminal.send("\x1b");
     assert.equal(f.editor.getText(), draft);
     assert.equal(f.tui.getFocusedComponent(), f.editor);
     // A real branch change keeps this editor, but retires the old action's
     // ownership. A late rejection cannot notify or hold the new branch's lock.
     const pending = deferred();
-    f.state.actions["flow.open"] = { label: "Pending flow", run() { f.calls.push("old branch action"); return pending.promise; } };
+    f.state.actions["approvals.open"] = { label: "Pending approvals", run() { f.calls.push("old branch action"); return pending.promise; } };
     await flush();
-    f.terminal.send("\x1bp"); await tick();
+    f.tui.resetTextSelection();
+    const oldPrompts = pointFor("prompts on");
+    f.terminal.click(oldPrompts.x, oldPrompts.y); await tick();
     assert.equal(f.calls.at(-1), "old branch action");
     const notices = f.notify.mock.calls.length;
-    flow.revision++;
-    f.state.actions["flow.open"] = { label: "New branch flow", run() { f.calls.push("new branch action"); } };
+    f.state.actions["approvals.open"] = { label: "New branch approvals", run() { f.calls.push("new branch action"); } };
     await handlers.get("session_tree")({}, ctx);
-    f.terminal.send("\x1bp"); await tick();
+    await flush();
+    f.tui.resetTextSelection();
+    const newPrompts = pointFor("prompts on");
+    f.terminal.click(newPrompts.x, newPrompts.y); await tick();
     assert.equal(f.calls.at(-1), "new branch action");
     pending.reject(new Error("outgoing branch failed")); await tick();
     assert.equal(f.notify.mock.calls.length, notices);

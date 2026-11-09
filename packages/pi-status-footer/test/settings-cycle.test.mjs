@@ -504,7 +504,7 @@ describe("settings cycle coordinator", () => {
     const second = cycles.stage(h.ctx, b.change); await vi.advanceTimersByTimeAsync(I); expect(await second).toBe(true);
     expect(anchors(h)).toHaveLength(2);
   });
-  it.each(["tool-gate:workflow", "tool-gate:approvals", "tool-gate:flow", "tool-gate:chat-notice", "plan-mode:inline", "tool-gate:phase-effort"])("allows own setting persistence during a setter: %s", async customType => {
+  it.each(["tool-gate:workflow", "tool-gate:approvals", "tool-gate:chat-notice", "plan-mode:inline"])("allows own setting persistence during a setter: %s", async customType => {
     const h = host(), cycles = settingsCycles(h.pi), c = control("workflow", "work", ["work", "plan"]);
     c.apply = async value => { h.pi.appendEntry(customType, {}); c.value = value; return true; };
     const first = cycles.stage(h.ctx, c.change); await vi.advanceTimersByTimeAsync(I); expect(await first).toBe(true);
@@ -537,7 +537,7 @@ describe("settings cycle coordinator", () => {
   });
   it.each([true, false])("checks records appended by final publication listeners (setting-owned: %s)", async owned => {
     const h = host(), cycles = settingsCycles(h.pi), c = control("workflow", "work", ["work", "plan"]);
-    h.pi.events.on("pi-plugins.settings-cycle.v1", event => { if (event.snapshot?.phase === "applied") h.pi.appendEntry(owned ? "tool-gate:phase-effort" : "unrelated:output", {}); });
+    h.pi.events.on("pi-plugins.settings-cycle.v1", event => { if (event.snapshot?.phase === "applied") h.pi.appendEntry(owned ? "tool-gate:approvals" : "unrelated:output", {}); });
     const first = cycles.stage(h.ctx, c.change); await vi.advanceTimersByTimeAsync(I); expect(await first).toBe(true);
     const second = cycles.stage(h.ctx, c.change); await vi.advanceTimersByTimeAsync(I); expect(await second).toBe(true);
     expect(anchors(h)).toHaveLength(owned ? 1 : 2);

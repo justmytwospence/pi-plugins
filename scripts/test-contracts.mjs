@@ -11,11 +11,8 @@ for (const { source, copies } of transcriptHelpers) {
   for (const copy of copies) assert.equal(readFileSync(resolve(root, copy), 'utf8'), expected, `generated transcript helper drift: ${copy}`);
 }
 const identical = [
-  ['pi-plan-mode','pi-cc-render'].map(p => `packages/${p}/src/fresh-handoff.ts`),
   ['pi-context','pi-cc-render'].map(p => `packages/${p}/src/context-metadata.ts`),
-  ['pi-tool-gate','pi-plan-mode','pi-status-footer'].map(p => `packages/${p}/src/flow-contract.ts`),
-  ['pi-tool-gate','pi-plan-mode'].map(p => `packages/${p}/src/task-effort.ts`),
-  ['pi-tool-gate','pi-plan-mode'].map(p => `packages/${p}/src/effort-origin.ts`),
+  ['pi-plan-mode','pi-status-footer','pi-sidebar','pi-compact-plan','pi-cache-guard','pi-subagents'].map(p => `packages/${p}/src/routed-model.ts`),
   ['pi-status-footer','pi-tool-gate','pi-plan-mode','pi-context','pi-cache-guard','pi-cc-render','pi-system1','pi-sidebar'].map(p => `packages/${p}/src/footer-actions.ts`),
   ['pi-sidebar','pi-subagents','pi-plan-mode'].map(p => `packages/${p}/src/family-contract.ts`),
   ['pi-status-footer','pi-tool-gate','pi-plan-mode'].map(p => `packages/${p}/src/workflow-ui.ts`),

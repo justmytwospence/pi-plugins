@@ -56,10 +56,9 @@ test("System 1 state is optional detached presentation data", () => {
   assert.deepEqual(querySystem1State(events), published);
 });
 
-test("System 1 shares the Context row without adding height in Independent, Linked and Exec", () => {
-  for (const width of [46, 120, 180]) for (const workflow of ["work", "plan", "exec"]) for (const linked of [false, true]) {
-    const s = { ...snapshot(), workflow: { kind: workflow }, exec: workflow === "exec" ? "implementing" : undefined };
-    if (linked) s.flow = { version: 1, operatingMode: "linked", revision: 1, workflow, ready: true, guardAvailable: true, transitioning: false };
+test("System 1 shares the Context row without adding height for every workflow", () => {
+  for (const width of [46, 120, 180]) for (const workflow of ["work", "chat", "plan"]) {
+    const s = { ...snapshot(), workflow: { kind: workflow } };
     const absent = layoutFooter({ ...s, system1: undefined }, width, theme);
     for (const { state, expected } of cases()) {
       const layout = layoutFooter({ ...s, system1: state }, width, theme);

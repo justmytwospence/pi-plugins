@@ -1,24 +1,22 @@
 import type { ExtensionAPI, Theme } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
 
-export type WorkflowKind = "work" | "chat" | "plan" | "exec";
+export type WorkflowKind = "work" | "chat" | "plan";
 
 export function isWorkflowKind(value: unknown): value is WorkflowKind {
-  return value === "work" || value === "chat" || value === "plan" || value === "exec";
+  return value === "work" || value === "chat" || value === "plan";
 }
 
 export const WORKFLOW_ROLES = {
   work: "success",
   chat: "thinkingLow",
   plan: "customMessageLabel",
-  exec: "warning",
 } as const satisfies Record<WorkflowKind, Parameters<Theme["fg"]>[0]>;
 
 export const WORKFLOW_EXPLANATIONS: Record<WorkflowKind, string> = {
   work: "edits and actions",
   chat: "read-only discussion",
   plan: "research and plan only",
-  exec: "implementing approved plan",
 };
 
 export function workflowBadge(theme: Pick<Theme, "fg" | "bold">, mode: WorkflowKind): string {

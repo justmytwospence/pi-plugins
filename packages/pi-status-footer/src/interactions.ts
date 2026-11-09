@@ -101,7 +101,6 @@ export interface FooterActionControllerOptions {
   getBlocked(): number;
   getPromptDepth(): number;
   isIdle(): boolean;
-  isLinked(): boolean;
   cycleReasoning(): void;
   captureCycleTrigger?(): SettingCycleTrigger | undefined;
   withCycleTrigger?<T>(trigger: SettingCycleTrigger, run: () => T): T;
@@ -123,13 +122,13 @@ export interface FooterActionController {
 type Binding = { editor: FooterEditor; tui: FooterTui; generation: number; release(): void };
 const commands: Record<FooterActionId | "model.open" | "reasoning.cycle", string> = {
   "model.open": "/model", "reasoning.cycle": "/thinking", "workflow.cycle": "/mode",
-  "workflow.open": "/mode", "flow.open": "/flow", "execution.status": "/plan-exec",
+  "workflow.open": "/mode",
   "approvals.open": "/approvals", "context.open": "/context",
   "context.skills": "/context", "cache.status": "/cache-guard", "mcp.open": "/mcp", "system1.open": "/system1", "headsup.open": "/sidebar",
 };
 const isAction = (action: string): action is keyof typeof commands => Object.hasOwn(commands, action);
 // Status-only inspections may run during a turn; pickers and all mutations wait for idle.
-const needsIdle = (action: string) => !["cache.status", "execution.status", "reasoning.cycle", "headsup.open"].includes(action);
+const needsIdle = (action: string) => !["cache.status", "reasoning.cycle", "headsup.open"].includes(action);
 
 export function createFooterActionController(options: FooterActionControllerOptions): FooterActionController {
   let disposed = false;
@@ -149,10 +148,10 @@ export function createFooterActionController(options: FooterActionControllerOpti
       const native = typeof handlers?.get === "function"
         ? handlers.get(action === "model.open" ? "app.model.select" : "app.thinking.cycle") : undefined;
       if (typeof native !== "function") return undefined;
-      // The model click and its native key hint must share the same usable entry,
-      // including in Linked; a provider alone cannot supply native keyboard routing.
+      // The model click and its native key hint share the editor's own entry; a provider
+      // alone cannot supply native keyboard routing.
       if (action === "reasoning.cycle") return options.cycleReasoning;
-      return options.isLinked() ? provider("flow.open") : native;
+      return native;
     }
     return provider(action);
   };
@@ -161,7 +160,7 @@ export function createFooterActionController(options: FooterActionControllerOpti
     return descriptor && typeof descriptor.run === "function" ? () => descriptor.run() : undefined;
   };
   const unavailable = (action: string) => {
-    if (isAction(action)) options.notify(`Footer control unavailable; use ${action === "model.open" && options.isLinked() ? "/flow" : commands[action]}.`, "warning");
+    if (isAction(action)) options.notify(`Footer control unavailable; use ${commands[action]}.`, "warning");
   };
   const available = (action: string): boolean => {
     const owner = binding;
@@ -189,7 +188,7 @@ export function createFooterActionController(options: FooterActionControllerOpti
     const token = {};
     opening = token;
     try {
-      if (["model.open", "workflow.open", "flow.open", "approvals.open"].includes(action)) options.cancelSettings("opened settings picker");
+      if (["model.open", "workflow.open", "approvals.open"].includes(action)) options.cancelSettings("opened settings picker");
       const trigger: SettingCycleTrigger = origin === "keyboard"
         ? options.captureCycleTrigger?.() ?? { kind: "programmatic" }
         : { kind: "pointer" };
@@ -224,8 +223,7 @@ export function createFooterActionController(options: FooterActionControllerOpti
       const select = () => {
         if (!ready(owner)) return;
         options.cancelSettings("opened settings picker");
-        if (options.isLinked()) void activate("model.open");
-        else model?.();
+        model?.();
       };
       const cycle = () => { void activate("reasoning.cycle", "keyboard"); };
       routing = true;

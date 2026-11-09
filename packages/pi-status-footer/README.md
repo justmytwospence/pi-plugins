@@ -75,7 +75,10 @@ readings fresh; the working row is independent of the footer mode.
    branch name; detached HEAD shows `detached:<sha7>`. Outside a Git repository,
    the Git summary stays quiet and the project remains visible. Model and labeled
    reasoning level get their own left-aligned row immediately below. Waiting/errors
-   appear on that model row and take priority. Workflow and Approvals rows follow
+   appear on that model row and take priority. With a plan model pair selected
+   (a pi-plan-mode virtual model such as `opusplan`), the model row adds the model
+   that last answered after the pair, as `opusplan → claude-sonnet-5-1` (example);
+   that segment is dropped first at narrow widths. Workflow and Approvals rows follow
    when their respective providers publish them; neither is invented when absent.
 2. `Context 32% used`. The gauge itself is the editor's border lines, above and
    below the prompt: the used share of the width in heavy rule (accent, then the
@@ -93,9 +96,9 @@ readings fresh; the working row is independent of the footer mode.
    countdowns when supported. Last, since they are usually the longest rows.
 
 The bold lowercase workflow badge is a landmark in the footer and on workflow
-transitions in the transcript: `work`, `chat`, `plan` or `exec`.
-Their theme roles are `success`, `thinkingLow`, `customMessageLabel` and
-`warning`, respectively; actual hues depend on the theme. Explanations, key hints
+transitions in the transcript: `work`, `chat` or `plan`.
+Their theme roles are `success`, `thinkingLow` and `customMessageLabel`,
+respectively; actual hues depend on the theme. Explanations, key hints
 and other secondary details stay subdued. Approvals remain a separate axis: their
 row leads with the mode itself (`auto`, `yolo`), bold in the same style, without a label.
 
@@ -113,7 +116,7 @@ System 1's optional Context chip shows only the classifier in use (`S1 Jev` or `
 | pi-system1 | Structured order, recent-route and health snapshot | `S1 Jev`, `S1 OpenAI` or `S1 unavailable` on Context; no new row |
 | pi-cache-guard | `cache 4:12`, `cache cold` | `Cache 4:12` or `Cache ❄` on the context row (warm in green, cold in the warning color) |
 | pi-tool-gate | `workflow: work (shift+tab to cycle)` and `⏵⏵ auto mode on (alt+a to cycle)` | separate Workflow and Approvals rows, with key hints and the gate tally on Approvals |
-| pi-plan-mode | workflow status and `plan-exec` detail | standalone work/plan workflow; during exec the Workflow row shows phase, counts and costs, while any Approvals row remains independent |
+| pi-plan-mode | workflow status | standalone work/plan workflow; any Approvals row remains independent |
 | pi-cache-guard (Jev trimming, key `lean-context`) | `lean: −12k tok` | `Lean −12k tok` on the context row |
 | anthropic-billing-guard | `extra usage x3` | `3 requests billed to extra usage` on the Claude limits row |
 | pi-reload-all | `reload pending: typing` | `Reload pending · typing` as the top row, just under the editor, until the reload runs |
@@ -259,7 +262,7 @@ Workflow (including standalone Plan), native reasoning and approval cycles share
 
 Keyboard cycles commit when all participating modifiers are released if release reporting is negotiated through the actual terminal path and the current held state is confirmed. SSH, Herdr and tmux paths are negotiated, not assumed to support it. Otherwise, including first or fast interactions while negotiation or held state is unconfirmed, unmodified keys, pointer and programmatic cycles, the final choice applies after 400 ms of inactivity; each accepted cycle restarts that deadline. The deadline stays armed during a confirmed hold too, so a release that a terminal or multiplexer misreports or drops never delays a change beyond it; release only commits sooner. Pausing longer than that while still holding commits the batch, and the next press starts a new one. Each batch has its own transaction; consecutive completed successful or unchanged batches reuse one UI-only history row until a boundary such as submit, an explicit choice, unrelated output or navigation. The row shows the latest batch, not an aggregate of earlier changes.
 
-With the custom footer active, the native reasoning key and footer click use the same staging in Independent and Linked; without it, native reasoning retains stock behavior. Native model cycling is unchanged. Explicit picker, command and tool choices remain immediate; plan and tool approvals still require confirmation.
+With the custom footer active, the native reasoning key and footer click use the same staging; without it, native reasoning retains stock behavior. Native model cycling is unchanged. Explicit picker, command and tool choices remain immediate; plan and tool approvals still require confirmation.
 
 Submitting an ordinary prompt flushes the preview first. If application fails, the message is not sent; interactive text is recoverable from native prompt history, without replacing a newer editor draft. Focus changes, dialogs/selectors, external model or relevant setting changes, session/branch navigation, compaction and shutdown/reload cancel pending previews. Restored interrupted history never reapplies them; compaction is not guaranteed to retain old lines.
 

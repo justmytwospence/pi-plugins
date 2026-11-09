@@ -42,13 +42,7 @@ In the interactive UI, workflow and approval shortcuts share a preview with supp
 
 Keyboard cycles commit when all participating modifiers are released if release reporting is negotiated through the actual terminal path and the current held state is confirmed. SSH, Herdr and tmux paths are negotiated, not assumed to support it. Otherwise, including first or fast interactions while negotiation or held state is unconfirmed, unmodified keys, pointer and programmatic cycles, the final choice applies after 400 ms of inactivity; each accepted cycle restarts that deadline. The deadline stays armed during a confirmed hold too, so a release that a terminal or multiplexer misreports or drops never delays a change beyond it; release only commits sooner. Pausing longer than that while still holding commits the batch, and the next press starts a new one. Each batch has its own transaction; consecutive completed successful or unchanged batches reuse one UI-only history row until a boundary such as submit, an explicit choice, unrelated output or navigation. The row shows the latest batch, not an aggregate of earlier changes.
 
-In Linked flows, provider selection, canonical phase changes, replan and finish/stop can recommend destination effort once, without changing assigned models. Work and Chat share General; restore and reconciliation do not classify. Manual changes govern the current phase, authored effort pins win, and approved implementation effort is applied without another judgment. See [Choosing effort](https://pi-plugins.vercel.app/guides/effort/).
-
-Approving a distinct-model Independent handoff enters **exec**; ordinary same-model Independent execution returns to Work. In Linked, approving the worker enters Exec even when planner and worker are the same model. Approvals remain independent. Both axes restore from the active session branch, including legacy combined-mode records. Without a UI, calls that would ask are blocked.
-
-While Linked implementation is idle, `/plan`, `/mode plan`, the configured workflow key or **Revisit plan** returns to the planner in effective Plan, with a separate draft copied from the approved plan. The task remains unfinished: working-tree changes, execution ID, history, findings, costs and review budget are preserved. The main planner can ask you questions normally. Declining, cancelling or saving a copy stays in Plan; only approval of the revised draft resumes the worker. Reapproval does not clear a review pause or authorize a retry or extra cycle; use the existing explicit recovery choices. Busy requests are refused, not queued and not used to cancel implementation or paid consultation/review; a model's `enter_plan_mode` request is deferred until successful turn settlement. `/planners` remains unavailable while the task is unfinished.
-
-Explicit `/flow independent` preserves the unfinished task, its draft and Plan restrictions. If a suspended Linked task has been unlinked, stop it before approving a new Independent plan. Explicit stop ends the task without claiming completion; completion and stop retain the existing Work/general model restoration policy.
+Approving a plan returns to Work; approvals remain independent. Both axes restore from the active session branch, including legacy combined-mode records. Without a UI, calls that would ask are blocked.
 
 Pi reserves Shift+Tab for thinking-level cycling and skips a conflicting extension shortcut; it does not override the stock binding. Rebind `app.thinking.cycle` in `~/.pi/agent/keybindings.json` (for example to `alt+t`), or set `workflowShortcut` to another key. The event contracts are in [`src/modes.ts`](./src/modes.ts).
 
@@ -287,7 +281,7 @@ This is a heuristic over arguments. Paths a program builds at runtime are not se
 
 ## Commands
 
-- `/mode [work|chat|plan]`: select workflow; without an argument, open the picker. Exec is entered only through a handoff.
+- `/mode [work|chat|plan]`: select workflow; without an argument, open the picker.
 - `/approvals [auto|yolo]`: select approvals; without an argument, open the picker. Legacy `manual` and `accept-edits` arguments remain supported.
 - `/gate` or `/gate status`: both axes and keys, counts, the classifier model, push-back setting, project rules, permission rules and folder grants.
 - `/gate rules [list | add | remove]`: [permission rules](#gate-rules) and folder grants: list them, pick one to remove it, or add one. `/gate grants` is the same.
@@ -382,7 +376,7 @@ The `agents` locations are shared with the opencode and Claude Code ports of thi
 - **pi-bg**: `bg_run` is judged like `bash`, in its own `cwd`; the read-only `bg_*` tools are on the default allow list.
 - **pi-subagents**: a subagent starts with this session's approval setting, and in chat when this session is in chat or plan, through pi-subagents' optional `pi-plugins.subagent-env.v1` environment contract (`PI_TOOL_GATE_APPROVAL`, `PI_TOOL_GATE_WORKFLOW`, read only in a process marked `PI_SUBAGENT`). A subagent's branch records override them, so a forked subagent keeps the forked branch's modes. Subagents are headless: a dialog its gate opens is cancelled and reported to the parent as a blocker, never forwarded to you.
 - **pi-plan-mode**: provides plan mode in the cycle (above). The classifier may receive the active branch's stored approved-plan snapshot (up to 12,000 characters), not the mutable plan file. The next user message expires that snapshot; a new approval can establish another. It is context subordinate to current instructions and permission rules, not blanket permission.
-- **pi-status-footer**: shows workflow as a bold lowercase `work`, `chat`, `plan` or `exec` landmark, separate from Approvals and the gate tally. Badge hues depend on the theme; explanations and key hints stay subdued. During a blocked dialog the compact row retains the badge when available, subject to terminal width.
+- **pi-status-footer**: shows workflow as a bold lowercase `work`, `chat` or `plan` landmark, separate from Approvals and the gate tally. Badge hues depend on the theme; explanations and key hints stay subdued. During a blocked dialog the compact row retains the badge when available, subject to terminal width.
 
 ## Limitations
 

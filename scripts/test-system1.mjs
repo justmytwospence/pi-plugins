@@ -93,7 +93,7 @@ try {
   const pickerInput = { task: 'Research this task', conversation: '', cwd: dir, capabilities: [{ id: 'docs', label: 'Docs', description: 'Look up relevant API docs', fallbackSelected: false }] };
   adapters.push({ name: 'plan-mode', call: reg => plan.pickToolsWithJev({ ...pickerInput, registry: reg }), off: reg => plan.pickToolsWithJev({ ...pickerInput, capabilities: [], registry: reg }) });
   const effortAdapters = [];
-  for (const name of ['plan-mode', 'tool-gate']) {
+  for (const name of ['plan-mode']) {
     const { judgeTaskEffort } = await jiti.import(`../packages/pi-${name}/src/task-effort.ts`);
     const input = { phase: 'plan', task: 'Investigate and design a parser fix', conversation: '', cwd: dir };
     const adapter = {
@@ -234,7 +234,7 @@ try {
   `], { cwd: root, encoding: 'utf8', env: childEnv('inherit', process.env) });
   assert.equal(subprocess.status, 0, subprocess.stderr);
   assert.equal(JSON.parse(subprocess.stdout).provider, 'system1-openai');
-  console.log(`PASS ${adapters.length} classifier paths, including both task-effort helpers: configured backends, fallback provenance, off states, missing-provider/no-fallback, stale results, cancellation and child selection inheritance (offline)`);
+  console.log(`PASS ${adapters.length} classifier paths, including the task-effort helper: configured backends, fallback provenance, off states, missing-provider/no-fallback, stale results, cancellation and child selection inheritance (offline)`);
 } finally {
   if (previous === undefined) delete process.env.PI_CODING_AGENT_DIR; else process.env.PI_CODING_AGENT_DIR = previous;
   rmSync(dir, { recursive: true, force: true });
