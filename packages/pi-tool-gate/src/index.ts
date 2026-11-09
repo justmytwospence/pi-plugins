@@ -122,6 +122,7 @@ import {
   executionReplanning, INVALID_REPLANNING, latestExecution,
 } from "./modes.ts";
 import { answerSubagentEnv, inheritedModes, SUBAGENT_ENV_CHANNEL, subagentEnv, subagentEnvHonored } from "./subagent-env.ts";
+import { effectiveDenyInsteadOfPrompting, PROMPTING_CONTINUE, PROMPTING_DISABLED, PROMPTING_ENTRY, PROMPTING_STATUS_KEY, promptingDenied, restorePromptingOverride, type PromptingOverride } from "./prompting.ts";
 import { loadRules } from "./rules.ts";
 import { agentBeforeLatestUser, approvedPlanOf, callerText, clip, clipTail, recentTexts, recentUserMessages } from "./transcript.ts";
 import { offerUserWords, resultText } from "./user-words.ts";
@@ -173,6 +174,8 @@ export interface GateConfig extends Record<string, unknown> {
   readOnlyCommands: string[];
   /** Block a held call once with a reason for the agent before asking you; a retry asks you. */
   pushBack: boolean;
+  /** Deny calls needing permission instead of opening a tool approval dialog. */
+  denyInsteadOfPrompting: boolean;
   /** The mode a new session starts in: chat, manual, accept-edits, plan, auto or yolo. */
   defaultMode: string;
   /** Deprecated: ignored; workflow and approvals have independent fixed cycles. */
@@ -201,6 +204,7 @@ export const DEFAULT_CONFIG: GateConfig = {
   ],
   readOnlyCommands: [],
   pushBack: true,
+  denyInsteadOfPrompting: false,
   defaultMode: "auto",
   modes: ["default", "acceptEdits", "plan", "auto"],
   cycleShortcut: "shift+tab",
@@ -493,6 +497,9 @@ export default function toolGate(pi: ExtensionAPI) {
   let config: GateConfig = DEFAULT_CONFIG;
   let workflow: BaseWorkflowMode = "work";
   let approval: ApprovalMode = "auto";
+  let promptingOverride: PromptingOverride;
+  const denyInsteadOfPrompting = () => effectiveDenyInsteadOfPrompting(promptingOverride, inheritedModes().denyInsteadOfPrompting, config.denyInsteadOfPrompting);
+  const promptingState = () => `Permission prompts: ${denyInsteadOfPrompting() ? "off" : "on"} (source: ${promptingOverride !== undefined ? "session" : inheritedModes().denyInsteadOfPrompting !== undefined ? "inherited" : "config"}).`;
   let execActive = false;
   let execReplanning = false;
   let execReplanningInvalid = false;
@@ -625,6 +632,7 @@ export default function toolGate(pi: ExtensionAPI) {
     try {
       ctx.ui.setStatus(WORKFLOW_STATUS_KEY, workflowStatus(effectiveWorkflow(), shortcut || undefined));
       ctx.ui.setStatus(MODE_STATUS_KEY, modeStatus(approval, duplicateShortcut ? undefined : approvalShortcut || undefined));
+      ctx.ui.setStatus(PROMPTING_STATUS_KEY, `permission prompts: ${denyInsteadOfPrompting() ? "off" : "on"}`);
       const flow = flows.snapshot();
       ctx.ui.setStatus("tool-gate:flow", !flowDisplayClaimed && flow.operatingMode === "linked"
         ? flow.blocked ? "Linked blocked · /flow" : `Linked ${flow.selectedFlow?.provider ?? "unavailable"}` : undefined);
@@ -711,7 +719,7 @@ export default function toolGate(pi: ExtensionAPI) {
       execReplanning: false,
     } as const;
   };
-  pi.events.on(SUBAGENT_ENV_CHANNEL, (data: unknown) => answerSubagentEnv(data, () => subagentEnv(approval, effectiveWorkflow())));
+  pi.events.on(SUBAGENT_ENV_CHANNEL, (data: unknown) => answerSubagentEnv(data, () => subagentEnv(approval, effectiveWorkflow(), denyInsteadOfPrompting())));
   const emit = (name: string, data: unknown) => {
     try { pi.events.emit(name, data); } catch { /* A listener's failure is its own. */ }
   };
@@ -789,6 +797,15 @@ export default function toolGate(pi: ExtensionAPI) {
     persist(APPROVAL_ENTRY, approval);
     status(ctx);
     broadcastApproval(previous);
+  };
+
+  const setPromptingOverride = (next: PromptingOverride, ctx: ExtensionContext) => {
+    if (promptingOverride === next) return;
+    settings.cancel("Permission prompting selected explicitly.");
+    promptingOverride = next;
+    pi.appendEntry(PROMPTING_ENTRY, { version: 1, denyInsteadOfPrompting: next ?? null });
+    invalidate();
+    status(ctx);
   };
 
   const chatNotice = () => (effectiveWorkflow() === "chat" ? chatEnterText(shortcut) : chatExitText(effectiveWorkflow()));
@@ -1065,7 +1082,10 @@ export default function toolGate(pi: ExtensionAPI) {
       }
       return;
     }
+    const previousPrompting = denyInsteadOfPrompting();
     config = loadConfig("tool-gate", DEFAULT_CONFIG, project);
+    if (previousPrompting !== denyInsteadOfPrompting()) invalidate();
+    status(hostCtx);
     const local = localGrants(loadGrants(project.main), grantsFile());
     localRules = local.rules;
     localDirs = new Map(local.dirs.map((d) => [d.key, { key: d.key, access: d.access, dir: d.dir }]));
@@ -1170,12 +1190,20 @@ export default function toolGate(pi: ExtensionAPI) {
   /** Ask the user, one dialog at a time. */
   const ask = (
     ctx: ExtensionContext,
-    q: { tool: string; input: Record<string, unknown>; held?: string; agentCase?: string; note?: string },
+    q: { tool: string; input: Record<string, unknown>; held?: string; agentCase?: string; note?: string; noUIReason: string; countHeadless?: boolean },
     offer: Offer | undefined,
   ): Promise<{ block?: boolean; reason?: string } | undefined> => {
+    if (denyInsteadOfPrompting()) return Promise.resolve(promptingDenied(q.tool, q.held));
+    // Classifier-unavailable's first refusal already accounts for a headless retry.
+    if (ctx.hasUI || q.countHeadless !== false) {
+      held++;
+      status(ctx);
+    }
+    if (!ctx.hasUI) return Promise.resolve({ block: true, reason: q.noUIReason });
     const epoch = revision;
     const run = async () => {
       if (decisionStale(epoch)) return staleResult();
+      if (denyInsteadOfPrompting()) return promptingDenied(q.tool, q.held);
       let items = offer ? [...offer.items] : [];
       /** An edit that was not a rule, to show again with what is wrong with it. */
       let draft: string | undefined;
@@ -1208,6 +1236,8 @@ export default function toolGate(pi: ExtensionAPI) {
           ...(grant ?? []),
           ...(problem ? [problem] : []),
         ].join("\n");
+        if (decisionStale(epoch)) return staleResult();
+        if (denyInsteadOfPrompting()) return promptingDenied(q.tool, q.held);
         const answer = await whileBlocked(pi.events, label, () =>
           askApproval(
             ctx,
@@ -1344,6 +1374,10 @@ export default function toolGate(pi: ExtensionAPI) {
         : ideas.length
           ? `A suggested workaround: ${ideas.join("; or ")}.`
           : "Look for a safer way: reversible, local, narrower, or previewed first.";
+      if (denyInsteadOfPrompting()) return {
+        block: true,
+        reason: `${h.reason}\n${noWorkaround ? "There is no permitted automatic workaround." : advice}\n${PROMPTING_DISABLED}\n${PROMPTING_CONTINUE}`,
+      };
       return {
         block: true,
         reason:
@@ -1355,11 +1389,8 @@ export default function toolGate(pi: ExtensionAPI) {
           "If it is not worth raising, carry on without it.",
       };
     }
-    held++;
-    status(ctx);
-    if (!ctx.hasUI) return { block: true, reason: `${h.reason}\nBlocked: there is no user to approve it.` };
     const agentCase = callerText(ctx.sessionManager.getBranch(), h.toolCallId);
-    return ask(ctx, { tool: h.tool, input: h.input, held: h.summary, agentCase: clip(agentCase, 4_000) }, h.offer);
+    return ask(ctx, { tool: h.tool, input: h.input, held: h.summary, agentCase: clip(agentCase, 4_000), noUIReason: `${h.reason}\nBlocked: there is no user to approve it.` }, h.offer);
   };
 
   const describeCall = (tool: string, input: Record<string, unknown>) => describeCallPresentation(tool, input).description;
@@ -1392,6 +1423,7 @@ export default function toolGate(pi: ExtensionAPI) {
     staleProject = undefined;
     warnedStale = false;
     config = structuredClone(DEFAULT_CONFIG);
+    promptingOverride = restorePromptingOverride(ctx.sessionManager.getBranch());
     rebuildDownloads(ctx);
     sessionRules = [];
     sessionDirs.clear();
@@ -1408,6 +1440,7 @@ export default function toolGate(pi: ExtensionAPI) {
     if (generation !== sessionGeneration) return;
     const entries = ctx.sessionManager.getBranch();
     const restored = restoreBranchModes(entries, defaults(config));
+    promptingOverride = restorePromptingOverride(entries);
     workflow = restored.workflow;
     approval = restored.approval;
     execActive = restored.execActive;
@@ -1451,6 +1484,7 @@ export default function toolGate(pi: ExtensionAPI) {
       invalidatePhaseEffort();
       invalidate();
       const restored = restoreBranchModes(ctx.sessionManager.getBranch(), defaults(config));
+      promptingOverride = restorePromptingOverride(ctx.sessionManager.getBranch());
       workflow = restored.workflow;
       approval = restored.approval;
       execActive = restored.execActive;
@@ -1464,6 +1498,7 @@ export default function toolGate(pi: ExtensionAPI) {
       flowRecordSeen = record;
       broadcastWorkflow("restore");
       broadcastApproval();
+      status(ctx);
     }
     const flow = flows.snapshot();
     if (flow.operatingMode === "linked") {
@@ -1533,12 +1568,10 @@ export default function toolGate(pi: ExtensionAPI) {
     input: Record<string, unknown>,
     p: Exclude<Plan, { kind: "allow" | "deny" }>,
   ) => {
-    held++;
-    status(ctx);
-    if (!ctx.hasUI) {
-      return { block: true, reason: `${approval === "default" ? "manual" : approval === "acceptEdits" ? "accept edits" : MODE_NAMES[approval]} mode needs the user's approval for this ${tool} call, and there is no user to ask.` };
-    }
-    return ask(ctx, { tool, input, ...(p.kind === "ask" ? { held: p.reasons.join("; ") } : {}) }, p.offer);
+    return ask(ctx, {
+      tool, input, ...(p.kind === "ask" ? { held: p.reasons.join("; ") } : {}),
+      noUIReason: `${approval === "default" ? "manual" : approval === "acceptEdits" ? "accept edits" : MODE_NAMES[approval]} mode needs the user's approval for this ${tool} call, and there is no user to ask.`,
+    }, p.offer);
   };
 
   /** A deny rule's refusal, which tells the agent who decided and not to look for a way around it. */
@@ -1556,12 +1589,9 @@ export default function toolGate(pi: ExtensionAPI) {
   const ruleOutcome = (ctx: ExtensionContext, toolCallId: string, tool: string, input: Record<string, unknown>, p: Plan) => {
     if (p.kind === "deny") return { result: deniedBy(tool, p.rule) };
     if (p.kind !== "ask" || !p.direct) return undefined;
-    held++;
-    status(ctx);
     const why = p.reasons.join("; ");
-    if (!ctx.hasUI) return { result: { block: true, reason: `tool-gate held this ${tool} call: it ${why}. There is no user to ask.` } };
     const agentCase = clip(callerText(ctx.sessionManager.getBranch(), toolCallId), 4_000);
-    return { result: ask(ctx, { tool, input, held: why, agentCase }, undefined) };
+    return { result: ask(ctx, { tool, input, held: why, agentCase, noUIReason: `tool-gate held this ${tool} call: it ${why}. There is no user to ask.` }, undefined) };
   };
 
   pi.on("tool_call", async (event, ctx) => {
@@ -1662,10 +1692,7 @@ export default function toolGate(pi: ExtensionAPI) {
         const critical = alwaysAskBash(command, shellDir(tool, input, ctx.cwd), undefined, undefined, 0, ctx.cwd)
           .filter((reason) => reason.startsWith("deletes ") || reason === "shell analysis depth exhausted (opaque command)");
         if (!critical.length) return undefined;
-        held++;
-        status(ctx);
-        if (!ctx.hasUI) return { block: true, reason: `tool-gate held this call: it ${critical.join("; ")}. There is no user to approve it.` };
-        return ask(ctx, { tool, input, held: critical.join("; ") }, undefined);
+        return ask(ctx, { tool, input, held: critical.join("; "), noUIReason: `tool-gate held this call: it ${critical.join("; ")}. There is no user to approve it.` }, undefined);
       }
 
       const p = await plan(tool, input, ctx.cwd, { judgedRead, chatChildren });
@@ -1706,8 +1733,7 @@ export default function toolGate(pi: ExtensionAPI) {
       const exactFailureKey = `${selectionKey}\0${tool}\0${JSON.stringify(input)}`;
       const previousFailure = classifierFailures.get(exactFailureKey);
       if (previousFailure) {
-        if (!ctx.hasUI) return { block: true, reason: `${previousFailure}\nBlocked: there is no user to approve it.` };
-        return ask(ctx, { tool, input, held: previousFailure, agentCase: clip(callerText(ctx.sessionManager.getBranch(), event.toolCallId), 4_000) }, undefined);
+        return ask(ctx, { tool, input, held: previousFailure, agentCase: clip(callerText(ctx.sessionManager.getBranch(), event.toolCallId), 4_000), noUIReason: `${previousFailure}\nBlocked: there is no user to approve it.`, countHeadless: false }, undefined);
       }
       const unavailable = (errorClass: string, metadata: Record<string, unknown> = {}, exhausted = false) => {
         const reason = `${CLASSIFIER_UNAVAILABLE} (${errorClass})`;
@@ -1955,9 +1981,13 @@ export default function toolGate(pi: ExtensionAPI) {
   const openFlowControl = (ctx: ExtensionContext) => flows.snapshot().operatingMode === "linked" ? showModePicker(ctx) : showFlowPicker(ctx);
   const showApprovals = async (ctx: ExtensionContext) => {
     settings.cancel("Approvals picker opened.");
-    if (!ctx.hasUI) { ctx.ui.notify(`Approvals: ${MODE_NAMES[approval]}. Usage: /approvals [auto|yolo].`, "info"); return; }
-    const selected = await pick(ctx, "Approvals", ["Auto", "Yolo"]);
-    if (selected) setApproval(selected === "Auto" ? "auto" : "bypassPermissions", ctx);
+    if (!ctx.hasUI) { ctx.ui.notify(`Approvals: ${MODE_NAMES[approval]}. Usage: /approvals [auto|yolo].\n${promptingState()} Reset: /gate prompts default.`, "info"); return; }
+    const toggle = `Turn permission prompts ${denyInsteadOfPrompting() ? "on" : "off"}`;
+    const selected = await pick(ctx, `Approvals · Permission prompts: ${denyInsteadOfPrompting() ? "off" : "on"}\n/gate prompts default restores inherited/config policy.`, ["Auto", "Yolo", toggle]);
+    if (selected === toggle) {
+      setPromptingOverride(!denyInsteadOfPrompting(), ctx);
+      ctx.ui.notify(promptingState(), "info");
+    } else if (selected === "Auto" || selected === "Yolo") setApproval(selected === "Auto" ? "auto" : "bypassPermissions", ctx);
   };
   pi.registerCommand("flow", {
     description: "Operating mode: Independent or a strict provider-linked workflow",
@@ -2061,13 +2091,25 @@ export default function toolGate(pi: ExtensionAPI) {
   };
 
   pi.registerCommand("gate", {
-    description: "tool-gate: status; on (auto mode) or off (yolo mode); rules (list, add and remove permission rules; grants is the same)",
+    description: "tool-gate: status; on (auto) or off (yolo); prompts [on|off|default] (off denies, never approves); rules (list, add, remove; grants is the same)",
     getArgumentCompletions: (prefix: string) =>
-      ["status", "on", "off", "rules", "rules list", "rules add", "rules remove", "grants"]
+      ["status", "on", "off", "prompts", "prompts on", "prompts off", "prompts default", "rules", "rules list", "rules add", "rules remove", "grants"]
         .filter((o) => o.startsWith(prefix))
         .map((o) => ({ value: o, label: o })),
     handler: async (args, ctx) => {
+      hostCtx = ctx;
       const arg = args.trim();
+      if (/^prompts(\s|$)/u.test(arg)) {
+        const [, value, ...extra] = arg.split(/\s+/u);
+        if (extra.length || (value !== undefined && !["on", "off", "default"].includes(value))) {
+          ctx.ui.notify("Usage: /gate prompts [on|off|default].", "warning");
+          return;
+        }
+        await refreshRules(ctx.cwd);
+        if (value !== undefined) setPromptingOverride(value === "default" ? undefined : value === "off", ctx);
+        ctx.ui.notify(promptingState(), "info");
+        return;
+      }
       if (arg === "on" || arg === "off") {
         setApproval(arg === "on" ? "auto" : "bypassPermissions", ctx);
         ctx.ui.notify(arg === "on" ? "Auto mode on" : "Yolo approvals on; workflow guards remain active", "info");
@@ -2087,6 +2129,7 @@ export default function toolGate(pi: ExtensionAPI) {
       ctx.ui.notify(
         [
           `Workflow: ${effectiveWorkflow()} (${shortcut || "no key"}). Approvals: ${MODE_NAMES[approval]} (${MODE_DESCRIPTIONS[approval]}) (${duplicateShortcut ? "no key" : approvalShortcut || "no key"}).`,
+          promptingState(),
           `${auto} auto-approved, ${pushedBack} pushed back, ${held} asked this session.`,
           `System 1: ${classifier}; push-back ${config.pushBack ? "on" : "off"}.`,
           `${rules.length} project rule${rules.length === 1 ? "" : "s"} for System 1. Permission rules for ${shown(project)}: ` +

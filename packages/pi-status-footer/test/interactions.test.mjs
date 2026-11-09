@@ -664,10 +664,10 @@ for (const width of [46, 120, 180]) for (const sidebar of [false, true]) {
   test(`index factory: actual layout, deferred capability snapshots and native input at ${width}, Sidebar ${sidebar}`, async () => {
     const f = fixture({ width, sidebar });
     f.release(); f.component.dispose(); f.footer.clear();
-    const handlers = new Map(), listeners = new Map();
+    const handlers = new Map(), listeners = new Map(), commands = new Map();
     const paint = { fg: (_color, text) => text, bold: (text) => text };
     const entries = [{ type: "custom", customType: "personal-status-footer", data: { working: false, mcp: false } }];
-    const statuses = new Map([["workflow-mode", "workflow: work (alt+w to cycle)"], ["permission-mode", "⏵⏵ auto mode on (alt+a to cycle)"]]);
+    const statuses = new Map([["workflow-mode", "workflow: work (alt+w to cycle)"], ["permission-mode", "⏵⏵ auto mode on (alt+a to cycle)"], ["permission-prompting", "permission prompts: off"]]);
     let renderDepth = 0, discoveries = 0, mounted, editorFactory = () => f.editor;
     const flow = { version: 1, operatingMode: "independent", revision: 0, workflow: "work", ready: true, guardAvailable: true, transitioning: false };
     const bus = {
@@ -720,7 +720,7 @@ for (const width of [46, 120, 180]) for (const sidebar of [false, true]) {
           return result?.then ? result.then(() => handler(...args)) : handler(...args);
         } : handler);
         return () => {};
-      }, registerCommand() {}, registerEntryRenderer() {},
+      }, registerCommand(name, command) { commands.set(name, command); }, registerEntryRenderer() {},
       getThinkingLevel: () => "high", getSessionName: () => "", appendEntry() {},
       getCommands() { assert.equal(renderDepth, 0, "command discovery is outside render"); return []; },
       getAllTools: () => [],
@@ -746,6 +746,27 @@ for (const width of [46, 120, 180]) for (const sidebar of [false, true]) {
     // Rerender the real pane width after the direct component probe.
     await flush();
     const draft = f.editor.getText();
+    const promptPoint = pointFor("prompts off");
+    f.terminal.click(promptPoint.x, promptPoint.y); await tick();
+    assert.equal(f.calls.at(-1), "approvals");
+    const afterPrompt = f.calls.length;
+    f.terminal.click(promptPoint.x - 1, promptPoint.y); await tick();
+    assert.equal(f.calls.length, afterPrompt, "separator is not a hit");
+    await commands.get("status").handler("details", ctx);
+    assert.match(f.notify.mock.calls.at(-1)[0], /Permission prompts: off\./);
+    statuses.set("permission-prompting", "unrecognized");
+    await commands.get("status").handler("details", ctx);
+    assert.match(f.notify.mock.calls.at(-1)[0], /Permission prompts: unknown\./);
+    statuses.set("permission-prompting", "permission prompts: on");
+    await commands.get("status").handler("details", ctx);
+    assert.match(f.notify.mock.calls.at(-1)[0], /Permission prompts: on\./);
+    await flush();
+    f.tui.resetTextSelection();
+    const onPoint = pointFor("prompts on");
+    f.terminal.click(onPoint.x, onPoint.y); await tick();
+    assert.equal(f.calls.at(-1), "approvals");
+    f.tui.resetTextSelection();
+    await flush();
     const point = pointFor("physical");
     f.terminal.click(point.x, point.y); await tick();
     assert.equal(f.calls.at(-1), "native.model");
@@ -777,6 +798,7 @@ for (const width of [46, 120, 180]) for (const sidebar of [false, true]) {
     f.tui.setFocus(f.editor);
     bus.emit("herdr:blocked", { active: true }); await flush();
     f.terminal.click(planPoint.x, planPoint.y); await tick();
+    f.terminal.click(promptPoint.x, promptPoint.y); await tick();
     assert.equal(f.calls.length, beforeTask + 1, "blocked layout retires old hits");
     bus.emit("herdr:blocked", { active: false });
     flow.workflow = "work"; delete flow.replanning; flow.revision++;
@@ -792,7 +814,7 @@ for (const width of [46, 120, 180]) for (const sidebar of [false, true]) {
         totals: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, compactions: 0, started: Date.now() } }, width, paint);
     } finally { renderDepth--; }
     assert.equal(discoveries, beforeChild);
-    assert.doesNotMatch(child.join("\n"), /alt\+p|alt\+w|alt\+a|work|physical/);
+    assert.doesNotMatch(child.join("\n"), /alt\+p|alt\+w|alt\+a|work|physical|prompts off/);
     // Native prompts are nested, and only the final end permits activation again.
     handlers.get("ui_prompt_start")({}, ctx); handlers.get("ui_prompt_start")({}, ctx);
     handlers.get("ui_prompt_end")({}, ctx);

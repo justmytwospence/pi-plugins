@@ -52,6 +52,12 @@ Explicit `/flow independent` preserves the unfinished task, its draft and Plan r
 
 Pi reserves Shift+Tab for thinking-level cycling and skips a conflicting extension shortcut; it does not override the stock binding. Rebind `app.thinking.cycle` in `~/.pi/agent/keybindings.json` (for example to `alt+t`), or set `workflowShortcut` to another key. The event contracts are in [`src/modes.ts`](./src/modes.ts).
 
+### Permission prompts
+
+`/gate prompts` reports whether permission prompts are on and their source; `/gate prompts off` denies calls requiring permission instead of opening a dialog, `/gate prompts on` restores prompting, and `/gate prompts default` clears the branch override. The latest branch override wins over the explicitly inherited parent value, then merged config. The root `denyInsteadOfPrompting` setting defaults to `false`. Subagents inherit either value as their starting policy and may override it on their own branch. `/approvals` keeps Auto and Yolo and offers a prompt toggle without changing approval mode.
+
+Turning prompts off does not approve calls or change workflow, classification, deny rules or critical-removal checks. Auto still evaluates calls; manual and accept-edits still require their usual permissions; Yolo still bypasses ordinary approvals but not critical holds. A call requiring permission receives a non-terminating refusal and does not run. With `pushBack: true`, the first hold still explains the reason and seeks a workaround; escalation is denied instead of prompting. With `pushBack: false`, the first approval-required hold is denied. Questions, authentication, plan review and approval, and explicitly opened settings pickers remain interactive.
+
 ## How auto mode works
 
 ### 1. Clear cases, no model call
@@ -286,8 +292,9 @@ This is a heuristic over arguments. Paths a program builds at runtime are not se
 - `/gate` or `/gate status`: both axes and keys, counts, the classifier model, push-back setting, project rules, permission rules and folder grants.
 - `/gate rules [list | add | remove]`: [permission rules](#gate-rules) and folder grants: list them, pick one to remove it, or add one. `/gate grants` is the same.
 - `/gate on`, `/gate off`: auto mode, or yolo mode.
+- `/gate prompts [on|off|default]`: report or override permission prompting for this branch. Off denies calls needing approval; default restores inherited/config policy, not necessarily on.
 
-Separate `workflow-mode` and `permission-mode` statuses show the axes and their keys; under auto approvals the gate also reports `gate: N auto · P pushed back · M asked`. Every call the classifier judges is recorded in the session as a `tool-gate:decision` custom entry (tool, clipped arguments, scores, failures, action, latency, input tokens), for tuning thresholds. The classifier's token usage is added to the gated tool's result.
+Separate `workflow-mode` and `permission-mode` statuses show the axes and their keys; `permission-prompting` publishes `permission prompts: on` or `permission prompts: off`. Under auto approvals the gate also reports `gate: N auto · P pushed back · M asked`. Every call the classifier judges is recorded in the session as a `tool-gate:decision` custom entry (tool, clipped arguments, scores, failures, action, latency, input tokens), for tuning thresholds. The classifier's token usage is added to the gated tool's result.
 
 ## Project rules
 
@@ -332,6 +339,7 @@ The `agents` locations are shared with the opencode and Claude Code ports of thi
   ],
   "readOnlyCommands": [],
   "pushBack": true,
+  "denyInsteadOfPrompting": false,
   "persistence": { "project": "local", "userWritable": true },
   "defaultWorkflow": "work",
   "defaultApproval": "auto",
@@ -358,7 +366,8 @@ The `agents` locations are shared with the opencode and Claude Code ports of thi
 - `thresholds`: the bars described above; `readOnly` is the chat and plan workflows' read check, the rest are the auto approval judge's.
 - `allowTools`: tools that never need a decision. Setting it replaces the whole default list.
 - `readOnlyCommands`: extra programs treated as read-only in shell commands.
-- `pushBack`: `false` asks you on the first hold instead of blocking it once.
+- `pushBack`: `false` asks you on the first hold instead of blocking it once, unless permission prompting is off.
+- `denyInsteadOfPrompting`: `true` denies calls that need a permission prompt and lets the agent continue. Defaults to `false`; branch overrides and inherited subagent values take precedence.
 - `directories`: the [directory policy](#directories). Read and write grants are additive; other lists replace defaults, so to add a private root, repeat the default ones.
 
 ## Requirements and costs

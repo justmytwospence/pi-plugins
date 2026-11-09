@@ -1943,6 +1943,36 @@ test("the permission mode gets its own row in its color; plan runs point at /pla
   assert.deepEqual(mod.absorbStatuses(new Map([["permission-mode", "something else"]]), { claudeRow: false }).rest, ["something else"]);
 });
 
+test("permission prompting is exact, optional, and prioritized on the approvals row", () => {
+  const absorb = text => mod.absorbStatuses(new Map(text === undefined ? [] : [["permission-prompting", text]]), { claudeRow: false });
+  assert.equal(absorb(undefined).permissionPrompts, undefined);
+  for (const text of ["permission prompts: maybe", "permission prompts: ON", "permission prompts: on extra"]) {
+    assert.deepEqual(absorb(text), { rest: [text] });
+  }
+  for (const disposition of ["on", "off"]) {
+    const a = absorb(`permission prompts: ${disposition}`);
+    assert.deepEqual(a, { permissionPrompts: disposition, rest: [] });
+    for (const workflow of ["work", "exec"]) for (const linked of [false, true]) for (const width of [46, 120, 180]) {
+      const s = { ...fixture(), ...a, statuses: ["Gate 100 auto · 200 pushed back · 300 asked"],
+        workflow: { kind: workflow }, mode: mod.parseModeStatus("⏵⏵ auto mode on (alt+a to cycle)"),
+        actions: { "approvals.open": {} },
+        ...(linked ? { flow: { version: 1, operatingMode: "linked", workflow, ready: true, selectedFlow: { provider: "test" } } } : {}) };
+      const rows = mod.renderFooter(s, width, theme).map(plain);
+      const row = rows.find(line => line.includes(`prompts ${disposition}`));
+      assert.ok(row && row.includes("auto"), `${width}: ${rows.join("\n")}`);
+      assert.ok(rows.every(line => visibleWidth(line) <= width));
+      assert.equal(mod.renderFooter({ ...s, compact: true }, width, theme).length, 1);
+      assert.doesNotMatch(mod.renderFooter({ ...s, compact: true }, width, theme).map(plain).join("\n"), /prompts (on|off)/);
+      const absent = mod.renderFooter({ ...s, mode: undefined }, width, theme).map(plain);
+      assert.ok(!absent.some(line => line.includes(`prompts ${disposition}`)));
+    }
+    const roles = [];
+    mod.renderFooter({ ...fixture(), ...a, statuses: [], mode: mod.parseModeStatus("⏵⏵ auto mode on") }, 120, { fg: (role, text) => { roles.push([role, text]); return text; }, bold: text => text });
+    assert.ok(roles.some(([role, text]) => role === (disposition === "off" ? "warning" : "muted") && text === `prompts ${disposition}`));
+  }
+  assert.ok(!mod.renderFooter({ ...fixture(), mode: mod.parseModeStatus("⏵⏵ auto mode on") }, 120, theme).map(plain).some(line => line.includes("prompts")));
+});
+
 test("pi-plan-mode's exec workflow preserves a separate approvals row", () => {
   const absorbed = mod.absorbStatuses(new Map([
     ["permission-mode", "⏵⏵ auto mode on (shift+tab to cycle)"],

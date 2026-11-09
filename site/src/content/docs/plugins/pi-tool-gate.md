@@ -95,6 +95,12 @@ Default classifier thresholds hold unrequested calls at 0.9 irreversible probabi
 
 By default, a held call first returns an explanation to the agent rather than asking you. A retry of the identical call, or another held call in the same family during that user turn, asks for approval. The agent can instead narrow, preview or abandon the operation.
 
+## Permission prompts
+
+`/gate prompts` reports the current state and source. `/gate prompts off` denies calls requiring permission rather than opening a dialog; `/gate prompts on` restores prompting, and `/gate prompts default` clears the branch override. The latest branch override takes precedence over the explicitly inherited subagent value, then merged configuration. The root `denyInsteadOfPrompting` setting defaults to `false`; children inherit either value as their starting policy and may override it on their branch. The `/approvals` picker keeps Auto and Yolo and offers a prompt toggle without changing approval mode.
+
+This does not approve calls or change workflow, classification, deny rules or critical-removal protections. Auto still evaluates calls; manual and accept-edits retain their usual permission requirements; Yolo bypasses ordinary approvals but not critical holds. A call requiring permission receives a non-terminating refusal and does not run. With `pushBack: true`, the first hold still explains the reason and seeks a workaround, but escalation is denied instead of prompting; with `pushBack: false`, the first approval-required hold is denied. Questions, authentication, plan review and approval, and explicitly opened settings pickers remain interactive.
+
 ## Approvals and commands
 
 The interactive dialog shows the call and why it was held. Its rows are **Allow once**, then, when rules can name the call, **Allow rule for this session**, **in this project** and **everywhere**, **Edit the rule...**, then **Block** and **Block with a message**, whose text goes to the agent with the refusal. The rule itself is in the question (`Rule: Bash(git push:*)`), not in the rows, which stay under 42 characters so phone clients read them. Fixed-rule holds, including downloaded code, offer only Allow once and the blocks. Esc blocks; `n` opens the message field; Ctrl+O expands long content. Bash is displayed as a command, file edits as a diff, and other tool arguments as bounded, indented fields. The final question includes explicit Action and Target lines, including in RPC and forwarded subagent questions; an unavailable target is marked Not specified. This changes presentation only: tool arguments and policy data retain their original structured values.
@@ -184,6 +190,7 @@ This `.pi/tool-gate.json` keeps the standard checks but asks immediately instead
 {
   "enabled": true,
   "pushBack": false,
+  "denyInsteadOfPrompting": false,
   "jev": {
     "enabled": true,
     "provider": "typesafe",

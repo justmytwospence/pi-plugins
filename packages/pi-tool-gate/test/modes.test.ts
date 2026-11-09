@@ -17,6 +17,10 @@ import { SETTINGS_CYCLE_CHANNEL, settingsCycles } from "../src/settings-cycle.ts
 import { ProviderFlowController } from "../src/provider-flows.ts";
 import { declareReadOnlyCalls } from "../src/read-only-call.ts";
 import { fakeJev, harness, userEntry } from "./harness.ts";
+import { PROMPTING_ENTRY, PROMPTING_STATUS_KEY } from "../src/prompting.ts";
+import { inheritedModes, PROMPTING_ENV, subagentEnv } from "../src/subagent-env.ts";
+
+const approvalsQuestion = (state: "on" | "off") => `Approvals · Permission prompts: ${state}\n/gate prompts default restores inherited/config policy.`;
 
 let configDir: string;
 beforeEach(() => {
@@ -231,11 +235,11 @@ describe("workflow and approval ownership", () => {
   test("bare pickers have undecorated short rows and use the blocked helper", async () => {
     const { h, ctx } = await start(setup());
     h.pi.events.emit(PLAN_PROVIDER, { planFile: "/tmp/plan.md" });
-    for (const [command, options, answer] of [["mode", ["Work", "Chat", "Plan", "Operating mode..."], "Chat"], ["approvals", ["Auto", "Yolo"], "Yolo"]] as const) {
+    for (const [command, options, answer] of [["mode", ["Work", "Chat", "Plan", "Operating mode..."], "Chat"], ["approvals", ["Auto", "Yolo", "Turn permission prompts off"], "Yolo"]] as const) {
       ctx.ui.selectAnswers.push(answer);
       const before = h.events.length;
       await h.commands.get(command).handler("", ctx);
-      expect(ctx.ui.selects.at(-1)?.title).toBe(command === "mode" ? "Workflow" : "Approvals");
+      expect(ctx.ui.selects.at(-1)?.title).toBe(command === "mode" ? "Workflow" : approvalsQuestion("on"));
       expect(ctx.ui.selects.at(-1)?.options).toEqual(options);
       expect(h.events.slice(before).filter(e => e.channel === "herdr:blocked").map(e => e.data.active)).toEqual([true, false]);
     }
@@ -915,7 +919,7 @@ describe("flow commands, protocol and optional footer actions", () => {
     expect(s.h.entries).toHaveLength(before);
     s.ctx.ui.selectAnswers.push(undefined);
     await actions["approvals.open"]!.run();
-    expect(s.ctx.ui.selects.at(-1)).toEqual({ title: "Approvals", options: ["Auto", "Yolo"] });
+    expect(s.ctx.ui.selects.at(-1)).toEqual({ title: approvalsQuestion("on"), options: ["Auto", "Yolo", "Turn permission prompts off"] });
     expect(s.ctx.ui.status.get(MODE_STATUS_KEY)).toContain("auto");
     await s.h.emit("session_tree", {}, s.ctx);
     const selects = s.ctx.ui.selects.length;
@@ -1172,6 +1176,150 @@ describe("workflow notices are independent of approvals", () => {
   });
 });
 
+describe("permission prompting controls and lifecycle", () => {
+  test("commands report source, persist booleans and reset, and publish exact status independently of approvals", async () => {
+    configure({ denyInsteadOfPrompting: true });
+    const { h, ctx } = await start(setup());
+    const gate = h.commands.get("gate");
+    expect(ctx.ui.status.get(PROMPTING_STATUS_KEY)).toBe("permission prompts: off");
+    await gate.handler("prompts", ctx);
+    expect(ctx.ui.notes.at(-1)?.message).toBe("Permission prompts: off (source: config).");
+    await gate.handler("prompts on", ctx);
+    expect(ctx.ui.notes.at(-1)?.message).toBe("Permission prompts: on (source: session).");
+    expect(ctx.ui.status.get(PROMPTING_STATUS_KEY)).toBe("permission prompts: on");
+    await gate.handler("prompts off", ctx);
+    expect(ctx.ui.notes.at(-1)?.message).toBe("Permission prompts: off (source: session).");
+    await gate.handler("prompts default", ctx);
+    expect(ctx.ui.notes.at(-1)?.message).toBe("Permission prompts: off (source: config).");
+    expect(h.entries.filter(e => e.customType === PROMPTING_ENTRY).map(e => e.data)).toEqual([
+      { version: 1, denyInsteadOfPrompting: false }, { version: 1, denyInsteadOfPrompting: true }, { version: 1, denyInsteadOfPrompting: null },
+    ]);
+    expect(h.entries.some(e => e.customType === APPROVAL_ENTRY || e.customType === WORKFLOW_ENTRY)).toBe(false);
+    await gate.handler("status", ctx);
+    expect(ctx.ui.notes.at(-1)?.message).toContain("Permission prompts: off (source: config).");
+    expect(gate.description).toContain("off denies, never approves");
+    expect(gate.getArgumentCompletions("prompts").map((c: any) => c.value)).toEqual(["prompts", "prompts on", "prompts off", "prompts default"]);
+  });
+
+  test("invalid arguments and identical overrides neither persist nor cancel a pending settings preview", async () => {
+    const { h, ctx } = await start(setup());
+    const gate = h.commands.get("gate");
+    await gate.handler("prompts off", ctx);
+    const settings = settingsCycles(h.pi);
+    h.pi.events.emit(MODE_CYCLE, {});
+    expect(settings.snapshot()?.phase).toBe("pending");
+    const before = h.entries.length;
+    for (const arg of ["prompts off", "prompts", "prompts nope", "prompts off extra", "prompts default extra", "prompts on off"]) {
+      await gate.handler(arg, ctx);
+      expect(h.entries).toHaveLength(before);
+      expect(settings.snapshot()?.phase).toBe("pending");
+      if (arg.includes("extra") || arg === "prompts nope" || arg === "prompts on off") {
+        expect(ctx.ui.notes.at(-1)).toEqual({ message: "Usage: /gate prompts [on|off|default].", type: "warning" });
+      }
+    }
+    await gate.handler("prompts on", ctx);
+    expect(settings.snapshot()).toMatchObject({ phase: "cancelled", reason: "Permission prompting selected explicitly." });
+    expect(ctx.ui.status.get(MODE_STATUS_KEY)).toContain("auto");
+    expect(ctx.ui.status.get(PROMPTING_STATUS_KEY)).toBe("permission prompts: on");
+    await settings.flush();
+    expect(ctx.ui.status.get(MODE_STATUS_KEY)).toContain("auto");
+  });
+
+  test("the explicit picker and footer action toggle only prompting, retain short options and show reset guidance", async () => {
+    const { h, ctx } = await start(setup());
+    await h.commands.get("mode").handler("chat", ctx);
+    await h.commands.get("approvals").handler("yolo", ctx);
+    const action = queryFooterActions(h.pi.events)["approvals.open"]!;
+    for (const state of ["on", "off"] as const) {
+      const toggle = `Turn permission prompts ${state === "on" ? "off" : "on"}`;
+      ctx.ui.selectAnswers.push(toggle);
+      await action.run();
+      expect(ctx.ui.selects.at(-1)).toEqual({ title: approvalsQuestion(state), options: ["Auto", "Yolo", toggle] });
+      expect(ctx.ui.selects.at(-1)!.options.every((option: string) => option.length <= 42)).toBe(true);
+      expect(ctx.ui.status.get(MODE_STATUS_KEY)).toContain("yolo");
+      expect(ctx.ui.status.get(WORKFLOW_STATUS_KEY)).toContain("chat");
+      expect(ctx.ui.status.get(PROMPTING_STATUS_KEY)).toBe(`permission prompts: ${state === "on" ? "off" : "on"}`);
+    }
+  });
+
+  test("headless approvals status includes disposition and reset without a picker", async () => {
+    const { h, ctx } = await start(setup());
+    ctx.hasUI = false;
+    await h.commands.get("gate").handler("prompts off", ctx);
+    await h.commands.get("approvals").handler("", ctx);
+    expect(ctx.ui.selects).toHaveLength(0);
+    expect(ctx.ui.notes.at(-1)?.message).toContain("Permission prompts: off (source: session).");
+    expect(ctx.ui.notes.at(-1)?.message).toContain("/gate prompts default");
+  });
+
+  test("branch moves, resets, reload and a new session never leak the previous override", async () => {
+    const { h, ctx, branch } = await start(setup());
+    const gate = h.commands.get("gate");
+    await gate.handler("prompts off", ctx);
+    branch.push(entry(PROMPTING_ENTRY, { version: 1, denyInsteadOfPrompting: true }));
+    await h.emit("session_tree", {}, ctx);
+    expect(ctx.ui.status.get(PROMPTING_STATUS_KEY)).toBe("permission prompts: off");
+    const reloaded = await start(setup([...branch]));
+    expect(reloaded.ctx.ui.status.get(PROMPTING_STATUS_KEY)).toBe("permission prompts: off");
+    branch.push(entry(PROMPTING_ENTRY, { version: 1, denyInsteadOfPrompting: false }));
+    await h.emit("session_tree", {}, ctx);
+    expect(ctx.ui.status.get(PROMPTING_STATUS_KEY)).toBe("permission prompts: on");
+    configure({ denyInsteadOfPrompting: true });
+    branch.push(entry(PROMPTING_ENTRY, { version: 1, denyInsteadOfPrompting: null }));
+    await h.emit("session_tree", {}, ctx);
+    await gate.handler("prompts", ctx);
+    expect(ctx.ui.notes.at(-1)?.message).toBe("Permission prompts: off (source: config).");
+    branch.splice(0, branch.length, userEntry("another branch"));
+    configure({ denyInsteadOfPrompting: false });
+    await h.emit("session_tree", {}, ctx);
+    expect(ctx.ui.status.get(PROMPTING_STATUS_KEY)).toBe("permission prompts: on");
+    await gate.handler("prompts off", ctx);
+    await h.emit("session_start", {}, ctx);
+    expect(ctx.ui.status.get(PROMPTING_STATUS_KEY)).toBe("permission prompts: on");
+  });
+
+  test("late fresh-bootstrap metadata adopts prompting with the flow, including absence of an override", async () => {
+    const { h, ctx, branch } = await start(setup());
+    await h.commands.get("gate").handler("prompts off", ctx);
+    branch.push(entry(FLOW_ENTRY, { version: 1, operatingMode: "independent", revision: 1 }));
+    await h.emit("input", { source: "extension", text: "fresh" }, ctx);
+    expect(ctx.ui.status.get(PROMPTING_STATUS_KEY)).toBe("permission prompts: on");
+    branch.push(entry(FLOW_ENTRY, { version: 1, operatingMode: "independent", revision: 2 }), entry(PROMPTING_ENTRY, { version: 1, denyInsteadOfPrompting: true }));
+    await h.emit("before_agent_start", {}, ctx);
+    expect(ctx.ui.status.get(PROMPTING_STATUS_KEY)).toBe("permission prompts: off");
+  });
+
+  test("approval/workflow cycles and legacy gate on/off preserve the independent disposition", async () => {
+    const { h, ctx } = await start(setup());
+    await h.commands.get("gate").handler("prompts off", ctx);
+    for (const channel of [MODE_CYCLE, WORKFLOW_CYCLE, MODE_CYCLE, WORKFLOW_CYCLE]) {
+      h.pi.events.emit(channel, {});
+      await settingsCycles(h.pi).flush();
+      expect(ctx.ui.status.get(PROMPTING_STATUS_KEY)).toBe("permission prompts: off");
+    }
+    for (const arg of ["off", "on"]) {
+      await h.commands.get("gate").handler(arg, ctx);
+      expect(ctx.ui.status.get(PROMPTING_STATUS_KEY)).toBe("permission prompts: off");
+    }
+  });
+
+  test.each(["true", "false"])("a subagent explicitly inherits prompting %s with configured true", async value => {
+    configure({ denyInsteadOfPrompting: true });
+    vi.stubEnv("PI_SUBAGENT", "1");
+    vi.stubEnv(PROMPTING_ENV, value);
+    const { h, ctx } = await start(setup());
+    await h.commands.get("gate").handler("prompts", ctx);
+    expect(ctx.ui.notes.at(-1)?.message).toBe(`Permission prompts: ${value === "true" ? "off" : "on"} (source: inherited).`);
+    expect(subagentEnv("auto", "work", value === "true")[PROMPTING_ENV]).toBe(value);
+  });
+
+  test.each(["", "TRUE", "FALSE", "1", "0", "null", "nope"])("invalid inherited prompting %j is ignored", value => {
+    expect(inheritedModes({ PI_SUBAGENT: "1", [PROMPTING_ENV]: value })).toEqual({});
+    expect(inheritedModes({ [PROMPTING_ENV]: "true" })).toEqual({});
+    expect(inheritedModes({ [PROMPTING_ENV]: "false" })).toEqual({});
+  });
+});
+
 describe("subagents inherit approvals", () => {
   const request = (h: ReturnType<typeof harness>, probe = false) => {
     const req: any = { version: 1, env: {}, ...(probe ? { probe: true } : {}) };
@@ -1181,12 +1329,14 @@ describe("subagents inherit approvals", () => {
   test("a parent passes its approval down, and chat to children of chat or plan", async () => {
     const { h, ctx } = await start(setup());
     h.pi.events.emit(PLAN_PROVIDER, { planFile: "/tmp/plan.md" });
-    expect(request(h)).toEqual({ PI_TOOL_GATE_APPROVAL: "auto" });
+    expect(request(h)).toEqual({ PI_TOOL_GATE_APPROVAL: "auto", [PROMPTING_ENV]: "false" });
+    await h.commands.get("gate").handler("prompts off", ctx);
+    expect(request(h)).toEqual({ PI_TOOL_GATE_APPROVAL: "auto", [PROMPTING_ENV]: "true" });
     await h.commands.get("approvals").handler("yolo", ctx);
-    expect(request(h)).toEqual({ PI_TOOL_GATE_APPROVAL: "bypassPermissions" });
+    expect(request(h)).toEqual({ PI_TOOL_GATE_APPROVAL: "bypassPermissions", [PROMPTING_ENV]: "true" });
     for (const mode of ["chat", "plan"]) {
       await h.commands.get("mode").handler(mode, ctx);
-      expect(request(h)).toEqual({ PI_TOOL_GATE_APPROVAL: "bypassPermissions", PI_TOOL_GATE_WORKFLOW: "chat" });
+      expect(request(h)).toEqual({ PI_TOOL_GATE_APPROVAL: "bypassPermissions", PI_TOOL_GATE_WORKFLOW: "chat", [PROMPTING_ENV]: "true" });
     }
     expect(request(h, true)).toEqual({});
   });
@@ -1194,23 +1344,36 @@ describe("subagents inherit approvals", () => {
     vi.stubEnv("PI_SUBAGENT", "1");
     vi.stubEnv("PI_TOOL_GATE_APPROVAL", "bypassPermissions");
     vi.stubEnv("PI_TOOL_GATE_WORKFLOW", "chat");
+    vi.stubEnv(PROMPTING_ENV, "true");
     const child = await start(setup());
+    expect(child.ctx.ui.status.get(PROMPTING_STATUS_KEY)).toBe("permission prompts: off");
+    await child.h.commands.get("gate").handler("prompts", child.ctx);
+    expect(child.ctx.ui.notes.at(-1)?.message).toBe("Permission prompts: off (source: inherited).");
+    await child.h.commands.get("gate").handler("prompts on", child.ctx);
+    expect(child.ctx.ui.status.get(PROMPTING_STATUS_KEY)).toBe("permission prompts: on");
+    await child.h.commands.get("gate").handler("prompts default", child.ctx);
+    expect(child.ctx.ui.status.get(PROMPTING_STATUS_KEY)).toBe("permission prompts: off");
     expect(child.ctx.ui.status.get(MODE_STATUS_KEY)).toContain("yolo");
     expect(child.ctx.ui.status.get(WORKFLOW_STATUS_KEY)).toContain("chat");
-    const forked = await start(setup([entry(APPROVAL_ENTRY, { version: 1, mode: "auto" }), entry(WORKFLOW_ENTRY, { version: 1, mode: "work" })]));
+    const forked = await start(setup([entry(APPROVAL_ENTRY, { version: 1, mode: "auto" }), entry(WORKFLOW_ENTRY, { version: 1, mode: "work" }), entry(PROMPTING_ENTRY, { version: 1, denyInsteadOfPrompting: false })]));
     expect(forked.ctx.ui.status.get(MODE_STATUS_KEY)).toContain("auto");
     expect(forked.ctx.ui.status.get(WORKFLOW_STATUS_KEY)).toContain("work");
+    expect(forked.ctx.ui.status.get(PROMPTING_STATUS_KEY)).toBe("permission prompts: on");
   });
   test("outside a subagent, or with an unknown value, the variables change nothing", async () => {
     vi.stubEnv("PI_TOOL_GATE_APPROVAL", "bypassPermissions");
     vi.stubEnv("PI_TOOL_GATE_WORKFLOW", "chat");
+    vi.stubEnv(PROMPTING_ENV, "true");
     const plain = await start(setup());
+    expect(plain.ctx.ui.status.get(PROMPTING_STATUS_KEY)).toBe("permission prompts: on");
     expect(plain.ctx.ui.status.get(MODE_STATUS_KEY)).toContain("auto");
     expect(plain.ctx.ui.status.get(WORKFLOW_STATUS_KEY)).toContain("work");
     vi.stubEnv("PI_SUBAGENT", "1");
     vi.stubEnv("PI_TOOL_GATE_APPROVAL", "yolo");
     vi.stubEnv("PI_TOOL_GATE_WORKFLOW", "work");
+    vi.stubEnv(PROMPTING_ENV, "TRUE");
     const odd = await start(setup());
+    expect(odd.ctx.ui.status.get(PROMPTING_STATUS_KEY)).toBe("permission prompts: on");
     expect(odd.ctx.ui.status.get(MODE_STATUS_KEY)).toContain("auto");
     expect(odd.ctx.ui.status.get(WORKFLOW_STATUS_KEY)).toContain("work");
   });

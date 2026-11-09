@@ -8,6 +8,7 @@ import { APPROVAL_MODES, type ApprovalMode } from "./modes.ts";
 export const SUBAGENT_ENV_CHANNEL = "pi-plugins.subagent-env.v1";
 export const APPROVAL_ENV = "PI_TOOL_GATE_APPROVAL";
 export const WORKFLOW_ENV = "PI_TOOL_GATE_WORKFLOW";
+export const PROMPTING_ENV = "PI_TOOL_GATE_DENY_INSTEAD_OF_PROMPTING";
 
 export interface SubagentEnvRequest {
   version: 1;
@@ -18,8 +19,8 @@ export interface SubagentEnvRequest {
 }
 
 /** What a child about to start inherits from this session's modes. */
-export function subagentEnv(approval: ApprovalMode, workflow: string): Record<string, string> {
-  return { [APPROVAL_ENV]: approval, ...(workflow === "chat" || workflow === "plan" ? { [WORKFLOW_ENV]: "chat" } : {}) };
+export function subagentEnv(approval: ApprovalMode, workflow: string, denyInsteadOfPrompting: boolean): Record<string, string> {
+  return { [APPROVAL_ENV]: approval, [PROMPTING_ENV]: String(denyInsteadOfPrompting), ...(workflow === "chat" || workflow === "plan" ? { [WORKFLOW_ENV]: "chat" } : {}) };
 }
 
 /**
@@ -48,11 +49,12 @@ export function answerSubagentEnv(data: unknown, env: () => Record<string, strin
  * The starting modes this process inherited as a subagent; nothing outside one (`PI_SUBAGENT`), so
  * a stray variable in an ordinary session changes nothing.
  */
-export function inheritedModes(env: NodeJS.ProcessEnv = process.env): { approval?: ApprovalMode; workflow?: "chat" } {
+export function inheritedModes(env: NodeJS.ProcessEnv = process.env): { approval?: ApprovalMode; workflow?: "chat"; denyInsteadOfPrompting?: boolean } {
   if (!env.PI_SUBAGENT) return {};
   const approval = env[APPROVAL_ENV];
   return {
     ...(APPROVAL_MODES.includes(approval as ApprovalMode) ? { approval: approval as ApprovalMode } : {}),
     ...(env[WORKFLOW_ENV] === "chat" ? { workflow: "chat" as const } : {}),
+    ...(env[PROMPTING_ENV] === "true" || env[PROMPTING_ENV] === "false" ? { denyInsteadOfPrompting: env[PROMPTING_ENV] === "true" } : {}),
   };
 }

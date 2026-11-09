@@ -90,6 +90,7 @@ export interface Snapshot {
   quotas: Quota[]; unavailableQuota?: string; providerUsage?: ProviderUsage[]; providerUsageMore?: number; statuses: string[]; now: number;
   /** Folded in from companion extensions' statuses when they are installed. */
   mode?: PermissionModeStatus;
+  permissionPrompts?: "on" | "off";
   workflow?: WorkflowStatus;
   /** pi-plan-mode's exec workflow detail after `exec mode on · `, empty when no detail is published. */
   exec?: string;
@@ -270,7 +271,7 @@ export function parseModeStatus(text: string): PermissionModeStatus | undefined 
   return { kind: MODE_KINDS[match[2]], label: `${glyph} ${match[2]} on`, ...(match[3] ? { key: match[3] } : {}) };
 }
 
-export interface AbsorbedStatuses { workflow?: WorkflowStatus; mode?: PermissionModeStatus; exec?: string; lean?: string; cache?: string; extraBilled?: number; stashed?: boolean; headsUp?: { kind: string; text: string; more: number }; marimo?: MarimoStatus[]; lens?: LensStatus; bg?: BgItem[]; pressure?: PressureItem[]; /** Another extension owns the `mcp` status. */ mcp?: boolean; rest: string[] }
+export interface AbsorbedStatuses { workflow?: WorkflowStatus; mode?: PermissionModeStatus; permissionPrompts?: "on" | "off"; exec?: string; lean?: string; cache?: string; extraBilled?: number; stashed?: boolean; headsUp?: { kind: string; text: string; more: number }; marimo?: MarimoStatus[]; lens?: LensStatus; bg?: BgItem[]; pressure?: PressureItem[]; /** Another extension owns the `mcp` status. */ mcp?: boolean; rest: string[] }
 // Statuses from our own companion extensions that read better inside the footer
 // rows they describe. Each is optional: absent extensions publish nothing, and a
 // status whose text no longer matches the expected shape falls through to the
@@ -320,6 +321,10 @@ export function absorbStatuses(statuses: ReadonlyMap<string, string>, options: {
     if (pressure) { result.pressure = pressure; continue; }
     const workflow = key === "workflow-mode" ? parseWorkflowStatus(plainText) : undefined;
     if (workflow) { result.workflow = workflow; continue; }
+    if (key === "permission-prompting" && (plainText === "permission prompts: on" || plainText === "permission prompts: off")) {
+      result.permissionPrompts = plainText === "permission prompts: on" ? "on" : "off";
+      continue;
+    }
     const mode = key === "permission-mode" ? parseModeStatus(plainText) : undefined;
     if (mode) {
       if (mode.kind === "chat" || mode.kind === "plan") result.workflow ??= { kind: mode.kind, ...(mode.key ? { key: mode.key } : {}) };
@@ -978,6 +983,7 @@ export function layoutFooter(snapshot: Snapshot, width: number, theme: Paint): F
     { ...partsSegment([
       { text: theme.bold(theme.fg(modeColor, MODE_NAMES[approval.kind])) + (approval.kind === "manual" || approval.kind === "acceptEdits" ? theme.fg("muted", " (legacy)") : ""), action: action("approvals.open") },
     ], 120), atomic: !!pending("approvals") },
+    partsSegment(s.permissionPrompts ? [{ text: theme.fg(s.permissionPrompts === "off" ? "warning" : "muted", `prompts ${s.permissionPrompts}`), action: action("approvals.open") }] : [], 125),
     { text: gateStatus ? clean(gateStatus) : "", short: gateStatus?.replace(/^Gate (\d+) auto · (\d+) pushed back · (\d+) asked$/u, "Gate $1/$2/$3"), priority: 60 },
   ], s.primaryKeys?.approvals ?? approval.key, action("approvals.open"));
 
@@ -1183,6 +1189,7 @@ export default function statusFooter(pi: ExtensionAPI): void {
   let discoveredFlow: FlowSnapshot | undefined;
   let discoveredSystem1: System1Status | undefined;
   let prepared: Snapshot | undefined;
+  let liveStatuses: (() => ReadonlyMap<string, string>) | undefined;
   let refreshSnapshot: (() => void) | undefined;
   const stageReasoning = () => {
     const context = ctx;
@@ -1735,7 +1742,7 @@ export default function statusFooter(pi: ExtensionAPI): void {
       context: current.getContextUsage() ?? { tokens: null, contextWindow: physicalModel?.contextWindow ?? 0, percent: null },
       totals, cacheHit, git: { ...git, branch: git.branch ?? branch ?? undefined },
       quotas, unavailableQuota, providerUsage: usage.rows, providerUsageMore: usage.more,
-      statuses: absorbed.rest, workflow: absorbed.workflow, mode: absorbed.mode, exec: absorbed.exec, lean: absorbed.lean, cache: absorbed.cache, extraBilled: absorbed.extraBilled,
+      statuses: absorbed.rest, workflow: absorbed.workflow, mode: absorbed.mode, permissionPrompts: absorbed.permissionPrompts, exec: absorbed.exec, lean: absorbed.lean, cache: absorbed.cache, extraBilled: absorbed.extraBilled,
       stash: absorbed.stashed ? { text: stashedPrompt() } : undefined,
       headsUp: absorbed.headsUp,
       marimo: absorbed.marimo, lens: absorbed.lens, bg: absorbed.bg, pressure: absorbed.pressure, borderGauge, compact: blockedHolds > 0,
@@ -1759,7 +1766,7 @@ export default function statusFooter(pi: ExtensionAPI): void {
       ...main,
       // Main's mutable controls and policy are not the viewed agent's state.
       flow: undefined, system1: undefined, actions: undefined, settingsCycle: undefined, primaryKeys: undefined, readOnly: true,
-      workflow: undefined, mode: undefined, exec: undefined,
+      workflow: undefined, mode: undefined, permissionPrompts: undefined, exec: undefined,
       cache: undefined, lean: undefined,
       cwd: session.cwd, provider: session.provider, model: session.model, thinking: session.thinking,
       oauth: false, quotas, unavailableQuota, providerUsage: usage.rows, providerUsageMore: usage.more,
@@ -1781,6 +1788,8 @@ export default function statusFooter(pi: ExtensionAPI): void {
       // getGitBranch can initialize SDK disk-backed state. Read it here and on
       // its subscription, never from render (including child chrome).
       let branch = footerData.getGitBranch();
+      const getStatuses = () => footerData.getExtensionStatuses();
+      liveStatuses = getStatuses;
       const refresh = (clock = true) => {
         if (!current()) return;
         discoveredFlow = queryFlow(pi.events, true);
@@ -1826,6 +1835,7 @@ export default function statusFooter(pi: ExtensionAPI): void {
         if (requestRender === render) requestRender = undefined;
         if (releaseFooter === dispose) releaseFooter = undefined;
         if (refreshSnapshot === render) refreshSnapshot = undefined;
+        if (liveStatuses === getStatuses) liveStatuses = undefined;
         component.dispose();
         if (footerControls === component) footerControls = undefined;
         unsubscribe();
@@ -2058,6 +2068,7 @@ export default function statusFooter(pi: ExtensionAPI): void {
           `Model: ${context.model?.provider ?? "unknown"}/${context.model?.id ?? "unknown"}${context.model?.provider === "waterfall" && selectedPhysical ? ` → ${selectedPhysical.provider}/${selectedPhysical.id}` : ""}; reasoning: ${pi.getThinkingLevel()}.`,
           `Context: ${usage?.tokens == null ? "unknown" : tokens(usage.tokens)} of ${tokens(usage?.contextWindow ?? context.model?.contextWindow ?? 0)} tokens; ${usage?.percent == null ? "usage unknown" : `${percent(usage.percent)} used`}. This is Pi's estimate.`,
           `Cache reuse: ${cacheHit === undefined ? "not measured" : percent(cacheHit)} of the latest measured prompt on this branch/model.`,
+          `Permission prompts: ${absorbStatuses(liveStatuses?.() ?? new Map(), { claudeRow: false }).permissionPrompts ?? "unknown"}.`,
           `Estimated session cost: ${money(totals.cost)} across recorded assistant, tool, summary and warming usage on all branches. This is not an invoice.`,
           `Recorded tokens: ${tokens(totals.input)} input, ${tokens(totals.output)} output, ${tokens(totals.cacheRead)} cache reads, ${tokens(totals.cacheWrite)} cache writes.`,
           git.unavailable ? "Git status: git unavailable." : git.notRepository ? "Git status: outside a Git repository." : !git.branch ? "Git status: git unavailable." : `Git status: ${git.changed} changed paths; ${git.staged} staged, ${git.unstaged} unstaged, ${git.untracked} untracked, ${git.conflicts} conflicts (counts can overlap). ${git.branch.startsWith("detached:") ? "" : git.upstreamMissing ? "Upstream: upstream missing (" + git.upstream + "; cached ref unavailable, no fetch)." : `Upstream: ${git.upstream ?? "no upstream"}; ${git.ahead} ahead, ${git.behind} behind (cached, no fetch).`}`,

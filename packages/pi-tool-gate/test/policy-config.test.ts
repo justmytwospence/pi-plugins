@@ -5,7 +5,7 @@ import { loadConfig, policyErrors, policyFiles } from "../src/policy-config.ts";
 import type { ProjectContext } from "../src/project.ts";
 import { editDirectoryGrant } from "../src/permissions.ts";
 
-const defaults: Record<string, unknown> = { enabled: true, jev: { model: "jev-latest", timeoutMs: 1500 }, list: ["a"] };
+const defaults: Record<string, unknown> = { enabled: true, denyInsteadOfPrompting: false, jev: { model: "jev-latest", timeoutMs: 1500 }, list: ["a"] };
 
 const dirs: string[] = [];
 afterEach(() => {
@@ -42,6 +42,25 @@ test("active shared policy and main local policy override users without inheriti
   expect(loadConfig("tool-gate", defaults, project)).toEqual({ ...defaults, source: "active", jev: { model: "user", timeoutMs: 10 } });
   write(path.join(main, ".pi/tool-gate.local.json"), { source: "local", jev: { timeoutMs: 20 } });
   expect(loadConfig("tool-gate", defaults, project)).toEqual({ ...defaults, source: "local", jev: { model: "user", timeoutMs: 20 } });
+});
+
+test("prompting defaults to false, user true and project false follow existing config precedence", () => {
+  const { cwd, root } = setup();
+  expect(loadConfig("tool-gate", defaults, cwd)).toEqual(defaults);
+  write(path.join(root, "xdg/agents/tool-gate.json"), { denyInsteadOfPrompting: true, jev: { timeoutMs: 42 } });
+  expect(loadConfig("tool-gate", defaults, cwd)).toEqual({ ...defaults, denyInsteadOfPrompting: true, jev: { model: "jev-latest", timeoutMs: 42 } });
+  write(path.join(cwd, ".pi/tool-gate.json"), { denyInsteadOfPrompting: false });
+  expect(loadConfig("tool-gate", defaults, cwd)).toEqual({ ...defaults, jev: { model: "jev-latest", timeoutMs: 42 } });
+});
+
+test.each(["true", "false", 0, 1, null, [], {}])("wrong-typed prompting %j preserves the earlier boolean and unrelated fields", invalid => {
+  const { cwd, root } = setup();
+  const user = path.join(root, "pi/tool-gate.json");
+  write(user, { denyInsteadOfPrompting: invalid });
+  expect(loadConfig("tool-gate", defaults, cwd)).toEqual(defaults);
+  write(user, { denyInsteadOfPrompting: true });
+  write(path.join(cwd, ".pi/tool-gate.json"), { denyInsteadOfPrompting: invalid, enabled: false, list: ["project"] });
+  expect(loadConfig("tool-gate", defaults, cwd)).toEqual({ ...defaults, denyInsteadOfPrompting: true, enabled: false, list: ["project"] });
 });
 
 test("directory read/write grants union and deduplicate defaults and every policy scope", () => {

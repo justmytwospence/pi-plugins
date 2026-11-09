@@ -20,7 +20,7 @@ const execLabels = ['Revisit plan', 'Execution status', 'Use Independent mode'];
 const replanLabels = ['Keep planning', 'Execution status', 'Stop implementation', 'Use Independent mode'];
 const specs = [
   { name: '/mode picker', command: 'mode', question: 'Workflow', labels: ['Work', 'Chat', 'Plan', 'Operating mode...'] },
-  { name: '/approvals picker', command: 'approvals', question: 'Approvals', labels: ['Auto', 'Yolo'] },
+  ...['on', 'off'].map(prompting => ({ name: `/approvals picker (prompts ${prompting})`, command: 'approvals', prompting, labels: ['Auto', 'Yolo', `Turn permission prompts ${prompting === 'on' ? 'off' : 'on'}`] })),
   { name: '/flow picker', command: 'flow', question: 'Operating mode', labels: flowLabels },
   { name: 'linked /flow picker', command: 'flow', linked: true, question: 'Operating mode', labels: flowLabels },
   { name: 'linked /mode picker', command: 'mode', linked: true, question: 'Workflow · Linked anthropic', labels: [...linkedLabels, 'Change provider...', 'Use Independent mode'] },
@@ -56,6 +56,7 @@ export async function gatePickerDialogs({ toolGate, ExtensionSelectorComponent }
       const entries = [
         { type: 'custom', id: 'workflow', customType: 'tool-gate:workflow', data: { version: 1, mode: 'work' } },
         { type: 'custom', id: 'approvals', customType: 'tool-gate:approvals', data: { version: 1, mode: 'auto' } },
+        ...(spec.prompting ? [{ type: 'custom', id: 'prompting', customType: 'tool-gate:prompting', data: { version: 1, denyInsteadOfPrompting: spec.prompting === 'off' } }] : []),
         ...(spec.linked ? [{ type: 'custom', id: 'flow', customType: 'tool-gate:flow', data: {
           version: 1, operatingMode: 'linked', revision: 1,
           selectedFlow: { provider: models[0].provider, anchorModel: models[0].id,
@@ -86,6 +87,8 @@ export async function gatePickerDialogs({ toolGate, ExtensionSelectorComponent }
             if (spec.blockedQuestion) {
               assert.match(title, /blocked/iu, 'blocked Linked mode must not present a healthy workflow picker');
               assert.match(title, /\/flow independent/u, 'blocked picker question includes the recovery command');
+            } else if (spec.prompting) {
+              assert.equal(title, `Approvals · Permission prompts: ${spec.prompting}\n/gate prompts default restores inherited/config policy.`);
             } else assert.equal(title, spec.question);
             assert.deepEqual(options, spec.labels);
             assert.ok(options.every(label => visibleWidth(label) <= 42), 'native options fit the phone without unguttered wrapping');

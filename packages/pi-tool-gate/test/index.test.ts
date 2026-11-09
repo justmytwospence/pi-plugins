@@ -1,11 +1,11 @@
-import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import { AgentSession } from "@earendil-works/pi-coding-agent";
 import { downloadsOf } from "../src/downloads.ts";
-import toolGate, { blockedBy, CLASSIFIER_UNAVAILABLE, DECLINED, DECLINED_WITH_MESSAGE, DECLINED_WITH_MESSAGE_END, DEFAULT_CONFIG, judgeStateOf, scriptOfCall } from "../src/index.ts";
+import toolGate, { blockedBy, declinedMessage, CLASSIFIER_UNAVAILABLE, DECLINED, DECLINED_WITH_MESSAGE, DECLINED_WITH_MESSAGE_END, DEFAULT_CONFIG, judgeStateOf, scriptOfCall } from "../src/index.ts";
 import { APPROVAL_ENTRY, WORKFLOW_ENTRY, WORKFLOW_SET, WORKFLOW_CYCLE, MODE_CYCLE, MODE_CHANGED, MODE_SET, PLAN_PROVIDER } from "../src/modes.ts";
 import { SETTINGS_REASONING_COMMITTED, settingsCycles } from "../src/settings-cycle.ts";
 import * as selectionUsage from "@justmytwospence/pi-subscription-usage";
@@ -18,6 +18,8 @@ import { FLOW_TRANSITION } from "../src/provider-flows.ts";
 import { SYSTEM1_CHANGED } from "../src/system1.js";
 import { WORKAROUNDS } from "../src/judge.ts";
 import { assistantEntry, fakeJev, harness, usage, userEntry } from "./harness.ts";
+import { PROMPTING_DISABLED, PROMPTING_STATUS_KEY } from "../src/prompting.ts";
+import * as views from "../src/view.ts";
 
 let configDir: string;
 beforeEach(() => {
@@ -1220,7 +1222,7 @@ describe("awaited Linked gate transitions", () => {
     await actions["flow.open"]!.run();
     expect(s.ctx.ui.selects.at(-1)?.options).toEqual(["Work · general", "Chat · general", "Plan · planner", "Change provider...", "Use Independent mode"]);
     await actions["approvals.open"]!.run();
-    expect(s.ctx.ui.selects.at(-1)?.options).toEqual(["Auto", "Yolo"]);
+    expect(s.ctx.ui.selects.at(-1)?.options).toEqual(["Auto", "Yolo", "Turn permission prompts off"]);
     expect(s.h.entries.some(entry => entry.customType === APPROVAL_ENTRY)).toBe(false);
     await s.h.emit("session_shutdown", {}, s.ctx);
   });
@@ -1416,6 +1418,262 @@ describe("Git checkout resolution", () => {
     expect(await h.emit("tool_call", call("read", { path: "a.ts" }), ctx)).toMatchObject({
       block: true, reason: expect.stringContaining("git rev-parse --show-toplevel timed out after 2s"),
     });
+  });
+});
+
+describe("deny instead of prompting", () => {
+  const configure = (value: Record<string, unknown>) => {
+    const dir = path.join(configDir, "pi");
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(path.join(dir, "tool-gate.json"), JSON.stringify(value));
+  };
+  const denied = (result: any) => {
+    expect(result).toMatchObject({ block: true, reason: expect.stringContaining(PROMPTING_DISABLED) });
+    expect(result).not.toHaveProperty("terminate");
+    expect(result.reason).not.toMatch(/user declined|make your case|ask them to approve|identical call in that same message/iu);
+    const error = { isError: true, content: [{ type: "text", text: result.reason }] };
+    expect(blockedBy(error)).toBe("gate");
+    expect(declinedMessage(error)).toBeUndefined();
+  };
+  const noPermissionUI = (s: ReturnType<typeof setup>) => {
+    expect(s.ctx.ui.selects).toHaveLength(0);
+    expect(s.ctx.ui.custom).not.toHaveBeenCalled();
+    expect(s.h.events.filter(e => e.channel === "herdr:blocked")).toHaveLength(0);
+    expect(s.h.entries.some(e => /grant/u.test(e.customType))).toBe(false);
+    expect(existsSync(path.join(s.ctx.cwd, ".pi", "tool-gate.local.json"))).toBe(false);
+  };
+
+  test.each([true, false])("read-only, explicit allows, safe classifier calls and human question/plan tools still run (UI=%s)", async hasUI => {
+    configure({ denyInsteadOfPrompting: true, permissions: { allow: ["Bash(npm publish)"] } });
+    const s = setup(safe, { hasUI });
+    await s.h.emit("session_start", {}, s.ctx);
+    for (const event of [call("read", { path: "src/a.ts" }), call("bash", { command: "git status" }), call("bash", { command: "npm publish" }), call("bash", { command: "npm test" }),
+      ...["ask_user_question", "plan_mode_question", "plan_mode_complete", "enter_plan_mode", "exit_plan_mode"].map(tool => call(tool, {})),
+    ]) expect(await s.h.emit("tool_call", event, s.ctx)).toBeUndefined();
+    expect(s.jev.calls).toHaveLength(1);
+    expect(s.ctx.ui.selects).toHaveLength(0);
+  });
+
+  for (const hasUI of [true, false]) {
+    test.each([
+      { name: "direct ask", tool: "bash", input: { command: "npm publish" }, permissions: { ask: ["Bash(npm publish)"] } },
+      { name: "manual write", tool: "write", input: { path: "src/a.ts", content: "x" }, mode: "manual" },
+      { name: "accept-edits non-edit", tool: "bash", input: { command: "npm publish" }, mode: "accept-edits" },
+      { name: "yolo critical removal", tool: "bash", input: { command: "rm -rf /" }, mode: "yolo" },
+    ])(`$name uses the common suppressed boundary (UI=${hasUI})`, async ({ tool, input, mode, permissions }) => {
+      configure({ denyInsteadOfPrompting: true, ...(permissions ? { permissions } : {}) });
+      const s = setup(risky, { hasUI });
+      s.ctx.ui.custom = vi.fn(async () => undefined);
+      await s.h.emit("session_start", {}, s.ctx);
+      if (mode) await s.h.commands.get("approvals").handler(mode, s.ctx);
+      const preview = vi.spyOn(views, "callView");
+      try {
+        denied(await s.h.emit("tool_call", call(tool, input), s.ctx));
+        denied(await s.h.emit("tool_call", call(tool, input, "retry"), s.ctx));
+        noPermissionUI(s);
+        expect(preview).not.toHaveBeenCalled();
+        expect(s.jev.calls).toHaveLength(0);
+        await s.h.commands.get("gate").handler("status", s.ctx);
+        expect(s.ctx.ui.notes.at(-1)?.message).toContain("0 asked this session.");
+      } finally { preview.mockRestore(); }
+    });
+
+    for (const pushBack of [true, false]) {
+      test.each([
+        { name: "risky", tool: "bash", input: { command: "npm publish" }, retry: { command: "npm publish --tag next" } },
+        { name: "always-held", tool: "bash", input: { command: "git push --force origin main" }, retry: { command: "git push --force origin main:main" } },
+        { name: "directory", tool: "write", input: { path: "/outside-project/config", content: "x" }, retry: { path: "/outside-project/config", content: "y" } },
+        { name: "derived path", tool: "write", input: { path: "/generated/config", content: "x" }, retry: { path: "/generated/config", content: "y" } },
+      ])(`$name retains first pushback and blocks retries (pushBack=${pushBack}, UI=${hasUI})`, async ({ name, tool, input, retry }) => {
+        configure({ denyInsteadOfPrompting: true, pushBack, directories: { derived: [{ path: "/generated", hint: "Edit its source, then regenerate." }] } });
+        const s = setup(risky, { hasUI });
+        s.ctx.ui.custom = vi.fn(async () => undefined);
+        await s.h.emit("session_start", {}, s.ctx);
+        denied(await s.h.emit("tool_call", call(tool, input), s.ctx));
+        const afterFirst = s.jev.calls.length;
+        // Identical retry and another held call of the same family both bypass the dialog.
+        denied(await s.h.emit("tool_call", call(tool, input, "same"), s.ctx));
+        denied(await s.h.emit("tool_call", call(tool, retry, "family"), s.ctx));
+        noPermissionUI(s);
+        const workarounds = s.jev.calls.filter(c => c.questions.workaround);
+        expect(workarounds).toHaveLength(pushBack && name !== "derived path" ? 1 : 0);
+        if (name === "derived path" || name === "directory" || name === "always-held") expect(s.jev.calls).toHaveLength(afterFirst);
+        await s.h.commands.get("gate").handler("status", s.ctx);
+        expect(s.ctx.ui.notes.at(-1)?.message).toContain(`${pushBack ? 1 : 0} pushed back, 0 asked this session.`);
+      });
+    }
+
+    test(`classifier-unavailable initial accounting stays separate and suppressed retries add no asked count (UI=${hasUI})`, async () => {
+      configure({ denyInsteadOfPrompting: true });
+      const s = setup({ stopReason: "error", errorMessage: "unavailable", answers: {} }, { hasUI });
+      s.ctx.ui.custom = vi.fn(async () => undefined);
+      await s.h.emit("session_start", {}, s.ctx);
+      const event = call("bash", { command: "npm test" });
+      expect(await s.h.emit("tool_call", event, s.ctx)).toMatchObject({ block: true, reason: expect.stringContaining(CLASSIFIER_UNAVAILABLE) });
+      denied(await s.h.emit("tool_call", event, s.ctx));
+      denied(await s.h.emit("tool_call", event, s.ctx));
+      noPermissionUI(s);
+      expect(s.jev.calls).toHaveLength(1);
+      await s.h.commands.get("gate").handler("status", s.ctx);
+      expect(s.ctx.ui.notes.at(-1)?.message).toContain("1 asked this session.");
+    });
+  }
+
+  test.each([
+    { name: "held escalation", config: { pushBack: false }, mode: "auto", command: "git push --force origin main", ending: "\nBlocked: there is no user to approve it.", count: 1 },
+    { name: "manual escalation", config: {}, mode: "manual", command: "npm test", ending: "manual mode needs the user's approval for this bash call, and there is no user to ask.", count: 1 },
+    { name: "accept-edits escalation", config: {}, mode: "accept-edits", command: "npm publish", ending: "accept edits mode needs the user's approval for this bash call, and there is no user to ask.", count: 1 },
+    { name: "ask rule", config: { permissions: { ask: ["Bash(npm publish)"] } }, mode: "auto", command: "npm publish", ending: ". There is no user to ask.", count: 1 },
+    { name: "yolo removal", config: {}, mode: "yolo", command: "rm -rf /", ending: ". There is no user to approve it.", count: 1 },
+    { name: "unavailable retry", config: {}, mode: "auto", command: "npm test", ending: "\nBlocked: there is no user to approve it.", count: 0 },
+  ])("ordinary headless $name retains its refusal and legacy counter", async ({ name, config, mode, command, ending, count }) => {
+    configure(config);
+    const s = setup(name === "unavailable retry" ? { stopReason: "error", errorMessage: "unavailable", answers: {} } : risky, { hasUI: false });
+    await s.h.emit("session_start", {}, s.ctx);
+    await s.h.commands.get("approvals").handler(mode, s.ctx);
+    const event = call("bash", { command });
+    const initial = name === "unavailable retry" ? await s.h.emit("tool_call", event, s.ctx) as any : undefined;
+    const result: any = await s.h.emit("tool_call", event, s.ctx);
+    expect(result).toMatchObject({ block: true });
+    expect(result.reason.endsWith(ending)).toBe(true);
+    if (name === "unavailable retry") expect(result.reason).toBe(`${initial.reason}${ending}`);
+    expect(result.reason).not.toContain(PROMPTING_DISABLED);
+    expect(s.ctx.ui.selects).toHaveLength(0);
+    expect(s.h.events.filter(e => e.channel === "herdr:blocked")).toHaveLength(0);
+    await s.h.commands.get("gate").handler("status", s.ctx);
+    expect(s.ctx.ui.notes.at(-1)?.message).toContain(`${count + (initial ? 1 : 0)} asked this session.`);
+  });
+
+  test("user-only workaround explicitly states there is no permitted automatic workaround without retry instructions", async () => {
+    configure({ denyInsteadOfPrompting: true });
+    const s = setup(risky);
+    const classify = (s.jev.registry as any).classify;
+    (s.jev.registry as any).classify = (model: any, context: any, options: any) => context.questions.workaround
+      ? { model: model.id, stopReason: "stop", answers: { workaround: { type: "choice", choice: "user_only", probabilities: { user_only: 0.9, skip: 0.1 }, confidence: 0.9 } } }
+      : classify(model, context, options);
+    await s.h.emit("session_start", {}, s.ctx);
+    const result: any = await s.h.emit("tool_call", call("bash", { command: "npm publish" }), s.ctx);
+    denied(result);
+    expect(result.reason).toContain("There is no permitted automatic workaround.");
+    expect(result.reason).not.toContain("The user has not been asked");
+  });
+
+  test("explicit denies and chat/plan restrictions still take priority over prompt disposition", async () => {
+    configure({ denyInsteadOfPrompting: true, permissions: { deny: ["Bash(npm publish)"] } });
+    const s = setup(safe);
+    await s.h.emit("session_start", {}, s.ctx);
+    for (const mode of ["auto", "manual", "accept-edits", "yolo"]) {
+      await s.h.commands.get("approvals").handler(mode, s.ctx);
+      expect(await s.h.emit("tool_call", call("bash", { command: "npm publish" }), s.ctx)).toMatchObject({ block: true, reason: expect.stringContaining("deny rule") });
+    }
+    await s.h.commands.get("mode").handler("chat", s.ctx);
+    expect(await s.h.emit("tool_call", call("write", { path: "src/a.ts", content: "x" }), s.ctx)).toMatchObject({ block: true, reason: expect.stringContaining("Chat mode is on") });
+    s.h.pi.events.emit(PLAN_PROVIDER, { available: true, planFile: path.join(s.ctx.cwd, "plan.md") });
+    await s.h.commands.get("mode").handler("plan", s.ctx);
+    expect(await s.h.emit("tool_call", call("write", { path: "src/a.ts", content: "x" }), s.ctx)).toMatchObject({ block: true, reason: expect.stringContaining("Plan mode is on") });
+    expect(await s.h.emit("tool_call", call("write", { path: "plan.md", content: "plan" }), s.ctx)).toBeUndefined();
+    for (const tool of ["ask_user_question", "plan_mode_question", "plan_mode_complete"]) expect(await s.h.emit("tool_call", call(tool, {}), s.ctx)).toBeUndefined();
+    expect(s.ctx.ui.selects).toHaveLength(0);
+  });
+
+  test("restoring prompts on brings back the ordinary pushback then retry approval", async () => {
+    configure({ denyInsteadOfPrompting: true });
+    const s = setup(risky);
+    await s.h.emit("session_start", {}, s.ctx);
+    denied(await s.h.emit("tool_call", call("bash", { command: "npm publish" }), s.ctx));
+    await s.h.commands.get("gate").handler("prompts on", s.ctx);
+    expect(await s.h.emit("tool_call", call("bash", { command: "npm publish" }), s.ctx)).toMatchObject({ block: true, reason: expect.stringContaining("make your case") });
+    s.ctx.ui.selectAnswers.push("Allow once");
+    expect(await s.h.emit("tool_call", call("bash", { command: "npm publish" }), s.ctx)).toBeUndefined();
+    expect(s.ctx.ui.selects).toHaveLength(1);
+    expect(s.ctx.ui.status.get("tool-gate")).toBe("gate: 0 auto · 2 pushed back · 1 asked");
+  });
+
+  test.each(["verdict", "workaround"])("changing prompting rejects a pending %s without an approval or authorization", async stage => {
+    const s = setup(stage === "verdict" ? safe : risky);
+    await s.h.emit("session_start", {}, s.ctx);
+    const entered = deferred<void>();
+    const answer = deferred<any>();
+    const classify = (s.jev.registry as any).classify;
+    (s.jev.registry as any).classify = async (model: any, context: any, options: any) => {
+      if (stage === "verdict" || context.questions.workaround) { entered.resolve(); return answer.promise; }
+      return classify(model, context, options);
+    };
+    const pending = s.h.emit("tool_call", call("bash", { command: stage === "verdict" ? "npm test" : "npm publish" }), s.ctx);
+    await entered.promise;
+    await s.h.commands.get("gate").handler("prompts off", s.ctx);
+    answer.resolve({ model: "jev-latest", stopReason: "stop", answers: stage === "verdict" ? safe : workaround, usage: usage(700) });
+    expect(await pending).toMatchObject({ block: true, reason: expect.stringContaining("reevaluated") });
+    expect(s.ctx.ui.selects).toHaveLength(0);
+    expect(await s.h.emit("tool_result", { toolCallId: "t1", toolName: "bash", content: [], isError: false }, s.ctx)).toBeUndefined();
+  });
+
+  test("a queued approval and an open answer become stale and cannot preview, display or save a grant", async () => {
+    const s = setup(safe);
+    await s.h.emit("session_start", {}, s.ctx);
+    await s.h.commands.get("approvals").handler("manual", s.ctx);
+    const entered = deferred<void>();
+    const answer = deferred<string>();
+    s.ctx.ui.select = vi.fn(async () => { entered.resolve(); return answer.promise; });
+    const preview = vi.spyOn(views, "callView");
+    try {
+      const first = s.h.emit("tool_call", call("bash", { command: "npm test" }), s.ctx);
+      await entered.promise;
+      const queued = s.h.emit("tool_call", call("bash", { command: "npm publish" }, "queued"), s.ctx);
+      // Manual does not publish counters: /gate status proves both requests reached ask().
+      await vi.waitFor(async () => {
+        await s.h.commands.get("gate").handler("status", s.ctx);
+        expect(s.ctx.ui.notes.at(-1)?.message).toContain("2 asked this session.");
+      });
+      await s.h.commands.get("gate").handler("prompts off", s.ctx);
+      answer.resolve("Allow rule in this project");
+      for (const result of await Promise.all([first, queued])) expect(result).toMatchObject({ block: true, reason: expect.stringContaining("reevaluated") });
+      expect(s.ctx.ui.select).toHaveBeenCalledOnce();
+      expect(preview).toHaveBeenCalledOnce();
+      await s.h.commands.get("gate").handler("prompts on", s.ctx);
+      s.ctx.ui.select = vi.fn(async () => "Block");
+      expect(await s.h.emit("tool_call", call("bash", { command: "npm test" }, "fresh"), s.ctx)).toMatchObject({ block: true });
+      expect(s.ctx.ui.select).toHaveBeenCalledOnce();
+      expect(s.h.events.filter(e => e.channel === "herdr:blocked" && e.data.active)).toHaveLength(2);
+    } finally { preview.mockRestore(); }
+  });
+
+  test("a policy revision during preview prevents the dialog from opening", async () => {
+    const s = setup(safe);
+    await s.h.emit("session_start", {}, s.ctx);
+    await s.h.commands.get("approvals").handler("manual", s.ctx);
+    const entered = deferred<void>();
+    const release = deferred<void>();
+    const original = views.callView;
+    const preview = vi.spyOn(views, "callView").mockImplementation(async (...args) => { entered.resolve(); await release.promise; return original(...args); });
+    try {
+      const pending = s.h.emit("tool_call", call("bash", { command: "npm test" }), s.ctx);
+      await entered.promise;
+      await s.h.commands.get("gate").handler("prompts off", s.ctx);
+      release.resolve();
+      expect(await pending).toMatchObject({ block: true, reason: expect.stringContaining("reevaluated") });
+      expect(s.ctx.ui.selects).toHaveLength(0);
+      expect(s.h.events.filter(e => e.channel === "herdr:blocked")).toHaveLength(0);
+    } finally { preview.mockRestore(); }
+  });
+
+  test.each([false, true])("config refresh invalidates judgments only on an effective disposition change (overridden=%s)", async overridden => {
+    configure({ denyInsteadOfPrompting: false });
+    const s = setup(safe);
+    await s.h.emit("session_start", {}, s.ctx);
+    if (overridden) await s.h.commands.get("gate").handler("prompts on", s.ctx);
+    const entered = deferred<void>();
+    const answer = deferred<any>();
+    (s.jev.registry as any).classify = async () => { entered.resolve(); return answer.promise; };
+    const pending = s.h.emit("tool_call", call("bash", { command: "npm test" }), s.ctx);
+    await entered.promise;
+    configure({ denyInsteadOfPrompting: true });
+    await s.h.commands.get("gate").handler("status", s.ctx);
+    expect(s.ctx.ui.status.get(PROMPTING_STATUS_KEY)).toBe(`permission prompts: ${overridden ? "on" : "off"}`);
+    answer.resolve({ model: "jev-latest", stopReason: "stop", answers: safe });
+    if (overridden) expect(await pending).toBeUndefined();
+    else expect(await pending).toMatchObject({ block: true, reason: expect.stringContaining("reevaluated") });
+    expect(s.ctx.ui.selects).toHaveLength(0);
   });
 });
 

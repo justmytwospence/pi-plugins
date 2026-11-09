@@ -77,9 +77,10 @@ const tui = { terminal: { rows: 40, columns: 120 }, requestRender() {} };
 
 // What stands under a dialog while it waits: pi-status-footer's one row, alone or under pi-bg's pill.
 const NOW = Date.now();
-const modeStatuses = (workflow, approval, phase) => new Map([
+const modeStatuses = (workflow, approval, phase, prompting) => new Map([
   ...(workflow ? [['workflow-mode', `workflow: ${workflow}${workflow === 'exec' ? '' : ' (shift+tab to cycle)'}`]] : []),
   ...(approval ? [['permission-mode', `⏵⏵ ${approval} mode on (alt+a to cycle)`]] : []),
+  ...(prompting ? [['permission-prompting', `permission prompts: ${prompting}`]] : []),
   ...(phase ? [['plan-exec', `exec mode on · ${phase} · 2 consultations · $0.02 consult · $0.01 review`]] : []),
 ]);
 // Detached protocol snapshots, never a second renderer or a copy of role-default policy.
@@ -150,6 +151,7 @@ function statusFooter(width, statuses, { compact = false, phase = 'idle', flow, 
       if (linked && !absorbed.exec && !flow.blocked && width >= 120) assert.match(workflow[0], /anthropic/u, 'Linked combines provider and workflow on one row');
     }
     assert.equal(approvals.length, absorbed.mode ? 1 : 0, 'Approvals keeps its own row');
+    if (absorbed.permissionPrompts && approvals.length && !readOnly && width >= 46) assert.match(approvals[0], new RegExp(`prompts ${absorbed.permissionPrompts}\\b`, 'u'), 'prompt disposition stays in the existing Approvals row');
     if (preview && width >= 46 && approvals.length) {
       const approval = preview.settings.find(item => item.key === 'approvals');
       if (approval) assert.ok(approvals[0].includes(approval.label), 'normal approval row retains the preview target without a phase suffix');
@@ -186,6 +188,10 @@ const footer = (width) => statusFooter(width, modeStatuses('plan', 'yolo'), { co
 const UNDERS = {
   footer: (width) => footer(width),
   'pill+footer': (width) => [...activity(width), ...footer(width)],
+  ...Object.fromEntries(['on', 'off'].flatMap(prompting => {
+    const rows = width => statusFooter(width, modeStatuses('plan', 'auto', undefined, prompting), { compact: true, phase: 'waiting' });
+    return [[`prompts ${prompting} blocked footer`, rows], [`prompts ${prompting} blocked pill+footer`, width => [...activity(width), ...rows(width)]]];
+  })),
   ...Object.fromEntries(['work', 'chat', 'plan', 'exec'].flatMap(workflow => {
     return ['idle', 'waiting'].flatMap(phase => {
       const rows = width => statusFooter(width, modeStatuses(workflow, 'auto'), { compact: true, phase });
@@ -212,6 +218,13 @@ const UNDERS = {
     ];
   })),
 };
+
+for (const width of [46, 120, 180]) {
+  for (const prompting of ['on', 'off']) {
+    const noProvider = statusFooter(width, modeStatuses('plan', undefined, undefined, prompting));
+    assert.doesNotMatch(noProvider.map(stripVTControlCharacters).join('\n'), /prompts (on|off)/u, 'prompt status alone must not invent an Approvals row');
+  }
+}
 
 for (const independent of [false, true]) {
   const flow = { ...flowSnapshot('plan', undefined, true), ...(independent ? { operatingMode: 'independent' } : {}) };
@@ -897,6 +910,12 @@ const FOOTERS = [
   // Notebook status slots plus the five core rows reach the deployed 13-row allowance
   // (including any activity pill/separator), rather than comparing unreadable baselines.
   { name: 'high status count', statuses: modeStatuses('plan', 'yolo'), highStatus: true },
+  ...['on', 'off'].flatMap(prompting => ['Independent', 'Linked', 'Exec'].map(mode => ({
+    name: `${mode} permission prompts ${prompting}`,
+    statuses: modeStatuses(mode === 'Exec' ? 'exec' : 'plan', 'auto', mode === 'Exec' ? 'implementing' : undefined, prompting),
+    ...(mode === 'Independent' ? {} : { flow: flowSnapshot(mode === 'Exec' ? 'exec' : 'plan') }),
+    highStatus: true,
+  }))),
   { name: 'heads-up waiting', statuses: new Map([...modeStatuses('plan', 'auto'), ['sidebar-headsup', '\u2726 heads up (2) \u00b7 risk: Main skipped the failing integration tests and reported green']]) },
   { name: 'provider ready', statuses: modeStatuses('plan', 'auto'), providerUsage: [usageReady] },
   ...scopedArgonFixtures.flatMap(({ label, usage }) => ['Independent', 'Linked', 'Exec'].flatMap(mode => [false, true].map(highStatus => ({
