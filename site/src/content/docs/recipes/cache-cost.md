@@ -52,7 +52,7 @@ Tool trimming runs before results enter context and points to a saved full-outpu
 
 ## Let effort follow the work
 
-Effort is selected at task and Linked phase boundaries, not on every message or during a run. Manual changes govern the current phase; approved implementation effort is applied without reclassification. Quota can influence automatic choices at those boundaries, but telemetry alone never changes effort. See [Choosing effort](/guides/effort/) for precedence, failure behavior and configuration.
+Effort is selected at task, plan-entry and approval boundaries, not on every message or during a run. Manual changes govern the current phase; approved implementation effort is applied without reclassification. Quota can influence automatic choices at those boundaries, but telemetry alone never changes effort. See [Choosing effort](/guides/effort/) for precedence, failure behavior and configuration.
 
 Cache guard preserves supported deliberate effort changes in request history using cache-safe `configuration_update` transport. It does not select effort, and disabling cache warnings does not disable this transport.
 

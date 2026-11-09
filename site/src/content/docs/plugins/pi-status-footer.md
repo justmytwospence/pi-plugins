@@ -11,7 +11,7 @@ plugin: pi-status-footer
 - **Controls:** `/status` details/on/all/native/working/mcp; existing model/workflow/approval keys and visible-value clicks in fullscreen Pi. `/waterfall` belongs to the optional model-router extension. No new global shortcut.
 - **Settings:** No JSON settings for modes; custom footer, active-provider limits, working stats and MCP chip on by default; selections persist in the session.
 - **Requirements, cost & privacy:** TUI; Git/quota sources optional, Nerd Font for icons. No inference calls. Authenticated usage requests send account credentials, not conversation text.
-- **Integrations & limits:** Optional companion actions, Linked workflow display and wait-message priority. Missing providers leave their controls absent. Load Vim before the footer. Regular terminals remain keyboard-operated; quota/cost estimates are not invoices and MCP is an approximation.
+- **Integrations & limits:** Optional companion actions, the routed model of a plan model pair and wait-message priority. Missing providers leave their controls absent. Load Vim before the footer. Regular terminals remain keyboard-operated; quota/cost estimates are not invoices and MCP is an approximation.
 
 Status footer replaces Pi's footer, not its task widgets or tool rendering. It keeps Pi's working indicator and only appends run statistics to its message. It emphasizes the current project, model, context usage and account limits, leaving detailed accounting available on demand.
 
@@ -36,44 +36,38 @@ The footer runs in Pi's terminal UI; print, JSON and RPC sessions do not start i
 
 The selections are stored in session metadata, excluded from model context, and survive reload/resume. New sessions start with the custom footer and both extras on. Native mode restores the display but still keeps cached account readings fresh; the working row is independent of the footer mode. Unload the extension if you do not want its background work.
 
-The first row shows project and Git state. **Independent**, the default, puts model/reasoning and workflow on separate rows. **Linked** combines workflow, provider, physical model and reasoning into one row; approvals always remain separate. [Tool gate](/plugins/pi-tool-gate/#independent-and-linked-operating-modes) owns that choice and its state, not the footer. At 60 columns and up, a one-cell inset gives every row breathing room without imposing aligned columns. Labels use natural single-space spacing. Project and model anchor the display with accent color; section labels, ordinary readings and reset countdowns stay subdued. A dim leading icon identifies every row, and a git-branch icon marks the branch. Bold readings and Pi's native thinking-level colors distinguish the model's reasoning setting. Warm caches and ready services are green; warnings and errors keep their semantic colors. Distinct pieces of information share a dim `·` separator; reset countdowns have no parentheses. Quota windows use concise `Claude` or `Codex` labels, and stale readings are muted and explicitly labeled. Recognized companion notices use sentence-case labels without colons: `Gate`, `Plan`, `Marimo`, `Background` (`Bg` when narrow) and `Pressure`. The gate's tally joins Approvals. Exec appears on the workflow row (the combined row in Linked) with its phase, counts and costs, without replacing or dimming Approvals. Standalone plan mode supplies workflow but not approvals. Plan's `/planners` hint and cache qualifiers also use dot separators. Background rows preserve service states and prioritize failed tasks over routine work. Unfamiliar publisher formats and third-party notices remain unchanged. Narrow terminals omit the decorative padding. Context follows. Where supported, the editor's top and bottom borders become the usage gauge while retaining its mode colors and scroll markers. An editor without compatible border hooks keeps its borders and gets a footer gauge instead. A [pi-subagents](/plugins/pi-subagents/) session draws this footer and editor gauge for the child: its directory, model, reasoning level, context and cost, with main's account limits and notices. Other-session chrome is read-only: it does not inherit main's Linked selection, control hints or clickable actions.
+The first row shows project and Git state. Model/reasoning and workflow sit on separate rows, and approvals stay separate. With a [plan model pair](/plugins/pi-plan-mode/#plan-model-pairs) selected (a virtual model such as `opusplan`), the model row adds the model that last answered after the pair, as `opusplan → claude-sonnet-5-1` (an example); that segment is dropped first at narrow widths. At 60 columns and up, a one-cell inset gives every row breathing room without imposing aligned columns. Labels use natural single-space spacing. Project and model anchor the display with accent color; section labels, ordinary readings and reset countdowns stay subdued. A dim leading icon identifies every row, and a git-branch icon marks the branch. Bold readings and Pi's native thinking-level colors distinguish the model's reasoning setting. Warm caches and ready services are green; warnings and errors keep their semantic colors. Distinct pieces of information share a dim `·` separator; reset countdowns have no parentheses. Quota windows use concise `Claude` or `Codex` labels, and stale readings are muted and explicitly labeled. Recognized companion notices use sentence-case labels without colons: `Gate`, `Plan`, `Marimo`, `Background` (`Bg` when narrow) and `Pressure`. The gate's tally joins Approvals. Standalone plan mode supplies workflow but not approvals. Plan's `/planners` hint and cache qualifiers also use dot separators. Background rows preserve service states and prioritize failed tasks over routine work. Unfamiliar publisher formats and third-party notices remain unchanged. Narrow terminals omit the decorative padding. Context follows. Where supported, the editor's top and bottom borders become the usage gauge while retaining its mode colors and scroll markers. An editor without compatible border hooks keeps its borders and gets a footer gauge instead. A [pi-subagents](/plugins/pi-subagents/) session draws this footer and editor gauge for the child: its directory, model, reasoning level, context and cost, with main's account limits and notices. Other-session chrome is read-only: it does not inherit main's control hints or clickable actions.
 
-Workflow is a bold lowercase landmark: `work`, `chat`, `plan` or `exec`. Their theme roles are respectively `success`, `thinkingLow`, `customMessageLabel` and `warning`; actual hues depend on the theme. The badge also marks workflow transitions in the transcript, while explanations, key hints and other secondary details remain quiet. Approvals are a separate axis, not part of the badge; their row leads with the mode (`auto`, `yolo`) in the same bold lowercase style, without a label. When published by tool-gate, `prompts on` or `prompts off` appears on that same row; clicking it opens the same Approvals picker as the mode. Missing state is not assumed to be on.
+Workflow is a bold lowercase landmark: `work`, `chat` or `plan`. Their theme roles are respectively `success`, `thinkingLow` and `customMessageLabel`; actual hues depend on the theme. The badge also marks workflow transitions in the transcript, while explanations, key hints and other secondary details remain quiet. Approvals are a separate axis, not part of the badge; their row leads with the mode (`auto`, `yolo`) in the same bold lowercase style, without a label. When published by tool-gate, `prompts on` or `prompts off` appears on that same row; clicking it opens the same Approvals picker as the mode. Missing state is not assumed to be on.
 
-While a dialog waits on you (an extension holds `herdr:blocked` on Pi's event bus, as the questionnaire, the tool gate and plan approval do), the footer shrinks to one row with no active controls or primary key hints: workflow badge when available, project, branch, model, reasoning and context percentage, plus any active phase. At narrow widths it prioritizes the badge and phase; other details can shorten or disappear. herdr-web-ui reads a Pi dialog off the screen only when no more than two lines follow its key hint, and an activity row (pi-bg's shells, subagents) may take the other. Everything else returns when the dialog closes. The event is the trigger; the footer does not require Herdr itself to be installed. A blocked Linked flow is a separate error state, not a healthy combined selection: use `/flow status`, a valid `/flow linked <provider>` or `/flow independent` for recovery.
+While a dialog waits on you (an extension holds `herdr:blocked` on Pi's event bus, as the questionnaire, the tool gate and plan approval do), the footer shrinks to one row with no active controls or primary key hints: workflow badge when available, project, branch, model, reasoning and context percentage, plus any active phase. At narrow widths it prioritizes the badge and phase; other details can shorten or disappear. herdr-web-ui reads a Pi dialog off the screen only when no more than two lines follow its key hint, and an activity row (pi-bg's shells, subagents) may take the other. Everything else returns when the dialog closes. The event is the trigger; the footer does not require Herdr itself to be installed.
 
 Terminal labels and rows on this page are examples, not screenshots.
 
 ### Control rows and key hints
 
-Each control row has one primary hint immediately after its content, as a dim ` · <key>` suffix without alignment padding: the first effective configured `app.model.select` key for the model/combined row (when it has none, the first `app.thinking.cycle` key for a reasoning model), the provider's workflow key for Independent workflow, and its approval key for Approvals. An Independent Exec row uses `/plan-exec`, not a workflow-cycle key. The layout reserves space for the hint before fitting content, but drops hints at very narrow widths to retain critical state; core control rows never wrap. Context and other telemetry rows gain no invented global keys.
+Each control row has one primary hint immediately after its content, as a dim ` · <key>` suffix without alignment padding: the first effective configured `app.model.select` key for the model row (when it has none, the first `app.thinking.cycle` key for a reasoning model), the provider's workflow key for workflow, and its approval key for Approvals. The layout reserves space for the hint before fitting content, but drops hints at very narrow widths to retain critical state; core control rows never wrap. Context and other telemetry rows gain no invented global keys.
 
 Simplified examples, omitting icons and other rows, with the [optional personal keymap](/guides/keyboard/#optional-personal-profile) (`alt+p` is not a suite default):
 
-**Independent — two model/workflow rows:**
+Two model/workflow rows:
 
 ```text
 gpt-6-sol · reasoning high · auto off · alt+p
 work · shift+tab
 ```
 
-**Linked — one combined row:**
+With a plan model pair selected, the model row also names the model that last answered:
 
 ```text
-work · openai-codex · gpt-6-sol · reasoning auto → high · alt+p
+opusplan → claude-sonnet-5-1 · reasoning high · alt+p
 ```
 
-Both modes retain a separate Approvals row, for example:
+A separate Approvals row follows, for example:
 
 ```text
 auto · alt+a
 ```
-
-During Linked replanning the combined row shows effective Plan, the actual physical model and `replanning` detail, not implementing/Exec; the task remains unfinished. The badge opens task status/choices, not an unrestricted workflow cycle. No extra footer row is added.
-
-Linked uses one flow per available provider: Work/Chat use `general`, Plan uses `planner`, and approved Exec uses `worker`. Assignments are captured when selected; reselecting the same provider explicitly refreshes them. The footer shows the native reasoning level; [phase boundaries](/guides/effort/) can recommend effort without changing assigned models. Manual reasoning controls remain available.
-
-With the custom footer enabled, the configured model-selection action opens the native picker in Independent and the combined workflow/flow picker in Linked. Native `/model` and cycle attempts outside that picker remain centrally guarded; they do not silently unlink. Use `/flow independent` to regain free model selection. Exec is approved-plan execution, including when planner and worker are the same physical model—not an item the picker or cycle can start.
 
 ### Fullscreen clicks
 
@@ -81,10 +75,9 @@ With the actual main editor focused in fullscreen Pi, a plain single left click 
 
 | Visible value | Action |
 | --- | --- |
-| Model or provider; model-row trailing hint (the effort-cycle key's hint cycles effort instead) | Native model picker in Independent; combined flow/workflow picker in Linked. |
-| Reasoning level | Stage the next reasoning level, using the same cycle as the configured native key in either operating mode. |
-| Work/Chat/Plan badge | Cycle base workflow; in Linked, stay in the selected provider. While replanning an unfinished task, open its status/task choices instead. |
-| Exec badge or `/plan-exec` hint | Inspect execution status/recovery, never launch, stop or silently complete it. |
+| Model or provider; model-row trailing hint (the effort-cycle key's hint cycles effort instead) | Native model picker. |
+| Reasoning level | Stage the next reasoning level, using the same cycle as the configured native key. |
+| Work/Chat/Plan badge | Cycle workflow. |
 | Approval value (`auto`, `yolo`, etc.) or its trailing hint | Open the approvals picker; do not silently enable Yolo. |
 | Context percentage | Open the context breakdown. |
 | `S1 Jev`, `S1 OpenAI` or `S1 unavailable` | Open the System 1 waterfall picker when its provider offers the action. |
@@ -126,7 +119,7 @@ Workflow (including standalone Plan), reasoning and approval cycles share a prev
 
 Keyboard cycles commit when all participating modifiers are released if release reporting is negotiated through the actual terminal path and the current held state is confirmed. SSH, Herdr and tmux paths are negotiated, not assumed to support it. Otherwise, including first or fast interactions while negotiation or held state is unconfirmed, unmodified keys, pointer and programmatic cycles, the final choice applies after 1000 ms of inactivity; each accepted cycle restarts that fallback. A confirmed hold has no unconditional timeout: if a release is lost with no later input, it cannot be distinguished from a continuing hold. Each batch has its own transaction; consecutive completed successful or unchanged batches reuse one UI-only history row until a boundary such as submit, an explicit choice, unrelated output or navigation. The row shows the latest batch, not an aggregate of earlier changes.
 
-With the custom footer active, the native reasoning key and footer click share staging in Independent and Linked. Without an active footer, native reasoning retains stock behavior; native model cycling is unchanged. Explicit picker, command and tool choices remain immediate, and plan/tool approvals still require confirmation.
+With the custom footer active, the native reasoning key and footer click share staging. Without an active footer, native reasoning retains stock behavior; native model cycling is unchanged. Explicit picker, command and tool choices remain immediate, and plan/tool approvals still require confirmation.
 
 An ordinary prompt flushes the pending selection before it proceeds. If application fails, the message is not sent; recover interactive text from native prompt history. The footer does not replace a newer editor draft. Leaving main focus, opening a dialog or selector, external model or relevant setting changes, session/branch navigation, compaction and shutdown/reload cancel pending previews. Restored interrupted history is never reapplied; compaction does not guarantee retention of old lines. `/status details` includes sanitized preview diagnostics.
 
@@ -172,7 +165,7 @@ There is no plugin JSON settings file for the footer modes; use the commands abo
 
 ## Optional integrations and limitations
 
-No companion is required. Cache guard contributes its clock and trimming estimate. Background work, machine pressure and notebook statuses receive dedicated rows. A pending reload from pi-reload-all leads the footer as its top row with what it waits on, Stash can show a restoration hint, pi-sidebar's waiting heads-up note gets its own row under the editor (clicking it or its key opens Sidebar), and anthropic-billing-guard can annotate the Claude limits row. Unrecognized status shapes remain unchanged rather than disappearing; workflow/model layout follows Independent or Linked, with approvals separate; an extension's `mcp` status joins the context row, and planner-run notices stay in the general status row. Without the gate/role-default provider and supported guard, the footer does not invent a Linked flow. The remote-client status allowance remains 13 rows for the whole below-editor region, including activity pills and separators; Linked's shorter core does not enlarge that budget.
+No companion is required. Cache guard contributes its clock and trimming estimate. Background work, machine pressure and notebook statuses receive dedicated rows. A pending reload from pi-reload-all leads the footer as its top row with what it waits on, Stash can show a restoration hint, pi-sidebar's waiting heads-up note gets its own row under the editor (clicking it or its key opens Sidebar), and anthropic-billing-guard can annotate the Claude limits row. Unrecognized status shapes remain unchanged rather than disappearing; model and workflow rows are separate, as are approvals; an extension's `mcp` status joins the context row, and planner-run notices stay in the general status row. The remote-client status allowance remains 13 rows for the whole below-editor region, including activity pills and separators.
 
 Load an editor replacement that does not wrap its predecessor, such as pi-vim, before this footer. A wrapping editor integration such as pi-stash does not have that ordering restriction. Disable other footer owners or uncoordinated working-message writers before using `/reload`; pi-bg's wait messages are explicitly coordinated, not a conflict; otherwise it can replace this footer or working row after startup. `/reload` is sufficient to replace footer controls; a full Pi restart should not be necessary. pi-cc-extensions in particular is superseded by the suite and should not be enabled; [pi-cc-render](/plugins/pi-cc-render/) leaves the footer to this component.
 

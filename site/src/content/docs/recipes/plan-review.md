@@ -37,13 +37,10 @@ Esc offers Hide, Stop planning or Back. Hiding keeps planners running. Reopen wi
 **Implement…** opens a page where you choose:
 
 - The plan: M (first, once there is one), A or B.
-- The mode and effort: **Here** uses the main session's current model; **Handoff** offers available distinct-model targets.
-- For **Here**, **keep conversation** or explicitly **compact to plan (same session)**. Both use ordinary chat execution, without a consultant or completion review.
-- For **Handoff**, **keep conversation** or an explicitly selected **fresh child** with only the implementation brief and plan. Handoffs enter exec mode with consultation and completion review; A or B stays on call for its plan, and plan M gets a seeded main-agent consultant even with keep-conversation context.
+- The context: **keep conversation** or explicitly **compact to plan (same session)**. Both use ordinary chat execution on the main session's current model (with a [plan model pair](/plugins/pi-plan-mode/#plan-model-pairs) selected, the pair routes it to the worker), with no child session.
+- The effort for that implementation.
 
-Current-session handoffs retain planning and implementation history, including consultations and review. On completion, the original main model is restored in place and the workflow returns to work, not plan, without changing approvals, compacting history or navigating back to a planning branch. `/plan-back` is explicit-only compatibility navigation for legacy saved return targets, not the normal completion path.
-
-Only explicit compact/fresh choices replace context or create a child session. Normal manual and automatic compaction still apply; plan mode does not substitute a plan-only summary for them. Anything essential for compact or fresh context must be in the plan. Exporting a plan writes a Markdown file; configured completion hooks can also run at implementation/export time.
+Only an explicit compact choice replaces context. Normal manual and automatic compaction still apply; plan mode does not substitute a plan-only summary for them. Anything essential for compacted context must be in the plan. Exporting a plan writes a Markdown file; configured completion hooks can also run at implementation/export time.
 
 ## Review actual files
 

@@ -37,7 +37,7 @@ System 1 configures an ordered route for the suite's classifier features. The gl
 
 | Plugin | What the classifier sees | Without it |
 | --- | --- | --- |
-| [Linked phase effort](/guides/effort/) | Recent task and conversation excerpts | Uses the destination's fallback effort |
+| [Plan and approval effort](/guides/effort/) | Recent task and conversation excerpts | Keeps the current effort |
 | [Cache guard](/plugins/pi-cache-guard/) | Tool output or conversation items being trimmed/compacted | Warnings and clock still work; normal Pi compaction remains available |
 | [Tool gate](/plugins/pi-tool-gate/) | Proposed calls, recent user intent and rules | Blocks calls that require a classifier verdict; fixed checks and explicitly allowed/read-only paths retain their ordinary behavior |
 | [Subagents](/plugins/pi-subagents/) | Delegation task and candidate choices | Uses agent configuration and parent/default choices |

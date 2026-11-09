@@ -4,13 +4,13 @@ description: Claude Code-style plan mode in your conversation, or two constraine
 plugin: pi-plan-mode
 ---
 
-The global [System 1](/plugins/pi-system1/) configuration (`/system1`) sets an ordered chain of Jev and native OpenAI Decisions for tool preselection and implementation-effort recommendations (Jev only by default). The legacy `jevToolSelection` switch disables tool preselection only; Jev provider/model settings apply to both uses only when Jev answers. Decisions requires pi-system1 and its isolated API credential; it uses API billing, not subscription OAuth. Pi does not verify credit funding. Operational failures can advance to the next configured backend with a notification; valid judgments and safety refusals do not trigger failover. Manual tool selection remains available.
+The global [System 1](/plugins/pi-system1/) configuration (`/system1`) sets an ordered chain of Jev and native OpenAI Decisions for tool preselection and effort recommendations (Jev only by default). The legacy `jevToolSelection` switch disables tool preselection only; Jev provider/model settings apply to both uses only when Jev answers. Decisions requires pi-system1 and its isolated API credential; it uses API billing, not subscription OAuth. Pi does not verify credit funding. Operational failures can advance to the next configured backend with a notification; valid judgments and safety refusals do not trigger failover. Manual tool selection remains available.
 
 ## Quick reference
 
 - **Use it for:** Research before implementation in the main conversation, or compare two constrained planners.
 - **Enable:** Select `packages/pi-plan-mode/src/index.ts` with [`pi config`](/guides/install/#enable-an-explicit-subset).
-- **Controls:** `/plan`, `/planners`; enter/exit and active-run tools below. Independent approval offers ordinary execution or a distinct-model handoff; Linked approval executes with the provider's worker, including when it is the same physical model. Exec supplies `ask_planner` and `finish_plan`. No standalone shortcut by default; gate Shift+Tab needs an explicit stock remap.
+- **Controls:** `/plan`, `/planners`; enter/exit and active-run tools below. Approval offers implementing here or compacting the plan first; a selected [plan model pair](#plan-model-pairs) continues on its worker in the same loop and supplies `ask_planner`. No standalone shortcut by default; gate Shift+Tab needs an explicit stock remap.
 - **Settings:** `pi-plan-mode.json`; `toggleShortcut` unset, implementation context keep, export `PLAN.md`; optional classifier tool selection on.
 - **Requirements, cost & privacy:** TUI and provider access for `/planners`; normal plan mode uses the main session. Planners/helpers each consume model usage; selected tools can send repository data externally.
 - **Integrations & limits:** Optional gate, activity views, footer and Herdr. Planner/scout entries join `/tasks` and FleetView; `/stop` remains shell-only. Read-only policies are not a sandbox.
@@ -28,86 +28,47 @@ pi-plan-mode separates researching a change from implementing it, in two ways:
 
 `/plan` turns plan mode on and sends the task, if given, as your next message. With pi-tool-gate, plan is one of its [workflows](/plugins/pi-tool-gate/#workflow-and-approvals), independent of approvals; its cycle key reaches plan once the stock thinking-key conflict is resolved. Without the gate, `toggleShortcut` toggles it. Your agent can also enter plan mode itself through `enter_plan_mode` when a task deserves a plan first.
 
-In the interactive UI, the configured standalone shortcut previews work/plan; with the gate it delegates to the gate's workflow cycle, sharing its timer and journal rather than starting another. Supported workflow, reasoning and approval cycles share a preview and one combined, immediately updated settings line. `pending` is not effective Plan protection: current guards remain in force until the final selection applies. Previewing Plan does not allocate a plan path or directory; a round trip returning every touched setting to its original value is a true no-op. An ordinary prompt flushes the preview first, and is not sent if application fails. Dialogs/selectors, leaving main focus, session or branch navigation, compaction, reload/shutdown and external changes to touched settings cancel a pending preview. Explicit commands, picker selections, Plan tools and Exec transitions remain immediate; neither hovering nor waiting approves a plan or tool call.
+In the interactive UI, the configured standalone shortcut previews work/plan; with the gate it delegates to the gate's workflow cycle, sharing its timer and journal rather than starting another. Supported workflow, reasoning and approval cycles share a preview and one combined, immediately updated settings line. `pending` is not effective Plan protection: current guards remain in force until the final selection applies. Previewing Plan does not allocate a plan path or directory; a round trip returning every touched setting to its original value is a true no-op. An ordinary prompt flushes the preview first, and is not sent if application fails. Dialogs/selectors, leaving main focus, session or branch navigation, compaction, reload/shutdown and external changes to touched settings cancel a pending preview. Explicit commands, picker selections, and Plan tools remain immediate; neither hovering nor waiting approves a plan or tool call.
 
 Keyboard cycles commit when all participating modifiers are released if release reporting is negotiated through the actual terminal path and the current held state is confirmed. SSH, Herdr and tmux paths are negotiated, not assumed to support it. Otherwise, including first or fast interactions while negotiation or held state is unconfirmed, unmodified keys, pointer and programmatic cycles, the final choice applies after 1000 ms of inactivity; each accepted cycle restarts that fallback. A confirmed hold has no unconditional timeout: if a release is lost with no later input, it cannot be distinguished from a continuing hold. Each batch has its own transaction; consecutive completed successful or unchanged batches reuse one UI-only history row until a boundary such as submit, an explicit choice, unrelated output or navigation. The row shows the latest batch, not an aggregate of earlier changes.
 
 While it is on, your agent writes its plan to a unique temporary draft, by default `~/.pi/agent/plans/draft-<timestamp>-<uuid>.md` (`plansDirectory`), allocated before its title is known. The draft stays at that path while the agent writes, and the agent is asked for a concise, descriptive first Markdown heading. `edit` and `write` are blocked except for that file. Only read-only shell commands run: with pi-tool-gate, by the gate's read-only analysis under either approval setting; without it, by the read-only shell policy. Other extension and MCP tools are not blocked by plan itself (with the gate, its approval setting decides about them, and subagents started while planning start in chat); your agent is instructed not to change anything with them.
 
-When the plan is complete, your agent calls `exit_plan_mode` directly. Plan tools are model-only: calling them inside `codemode` is prohibited because nested calls have no inline plan renderer. The plan appears in the conversation. In **Independent** (the default), you choose:
+When the plan is complete, your agent calls `exit_plan_mode` directly. Plan tools are model-only: calling them inside `codemode` is prohibited because nested calls have no inline plan renderer. The plan appears in the conversation. You choose:
 
-- **Yes, implement here** (first and default): the current model implements with the whole conversation.
-- **Yes, compact plan and implement here**: compact to the approved plan, then implement with the same model in the same session, not a child.
-- `Yes, hand off to <model> (<effort>)`: a distinct available model implements the plan in this session, retaining the conversation history. Once the current turn ends, the model is switched and a collapsed handoff message (`ctrl+o` expands it) carries the plan and how to implement it; implementation starts at once.
-- **Edit the plan first**: revise it in Pi's editor, then choose again.
-- **Save for later** (in ordinary planning): edit the hyphenated name suggested from the plan title; `.md` is added automatically. The snapshot goes under `plansDirectory` (default `~/.pi/agent/plans/`) and collisions get `-2`, `-3`, etc. The original working draft stays at its path for historical references, but the next planning task gets a fresh draft. Saving ends the turn without approving implementation. Continue later with `/plan Continue from @/absolute/path/descriptive-plan.md` as a planning prompt, not an import command or automatic approval.
+- **Yes, implement here** (first and default): the session's model implements with the whole conversation. With a plan model pair selected, its worker takes over in the same agent loop.
+- **Yes, compact plan and implement here**: compact to the approved plan, then implement in the same session, not a child.
+- **Edit the plan**: revise it in Pi's editor, then choose again.
+- **Save for later**: edit the hyphenated name suggested from the plan title; `.md` is added automatically. The snapshot goes under `plansDirectory` (default `~/.pi/agent/plans/`) and collisions get `-2`, `-3`, etc. The original working draft stays at its path for historical references, but the next planning task gets a fresh draft. Saving ends the turn without approving implementation. Continue later with `/plan Continue from @/absolute/path/descriptive-plan.md` as a planning prompt, not an import command or automatic approval.
 - **No, keep planning**: the turn ends and you say what should change in the chat. The agent answers there, and the next review starts with the lines that changed since the plan you declined.
 
 Approving a newly allocated temporary draft copies the exact final reviewed text (including your edits) to a title-derived file such as `add-api-rate-limiting.md`; implementation uses that copy. The original draft stays intact for historical references and recovery. Names use the first usable title, normalized to a hyphenated slug of at most 80 characters; missing, generic (`Plan` or `The Plan`) and non-ASCII-only titles fall back to `untitled-plan`. Collisions add `-2`, `-3`, etc. without overwriting files. Reapproval keeps the approved path; existing, restored legacy and user-provided paths are not renamed or replaced. **Save for later** honors the name you enter rather than forcing the title-derived suggestion.
 
-In Independent, Up/Down navigates, Left/Right adjusts effort for every execution option (including both direct rows), Enter confirms, and Esc/Ctrl+C cancels. Both direct rows share the current model's effort selection. Before approval, System 1 can recommend implementation effort, including for the same model. The task is judged once; each execution target receives its own quota snapshot and recommendation. Authored effort pins and manual adjustments take precedence; configured defaults and existing fallbacks apply when appropriate. The approved tuple is applied without another judgment. Unsupported levels are clamped to the model's supported levels; nonreasoning models have no effort adjustment. Changes apply only to this approval, not saved defaults; RPC offers action and effort separately. Changing effort alone is not a handoff: model identity is provider plus model ID. See [Choosing effort](/guides/effort/).
+Up/Down navigates, Left/Right adjusts effort on the two implement rows, Enter confirms, and Esc/Ctrl+C cancels. Both rows share one effort selection. Before approval, System 1 can recommend effort once; authored effort pins and manual adjustments take precedence, and configured defaults and existing fallbacks apply when appropriate. With a pair selected, the effort row targets the pair's worker model and the question names the worker and the planner. The approved level is applied without another judgment. Unsupported levels are clamped to the model's supported levels; nonreasoning models have no effort adjustment. Changes apply only to this approval, not saved defaults; RPC offers action and effort separately. See [Choosing effort](/guides/effort/).
 
-In Independent, ordinary approval returns the workflow to work without changing approvals; a distinct-model handoff enters exec. `implementationModelMap` supplies ordered handoff choices; absent entries use the provider-local defaults below, not pi-subagents' worker model or a same-model pseudo-handoff. The direct choices remain available in Independent. Plans use a handoff standard (Summary, Decisions, Changes, Steps, Verification, Out of scope, Handoff notes) so an actual handoff needs no new design decisions.
+Approval returns the workflow to work without changing approvals. Plans use a handoff standard (Summary, Decisions, Changes, Steps, Verification, Out of scope, Handoff notes) so a cheaper worker that reads the conversation needs no new design decisions.
 
 When you decline and the agent revises a plan, approval shows a short **What changed** bullet summary followed by the full current plan in normal styling, not a red/green prose diff. Without a supplied summary it says **Plan revised since your last review.** First or identical submissions show no revision summary. Editing the plan in the approval dialog clears any stale agent summary; the full current plan is always authoritative.
 
-Direct execution is ordinary chat: implementation, verification and a normal final reply, without exec mode, a seeded consultant, `ask_planner`, `finish_plan`, completion card/review or return to a planning branch. Optional compaction does not change that workflow.
+Implementation is ordinary chat: implementation, verification and a normal final reply. Optional compaction does not change that.
 
-### Linked approval
+### Plan model pairs
 
-With [pi-tool-gate's Linked mode](/plugins/pi-tool-gate/#independent-and-linked-operating-modes), Plan uses the provider's `planner` assignment and approved execution uses its `worker` assignment. Work and Chat use `general`. The flow is a captured, provider-local snapshot; reselect its provider through `/flow` to refresh role defaults. Independent remains the default and works without this integration.
+A plan model pair is a Pi virtual model that plans on one model and implements on another, as Claude Code's `opusplan` does. Select one with `/model` or as your default model. Built-in pairs (registered for each provider whose models are available): `anthropic/fableplan` (Fable plans, Opus builds), `anthropic/opusplan` (Opus, Sonnet), `openai-codex/astraplan` and `openai/astraplan` (Astra, Sol), and `openai-codex/solplan` and `openai/solplan` (Sol, Terra). Each family resolves to the highest available generation on the pair's provider; a pair whose models are unavailable is not offered. Add or replace pairs with `modelPairs` (see [settings](#settings-and-trusted-capabilities)).
 
-Linked inline approval offers **Approve and implement** and a **Context** submenu, alongside edit, save and keep planning. **Keep history** is the default; **Compact to approved plan** is explicit. **Fresh conversation** is available only for an initial approval when the native-host handoff capability is present, never for a revised plan. Selecting context alone does not approve. The question shows the worker, context and effort; there is no free model override. Independent approval and the `/planners` screens are unchanged. `implementationModelMap` does not override a Linked flow; the approved effort applies to the worker.
+Routing is per request: the planner serves requests while plan mode is on or a consultation is open, and the worker serves the rest. Approving a plan therefore continues the same agent loop on the worker, with no turn end, model switch or brief message, and the selection stays the pair. A phase switch re-reads the conversation on the other model without its prompt cache. With pi-status-footer, the model row shows the pair and the model that last answered.
 
-**Approval, not model inequality, starts Linked Exec.** Planner and worker may resolve to the same physical model; that still starts the approved execution lifecycle. The pending handoff retains Plan guards until worker activation and Exec entry succeed at the settled handoff boundary, with no intermediate Work-model switch. An approval tied to an old branch or flow selection cannot start execution in a new one.
+Effort: when plan mode starts, System 1 judges effort once for the planner (skipped if you changed the level since), and at approval the picker's effort row targets the worker. Consultations use the level recorded at approval.
 
-A fresh implementation carries the selected flow snapshot and approved plan identity before its first prompt, so it starts as Exec on the worker, not Work on General. It does not copy an escalation of the parent's approval policy. There is no implicit compaction, provider substitution or inferred plan approval.
+**Consulting the planner.** While a pair is selected, the implementing agent has `ask_planner` and `planner_answer`. When the plan does not fit what it finds, the agent calls `ask_planner`; the next requests of the same conversation go to the planner, which reads everything, including the implementer's changes, may amend the plan file (a dated line under `## Amendments`), asks you with `ask_user_question` when the decision is yours, and finishes with `planner_answer`. If it replies without calling `planner_answer`, its reply is taken as the answer. Both tools refuse outside their phase.
 
-### Exec mode
+During a consultation, `edit` and `write` are blocked except for the plan file, `bash` is limited to the read-only policy (and `safeSubcommands`), and `bg_run` is blocked. The first edit or write of each file the plan does not list (paths in backticks) gets a note appended to the tool result: call `ask_planner` if the change departs from the plan. Nothing else is blocked, and a plan that names no paths gets no notes.
 
-Approving a distinct-model handoff in Independent, or the linked worker in Linked, starts exec mode; Shift+Tab cannot start execution, but can request replanning in idle Linked Exec. Approvals remain independent and Alt+A can change them. Exec remains active through consultation, review, revisions and pauses until final completion or an explicit stop. Plans are named by their first heading, not their file name.
-
-#### Planner on call
-
-After a handoff, the model that planned stays on call and your implementing agent gets `ask_planner`: it asks when the plan does not fit what it finds, and waits for a decision. **During implementation, the planner is the only agent that asks you.** When a decision is yours, the planner asks you itself in the `ask_user_question` dialog while the implementer waits; your answer returns to the planner, which amends the plan and answers the implementer. The implementer's own `ask_user_question` is blocked while a planner is on call. Type in the free-text row to push back or ask the planner something; Esc postpones the question (footer: `planner asks you`) and it reopens when the turn ends with an empty editor, or from the footer badge or `/plan-exec`. The first ask writes the planning context to the prompt cache once; Pi's `cacheWarming` keeps it warm while you answer, the planner's time limit pauses while it waits for you, and expanded cards show the cache hit rate.
-- **Unplanned files.** The first edit or write of each file the plan does not list (paths in backticks) gets a note appended to the tool result: ask the planner, or record the departure under `## Amendments` when there is none. Nothing is blocked, and a plan that names no paths gets no notes.
-#### Completion review and recovery
-
-**`finish_plan` submits for completion review; it does not itself end exec mode.** The implementer supplies nonempty `report`, `verification` (including checks not run) and `concerns`. Only an explicit structured **Accepted** decision completes reviewed work. The planner reviews the approved plan and amendments, current files and commit history; it does not rerun tests, treat reported checks as independently verified, or introduce new preferences. Changes requested return to the same implementer context for fixes or evidence-backed disputes. Each later submission must respond exactly once to every outstanding finding by ID, with status `addressed`, `disputed` or `blocked` and an explanation.
-
-`completionMaxRevisions` is an integer from 0–5, default **2**: the initial review plus two fix-and-review cycles means at most three reviews before pausing. Zero still performs the initial review. Failures do not consume revision cycles; a provider error or unusable reply is retried once automatically (not timeouts, cancellation or an unavailable planner). Exhausted revisions, human-only checks or decisions, unavailable planners, invalid/empty replies, timeout and cancellation pause visibly with exec mode, model and implementation context intact. Calling `finish_plan` again cannot bypass the pause or reset the budget.
-
-When a reviewer needs your decision or a human-only check, the planner asks you during the review, in a dialog; your answer is user-provided evidence. Esc leaves a **needs your answer** pause with **Use recommendation**, **Finish unreviewed** and **Stop implementation**.
-
-If a review fails twice or is interrupted, a dialog offers **Retry review**, **Finish unreviewed** or **Stop implementation** (**Allow one more revision** when the allowance is exhausted). Typed text is a question to the planner. Esc leaves the execution paused; conversation alone never authorizes recovery.
-
-Choosing **Finish without review** requires confirmation in **Finish without planner acceptance?**; **Keep paused** cancels it. Confirmation produces **Completed by user override**, preserving findings and limitations, never **Accepted**. No interactive UI means no override. Stopping produces **Implementation stopped**, without claiming completion or returning to a planning branch. Independent stop keeps the implementation model; Linked stop first activates Work's assigned model.
-
-With `completionReview: false`, completion is explicitly **Completed without review**. Accepted, configured no-review and confirmed override are final outcomes. On Independent completion, the original main model is restored in place under the existing manual-model-change protection. Linked completion activates Work's assigned model instead. The workflow returns to work, not plan; approvals stay unchanged. The current session retains its planning, implementation, consultation and review history: completion does not compact it or navigate back to a planning branch. Paused work survives reload; interrupted in-flight exchanges restore paused, without another paid request.
-
-If Linked completion or stop cannot activate Work's model, Exec stays active and paused with its completion intent saved: **Work model unavailable. Retry completion or use /flow independent.** Use `/plan-exec retry` to retry that saved model handoff without rerunning paid completion review. `/flow independent` removes linkage without ending Exec or changing its model/approvals; use execution recovery to finish or stop. Entering Linked or changing provider is unavailable during active Exec.
-
-Current-session handoffs retain conversation history by default. Only an explicitly selected **compact to plan** replaces context with the approved plan, and only an explicitly selected **fresh child** starts a separate session with the brief and plan. Pi's normal manual and automatic compaction still apply; plan mode does not replace ordinary compaction with a plan-only summary. `/plan-back` is an explicit-only compatibility command for legacy saved return targets, not an automatic completion step.
-
-Consultation and review cards show the current outcome, the exact question when your answer is needed, and what to do next. Reports and verification are previewed; findings show counts and titles. Pending exchanges show live activity. In Pi's terminal UI, Ctrl+O expands the full recorded details, including evidence, finding responses, errors, revision history and costs. Reported checks are not independently verified. The footer shows the exec phase, including when it is waiting for an answer, a review failed, approval is needed, or implementation is idle but not completed, alongside separate consultation and review costs. An idle or interrupted execution can be continued or redirected in conversation; it is not a completion.
-
-#### Advanced: compatibility commands
-
-Everything that needs you opens one dialog, from the footer badge, bare `/plan-exec`, Shift+Tab or `/plan`. The explicit command forms remain available:
-
-- `/plan-exec status`: inspect status/recovery without taking an execution action; the footer's Exec badge uses the same read-only status path.
-- `/plan-exec retry`: authorize one retry of a failed or interrupted review, or retry a saved Linked Work-model handoff without another review.
-- `/plan-exec resume <answer>`: answer a postponed planner question, provide a user-needed answer or authorize one additional revision-and-review cycle after exhaustion.
-- `/plan-exec accept`: open the confirmation for an unreviewed override.
-- `/plan-exec stop`: stop implementation without claiming completion.
-
-While Linked implementation is idle, `/plan`, `/mode plan`, the configured workflow key or **Revisit plan** returns to the planner in effective Plan, with a separate draft copied from the approved plan. The task remains unfinished: working-tree changes, execution ID, history, findings, costs and review budget are preserved. The main planner can ask you questions normally. Declining, cancelling or saving a copy stays in Plan; only approval of the revised draft resumes the worker. Reapproval does not clear a review pause or authorize a retry or extra cycle; use the existing explicit recovery choices. Busy requests are refused, not queued and not used to cancel implementation or paid consultation/review; a model's `enter_plan_mode` request is deferred until successful turn settlement. `/planners` remains unavailable while the task is unfinished.
-
-Explicit `/flow independent` preserves the unfinished task, its draft and Plan restrictions. If a suspended Linked task has been unlinked, stop it before approving a new Independent plan. Explicit stop ends the task without claiming completion; completion and stop retain the existing Work/general model restoration policy. In Independent Exec, `/plan` and workflow changes open the execution menu; `enter_plan_mode` is refused. Reload and branch navigation restore recorded state.
+Exec mode, `finish_plan`, completion review, model handoffs and `/plan-exec` were removed. A session saved with an unfinished exec implementation continues as ordinary work, with a one-time notice.
 
 In Pi's fullscreen terminal mode, **Plan review** scrolls the main chat to the beginning of the plan when the approval picker opens, including for short plans. Scroll the chat to read the rest; ordinary redraws do not move you back. Editing the plan returns to its beginning, and closing review restores following the latest message. Regular terminal mode and RPC keep their usual presentation because Pi does not own their chat scrollback. Once you decide, a plan longer than 12 lines folds in the transcript (`… N more lines (ctrl+o to expand)`). [Compaction plan](/plugins/pi-compact-plan/) draws its compaction focus with the same review card.
 
-In Independent, your agent plans on the session's model; Linked activates its captured planner assignment. An enabled completion review with a planner on call adds a separate model request.
+Without a pair, your agent plans and implements on the session's model. With a pair, planning runs on the planner and implementation on the worker, each billed as its provider bills.
 
 ## Enable, requirements, and costs
 
@@ -115,7 +76,7 @@ Select `packages/pi-plan-mode/src/index.ts` through [suite installation](/guides
 
 `/planners` requires Pi's interactive terminal UI and authenticated access to the chosen model providers. The component documents Pi 0.99 or newer; the installation guide identifies the suite's tested host version. Planners use providers registered in the main session. Their optional research helpers are separate Pi subprocesses and need the provider extensions required by their models; `providerExtensions` can override automatic provider-extension discovery.
 
-**Costs:** planners, helper agents, main-agent synthesis, and implementation all consume model usage. `/planners` always runs two planner sessions; use plan mode for a single plan. Tool preselection and implementation-effort recommendations use the selected Pi classifier and can incur charges; selected research tools may also call paid services. Set `jevToolSelection: false` to choose tools manually without that classifier step. No pi-subagents or pi-ask-user-question installation is required for the planner's own helper and question tools.
+**Costs:** planners, helper agents, main-agent synthesis, and implementation all consume model usage. `/planners` always runs two planner sessions; use plan mode for a single plan. Tool preselection and effort recommendations use the selected Pi classifier and can incur charges; selected research tools may also call paid services. Set `jevToolSelection: false` to choose tools manually without that classifier step. No pi-subagents or pi-ask-user-question installation is required for the planner's own helper and question tools.
 
 ## Start the planners
 
@@ -146,13 +107,7 @@ The **Write plan M** and **Revise plan M** actions request that synthesis for yo
 
 In the transcript, planner questions show their headers and prompts; results show selected or custom answers and notes, or the cancellation or validation message. Main-agent planner calls show the planner and a short question preview. Merged-plan calls show a line count instead of dumping the plan, and replies distinguish working, waiting for your answers, completed, aborted and failed outcomes. Ctrl+O expands the original question, options, answers or plan prose. These tool-owned presentations also remain in use with pi-cc-render enabled. Only the display changes: tool arguments, JSON results, structured details and transcript checkpoints remain unchanged.
 
-Choose **Implement…** to pick the plan (M first, once there is one), mode, effort and context. The choices below describe Independent. **Here** is its default: it uses the main session's current model regardless of whether M, A or B wrote the plan. Context is **keep conversation** or **compact to plan (same session)**. Either is ordinary chat execution with a normal final reply, no consultant or exec/completion workflow, and no child session.
-
-**Handoff** appears only when the plan author's configured list or provider-local defaults offer a target distinct from the current session model. The model row cycles only those targets. Handoff retains keep-conversation and fresh-child choices; a fresh child starts with only the brief and plan. Actual handoffs start exec mode; the author planner (A or B) stays on call, and plan M gets a seeded main-agent consultant with either keep-conversation or fresh-child context. Consultation, `finish_plan` and completion review remain on these paths.
-
-Left/Right adjusts the effort row in both Independent implementation modes. Defaults and supported-level normalization match inline approval; switching modes preserves per-model effort selections.
-
-In Linked, Implement uses the same **linked worker** policy as inline approval, with no arbitrary model-target selector. Context-policy choices remain available and execution still requires explicit plan approval, even when the worker equals the current model.
+Choose **Implement…** to pick the plan (M first, once there is one), the context and the effort. Implementation uses the main session's current model (with a plan model pair selected, the pair routes it to the worker) regardless of whether M, A or B wrote the plan. Context is **keep conversation** or **compact to plan (same session)**. Either is ordinary chat execution with a normal final reply and no child session. Left/Right adjusts each row; defaults and supported-level normalization match inline approval.
 
 Implementing M, A or B writes the selected plan's current text under `plansDirectory` using the same title-derived names, fallback and collision suffixes as inline approval.
 
@@ -160,14 +115,12 @@ Implementing M, A or B writes the selected plan's current text under `plansDirec
 
 ## Settings and trusted capabilities
 
-Settings normally live at `~/.pi/agent/pi-plan-mode.json`. Common options are editable in the `/planners` Settings step, including the **Completion review** toggle (`completionReview`, default `true`). Turning it off produces **Completed without review**, not planner acceptance. **Review revisions** sets `completionMaxRevisions` (integer 0–5, default 2), the fix-and-review cycles after the initial review. This example chooses manual tool selection and a shorter planner-turn limit without assuming particular model IDs:
+Settings normally live at `~/.pi/agent/pi-plan-mode.json`. Common options are editable in the `/planners` Settings step, including the default implementation context. This example chooses manual tool selection and a shorter planner-turn limit without assuming particular model IDs:
 
 ```json
 {
   "plannerTimeoutSeconds": 900,
   "jevToolSelection": false,
-  "completionReview": true,
-  "completionMaxRevisions": 2,
   "alwaysOffer": [],
   "defaultImplementationContext": "keep",
   "defaultPlanExportPath": "PLAN.md",
@@ -175,23 +128,24 @@ Settings normally live at `~/.pi/agent/pi-plan-mode.json`. Common options are ed
 }
 ```
 
-Choose available models in the UI, or configure `planners`, `scoutModelMap`, and `implementationModelMap` using `provider/modelId` specifications with optional effort suffixes.
+Choose available models in the UI, or configure `planners`, `scoutModelMap` and `modelPairs` using `provider/modelId` specifications with optional effort suffixes.
 
-In Independent, `implementationModelMap` values are ordered lists; legacy scalar specs remain accepted as one-element lists. Linked uses the selected flow's worker assignment instead. An explicit empty array disables automatic handoff defaults for that exact planning model, not direct execution. `scoutModelMap` remains scalar. For example (model IDs are illustrative):
+`modelPairs` defines custom plan model pairs, keyed by the `provider/id` each registers under in `/model`. A key equal to a built-in pair replaces it; other keys are added. `planner` and `worker` are `provider/modelId` specs (no effort suffix, not the same model), and `name` is optional (non-empty, at most 80 characters; default `<planner id> plan, <worker id> build`). An invalid entry or extra key invalidates the whole file. Model IDs are illustrative:
 
 ```json
 {
-  "implementationModelMap": {
-    "anthropic/claude-fable-5-1": ["anthropic/claude-opus-5-5:high", "anthropic/claude-sonnet-5-1:medium"],
-    "openai-codex/gpt-6-astra": []
-  },
-  "defaultImplementationThinkingLevel": "medium"
+  "modelPairs": {
+    "anthropic/fableplan": {
+      "planner": "anthropic/claude-fable-5-1",
+      "worker": "anthropic/claude-sonnet-5-1",
+      "name": "Fable plan, Sonnet build"
+    },
+    "openai/reviewplan": { "planner": "openai/gpt-6-astra", "worker": "openai/gpt-6.1-terra" }
+  }
 }
 ```
 
-Missing map entries use provider-local defaults, nearest tier first: **Astra → Sol, Terra; Sol → Terra; Fable → Opus, Sonnet; Opus → Sonnet**. Sonnet, Terra and unrecognized families have no defaults. OpenAI family IDs are recognized on `openai` and `openai-codex`, Anthropic families on `anthropic`; defaults stay within the exact provider and authenticated available models, independently of your cycling shortlist. The cycling shortlist (`enabledModels`/scoped models) does not restrict implementation choices; the `/planners` planning-model picker remains scoped. They prefer a same-generation sibling, otherwise the highest available numeric generation. Unrecognized aliases/snapshots do not generate defaults. Explicit mappings may cross providers; unavailable, duplicate and same-model targets are removed. There is no worker fallback for Independent handoff choices.
-
-`defaultImplementationThinkingLevel` supplies explicit Independent handoff effort when the target has no suffix. For an unpinned Linked handoff, the System 1 recommendation wins; if unavailable, the worker suggestion takes precedence over this default. `plannerToolsets` groups extension tools, `commandGrants` permits specified extra commands with associated skills, and `providerExtensions` controls helper authentication support. `toggleShortcut` toggles plan mode when pi-tool-gate is absent (with the gate it cycles the gate's modes; do not bind it to the gate's key); it takes effect after `/reload`. `plansDirectory` moves plan mode's plan files.
+The earlier `implementationModelMap`, `defaultImplementationThinkingLevel`, `completionReview` and `completionMaxRevisions` keys are ignored. `plannerToolsets` groups extension tools, `commandGrants` permits specified extra commands with associated skills, and `providerExtensions` controls helper authentication support. `toggleShortcut` toggles plan mode when pi-tool-gate is absent (with the gate it cycles the gate's modes; do not bind it to the gate's key); it takes effect after `/reload`. `plansDirectory` moves plan mode's plan files.
 
 Jev defaults to provider `typesafe`, model `jev-latest`, and selection threshold `0.5`. Default `alwaysOffer` names are `web`, `web_search`, `fetch_content`, `context7`, `jev`, and `system1_judge`; this neither installs those tools nor provides their credentials.
 
@@ -205,7 +159,7 @@ Planner sessions omit edit/write tools, restrict shell commands through a review
 
 In particular, `safeSubcommands` fully trusts matching command prefixes and bypasses checking of the **entire submitted shell command**, including trailing chains and redirects. Do not use it as a harmless read-only allowlist. Even default Git inspection can invoke configured helpers unless the relevant negative flags suppress them.
 
-The planner on call gets every toolset, MCP server and command grant a `/planners` planner can be given, plus read-only subagents, but not your other extensions' tools; it cannot run tests and may write only the plan file. Its session is a seeded copy under `~/.pi/agent/plan-mode/planners/`.
+During a consultation, the pair's planner works in your conversation under the consult guard above; it may write only the plan file and run read-only commands.
 
 M is only instructed to leave files alone during planning; it is not constrained by the planners' read-only tool policy. Implementation and exports intentionally write files.
 
@@ -215,6 +169,6 @@ Esc offers Hide, Stop planning, or Back. Hiding leaves planners running; `/plann
 
 Planners and their research scouts offer activity entries to `/tasks` and pills to FleetView (or the pi-bg fallback host). Enter on an entry opens `/planners`; double-`x` stops a working planner row. Scout rows are observational, not independently stoppable from the list; stop their owning planner or use the planning screen. `/stop` still stops only pi-bg shell tasks. The planning screen remains available without any activity host.
 
-With pi-tool-gate in Independent, ordinary plan approval returns to work without changing approvals; Linked uses approved worker execution instead. Without the gate, plan mode retains its local work/plan behavior and does not enforce approvals. With pi-subagents, scout-model integration remains optional through `subagents:role-model` (the `explorer` role); its worker is not an Independent implementation fallback. Linked needs the gate, supported model guard and role-default provider; their absence does not remove standalone planning. The footer's Exec badge opens status/recovery rather than cycling workflow or launching execution. Web tools, MCP servers, classifier selection, and completion hooks are optional. With pi-herdr, planner work emits `herdr:working` holds for background visibility; without it, planning still works. Use pi-diff-review after implementation to inspect the actual changes rather than treating an accepted plan as proof of correct execution.
+With pi-tool-gate, plan approval returns to work without changing approvals. Without the gate, plan mode retains its local work/plan behavior and does not enforce approvals. With pi-subagents, scout-model integration remains optional through `subagents:role-model` (the `explorer` role); its worker is not an implementation fallback. Web tools, MCP servers, classifier selection, and completion hooks are optional. With pi-herdr, planner work emits `herdr:working` holds for background visibility; without it, planning still works. Use pi-diff-review after implementation to inspect the actual changes rather than treating an accepted plan as proof of correct execution.
 
-See [planning and review](/recipes/plan-review/), [activity architecture](/architecture/activity/), and [troubleshooting](/guides/troubleshooting/). [Source and tests](https://github.com/justmytwospence/pi-plugins/tree/main/packages/pi-plan-mode) cover planner flow, shell policy, persistence, and implementation handoff.
+See [planning and review](/recipes/plan-review/), [activity architecture](/architecture/activity/), and [troubleshooting](/guides/troubleshooting/). [Source and tests](https://github.com/justmytwospence/pi-plugins/tree/main/packages/pi-plan-mode) cover planner flow, shell policy, persistence, and plan model pairs.

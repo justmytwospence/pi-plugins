@@ -10,13 +10,11 @@ Model and reasoning effort are separate choices. Automatic recommendations are m
 | Boundary | Effort behavior |
 | --- | --- |
 | New subagent task or batch | Select open model and effort fields before scheduling; queued launches and chain items retain those selections. Resume, steering and retries retain the selected tuple. |
-| Select a Linked provider | Recommend effort once for its active General, Plan or Exec phase, while retaining the assigned physical model. |
-| Linked phase change or replan | Recommend once for the destination phase; General rates remaining work, Plan unresolved investigation and design. Work and Chat are both General, so switching between them does not re-judge. |
-| Approve or resume implementation | Use the approved model and effort tuple, without a second judgment. The approval default rates implementation after the settled design; changing the target reuses the task judgment but captures target-specific pressure. |
-| Finish or stop Linked execution | Recommend General effort once; with no usable task context, use the General role fallback. |
+| Enter plan mode with a plan model pair selected | Recommend effort once for the planner and apply it with your next message, unless you changed the level since entering plan mode. |
+| Approve a plan | Recommend effort for the worker (the pair's worker model, or the session model without a pair) in the picker's effort row; the approved level is applied without a second judgment. The approval default rates implementation after the settled design; Left/Right overrides it. |
 | Restore, reload, tree navigation or reconciliation | Restore native saved effort, without quota reads or effort classification. |
 
-Explicit subagent arguments and authored agent-profile effort pins win for their fields; built-in role levels are suggestions, not pins. A pinned Linked destination skips automatic effort selection. Manual approval changes override recommendations and configured defaults. Approval applies to that execution, not saved defaults. Unsupported levels are clamped to the destination model's capabilities; a non-reasoning model has no effort adjustment. Native thinking controls remain available. See [plan mode](/plugins/pi-plan-mode/) and [subagent models](/guides/subagent-models/).
+Explicit subagent arguments and authored agent-profile effort pins win for their fields; built-in role levels are suggestions, not pins. A pinned destination skips automatic effort selection. Manual approval changes override recommendations and configured defaults. Approval applies to that execution, not saved defaults. Unsupported levels are clamped to the destination model's capabilities; a non-reasoning model has no effort adjustment. Native thinking controls remain available. See [plan mode](/plugins/pi-plan-mode/) and [subagent models](/guides/subagent-models/).
 
 ## Quota at selection time
 
