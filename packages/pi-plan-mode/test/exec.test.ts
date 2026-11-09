@@ -1644,6 +1644,20 @@ test("a pause is shown once in its run and reopens when a later turn ends", asyn
   assert.equal(statusMessages(s).length, 0);
 });
 
+test("exec guidance keeps its place across requests so the prompt prefix stays cacheable", async () => {
+  const s = await setup();
+  const turn = (n: number) => ({ role: "user", content: `turn ${n}`, timestamp: n });
+  const first = (await s.emit("context", { messages: [turn(1)] })).messages;
+  assert.equal(first.length, 2);
+  assert.equal(first[1].customType, "plan-mode-exec-guidance");
+  const second = (await s.emit("context", { messages: [turn(1), turn(2), turn(3)] })).messages;
+  assert.deepEqual(second.slice(0, 2), first, "earlier request is an exact prefix");
+  assert.deepEqual(
+    second.slice(2).map((m: { content: string }) => m.content),
+    ["turn 2", "turn 3"],
+  );
+});
+
 test("wrong-phase actions and conversational retry requests grant no authority", async () => {
   const s = await setup();
   const saved = structuredClone(s.latest());

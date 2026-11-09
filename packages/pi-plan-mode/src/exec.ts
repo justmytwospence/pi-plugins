@@ -35,6 +35,7 @@ import {
   renderFinish,
   responsesText,
 } from "./exec-cards.js";
+import { type GuidanceAnchor, placeGuidance } from "./exec-guidance.js";
 import {
   pausePresentation,
   pauseQuestion,
@@ -220,6 +221,8 @@ export function registerExec(pi: ExtensionAPI, host: ExecHost): ExecController {
   /** Files the agent edited or wrote with its tools while this mode was on. */
   const touched = new Set<string>();
   let hostCtx: ExtensionContext | undefined;
+  /** Where each exec guidance text sits in the request history, per execution. */
+  let guidanceAnchors: { executionId: string; anchors: GuidanceAnchor[] } | undefined;
   let finalizing: { current: ExecState; token: number } | undefined;
 
   const safely = (fn: () => void) => {
@@ -1321,18 +1324,12 @@ export function registerExec(pi: ExtensionAPI, host: ExecHost): ExecController {
             ? `${pauseText(n)}\nDo not implement while paused. The user resolves it in a dialog; answer their questions briefly if they ask.`
             : "Continue the approved implementation unless the user changes direction. Completion requires finish_plan and the existing review safeguards.\nNever ask the user directly or end your turn with a question: use ask_planner. When the user changes direction, tell the planner with ask_planner so it amends the plan, then follow its answer.",
     ].join("\n\n");
-    return {
-      messages: [
-        ...event.messages,
-        {
-          role: "custom" as const,
-          customType: "plan-mode-exec-guidance",
-          content: guidance,
-          display: false,
-          timestamp: Date.now(),
-        },
-      ],
-    };
+    // Anchored, not appended at the tail: a moving tail message re-bills the whole conversation
+    // on every request (see exec-guidance.ts).
+    const anchors = guidanceAnchors?.executionId === n.executionId ? guidanceAnchors.anchors : [];
+    const placed = placeGuidance(event.messages, guidance, anchors, Date.now());
+    guidanceAnchors = { executionId: n.executionId, anchors: placed.anchors };
+    return { messages: placed.messages };
   });
   pi.on("agent_start", (_event, ctx) => {
     if (!busy) shownThisRun = false;
