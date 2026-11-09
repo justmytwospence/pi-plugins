@@ -662,3 +662,18 @@ test("Decisions quick compaction keeps the existing deterministic summary", asyn
   expect(out.compaction.usage).toEqual(usage(300));
   expect(h.reg.discovered).toEqual(["system1-openai"]);
 });
+
+test("a virtual selection (a plan model pair) summarizes on the model behind it", async () => {
+  const { reg, ctx, emit } = setup(keepFirstDropSecond);
+  const answered = { type: "message", message: { role: "assistant", provider: "anthropic", model: "claude-sonnet-5-5", stopReason: "stop" } };
+  (reg as any).find = (provider: string, id: string) => ({ provider, id, api: "anthropic-messages" });
+  ctx.model = { provider: "anthropic", id: "opusplan", api: "pi-virtual" };
+  await emit("session_start", {});
+  vi.mocked(compact).mockClear();
+  await emit("session_before_compact", compaction());
+  expect(compact).not.toHaveBeenCalled();
+  ctx.sessionManager.getBranch = () => [answered];
+  await emit("session_before_compact", compaction());
+  expect(vi.mocked(compact).mock.calls).toHaveLength(1);
+  expect((vi.mocked(compact).mock.calls[0] as any)[1]).toMatchObject({ provider: "anthropic", id: "claude-sonnet-5-5" });
+});

@@ -37,6 +37,19 @@ describe("MainState", () => {
     expect(state.request!.payload).toBe(sent);
   });
 
+  it("records main's request under a virtual selection by the physical model its payload names", async () => {
+    const pi = new FakePi();
+    const state = new MainState(pi as never, () => 1000);
+    const pair = { provider: "anthropic", id: "opusplan", api: "pi-virtual" };
+    const physical = { provider: "anthropic", id: "claude-x", api: "anthropic-messages" };
+    const { ctx } = fakeCtx({ model: pair, models: [pair, physical], systemPrompt: PROMPT });
+    await pi.emit("session_start", { reason: "startup" }, ctx);
+    await pi.emit("before_provider_request", { payload: { ...payload(), model: "claude-unknown" } }, ctx);
+    expect(state.request).toBeUndefined();
+    await pi.emit("before_provider_request", { payload: payload() }, ctx);
+    expect(state.request).toMatchObject({ api: "anthropic-messages", provider: "anthropic", model: "claude-x" });
+  });
+
   it("forgets the request after /tree or a compaction, and reads main's last answer from its session", async () => {
     const pi = new FakePi();
     const state = new MainState(pi as never);

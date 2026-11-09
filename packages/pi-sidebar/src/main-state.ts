@@ -3,6 +3,7 @@
 // second (running tools, finished parallel results, the reply it is writing).
 import { buildSessionContext, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
+import { payloadModel } from "./routed-model.ts";
 import { summarizeArgs } from "./transcript.ts";
 
 type Json = Record<string, unknown>;
@@ -131,7 +132,8 @@ export class MainState {
     pi.on("model_select", (_event, ctx) => { this.ctx = ctx; this.changed(); });
 
     pi.on("before_provider_request", (event, ctx) => {
-      const model = ctx.model;
+      // Under a virtual selection (a plan model pair) the payload names the physical model.
+      const model = payloadModel(ctx, (event.payload as { model?: unknown } | undefined)?.model);
       if (!model || !isConversationRequest(event.payload, model.id, ctx.getSystemPrompt())) return undefined;
       this.ctx = ctx;
       // A reference, not a copy: handlers that run later may still edit this object in place, and

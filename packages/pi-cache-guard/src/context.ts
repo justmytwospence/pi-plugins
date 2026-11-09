@@ -16,6 +16,7 @@ import { compact } from "@earendil-works/pi-coding-agent";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 
 import { agentDir, loadSettings } from "./config.ts";
+import { isVirtual, routedModel } from "./routed-model.ts";
 import { DEFAULT_SETTINGS, type Settings } from "./core.ts";
 import { type ClassifierUsage, type JevState, addUsage, askJev, resolveJev } from "./jev.ts";
 import {
@@ -300,7 +301,8 @@ export function leanContext(pi: ExtensionAPI): Lean {
         };
       }
 
-      const model = ctx.model;
+      // A virtual selection (a plan model pair) cannot summarize directly: use the model behind it.
+      const model = isVirtual(ctx.model) ? routedModel(ctx as never) : ctx.model;
       if (!model) return recordFailure("no summary model", usage);
       try {
         const auth = (await ctx.modelRegistry.getApiKeyAndHeaders(model)) as { ok: boolean; apiKey?: string; headers?: Record<string, string>; env?: Record<string, string> };

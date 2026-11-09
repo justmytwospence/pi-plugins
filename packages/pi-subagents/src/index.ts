@@ -42,6 +42,7 @@ import { transcriptCheckpoint } from "./transcript-contract.ts";
 import { WORKING_MESSAGE_EVENT } from "./working-message.ts";
 import { declareReadOnlyCalls } from "./read-only-call.ts";
 import { onWebCommand, section, table as webTable, text as webText } from "./switchyard-web.ts";
+import { routedModel } from "./routed-model.ts";
 
 const finalReport = <T extends { details?: object }>(value: T, id: string) =>
   transcriptCheckpoint(value, { id, kind: "report" });
@@ -995,7 +996,9 @@ export default function subagents(pi: ExtensionAPI) {
 
   /** Jev's picks for the gaps in each item, one request per item, in parallel. */
   const plan = async (ctx: ExtensionContext, items: Item[], agents: AgentDef[], signal: AbortSignal | undefined, fork: boolean) => {
-    const parent = { model: ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : "", thinking: pi.getThinkingLevel() };
+    // A plan model pair is virtual: tiers, profiles and pressure belong to the model behind it.
+    const parentModel = routedModel(ctx as never) ?? ctx.model;
+    const parent = { model: parentModel ? `${parentModel.provider}/${parentModel.id}` : "", thinking: pi.getThinkingLevel() };
     const available = (ctx.modelRegistry?.getAll?.() ?? []) as AvailableModel[];
     const tiers = {
       models: providerTiers(parent.model, config.tiers, config.providerTiers, available),

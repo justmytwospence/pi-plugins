@@ -15,6 +15,7 @@ import { convertToLlm, sessionEntryToContextMessages } from "@earendil-works/pi-
 import { matchesKey } from "@earendil-works/pi-tui";
 import { isAnswer, requestAsk, type ServiceQuestion } from "./ask-service.ts";
 import { holdBlocked, holdWorking } from "./herdr-blocked.ts";
+import { payloadModel } from "./routed-model.ts";
 import { type Answer, draftPrompt, parsePlan, type Plan, refinePrompt, replyText, revisePrompt } from "./protocol.ts";
 import { entryText, isConversationRequest, splicePayload } from "./splice.ts";
 import { askText } from "./text-input.ts";
@@ -118,7 +119,8 @@ export default function piCompactPlan(pi: ExtensionAPI) {
     last = undefined;
   });
   pi.on("before_provider_request", (event, ctx) => {
-    const model = ctx.model;
+    // Under a virtual selection (a plan model pair) the payload names the physical model.
+    const model = payloadModel(ctx as never, (event.payload as { model?: unknown } | undefined)?.model);
     if (drafting || !model) return undefined;
     const leaf = ctx.sessionManager.getLeafEntry?.();
     if (!isConversationRequest(event.payload, model.id, entryText(leaf))) return undefined;

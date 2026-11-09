@@ -28,6 +28,7 @@ import { assembleContext, describeLive, foreignRoleMessage, mainDelta, roleMessa
 import { derivedSessionId, interleave, newPartAt, TRANSCRIPT_TAG, TranscriptParts } from "./foreign.ts";
 import { modelKey, type ModelChoice, type ModelLike } from "./models.ts";
 import type { ToolRenderers } from "./pi-chat.ts";
+import { routedModel } from "./routed-model.ts";
 
 const BUILTIN_TOOLS = ["read", "grep", "find", "ls", "bash"];
 const COLD_MARGIN_MS = 20_000;
@@ -553,7 +554,7 @@ export function cachePreflight(main: MainState, now: number): Preflight {
   // main's request from its session; main's last answer says how warm its cache still is.
   const last = request ? undefined : main.lastAnswer();
   if (!request && !last) return { kind: "send" }; // no conversation yet: only the prompt and tools
-  const api = request?.api ?? ctx.model?.api ?? "";
+  const api = request?.api ?? (routedModel(ctx) ?? ctx.model)?.api ?? "";
   if (!SUPPORTED_APIS.has(api)) return { kind: "refuse", reason: `main uses the ${api} API, which Sidebar cannot share a cache with.` };
   if (request && !ctx.modelRegistry.find(request.provider, request.model)) return { kind: "refuse", reason: `main's model ${request.provider}/${request.model} is not available.` };
   const age = now - (request?.sentAt ?? last!.at);
