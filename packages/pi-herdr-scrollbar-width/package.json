@@ -1,6 +1,6 @@
 {
   "name": "@justmytwospence/pi-herdr-scrollbar-width",
-  "version": "0.1.37",
+  "version": "0.1.38",
   "description": "Keep pi's fullscreen exit transcript from wrapping inside herdr panes with scrollbars.",
   "type": "module",
   "license": "MIT",
