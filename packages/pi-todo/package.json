@@ -1,6 +1,6 @@
 {
 	"name": "@justmytwospence/pi-todo",
-	"version": "0.1.42",
+	"version": "0.1.43",
 	"description": "Pi extension. A todo list for the model, rendered as a live overlay that survives /reload and conversation compaction.",
 	"keywords": [
 		"pi-package",
