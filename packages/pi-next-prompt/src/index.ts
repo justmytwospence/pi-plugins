@@ -59,6 +59,20 @@ export function ghostLine(line: string, text: string, width: number, dim: (s: st
   return clipped + " ".repeat(Math.max(0, width - visibleWidth(clipped)));
 }
 
+/** An explicit offer carried across /reload, which replaces this extension instance. */
+const RELOAD_CARRY = Symbol.for("pi-plugins.next-prompt.reload-carry.v1");
+type ReloadCarry = { session: string | undefined; kind: "prompt" | "terminal"; text: string; acknowledged: boolean; at: number };
+const carryStore = globalThis as { [RELOAD_CARRY]?: ReloadCarry };
+const sessionKey = (ctx: ExtensionContext | undefined) => {
+  const manager = (ctx as { sessionManager?: { getSessionFile?(): string | undefined; getSessionId?(): string } } | undefined)?.sessionManager;
+  return manager?.getSessionFile?.() ?? manager?.getSessionId?.();
+};
+
+/** Told to the model on its next turn when an explicit offer left the editor without being accepted. */
+export const withdrawnNotice = (kind: "prompt" | "terminal", reason: string) =>
+  `Your earlier offer_${kind} suggestion is no longer in the user's editor (${reason === "input" ? "the user's message cleared it" : `removed: ${reason}`}). ` +
+  `A displayed status from an earlier turn does not mean it is still there. If the user still needs it, call offer_${kind} again in this turn before saying it is in their prompt.`;
+
 const SURFACE = Symbol.for("pi-plugins.editor-surface.v1");
 const MODE = Symbol.for("pi-plugins.editor-mode.v1");
 type Renderable = { render(width: number): string[]; getText(): string; onChange?: (text: string) => void; isShowingAutocomplete?(): boolean; [SURFACE]?: string; [MODE]?: () => { state: string; autocomplete?: boolean } };
@@ -208,6 +222,8 @@ export default function nextPrompt(pi: ExtensionAPI) {
   type ExplicitOffer = { id: number; kind: OfferKind; text: string; surface?: Surface; acknowledged: boolean; queued: boolean; finish?: (details: OfferDetails) => void };
   let explicit: ExplicitOffer | undefined;
   let lastExplicit = "none yet";
+  // An explicit offer that left the editor without being accepted; the next turn's prompt says so.
+  let withdrawn: { kind: OfferKind; reason: string } | undefined;
   const blocked = (reason: string): OfferDetails => ({ status: "blocked", reason });
   const displayed = (offer: ExplicitOffer): OfferDetails => ({ status: "displayed", kind: offer.kind, text: offer.text, surface: offer.surface, acceptAfterTurn: false });
   let lastTag = "none yet";
@@ -348,6 +364,8 @@ export default function nextPrompt(pi: ExtensionAPI) {
     explicit = undefined;
     if (previous) {
       lastExplicit = reason;
+      withdrawn = reason === "accepted" || reason === "taken into stash" ? undefined
+        : previous.acknowledged || previous.queued ? { kind: previous.kind, reason } : withdrawn;
       previous.finish?.(blocked(reason));
     }
     offered = undefined;
@@ -630,7 +648,7 @@ export default function nextPrompt(pi: ExtensionAPI) {
     kind === "terminal"
       ? "Use offer_terminal for interactive shell handoffs with the complete raw shell command (no !i prefix)."
       : "Use offer_prompt for requested prompt or Pi slash command handoffs with the complete exact text, including when asked to put it in the prompt. Shell handoffs use offer_terminal.",
-    `Only offer_${kind} status displayed permits claiming a visible offer. After a displayed result explain Tab/Right to copy the suggestion immediately into an editable draft; Enter is a separate submission.`,
+    `Only offer_${kind} status displayed permits claiming a visible offer, and only in the same turn: the user's next message clears it. After a displayed result explain Tab/Right to copy the suggestion immediately into an editable draft; Enter is a separate submission.`,
     "On status queued, explain that the suggestion is waiting underneath the current draft: clear or stash the draft to reveal it, then Tab/Right accepts once it appears. Do not claim it was displayed or inserted.",
     ...(kind === "terminal" ? ["Wait for the current response to finish before pressing Enter to run an interactive command."] : []),
     "If blocked, name the blocker and print the complete proposed text as a fallback without claiming it is in the editor. Never include secrets.",
@@ -793,7 +811,7 @@ export default function nextPrompt(pi: ExtensionAPI) {
     }
   };
 
-  pi.on("session_start", (_event, ctx) => {
+  pi.on("session_start", (event, ctx) => {
     config = loadConfig("next-prompt", DEFAULT_CONFIG, ctx.cwd);
     busy = false;
     trace.length = 0;
@@ -801,10 +819,30 @@ export default function nextPrompt(pi: ExtensionAPI) {
     beforeSettlement = undefined;
     afterSettlement = undefined;
     reset("session_start");
+    withdrawn = undefined;
     attach(ctx);
+    const carry = carryStore[RELOAD_CARRY];
+    delete carryStore[RELOAD_CARRY];
+    if ((event as { reason?: string } | undefined)?.reason !== "reload" || !carry) return;
+    if (carry.session !== sessionKey(ctx) || Date.now() - carry.at > 60_000) return;
+    if (!active() || !ui) {
+      withdrawn = { kind: carry.kind, reason: "reload" };
+      return;
+    }
+    // A reload between turns must not silently drop the handoff the model just announced.
+    settled = true;
+    outcome = "completed";
+    explicit = { id: ++generation, kind: carry.kind, text: carry.text, acknowledged: carry.acknowledged, queued: !carry.acknowledged };
+    lastExplicit = `${carry.kind} restored after reload`;
+    record("create", "restored after reload");
+    show(carry.text);
   });
 
-  pi.on("session_shutdown", () => {
+  pi.on("session_shutdown", (event, ctx) => {
+    delete carryStore[RELOAD_CARRY];
+    if ((event as { reason?: string } | undefined)?.reason === "reload" && explicit && !busy && (explicit.acknowledged || explicit.queued)) {
+      carryStore[RELOAD_CARRY] = { session: sessionKey(ctx), kind: explicit.kind, text: explicit.text, acknowledged: explicit.acknowledged, at: Date.now() };
+    }
     reset("session_shutdown");
     releaseEditorChanges();
     unsubscribe?.();
@@ -836,7 +874,10 @@ export default function nextPrompt(pi: ExtensionAPI) {
     let interactive = false;
     pi.events.emit("interactive-shell:probe", { reply: () => { interactive = true; } });
     event.systemPromptOptions.sections[SECTION] = INSTRUCTION + PROMPT_OFFER_INSTRUCTION + (interactive ? INTERACTIVE_INSTRUCTION : "");
-    return undefined;
+    // A hidden message, not a system prompt change, so the prompt cache survives.
+    const gone = withdrawn;
+    withdrawn = undefined;
+    return gone ? { message: { customType: "next-prompt:withdrawn", content: withdrawnNotice(gone.kind, gone.reason), display: false } } : undefined;
   });
 
   pi.on("agent_start", () => {

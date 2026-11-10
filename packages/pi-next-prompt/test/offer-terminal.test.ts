@@ -853,3 +853,52 @@ test("focused ghost without a cursor remains suspended until output includes the
   expect(s.ctx.ui.editorWrites).toEqual(["!i printf 'one  two'"]);
   expect(s.ctx.ui.press("\t")).toBe(false);
 });
+
+test("an acknowledged offer survives /reload into the new extension instance", async () => {
+  const s = await setup();
+  await s.h.emit("agent_start", {}, s.ctx);
+  expect((await s.offer()).details.status).toBe("displayed");
+  await s.h.emit("agent_before_settle", { outcome: "completed" }, s.ctx);
+  await s.h.emit("agent_settled", {}, s.ctx);
+  await s.h.emit("session_shutdown", { reason: "reload" }, s.ctx);
+  // Pi builds a fresh instance on reload; the harness shares the UI, as Pi does.
+  const h2 = harness();
+  h2.pi.events.on("interactive-shell:inspect", ({ reply }: any) => reply({ available: true, layout: "inline" }));
+  const diagnostics2 = nextPrompt(h2.pi);
+  s.ctx.ui.inputHandlers.length = 0;
+  await h2.emit("session_start", { reason: "reload" }, s.ctx);
+  expect(s.ctx.ui.widgetLines("next-prompt").join("")).toContain("!i printf 'one  two'");
+  expect(diagnostics2().ready).toBe(true);
+  expect(s.ctx.ui.press("\t")).toBe(true);
+  expect(s.ctx.ui.editorText).toBe("!i printf 'one  two'");
+});
+
+test("no carry across a non-reload session start", async () => {
+  const s = await setup();
+  await s.offer();
+  await s.h.emit("session_shutdown", { reason: "new" }, s.ctx);
+  const h2 = harness();
+  nextPrompt(h2.pi);
+  await h2.emit("session_start", { reason: "reload" }, s.ctx);
+  expect(s.ctx.ui.widgets.has("next-prompt")).toBe(false);
+});
+
+test("the next turn is told when an offer was cleared without acceptance", async () => {
+  const s = await setup();
+  await s.offer();
+  await s.h.emit("input", { text: "what do i need to run?" }, s.ctx);
+  const event = { prompt: "what do i need to run?", systemPromptOptions: { sections: {} as Record<string, string> } };
+  const result: any = await s.h.emit("before_agent_start", event, s.ctx);
+  expect(result.message.display).toBe(false);
+  expect(result.message.content).toContain("call offer_terminal again");
+  expect(await s.h.emit("before_agent_start", event, s.ctx)).toBeUndefined();
+});
+
+test("an accepted offer sends no withdrawal notice", async () => {
+  const s = await setup();
+  await s.offer();
+  expect(s.ctx.ui.press("\t")).toBe(true);
+  await s.h.emit("input", { text: "go" }, s.ctx);
+  const event = { prompt: "go", systemPromptOptions: { sections: {} as Record<string, string> } };
+  expect(await s.h.emit("before_agent_start", event, s.ctx)).toBeUndefined();
+});
