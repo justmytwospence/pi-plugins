@@ -3,6 +3,14 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { failure, handoff, interactiveCommand, type HandoffResult } from "./handoff.ts";
 import { createFocusProxy, hideDuplicateStatus, layoutShape, resolveTranscript, TranscriptPanels } from "./transcript.ts";
 
+/** What the agent is told when an accepted suggestion's command ends. */
+export function continuation(result: HandoffResult): string {
+  if (result.exitCode === 0) return "The requested interactive command succeeded (exit 0). Continue with the task; its terminal output was not captured.";
+  const output = result.output.includes("\nLast terminal output:\n") ? "Its recorded result includes the last terminal output" : "No terminal output was captured";
+  if (result.cancelled) return `The user cancelled the requested interactive command (exit ${result.exitCode}). ${output}. Do not rerun it unprompted: check what state it left and continue or ask how to proceed.`;
+  return `The requested interactive command failed (exit ${result.exitCode}). ${output}. Diagnose the failure and respond: check what state the command left before retrying anything, fix the cause, and offer a corrected command if one is still needed.`;
+}
+
 export default function interactiveShell(pi: ExtensionAPI) {
   const terminalAvailable = () => process.stdin.isTTY === true && process.stdout.isTTY === true;
   let available = false;
@@ -122,7 +130,7 @@ export default function interactiveShell(pi: ExtensionAPI) {
         generation++;
         pi.sendMessage({
           customType: "interactive-shell-continuation",
-          content: "The requested interactive command has finished. Continue based on its recorded exit status; its terminal output was not captured.",
+          content: continuation(result),
           display: false,
         }, { triggerTurn: true });
       });

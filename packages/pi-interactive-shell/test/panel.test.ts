@@ -80,7 +80,7 @@ test("a command's literal control bytes cannot escape the header", async () => {
   const header = h.panel.render(98)[1];
   expect(header).not.toContain("\x1b[2J");
   expect(header).toContain("\\x1b[2J");
-  expect(header).toContain("\\x0a");
+  expect(header).toContain("printf '\\x1b[2J' ↵ next-line");
   await h.panel.shutdown();
 });
 
@@ -185,7 +185,7 @@ test("native fd closure racing input or resize cannot crash the UI", async () =>
   expect(h.done.mock.calls[0][0].exitCode).toBe(0);
 });
 
-test("retains final output until dismissal, without returning screen content", async () => {
+test("a failed exit retains final output until dismissal and returns its tail", async () => {
   const h = await setup();
   h.data("PRIVATE_SCREEN_ONLY\r\n");
   await vi.waitFor(() => expect(plain(h.panel.render(98))).toContain("PRIVATE_SCREEN_ONLY"));
@@ -194,8 +194,7 @@ test("retains final output until dismissal, without returning screen content", a
   expect(h.done).not.toHaveBeenCalled();
   h.panel.handleInput("\r");
   await vi.waitFor(() => expect(h.done).toHaveBeenCalledOnce());
-  expect(h.done.mock.calls[0][0]).toEqual({ output: "(interactive command exited with code 1)", exitCode: 1, cancelled: false, truncated: false });
-  expect(JSON.stringify(h.done.mock.calls)).not.toContain("PRIVATE_SCREEN_ONLY");
+  expect(h.done.mock.calls[0][0]).toEqual({ output: "(interactive command exited with code 1)\nLast terminal output:\nPRIVATE_SCREEN_ONLY", exitCode: 1, cancelled: false, truncated: false });
   expect(h.dispose).toHaveBeenCalledTimes(2);
 });
 
@@ -249,7 +248,8 @@ test.each([
   stopped();
   await vi.waitFor(() => expect(h.done).toHaveBeenCalledOnce());
   expect(h.done.mock.calls[0][0]).toMatchObject({ exitCode, cancelled, truncated: false });
-  expect(JSON.stringify(h.done.mock.calls)).not.toContain("PRIVATE_FINAL_OUTPUT");
+  if (exitCode) expect(h.done.mock.calls[0][0].output).toMatch(/\nLast terminal output:\nPRIVATE_FINAL_OUTPUT$/);
+  else expect(JSON.stringify(h.done.mock.calls)).not.toContain("PRIVATE_FINAL_OUTPUT");
   expect(h.dispose).toHaveBeenCalledTimes(2);
   expect(dispose).toHaveBeenCalledOnce();
   await Promise.all([h.panel.shutdown(), h.panel.shutdown()]);
@@ -380,7 +380,8 @@ test.each([false, true])("inline exit auto-finishes with frozen head-tail before
   expect(headTail.mock.invocationCallOrder[0]).toBeLessThan(dispose.mock.invocationCallOrder[0]);
   const [result, snapshot] = h.done.mock.calls[0];
   expect(result.exitCode).toBe(7);
-  expect(JSON.stringify(result)).not.toContain("row");
+  expect(result.output).toContain("Last terminal output:\nrow0\n");
+  expect(result.output).toMatch(/row39$/);
   expect(snapshot.handleInput).toBeUndefined();
   expect(snapshot.focused).toBeUndefined();
   const lines = snapshot.render(98);
@@ -552,4 +553,12 @@ test("inline shutdown during pending startup captures output and finishes once",
   expect(stopPty).toHaveBeenCalledOnce();
   expect(done).toHaveBeenCalledOnce();
   expect(done.mock.calls[0][1].render(80).join("")).not.toContain(CURSOR_MARKER);
+});
+
+test("a successful exit returns only its status, never screen content", async () => {
+  const h = await setup(undefined, undefined, true);
+  h.data("PRIVATE_SUCCESS_OUTPUT\r\n");
+  h.exit(0);
+  await vi.waitFor(() => expect(h.done).toHaveBeenCalledOnce());
+  expect(h.done.mock.calls[0][0]).toEqual({ output: "(interactive command exited with code 0)", exitCode: 0, cancelled: false, truncated: false });
 });

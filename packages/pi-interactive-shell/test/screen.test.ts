@@ -447,3 +447,14 @@ test("head-tail uses the bounded buffer's earliest rows after truncation and the
   await screen.flush();
   expect(screen.headTail(3)).toEqual({ head: [], tail: screen.render(0, false), omitted: 0 });
 });
+
+test("tailText joins soft-wrapped rows, strips styling and keeps the last lines", async () => {
+  const { screen } = create(8, 3);
+  screen.write("\x1b[31mred\x1b[0m line\r\nabcdefghijkl\r\n\r\n");
+  await screen.flush();
+  expect(screen.tailText()).toBe("red line\nabcdefghijkl");
+  for (let i = 0; i < 10; i++) screen.write(`n${i}\r\n`);
+  await screen.flush();
+  expect(screen.tailText(2)).toBe("n8\nn9");
+  expect(screen.tailText(60, 6)).toBe("n8\nn9");
+});

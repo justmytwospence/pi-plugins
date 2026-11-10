@@ -133,13 +133,17 @@ export class TerminalPanel {
     if (this.closed || this.ended) return;
     this.ended = true;
     const signalName = signal ? Object.entries(constants.signals).find(([, value]) => value === signal)?.[0] ?? String(signal) : undefined;
-    this.result = {
-      output: signalName ? `(interactive command interrupted by ${signalName})` : `(interactive command exited with code ${code})`,
+    const status = signalName ? `(interactive command interrupted by ${signalName})` : `(interactive command exited with code ${code})`;
+    const result: HandoffResult = this.result = {
+      output: status,
       exitCode: signal ? 128 + signal : code,
       cancelled: signal === constants.signals.SIGINT || signal === constants.signals.SIGTERM || code === 130,
       truncated: false,
     };
     await this.screen.flush();
+    // A failure records the end of the terminal, so the agent can diagnose it; success records only the status.
+    const tail = result.exitCode !== 0 && !this.closed ? this.screen.tailText() : "";
+    if (tail) result.output = `${status}\nLast terminal output:\n${tail}`;
     // Even a successful shell can leave descendants; this is not a detached job.
     await this.stop();
     if (this.autoClose || this.inline) this.finish(this.result);
@@ -271,7 +275,8 @@ export class TerminalPanel {
     const border = (text: string) => this.theme.fg("accent", text);
     const title = ` Interactive terminal · ${status} `;
     const top = border("┌" + truncateToWidth(title, innerWidth) + "─".repeat(Math.max(0, innerWidth - visibleWidth(title))) + "┐");
-    const displayCommand = this.command.replace(/[\x00-\x1f\x7f-\x9f]/g, char => `\\x${char.charCodeAt(0).toString(16).padStart(2, "0")}`);
+    // A multi-line command shows on one header line: continuations join, other line breaks show as ↵.
+    const displayCommand = this.command.replace(/\\\n\s*/g, " ").replace(/\s*\n\s*/g, " ↵ ").replace(/[\x00-\x1f\x7f-\x9f]/g, char => `\\x${char.charCodeAt(0).toString(16).padStart(2, "0")}`);
     const command = border("│") + pad(` $ ${displayCommand}`) + border("│");
     const lines = content.map(line => border("│") + " " + padContent(line) + " " + border("│"));
     function padContent(line: string) {

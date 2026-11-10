@@ -174,7 +174,7 @@ test.each([
   expect(h.pi.sendMessage).toHaveBeenCalledTimes(matched ? 1 : 0);
 });
 
-test.each([completed, { ...completed, exitCode: 7 }, { ...completed, exitCode: 130, cancelled: true }])("matched completion schedules exactly one hidden status-only turn: %j", async result => {
+test.each([completed, { ...completed, exitCode: 7 }, { ...completed, exitCode: 130, cancelled: true }])("matched completion schedules exactly one hidden continuation turn: %j", async result => {
   completeHandoffs(result);
   const h = harness();
   h.accept();
@@ -183,7 +183,7 @@ test.each([completed, { ...completed, exitCode: 7 }, { ...completed, exitCode: 1
   await nextImmediate();
   expect(h.pi.sendMessage).toHaveBeenCalledExactlyOnceWith({
     customType: "interactive-shell-continuation",
-    content: expect.stringMatching(/exit status.*output was not captured/), display: false,
+    content: expect.stringMatching(result.cancelled ? /cancelled.*exit 130.*No terminal output/ : result.exitCode ? /failed \(exit 7\).*No terminal output.*Diagnose/ : /succeeded.*not captured/), display: false,
   }, { triggerTurn: true });
   await nextImmediate();
   expect(h.pi.sendMessage).toHaveBeenCalledOnce();
@@ -435,7 +435,8 @@ test("real Pi loader and interactive bash path record the result before continua
     expect(chat.children[0].render(80).join("\n")).toContain("output retained");
     expect(chat.children[0].render(80).join("\n")).toContain("PRIVATE_DISPLAY  quoted   spaces");
     const recorded = manager.getEntries().filter(entry => entry.type === "message").map(entry => (entry as any).message);
-    expect(recorded[0].output).not.toContain("PRIVATE_DISPLAY");
+    // A failure records the end of the terminal for the agent; the frame itself is never recorded.
+    expect(recorded[0].output).toBe("(interactive command exited with code 7)\nLast terminal output:\nPRIVATE_DISPLAY  quoted   spaces");
     expect(JSON.stringify(manager.getEntries())).not.toContain("output retained");
     await nextImmediate();
     expect(sendMessage).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({

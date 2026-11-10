@@ -140,6 +140,24 @@ export class TerminalScreen {
     if (!this.disposed) this.terminal.resize(cols, rows);
   }
 
+  /** Plain text of the last rows (scrollback included), soft-wrapped rows joined, ANSI-free; for failure reports. */
+  tailText(maxLines = 60, maxChars = 6_000): string {
+    if (this.disposed) return "";
+    const buffer = this.terminal.buffer.active;
+    const rows: string[] = [];
+    for (let y = 0; y < buffer.length; y++) {
+      const line = buffer.getLine(y);
+      if (!line) continue;
+      const text = line.translateToString(true);
+      if (line.isWrapped && rows.length) rows[rows.length - 1] += text;
+      else rows.push(text);
+    }
+    while (rows.length && rows.at(-1)!.trim() === "") rows.pop();
+    let text = rows.slice(-maxLines).map(row => row.trimEnd()).join("\n").replace(/[\x00-\x08\x0b-\x1f\x7f]/g, "");
+    if (text.length > maxChars) text = text.slice(text.length - maxChars).replace(/^[^\n]*\n/, "");
+    return text;
+  }
+
   get maxScrollback(): number {
     return this.disposed ? 0 : this.terminal.buffer.active.baseY;
   }
