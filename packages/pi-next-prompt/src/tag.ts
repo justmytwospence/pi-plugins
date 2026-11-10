@@ -11,6 +11,12 @@ export const INSTRUCTION =
 export const PROMPT_OFFER_INSTRUCTION =
   "\nWhen the user asks you to put text or a Pi slash command in their prompt, use offer_prompt with the complete exact text. Do not rely on prose or a <next> tag for an explicit handoff. Call it before saying the suggestion is available. Only status displayed permits claiming a visible offer, and only in the turn that offered it: the user's next message clears it, so call the tool again before saying it is still there. It is not inserted until the user accepts it. After a displayed result explain Tab/Right to copy the suggestion immediately into an editable draft; Enter is a separate submission. On status queued, explain that the suggestion is waiting underneath the current draft: clear or stash the draft to reveal it, then Tab/Right accepts once it appears. Do not claim it was displayed or inserted. On blocked, state the blocker and show the text plainly without claiming it was offered. Shell handoffs use offer_terminal, not offer_prompt. Never include credentials.";
 
+/** How offer_terminal commands are laid out in the editor. */
+export const LAYOUT_GUIDELINE =
+  "Keep a command that fits in about 100 characters on one line. Lay out a longer one over several lines so it reads easily in the prompt: " +
+  "break before each `&&`, `||` or `|` and between groups of options with ` \\` continuations (nothing after the backslash), indenting continuation lines two spaces, " +
+  "and inside a quoted script (`sh -c '...'`) put one statement per line instead of joining them with `;`.";
+
 export const INTERACTIVE_INSTRUCTION =
   "\nTerminal handoff is available: when handing the user one concrete interactive shell command, " +
   "use offer_terminal with the complete raw shell command, not an interactive next tag or only prose or a code block. Ordinary prose next-step tags remain available for non-shell suggestions. " +
@@ -19,10 +25,11 @@ export const INTERACTIVE_INSTRUCTION =
   "Treat the user's manual test as the pending next step even when implementation and automated checks are complete. " +
   "After the tool returns displayed, explain the visible handoff in your response; Tab only fills an editable draft and the user must press Enter to run it. Acceptance is available once displayed. On status queued, explain that the command suggestion is waiting underneath the current draft: clear or stash the draft to reveal it, then Tab/Right accepts once it appears. Do not claim it was displayed or inserted. Wait for the current response to finish before pressing Enter to run an interactive command. Only displayed permits claiming a visible command offer. " +
   "Never include credentials, and always give the complete command however long it is: never truncate or abbreviate it. " +
+  LAYOUT_GUIDELINE + " " +
   "Do not retry a command that may already have made changes without checking its state. " +
-  "The command runs in the session working directory and returns only its exit status, not captured output; " +
-  "When the user accepts your suggested `!i` draft with Tab or Right and submits it exactly unchanged with Enter, the handoff ends on success, failure, or cancellation and the agent continues automatically using only the status. " +
-  "Terminal output and keystrokes are never sent to the model; an inline terminal leaves a static, memory-only output preview in the chat after exit. Manually entered, edited, externally offered, and `!!i` commands do not automatically resume the agent. Unsupported layouts return an explicit blocked reason and do not run the command.";
+  "The command runs in the session working directory. A success records only its exit status; a failure or cancellation also records the last lines of its terminal output. " +
+  "When the user accepts your suggested `!i` draft with Tab or Right and submits it exactly unchanged with Enter, the agent continues automatically when it ends: after a failure, read the recorded output, diagnose the cause, check what state the command left, and fix it or offer a corrected command rather than retrying blindly. " +
+  "Keystrokes (passwords included) are never sent to the model, and a successful command's output is not either; an inline terminal leaves a static, memory-only output preview in the chat after exit. Manually entered, edited, externally offered, and `!!i` commands do not automatically resume the agent (`!!i` records nothing). Unsupported layouts return an explicit blocked reason and do not run the command.";
 
 /** A line that is only a tag (surrounding whitespace allowed). */
 const TAG_LINE = /^[ \t]*<next>(.*?)<\/next>[ \t]*$/gmu;

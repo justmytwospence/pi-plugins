@@ -62,7 +62,10 @@ test.each([
 test("blocked terminal guidance still names the blocker without executing or exposing private interaction", () => {
   expect(INTERACTIVE_INSTRUCTION).toContain("Only displayed permits claiming a visible command offer");
   expect(INTERACTIVE_INSTRUCTION).toContain("Unsupported layouts return an explicit blocked reason and do not run the command");
-  expect(INTERACTIVE_INSTRUCTION).toContain("Terminal output and keystrokes are never sent to the model");
+  expect(INTERACTIVE_INSTRUCTION).toContain("Keystrokes (passwords included) are never sent to the model");
+  expect(INTERACTIVE_INSTRUCTION).toContain("a failure or cancellation also records the last lines of its terminal output");
+  expect(INTERACTIVE_INSTRUCTION).toContain("after a failure, read the recorded output, diagnose the cause");
+  expect(INTERACTIVE_INSTRUCTION).toContain("Lay out a longer one over several lines");
   expect(INTERACTIVE_INSTRUCTION).toContain("complete command however long it is: never truncate or abbreviate it");
   expect(INTERACTIVE_INSTRUCTION).toContain("Do not retry a command that may already have made changes without checking its state");
 });

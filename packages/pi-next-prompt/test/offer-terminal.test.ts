@@ -171,7 +171,7 @@ test("model-only schema and guidelines distinguish verified display, queueing an
   expect(guidelines).toContain("Wait for the current response to finish before pressing Enter to run an interactive command.");
 });
 
-test.each(["", "  ", " true", "true ", "one\ntwo", "one\rtwo", "one\x1btwo", "one\x00two", "!i true", "!!i true"])("rejects invalid input %j", async command => {
+test.each(["", "  ", " true", "true ", "one \\ \ntwo", "one\r\ntwo", "one\rtwo", "one\x1btwo", "one\x00two", "!i true", "!!i true"])("rejects invalid input %j", async command => {
   const { execute, ctx } = await setup();
   expect((await execute(command)).details.status).toBe("blocked");
   expect(ctx.ui.widgets.size).toBe(0);
@@ -901,4 +901,14 @@ test("an accepted offer sends no withdrawal notice", async () => {
   await s.h.emit("input", { text: "go" }, s.ctx);
   const event = { prompt: "go", systemPromptOptions: { sections: {} as Record<string, string> } };
   expect(await s.h.emit("before_agent_start", event, s.ctx)).toBeUndefined();
+});
+
+test.each([false, true])("a long command offered over several lines keeps its layout (ghost=%s)", async ghost => {
+  const s = await setup({ ghost });
+  const command = "sudo sh -c '\n  set -e\n  apt-get update\n' \\\n  && echo done";
+  expect((await s.offer(command)).details.status).toBe("displayed");
+  const shown = (ghost ? s.ctx.ui.renderEditor() : s.ctx.ui.widgetLines("next-prompt")).join("\n");
+  for (const part of ["i sudo sh -c '", "  set -e", "  apt-get update", "' \\", "  && echo done"]) expect(shown).toContain(part);
+  expect(s.ctx.ui.press("\t")).toBe(true);
+  expect(s.ctx.ui.editorText).toBe(`!i ${command}`);
 });

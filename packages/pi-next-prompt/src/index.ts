@@ -10,7 +10,7 @@ import { Type } from "typebox";
 import { loadConfig } from "./config.ts";
 import { type ClassifierQuestion, type JevConfig, askJev, bool } from "./jev.ts";
 import { SYSTEM1_CHANGED, installSystem1Notifications, provenanceOf, resolveSystem1Target, type System1DecisionProvenance } from "./system1.js";
-import { INSTRUCTION, INTERACTIVE_INSTRUCTION, PROMPT_OFFER_INSTRUCTION, extractNext } from "./tag.ts";
+import { INSTRUCTION, INTERACTIVE_INSTRUCTION, LAYOUT_GUIDELINE, PROMPT_OFFER_INSTRUCTION, extractNext } from "./tag.ts";
 import { clip, clipTail, messageText } from "./transcript.ts";
 
 export interface NextPromptConfig extends Record<string, unknown> {
@@ -72,6 +72,23 @@ const sessionKey = (ctx: ExtensionContext | undefined) => {
 export const withdrawnNotice = (kind: "prompt" | "terminal", reason: string) =>
   `Your earlier offer_${kind} suggestion is no longer in the user's editor (${reason === "input" ? "the user's message cleared it" : `removed: ${reason}`}). ` +
   `A displayed status from an earlier turn does not mean it is still there. If the user still needs it, call offer_${kind} again in this turn before saying it is in their prompt.`;
+
+/**
+ * `ghostLine` for a suggestion of several lines (a long shell command split with continuations):
+ * the first line at the cursor, the rest below it, aligned with the cursor column. Undefined without a cursor.
+ */
+export function ghostLines(line: string, text: string, width: number, dim: (s: string) => string): string[] | undefined {
+  const [first = "", ...rest] = text.split("\n");
+  const head = ghostLine(line, first, width, dim);
+  if (head === undefined || rest.length === 0) return head === undefined ? undefined : [head];
+  const at = [line.indexOf(EMPTY_CURSOR), line.indexOf(CURSOR_MARKER)].filter(i => i !== -1).sort((a, b) => a - b)[0]!;
+  const indent = " ".repeat(visibleWidth(line.slice(0, at).replaceAll(CURSOR_MARKER, "")));
+  const rightPad = /^ */.exec(line)![0].length;
+  return [head, ...rest.map(part => {
+    const clipped = truncateToWidth(`${indent}${dim(part)}`, Math.max(1, width - rightPad));
+    return clipped + " ".repeat(Math.max(0, width - visibleWidth(clipped)));
+  })];
+}
 
 const SURFACE = Symbol.for("pi-plugins.editor-surface.v1");
 const MODE = Symbol.for("pi-plugins.editor-mode.v1");
@@ -509,11 +526,11 @@ export default function nextPrompt(pi: ExtensionAPI) {
       const text = suspended ? owner?.text : shown;
       if (text === undefined) { observe("ghost", false, "not shown"); return lines; }
       const i = lines.findIndex(hasCursor);
-      const line = i === -1 ? undefined : ghostLine(lines[i]!, text, w, (s) => target.theme.fg("dim", s));
-      if (line === undefined) { observe("ghost", false, "no cursor"); return lines; }
+      const ghosted = i === -1 ? undefined : ghostLines(lines[i]!, text, w, (s) => target.theme.fg("dim", s));
+      if (ghosted === undefined) { observe("ghost", false, "no cursor"); return lines; }
       resume(owner, "ghost");
       const out = lines.slice();
-      out[i] = line;
+      out.splice(i, 1, ...ghosted);
       observe("ghost", true, "included in component output");
       observed?.("ghost");
       return out;
@@ -570,11 +587,12 @@ export default function nextPrompt(pi: ExtensionAPI) {
             observe("widget", false, "not shown");
             return [];
           }
-          const line = truncateToWidth(`${theme.fg("dim", `→ ${text}`)}  ${theme.fg("muted", hint)}`, width);
+          const [first = "", ...rest] = text.split("\n");
+          const line = truncateToWidth(`${theme.fg("dim", `→ ${first}`)}  ${theme.fg("muted", hint)}`, width);
           if (line.length > 0) resume(owner, "widget");
           observe("widget", line.length > 0, line.length > 0 ? "included in component output" : "empty output");
           if (line.length > 0) observed?.("widget");
-          return [line];
+          return line.length > 0 ? [line, ...rest.map(part => truncateToWidth(theme.fg("dim", `  ${part}`), width))] : [line];
         },
         invalidate: () => {},
       }),
@@ -646,7 +664,7 @@ export default function nextPrompt(pi: ExtensionAPI) {
 
   const offerGuidelines = (kind: OfferKind) => [
     kind === "terminal"
-      ? "Use offer_terminal for interactive shell handoffs with the complete raw shell command (no !i prefix)."
+      ? `Use offer_terminal for interactive shell handoffs with the complete raw shell command (no !i prefix). ${LAYOUT_GUIDELINE}`
       : "Use offer_prompt for requested prompt or Pi slash command handoffs with the complete exact text, including when asked to put it in the prompt. Shell handoffs use offer_terminal.",
     `Only offer_${kind} status displayed permits claiming a visible offer, and only in the same turn: the user's next message clears it. After a displayed result explain Tab/Right to copy the suggestion immediately into an editable draft; Enter is a separate submission.`,
     "On status queued, explain that the suggestion is waiting underneath the current draft: clear or stash the draft to reveal it, then Tab/Right accepts once it appears. Do not claim it was displayed or inserted.",
@@ -710,7 +728,9 @@ export default function nextPrompt(pi: ExtensionAPI) {
       };
       if (!command.trim()) return result(blocked("command is empty"));
       if (command !== command.trim()) return result(blocked("leading or trailing whitespace cannot be preserved by Pi's shell submission; command was not offered"));
-      if (/[\x00-\x1f\x7f-\x9f]/u.test(command)) return result(blocked("command contains control characters or line breaks"));
+      // Line breaks are allowed: a long command is laid out over several lines (continuations, script lines).
+      if (/[\x00-\x09\x0b-\x1f\x7f-\x9f]/u.test(command)) return result(blocked("command contains control characters other than line breaks"));
+      if (/\\[ \t]+\n/u.test(command)) return result(blocked("a backslash followed by spaces before a line break does not continue the line; remove the trailing spaces"));
       if (/^!!?i(?:\s|$)/u.test(command.trimStart())) return result(blocked("provide the raw command without !i or !!i prefix"));
       const text = `!i ${command}`;
       if (config.maxChars > 0 && text.length > config.maxChars) return result(blocked("command exceeds maxChars; shell commands are never truncated"));

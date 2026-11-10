@@ -1,7 +1,7 @@
 import { mkdtempSync } from "node:fs";
 import path from "node:path";
 import { beforeEach, expect, test } from "vitest";
-import nextPrompt, { DEFAULT_CONFIG, SECTION, ghostLine, processAssistant, vet } from "../src/index.ts";
+import nextPrompt, { DEFAULT_CONFIG, SECTION, ghostLine, ghostLines, processAssistant, vet } from "../src/index.ts";
 import { visibleWidth } from "@earendil-works/pi-tui";
 import { INSTRUCTION, PROMPT_OFFER_INSTRUCTION } from "../src/tag.ts";
 import { fakeJev, harness } from "./harness.ts";
@@ -454,4 +454,13 @@ test("status reports fallback and ghost offers separately", async () => {
 
 test("processAssistant ignores other roles", () => {
   expect(processAssistant({ role: "user", content: "<next>x</next>" }, 110)).toEqual({ suggestion: undefined, replacement: undefined });
+});
+
+test("ghostLines puts continuation lines under the cursor column, each the full width", () => {
+  const CUR = "\x1b[7m \x1b[0m";
+  const out = ghostLines(`  ${CUR}${" ".repeat(17)}`, "one \\\n  two", 20, (s) => s)!;
+  expect(out).toHaveLength(2);
+  expect(out[1]).toBe(`    two${" ".repeat(13)}`);
+  for (const line of out) expect(visibleWidth(line)).toBe(20);
+  expect(ghostLines("no cursor", "a\nb", 20, (s) => s)).toBeUndefined();
 });
