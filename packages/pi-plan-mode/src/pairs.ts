@@ -40,6 +40,8 @@ export interface SelectedPair {
 export interface PairController {
   define(defs: PairDefinition[]): void;
   selected(ctx: ExtensionContext): SelectedPair | undefined;
+  /** A registered pair whose planner is the current (physical) session model, to offer its worker at approval. */
+  pairFor(ctx: ExtensionContext): SelectedPair | undefined;
   approve(ctx: ExtensionContext, planFile: string): void;
   phaseChanged(ctx: ExtensionContext): void;
   readonly state: PairState;
@@ -82,10 +84,25 @@ export function registerPairs(pi: ExtensionAPI, host: PairHost): PairController 
     const key = pairKey(model);
     const def = defs.find((candidate) => pairKey(candidate) === key);
     if (!def) return undefined;
-    const resolved = resolvePair(def, available(ctx));
-    if ("error" in resolved) return undefined;
+    return resolved(ctx, def);
+  };
+
+  const resolved = (ctx: ExtensionContext, def: PairDefinition): SelectedPair | undefined => {
+    const result = resolvePair(def, available(ctx));
+    if ("error" in result) return undefined;
     const name = (spec: ModelSpec) => ctx.modelRegistry.find(spec.provider, spec.modelId)?.name ?? spec.modelId;
-    return { def, ...resolved, plannerName: name(resolved.planner), workerName: name(resolved.worker) };
+    return { def, ...result, plannerName: name(result.planner), workerName: name(result.worker) };
+  };
+
+  const pairFor = (ctx: ExtensionContext): SelectedPair | undefined => {
+    const model = ctx.model;
+    if (!virtualApi || !model || (model as { api?: string }).api === "pi-virtual") return undefined;
+    for (const def of defs) {
+      if (!registered.has(pairKey(def))) continue;
+      const pair = resolved(ctx, def);
+      if (pair && pair.planner.provider === model.provider && pair.planner.modelId === model.id) return pair;
+    }
+    return undefined;
   };
 
   const register = (def: PairDefinition) => {
@@ -331,6 +348,7 @@ export function registerPairs(pi: ExtensionAPI, host: PairHost): PairController 
   return {
     define,
     selected,
+    pairFor,
     approve(ctx, planFile) {
       if (!selected(ctx)) return;
       state = { version: 1, consult: false, planFile, planLevel: pi.getThinkingLevel() as ModelSpecThinkingLevel };

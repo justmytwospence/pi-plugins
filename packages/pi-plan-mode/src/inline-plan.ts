@@ -85,6 +85,8 @@ export interface Approval {
   edited: boolean;
   thinkingLevel?: ModelSpecThinkingLevel;
   effortSource?: EffortSource;
+  /** Implemented on the offered plan model pair's worker (the session switched to the pair). */
+  withPair?: true;
 }
 
 export interface InlineHost {
@@ -103,8 +105,12 @@ export interface InlineHost {
         planningName: string;
         /** A sentence for the approval question, e.g. who implements and who answers its questions. */
         note?: string;
+        /** A plan model pair's worker to offer as well (no pair selected, the session model plans one). */
+        alternate?: { model: ModelSpec; name: string };
       }
     | undefined;
+  /** Switch the session to the offered pair before implementing on its worker; false when it could not. */
+  selectPair?(ctx: ExtensionContext): Promise<boolean>;
   /** A task-level default only; callers retain manual effort choices and approval freshness. */
   implementationEffort?(ctx: ExtensionContext, plan: Pick<Approval, "plan" | "planFile">): ImplementationEffortRequest;
   compactHere(approval: Approval, ctx: ExtensionContext): void;
@@ -580,11 +586,22 @@ export function registerInlinePlanMode(pi: ExtensionAPI, host: InlineHost): Inli
                 "Plan review expired because the plan, workflow, branch, model or System 1 changed. Approve the plan again.",
               );
           }
+          const alternate = models?.alternate;
+          if (request && alternate && reasoning(alternate.model)) {
+            const effort = await request.pick(alternate.model, signal);
+            if (effort.kind === "system1")
+              recommendations.set(`${alternate.model.provider}/${alternate.model.modelId}`, effort.thinkingLevel);
+            if (!current() || readPlan(planFile) !== plan || (!signal?.aborted && !request.isCurrent()))
+              return text(
+                "Plan review expired because the plan, workflow, branch, model or System 1 changed. Approve the plan again.",
+              );
+          }
           const picked = await pickApproval(
             ctx,
             {
               ...(models?.planning ? { planning: models.planning } : {}),
               ...(models?.note ? { note: models.note } : {}),
+              ...(alternate && host.selectPair ? { alternate } : {}),
               ...(request ? { effortDefaultKey: request.key } : {}),
               recommendations,
             },
@@ -721,8 +738,18 @@ export function registerInlinePlanMode(pi: ExtensionAPI, host: InlineHost): Inli
             edited,
             thinkingLevel: picked?.thinkingLevel,
             effortSource: picked?.effortSource ?? "fallback",
+            ...(choice.withPair ? { withPair: true as const } : {}),
           };
           const mode = "work";
+          // Switching to the pair while still planning routes nothing yet: the pair plans on this same model.
+          if (choice.withPair) {
+            const switched = (await host.selectPair?.(ctx)) === true;
+            if (!sameDestination()) return text("Plan review expired because the workflow or branch changed.");
+            if (!switched)
+              return text(
+                `Could not switch to the plan model pair for ${alternate?.name ?? "its worker"}. Stay in plan mode and approve the plan again.`,
+              );
+          }
           if (!(await requestWorkFromTool()))
             return text("Work is unavailable. Stay in plan mode and approve the plan again.");
           if (!sameDestination()) return text("Plan review expired because the workflow or branch changed.");

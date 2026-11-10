@@ -1896,3 +1896,58 @@ test("a host note from implementationChoices appears in the approval question", 
   assert.equal(titles[0], `Implement this plan? ${note}`);
   assert.equal(implementHere.mock.calls.length, 1);
 });
+
+test("implementing with an offered pair worker switches to the pair first; a failed switch keeps planning", async () => {
+  for (const switched of [true, false]) {
+    const mock = createMockPi();
+    const context = createMockContext({ hasUI: true, mode: "rpc" });
+    const ctx = context.ctx as ExtensionContext;
+    Object.assign(ctx.sessionManager, { getLeafId: () => null });
+    const plansDirectory = mkdtempSync(join(tmpdir(), "pair-plan-"));
+    onTestFinished(() => rmSync(plansDirectory, { recursive: true, force: true }));
+    const order: string[] = [];
+    const selectPair = vi.fn(async () => {
+      order.push("select");
+      return switched;
+    });
+    const implementHere = vi.fn((_ctx: ExtensionContext, approval: { withPair?: true }) => {
+      order.push(`implement:${approval.withPair === true}`);
+      return "implemented";
+    });
+    const inline = registerInlinePlanMode(mock.pi, {
+      plansDirectory: () => plansDirectory,
+      safeSubcommands: () => undefined,
+      toggleKey: () => undefined,
+      implementationChoices: () => ({
+        planning: { provider: "anthropic", modelId: "claude-opus-5-5" },
+        planningName: "Claude Opus 5.5",
+        alternate: { model: { provider: "anthropic", modelId: "claude-sonnet-5-5" }, name: "Claude Sonnet 5.5" },
+      }),
+      selectPair,
+      approved: vi.fn(),
+      compactHere: vi.fn(),
+      implementHere,
+    });
+    const offered: string[][] = [];
+    ctx.ui.select = async (title, choices) => {
+      if (!title.startsWith("Implement this plan?")) return undefined;
+      offered.push(choices);
+      return "Yes, implement with Sonnet 5.5";
+    };
+    for (const handler of mock.events.get("session_start") ?? []) await handler({ reason: "startup" }, ctx);
+    await inline.enter(ctx);
+    writeFileSync(inline.planFile as string, "# Pair plan\n");
+    const exit = mock.tools.find((candidate) => candidate.name === EXIT_TOOL) as unknown as Tool;
+    const result = await exit.execute("pair", {}, undefined, undefined, ctx);
+    assert.ok(offered[0]?.includes("Yes, compact and implement with Sonnet 5.5"));
+    if (switched) {
+      assert.equal(result.details.outcome, "approved");
+      assert.deepEqual(order, ["select", "implement:true"]);
+      assert.equal(inline.active, false);
+    } else {
+      assert.match(result.content[0]?.text ?? "", /Could not switch to the plan model pair for Claude Sonnet 5\.5/u);
+      assert.deepEqual(order, ["select"]);
+      assert.equal(inline.active, true);
+    }
+  }
+});

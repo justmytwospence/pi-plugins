@@ -30,9 +30,16 @@ function clean(text: string): string {
   return stripVTControlCharacters(text).replace(/[\p{Cc}\p{Zl}\p{Zp}]/gu, " ");
 }
 
+/** The label of the row that implements on a plan model pair's worker, e.g. `Yes, implement with Sonnet 5.5`. */
+export function pairLabel(workerName: string, compact = false): string {
+  return `Yes, ${compact ? "compact and " : ""}implement with ${clean(workerName)
+    .trim()
+    .replace(/^Claude /u, "")}`;
+}
+
 export type ApprovalChoice =
-  | { kind: "here" }
-  | { kind: "compact-here" }
+  | { kind: "here"; withPair?: true }
+  | { kind: "compact-here"; withPair?: true }
   | { kind: "edit" }
   | { kind: "save" }
   | { kind: "keep" };
@@ -45,6 +52,8 @@ export interface ApprovalInput {
   effortDefaultKey?: string;
   /** A sentence after the question, e.g. who implements and who answers its questions. */
   note?: string;
+  /** A plan model pair's worker to offer: its rows switch the session to the pair, then implement. */
+  alternate?: { model: ModelSpec; name: string };
 }
 
 export interface ApprovalResult {
@@ -76,10 +85,12 @@ type Row = { id: string; choice: ApprovalChoice; label: string; model?: ModelSpe
 const effortId = (row: Row) => (row.model ? modelId(row.model) : "");
 type Catalog = Pick<ReturnType<typeof modelCatalog>, "efforts">;
 
-function initialEffort(input: ApprovalInput): ModelSpecThinkingLevel | undefined {
-  const recommended =
-    (input.planning && input.recommendations?.get(formatModelKey(input.planning))) ?? input.recommendedThinkingLevel;
-  return recommended ?? input.planning?.thinkingLevel;
+function recommendedFor(input: ApprovalInput, model: ModelSpec | undefined): ModelSpecThinkingLevel | undefined {
+  return (model && input.recommendations?.get(formatModelKey(model))) ?? input.recommendedThinkingLevel;
+}
+
+function initialEffort(input: ApprovalInput, model: ModelSpec | undefined): ModelSpecThinkingLevel | undefined {
+  return recommendedFor(input, model) ?? model?.thinkingLevel ?? input.planning?.thinkingLevel;
 }
 
 /** A single inline Pi-layout component, also exported for remote-client rendering fixtures. */
@@ -100,9 +111,30 @@ export class ApprovalPicker implements Component {
     private readonly signal?: AbortSignal,
   ) {
     this.question = `${APPROVAL_QUESTION}${input.note ? ` ${clean(input.note)}` : ""}`;
+    const alternate = input.alternate;
     this.rows = [
       { id: "here", choice: { kind: "here" }, label: HERE, model: input.planning },
+      ...(alternate
+        ? [
+            {
+              id: "pair",
+              choice: { kind: "here", withPair: true } as const,
+              label: pairLabel(alternate.name),
+              model: alternate.model,
+            },
+          ]
+        : []),
       { id: "compact-here", choice: { kind: "compact-here" }, label: COMPACT_HERE, model: input.planning },
+      ...(alternate
+        ? [
+            {
+              id: "compact-pair",
+              choice: { kind: "compact-here", withPair: true } as const,
+              label: pairLabel(alternate.name, true),
+              model: alternate.model,
+            },
+          ]
+        : []),
       { id: "edit", choice: { kind: "edit" }, label: EDIT },
       { id: "save", choice: { kind: "save" }, label: SAVE },
       { id: "keep", choice: { kind: "keep" }, label: KEEP },
@@ -123,13 +155,10 @@ export class ApprovalPicker implements Component {
       const levels = this.levels(row);
       state.efforts.set(
         id,
-        normalizeEffort(state.efforts.has(id) ? state.efforts.get(id) : initialEffort(input), levels),
+        normalizeEffort(state.efforts.has(id) ? state.efforts.get(id) : initialEffort(input, row.model), levels),
       );
       if (!state.manuallyAdjusted.has(id) && !state.sources.has(id)) {
-        const recommended =
-          (input.planning && input.recommendations?.has(formatModelKey(input.planning))) ||
-          input.recommendedThinkingLevel !== undefined;
-        state.sources.set(id, recommended ? "system1" : "fallback");
+        state.sources.set(id, recommendedFor(input, row.model) !== undefined ? "system1" : "fallback");
       }
     }
     signal?.addEventListener("abort", this.onAbort, { once: true });

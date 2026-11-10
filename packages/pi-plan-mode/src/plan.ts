@@ -948,7 +948,36 @@ export default async function plan(pi: ExtensionAPI, dependencies: PlanDependenc
           note: `${pair.workerName} implements; ${pair.plannerName} answers its questions.`,
         };
       }
-      return { planning, planningName: catalog.name(planning) };
+      const offer = pairs.pairFor(ctx);
+      return {
+        planning,
+        planningName: catalog.name(planning),
+        ...(offer
+          ? {
+              alternate: {
+                model: {
+                  ...offer.worker,
+                  ...(planning.thinkingLevel ? { thinkingLevel: planning.thinkingLevel } : {}),
+                },
+                name: offer.workerName,
+              },
+            }
+          : {}),
+      };
+    },
+    selectPair: async (ctx) => {
+      const offer = pairs.pairFor(ctx);
+      const model = offer && ctx.modelRegistry.find(offer.def.provider, offer.def.id);
+      if (!model) return false;
+      // A model switch may apply a per-model default; keep the planning level for the pair's consultations.
+      const level = pi.getThinkingLevel();
+      try {
+        if (!(await withEffortOrigin("plan-mode", () => pi.setModel(model)))) return false;
+      } catch {
+        return false;
+      }
+      if (pi.getThinkingLevel() !== level) withEffortOrigin("plan-mode", () => pi.setThinkingLevel(level));
+      return true;
     },
     compactHere: (approval, ctx) => {
       pairs.approve(ctx, approval.planFile);

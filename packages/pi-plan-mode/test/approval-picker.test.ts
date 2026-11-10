@@ -14,6 +14,7 @@ import {
   EDIT,
   HERE,
   KEEP,
+  pairLabel,
   pickApproval,
   SAVE,
 } from "../src/approval-picker.js";
@@ -98,6 +99,49 @@ test("approval has exactly five rows and no handoff or context rows", () => {
   }
   const labels = [HERE, COMPACT_HERE, EDIT, SAVE, KEEP];
   assert.ok(labels.every((label) => !/hand off|Linked|Context|Fresh/iu.test(label)));
+});
+
+test("an offered pair worker adds its own rows with independent, recommended effort", () => {
+  const worker: ModelSpec = { provider: "test", modelId: "worker", thinkingLevel: "high" };
+  const { component, state, done } = fixture({
+    input: {
+      planning: planner,
+      alternate: { model: worker, name: "Claude Sonnet 5.5" },
+      recommendations: new Map([["test/worker", "low"]]),
+    },
+  });
+  const labels = component
+    .render(120)
+    .map(stripVTControlCharacters)
+    .filter((line) => /^ [→ ] \S/u.test(line))
+    .map((line) => line.trim().replace(/^→ /u, ""));
+  assert.deepEqual(labels, [
+    HERE,
+    "Yes, implement with Sonnet 5.5",
+    COMPACT_HERE,
+    "Yes, compact and implement with Sonnet 5.5",
+    EDIT,
+    SAVE,
+    KEEP,
+  ]);
+  for (const label of labels) assert.ok(label.length <= 42, label);
+  assert.match(component.render(120).join("\n"), /effort: high/u);
+  component.handleInput(down);
+  assert.match(component.render(120).join("\n"), /effort: low/u);
+  component.handleInput(right);
+  component.handleInput(up);
+  assert.match(component.render(120).join("\n"), /effort: high/u);
+  component.handleInput(down);
+  component.handleInput("\r");
+  assert.deepEqual(done.mock.calls, [
+    [{ effortSource: "manual", choice: { kind: "here", withPair: true }, thinkingLevel: "medium" }],
+  ]);
+  assert.equal(state.sources.get(JSON.stringify(["test", "planner"])), "fallback");
+});
+
+test("pairLabel drops the Claude prefix and sanitizes the name", () => {
+  assert.equal(pairLabel("Claude Sonnet 5.5"), "Yes, implement with Sonnet 5.5");
+  assert.equal(pairLabel("GPT-5.5 Sol\n", true), "Yes, compact and implement with GPT-5.5 Sol");
 });
 
 test("the optional note follows the question, sanitized, and is absent without it", () => {

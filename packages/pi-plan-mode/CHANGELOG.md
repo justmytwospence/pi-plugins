@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Implement on a pair's worker from approval
+
+- With no plan model pair selected and the session model the planner of a registered pair (Opus for `anthropic/opusplan`), approval also offers **Yes, implement with <worker>** and **Yes, compact and implement with <worker>**. They switch the session to the pair (keeping the planning level for `ask_planner`), then implement on the worker. Their effort row targets the worker, with its own System 1 recommendation.
+
 ### Plan model pairs replace handoffs, exec mode and completion review
 
 - Added plan model pairs: virtual models (`anthropic/fableplan`, `anthropic/opusplan`, `openai-codex/astraplan`, `openai-codex/solplan`, `openai/astraplan`, `openai/solplan`, plus custom pairs from the `modelPairs` setting) that route each request to the planner while plan mode is on or a consultation is open, and to the worker otherwise. Approving a plan continues the same agent loop on the worker. A phase switch re-reads the conversation on the other model without its prompt cache.

@@ -1,7 +1,12 @@
 import assert from "node:assert/strict";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { test } from "vitest";
+import { EXIT_TOOL, INLINE_ENTRY } from "../src/inline-plan.js";
 import { BUILTIN_PAIRS, pairKey } from "../src/model-pairs.js";
 import { PAIR_ENTRY, registerPairs } from "../src/pairs.js";
+import { createMockContext } from "./shared/support.js";
 import { createMockPi } from "./support.js";
 
 type Handler = (event: unknown, ctx: unknown) => unknown;
@@ -233,8 +238,6 @@ test("session_start unregisters unresolvable pairs but not the selected one", as
 test("an unplanned file gets one note per approval", async () => {
   const t = setup();
   const { mkdtempSync, writeFileSync } = await import("node:fs");
-  const { tmpdir } = await import("node:os");
-  const { join } = await import("node:path");
   const dir = mkdtempSync(join(tmpdir(), "pairs-"));
   const plan = join(dir, "plan.md");
   writeFileSync(plan, "## Changes\n\n- `src/a.ts`: change\n");
@@ -307,4 +310,86 @@ test("the plan factory registers the built-in pairs, then custom pairs from the 
   const request = { model: { provider: "anthropic", id: "opusplan" }, thinkingLevel: "medium", reason: "user" };
   const routed = registered.get("anthropic/opusplan")?.route(request, ctx) as { model: { id: string } };
   assert.equal(routed.model.id, "claude-haiku-4-5", "the replacement's worker routes the build phase");
+});
+
+test("pairFor offers the pair whose planner is the session model, never for a virtual or worker model", async () => {
+  const opus = setup({ model: { provider: "anthropic", id: "claude-opus-4-5", api: "anthropic-messages" } });
+  const offer = opus.controller.pairFor(opus.ctx as never);
+  assert.equal(offer && pairKey(offer.def), "anthropic/opusplan");
+  assert.deepEqual(offer?.worker, { provider: "anthropic", modelId: "claude-sonnet-4-5" });
+  assert.equal(offer?.workerName, "Sonnet 4.5");
+  const pair = setup();
+  assert.equal(pair.controller.pairFor(pair.ctx as never), undefined);
+  const sonnet = setup({ model: { provider: "anthropic", id: "claude-sonnet-4-5", api: "anthropic-messages" } });
+  assert.equal(sonnet.controller.pairFor(sonnet.ctx as never), undefined);
+  // A pair pruned at startup (unresolvable then) is not offered.
+  const pruned = setup({ available: [], model: { provider: "anthropic", id: "claude-opus-4-5" } });
+  await pruned.fire("session_start");
+  assert.equal(pruned.controller.pairFor(pruned.ctx as never), undefined);
+});
+
+test("approving with the offered worker switches a plain Opus session to opusplan and keeps the planning level", async () => {
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const { default: planMode } = await import("../src/index.js");
+  const plansDirectory = mkdtempSync(join(tmpdir(), "pair-offer-"));
+  const mock = createMockPi({ thinkingLevel: "xhigh" });
+  const raw = mock.rawPi as unknown as Record<string, unknown>;
+  raw.registerVirtualModel = () => {};
+  raw.unregisterVirtualModel = () => {};
+  const opus = { provider: "anthropic", id: "claude-opus-4-5", name: "Opus 4.5", api: "anthropic-messages" };
+  const sonnet = { provider: "anthropic", id: "claude-sonnet-4-5", name: "Sonnet 4.5", api: "anthropic-messages" };
+  const opusplan = { provider: "anthropic", id: "opusplan", name: "Opus plan, Sonnet build", api: "pi-virtual" };
+  const catalog = [opus, sonnet, opusplan];
+  let current: unknown = opus;
+  raw.setModel = async (model: unknown) => {
+    mock.setModels.push(model);
+    current = model;
+    (raw.setThinkingLevel as (level: string) => void)("medium"); // a per-model default
+    return true;
+  };
+  const offered: string[][] = [];
+  const context = createMockContext({
+    mode: "rpc",
+    hasUI: true,
+    select: async (title: string, choices: string[]) => {
+      if (!title.startsWith("Implement this plan?")) return undefined;
+      offered.push(choices);
+      return "Yes, implement with Sonnet 4.5";
+    },
+    modelRegistry: {
+      getAvailable: () => [opus, sonnet],
+      find: (provider: string, id: string) => catalog.find((model) => model.provider === provider && model.id === id),
+    },
+  });
+  Object.defineProperty(context.ctx, "model", { get: () => current, configurable: true });
+  await planMode(mock.pi, {
+    readSettings: async () => ({ thinkingLevel: "inherit" as const, plansDirectory, jevToolSelection: false }),
+    pickImplementationEffort: async () => ({ kind: "fallback", reason: "fixture" }),
+  });
+  try {
+    for (const handler of (mock.events.get("session_start") ?? []) as Handler[])
+      await handler({ reason: "startup" }, context.ctx);
+    const tool = (name: string) =>
+      mock.tools.find((candidate) => candidate.name === name) as unknown as {
+        execute(...args: unknown[]): Promise<{ content: { text: string }[]; details?: { outcome?: string } }>;
+      };
+    await tool("enter_plan_mode").execute("enter", {}, undefined, undefined, context.ctx);
+    const state = mock.entries.filter((entry) => entry.customType === INLINE_ENTRY).at(-1)?.data as {
+      planFile?: string;
+    };
+    assert.ok(state?.planFile);
+    writeFileSync(state.planFile, "# Offer plan\n\nDo it.\n");
+    const result = await tool(EXIT_TOOL).execute("exit", {}, undefined, undefined, context.ctx);
+    assert.ok(offered[0]?.includes("Yes, compact and implement with Sonnet 4.5"));
+    assert.equal(result.details?.outcome, "approved");
+    assert.deepEqual(mock.setModels, [opusplan]);
+    const pair = mock.entries.filter((entry) => entry.customType === PAIR_ENTRY).at(-1)?.data as {
+      planLevel?: string;
+    };
+    assert.equal(pair?.planLevel, "xhigh", "the planner keeps the level it planned at");
+    assert.match(result.content[0]?.text ?? "", /ask_planner/u);
+  } finally {
+    rmSync(plansDirectory, { recursive: true, force: true });
+  }
 });
