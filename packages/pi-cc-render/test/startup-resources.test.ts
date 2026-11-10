@@ -1267,7 +1267,7 @@ describe("waterfall-ordered models", () => {
 		expect(noReset.groups.map((group) => group.label)).toEqual(["1 anthropic", "2 openai", "3 google · Argon weekly"]);
 	});
 
-	test("routers are a line above providers, which follow the waterfall with skipped rungs dimmed and labeled", async () => {
+	test("virtual models stay out; providers follow the waterfall with skipped rungs dimmed and labeled", async () => {
 		const { buildModelsSection } = await import("../src/feature/shell/startup-resources.ts");
 		const now = 1_000_000;
 		const section = buildModelsSection([
@@ -1291,17 +1291,15 @@ describe("waterfall-ordered models", () => {
 		])!;
 		// Providers outside the waterfall (OpenRouter, lmstudio) list only their favorites; System 1 comes last.
 		expect(section.groups.map((group) => group.label)).toEqual([
-			"auto", "1 anthropic · resets 3h", "2 openai · off", "3 google", "4 muse-code · unverified", "lmstudio", "System 1",
+			"1 anthropic · resets 3h", "2 openai · off", "3 google", "4 muse-code · unverified", "lmstudio", "System 1",
 		]);
-		expect(section.groups[5]!.items).toEqual(["qwen3.8-27b"]);
-		expect(section.groups[6]).toMatchObject({ uncounted: true, items: ["typesafe/jev-1", "openai/gpt-6-mini"],
+		expect(section.groups[4]!.items).toEqual(["qwen3.8-27b"]);
+		expect(section.groups[5]).toMatchObject({ uncounted: true, items: ["typesafe/jev-1", "openai/gpt-6-mini"],
 			right: ["jev", "openai-decisions"], tones: [undefined, "dim"] });
-		expect(section.groups[0]).toMatchObject({ uncounted: true, items: ["waterfall"], actions: [{ kind: "model", provider: "waterfall", id: "auto" }],
-			right: ["anthropic → openai → google → muse"] });
-		expect(section.groups[0]!.marks![0]).toBeTruthy();
-		expect(section.groups[1]!.tones).toEqual(["dim"]);
-		expect(section.groups[3]!.tones).toBeUndefined();
-		expect(section.count).toBe(6);
+		expect(section.groups.some((group) => group.marks)).toBe(false);
+		expect(section.groups[0]!.tones).toEqual(["dim"]);
+		expect(section.groups[2]!.tones).toBeUndefined();
+		expect(section.count).toBe(5);
 		// Before the first assessment an explicitly configured four-rung order scopes providers, without notes.
 		const early = buildModelsSection([
 			{ provider: "waterfall", id: "auto", virtual: true },
@@ -1312,11 +1310,10 @@ describe("waterfall-ordered models", () => {
 			{ provider: "anthropic", model: "claude-opus-5-5" }, { provider: "openai", model: "gpt-6.1-sol" },
 			{ provider: "google", model: "antigravity-gemini-4-argon" }, { provider: "muse-sdk", model: "muse-wonder-1.0" },
 		] })!;
-		expect(early.groups.map((group) => group.label)).toEqual(["auto", "1 anthropic", "3 google"]);
-		expect(early.groups[0]!.right).toEqual(["anthropic → openai → google → muse"]);
-		// Without a waterfall, providers stay alphabetical and the router is still not a provider group.
+		expect(early.groups.map((group) => group.label)).toEqual(["1 anthropic", "3 google"]);
+		// Without a waterfall, providers stay alphabetical and virtual models still stay out.
 		const plain = buildModelsSection([{ provider: "waterfall", id: "auto", virtual: true }, { provider: "openai", id: "gpt-6.1-sol" }, { provider: "anthropic", id: "claude-opus-5-5" }])!;
-		expect(plain.groups.map((group) => group.label)).toEqual(["auto", "anthropic", "openai"]);
+		expect(plain.groups.map((group) => group.label)).toEqual(["anthropic", "openai"]);
 	});
 });
 

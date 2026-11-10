@@ -1227,10 +1227,8 @@ export function buildModelsSection(
 	system1?: System1Status["candidates"],
 ): ResourceSection | undefined {
 	const key = (model: { provider: string; id: string }) => `${model.provider}/${model.id}`;
-	// Routers are not providers: a virtual model is one line above the provider groups.
-	const virtual = available.filter((model) => model.virtual);
+	// Virtual models (plan-mode pairs and other routers) are not provider models: `/model` lists them, the splash does not.
 	available = available.filter((model) => !model.virtual);
-	favorites = favorites.filter((model) => !virtual.some((entry) => key(entry) === key(model)));
 	// Only subscription-backed Antigravity Gemini/Gemma routes belong in this Google splash group.
 	// Native google/gemini-* entries may use an API key, so never substitute them for a missing route.
 	const shown = (model: ModelEntry) => model.provider !== "google" || /^antigravity-(gemini|gemma)-/.test(model.id);
@@ -1259,7 +1257,7 @@ export function buildModelsSection(
 		for (const model of rest.sort((a, b) => compareNames(a.id, b.id))) add(model);
 	}
 	if (current && byKey.has(key(current))) add(byKey.get(key(current))!);
-	const count = [...providers.values()].reduce((sum, list) => sum + list.length, 0) + virtual.length;
+	const count = [...providers.values()].reduce((sum, list) => sum + list.length, 0);
 	if (count === 0) return undefined;
 	// Providers follow the subscription waterfall's order when it is known, numbered, with
 	// rungs it would skip now dimmed and labeled why; the rest follow alphabetically.
@@ -1284,18 +1282,6 @@ export function buildModelsSection(
 			...(prefixes.some(Boolean) ? { prefixes } : {}),
 		};
 	});
-	if (virtual.length) {
-		const order = ladder.map((rung) => vendorOf(rung.provider)).join(" → ");
-		groups.unshift({
-			label: "auto",
-			uncounted: true,
-			items: virtual.map((model) => model.provider),
-			actions: virtual.map((model) => ({ kind: "model", provider: model.provider, id: model.id })),
-			right: virtual.map(() => order || undefined),
-			...(virtual.some((model) => current && key(model) === key(current))
-				? { marks: virtual.map((model) => (current && key(model) === key(current) ? CURRENT_MARK : undefined)) } : {}),
-		});
-	}
 	// System 1's judgment models, in its waterfall order; they are not chat models, so they are not counted.
 	if (system1?.length) {
 		groups.push({
