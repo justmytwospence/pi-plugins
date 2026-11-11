@@ -28,7 +28,7 @@ import { assembleContext, describeLive, foreignRoleMessage, mainDelta, roleMessa
 import { derivedSessionId, interleave, newPartAt, TRANSCRIPT_TAG, TranscriptParts } from "./foreign.ts";
 import { modelKey, type ModelChoice, type ModelLike } from "./models.ts";
 import type { ToolRenderers } from "./pi-chat.ts";
-import { routedModel } from "./routed-model.ts";
+import { isVirtual } from "./routed-model.ts";
 
 const BUILTIN_TOOLS = ["read", "grep", "find", "ls", "bash"];
 const COLD_MARGIN_MS = 20_000;
@@ -106,10 +106,31 @@ export function replayMessages(ctx: Pick<ExtensionContext, "sessionManager">, tr
   return trim ? trimOpenTurn(messages) : { messages, pending: [] };
 }
 
-/** Main's model, as Sidebar names it. */
-export function mainLabel(ctx: Pick<ExtensionContext, "model">): string {
-  const model = ctx.model as ModelLike | undefined;
+/** Main's model, as Sidebar names it: the physical one under a plan model pair. */
+export function mainLabel(main: Pick<MainState, "ctx" | "physical">): string {
+  const model = (main.physical()?.model ?? main.ctx?.model) as ModelLike | undefined;
   return model ? model.name?.trim() || model.id : "another model";
+}
+
+/**
+ * The model and thinking level Sidebar shares main's cache on: main's last request's model, else the
+ * physical model main last answered on (never a virtual selection, which only main can route).
+ */
+export function sameAsMain(main: Pick<MainState, "ctx" | "request" | "physical">, sessionLevel: string): { model: NonNullable<ExtensionContext["model"]>; thinkingLevel: string } {
+  const ctx = main.ctx;
+  if (!ctx) throw new Error("main's session is not ready yet");
+  const physical = main.physical();
+  const request = main.request;
+  const model = request ? ctx.modelRegistry.find(request.provider, request.model) : physical?.model;
+  if (!model) {
+    if (request) throw new Error(`main's model ${request.provider}/${request.model} is not available`);
+    if (isVirtual(ctx.model)) throw new Error(`main's model ${ctx.model!.provider}/${ctx.model!.id} is virtual and Sidebar cannot tell which model it routes to`);
+    throw new Error("no model");
+  }
+  // The level main's last answer used when that answer came from the same model (Anthropic drops the
+  // cached messages when thinking changes); else the session's.
+  const level = physical && physical.model.provider === model.provider && physical.model.id === model.id ? physical.thinkingLevel : undefined;
+  return { model, thinkingLevel: level ?? sessionLevel };
 }
 
 export interface QuestionCapture { snapshot: MainSnapshot; entries: unknown[]; status: string }
@@ -319,15 +340,16 @@ export class SidebarAgent {
     if (choice.kind === "unavailable") throw new Error(`Sidebar's model ${choice.pattern} matches no model you are logged in to.`);
     const foreign: Foreign | undefined = choice.kind === "other" ? { model: choice.model, label: choice.label, ...(choice.thinking ? { thinking: choice.thinking } : {}) } : undefined;
     const request = this.captured ? this.captured.snapshot.request : this.main.request;
-    const model = foreign ? (foreign.model as NonNullable<ExtensionContext["model"]>) : request ? ctx.modelRegistry.find(request.provider, request.model) : ctx.model;
-    if (!model) throw new Error("no model");
-    const key = `${foreign ? `other:${foreign.thinking ?? ""}:` : ""}${model.provider}/${model.id}`;
+    const same = foreign ? undefined : sameAsMain({ ctx: this.main.ctx ?? ctx, request, physical: () => this.main.physical() }, this.pi.getThinkingLevel());
+    const model = foreign ? (foreign.model as NonNullable<ExtensionContext["model"]>) : same!.model;
+    const thinkingLevel = foreign ? (foreign.thinking ?? this.pi.getThinkingLevel()) : same!.thinkingLevel;
+    const key = `${foreign ? `other:${foreign.thinking ?? ""}:` : `${thinkingLevel}:`}${model.provider}/${model.id}`;
     if (this.session && this.sessionModel === key) return this.session;
     if (this.creating && this.sessionModel === key) return this.creating;
     await this.dispose();
     const generation = this.generation;
     this.sessionModel = key;
-    this.creating = this.create(ctx, model, foreign).then((session) => {
+    this.creating = this.create(ctx, model, thinkingLevel, foreign).then((session) => {
       if (generation !== this.generation) {
         session.dispose();
         throw new Error("Sidebar was reset while starting");
@@ -338,7 +360,7 @@ export class SidebarAgent {
     return this.creating;
   }
 
-  private async create(ctx: ExtensionContext, model: NonNullable<ExtensionContext["model"]>, foreign?: Foreign): Promise<AgentSession> {
+  private async create(ctx: ExtensionContext, model: NonNullable<ExtensionContext["model"]>, thinkingLevel: string, foreign?: Foreign): Promise<AgentSession> {
     const agentDir = getAgentDir();
     const settingsManager = SettingsManager.create(ctx.cwd, agentDir);
     const sources = toolSources(this.pi);
@@ -372,7 +394,7 @@ export class SidebarAgent {
       agentDir,
       modelRuntime,
       model,
-      thinkingLevel: (foreign?.thinking ?? this.pi.getThinkingLevel()) as never,
+      thinkingLevel: thinkingLevel as never,
       tools: [...sources.names, ...(this.family ? ["sidebar_agents", "sidebar_transcript"] : [])],
       resourceLoader: loader,
       sessionManager,
@@ -482,7 +504,7 @@ export class SidebarAgent {
           const view = this.parts.build(replaySnapshot(false).messages, foreign.model.contextWindow, now, newPartAt(thread));
           this.foreignWarm = view.continued && this.foreignCacheWarm(foreign.model, now);
           const status = statusMessage(describeLive(live, { messages: [], pending: view.pending }, now), now, extraStatus);
-          const role = foreignRoleMessage({ sidebar: foreign.label, main: mainLabel(ctx) }, now, this.quiz?.role());
+          const role = foreignRoleMessage({ sidebar: foreign.label, main: mainLabel(this.main) }, now, this.quiz?.role());
           return { messages: [...leading, role, ...interleave(view.messages, view.threadAt, thread), status] };
         }
         if (request) {
@@ -553,8 +575,11 @@ export function cachePreflight(main: MainState, now: number): Preflight {
   // Without a request in memory (after a restart, /reload, /tree or a compaction), Sidebar rebuilds
   // main's request from its session; main's last answer says how warm its cache still is.
   const last = request ? undefined : main.lastAnswer();
+  // Under a plan model pair, the physical model main last answered on (or the pair's next one).
+  const physical = main.physical();
+  if (!request && !physical && isVirtual(ctx.model)) return { kind: "refuse", reason: `main's model ${ctx.model!.provider}/${ctx.model!.id} is virtual and Sidebar cannot tell which model it routes to.` };
   if (!request && !last) return { kind: "send" }; // no conversation yet: only the prompt and tools
-  const api = request?.api ?? (routedModel(ctx) ?? ctx.model)?.api ?? "";
+  const api = request?.api ?? (physical?.model ?? ctx.model)?.api ?? "";
   if (!SUPPORTED_APIS.has(api)) return { kind: "refuse", reason: `main uses the ${api} API, which Sidebar cannot share a cache with.` };
   if (request && !ctx.modelRegistry.find(request.provider, request.model)) return { kind: "refuse", reason: `main's model ${request.provider}/${request.model} is not available.` };
   const age = now - (request?.sentAt ?? last!.at);

@@ -176,7 +176,7 @@ async function foreignRequest(input: SideInput, foreign: ForeignCheck): Promise<
   const view = foreign.parts.build(replayMessages(ctx, false).messages, foreign.model.contextWindow, now);
   if (view.messages.length === 0) return { outcome: "skipped", reason: "main's session has nothing to read yet" };
   const liveText = [describeLive(main.live, { messages: [], pending: view.pending }, now), main.familyStatus?.()].filter(Boolean).join("\n");
-  const intro = foreignHeadsUpIntro({ sidebar: foreign.label, main: mainLabel(ctx) });
+  const intro = foreignHeadsUpIntro({ sidebar: foreign.label, main: mainLabel(main) });
   const messages = convertToLlm(sideMessages(view.messages, `${intro}\n\n${input.instructions}`, input.status(liveText), now));
   const stream: StreamFn = input.stream ?? ((m, c, o) => ctx.modelRegistry.streamSimple(m as never, c as never, o as never));
   const thinking = foreign.thinking ?? input.thinking;

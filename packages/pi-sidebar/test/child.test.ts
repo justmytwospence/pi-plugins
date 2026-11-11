@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { anchorForeign, replayMessages, replayPayload, SidebarAgent, subagentsGuarded, toolSources } from "../src/child.ts";
+import { anchorForeign, mainLabel, replayMessages, replayPayload, sameAsMain, SidebarAgent, subagentsGuarded, toolSources } from "../src/child.ts";
 import { MainState } from "../src/main-state.ts";
 import { FakePi, fakeCtx } from "./fake.ts";
 
@@ -215,6 +215,43 @@ describe("preflight", () => {
     (agent as unknown as { recordUsage(m: unknown): void }).recordUsage({ role: "assistant", usage: { input: 500, cacheRead: 29_500, cacheWrite: 0 } });
     expect(agent.missed).toBeUndefined();
     expect(agent.lastAnswer).toBe("98% cached · 500 new");
+  });
+});
+
+describe("under a plan model pair", () => {
+  const pair = { provider: "anthropic", id: "opusplan", api: "pi-virtual", name: "Opus Plan" };
+  const answeredBy = (model: string, thinkingLevel: string) => [
+    { type: "message", id: "u1", parentId: null, timestamp: "", message: { role: "user", content: "fix it", timestamp: 0 } },
+    { type: "message", id: "a1", parentId: "u1", timestamp: "", message: { role: "assistant", content: [], provider: "anthropic", model, thinkingLevel, api: "anthropic-messages", usage: { input: 1, cacheRead: 99 }, stopReason: "stop", timestamp: 0 } },
+  ];
+  const stateWith = (entries: unknown[], request?: boolean) => {
+    const pi = new FakePi();
+    const state = new MainState(pi as never, () => 10_000);
+    state.bind(fakeCtx({ model: pair, entries, leafId: "a1" }).ctx as never);
+    if (request) state.request = { api: "anthropic-messages", provider: "anthropic", model: "claude-sonnet", leafId: "a1", sentAt: 10_000, payload: mainPayload() };
+    return { pi, state };
+  };
+
+  it("runs Sidebar on the physical model and level main last answered on, never the pair", () => {
+    const { state } = stateWith(answeredBy("claude-opus", "medium"));
+    expect(sameAsMain(state, "high")).toEqual({ model: { provider: "anthropic", id: "claude-opus", api: "anthropic-messages" }, thinkingLevel: "medium" });
+    expect(mainLabel(state)).toBe("claude-opus");
+  });
+
+  it("follows main's last request, keeping the answer's level only for the same model", () => {
+    expect(sameAsMain(stateWith(answeredBy("claude-sonnet", "low"), true).state, "high")).toMatchObject({ model: { id: "claude-sonnet" }, thinkingLevel: "low" });
+    expect(sameAsMain(stateWith(answeredBy("claude-opus", "low"), true).state, "high")).toMatchObject({ model: { id: "claude-sonnet" }, thinkingLevel: "high" });
+  });
+
+  it("refuses clearly when nothing says which model the pair routes to", () => {
+    const { pi, state } = stateWith([]);
+    expect(() => sameAsMain(state, "high")).toThrow(/virtual/);
+    expect(new SidebarAgent(pi as never, state, () => 10_000).preflight()).toMatchObject({ kind: "refuse", reason: expect.stringMatching(/virtual/) });
+  });
+
+  it("checks main's cache under the pair as under its physical model", () => {
+    const { pi, state } = stateWith(answeredBy("claude-opus", "medium"));
+    expect(new SidebarAgent(pi as never, state, () => 10_000).preflight()).toEqual({ kind: "send" });
   });
 });
 

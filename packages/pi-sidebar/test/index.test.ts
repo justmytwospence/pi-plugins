@@ -208,6 +208,18 @@ describe("Sidebar's model", () => {
     expect(controller.sidebarModel()).toEqual({ kind: "same" });
   });
 
+  it("treats the favorite main last answered on under a plan model pair as the same model", async () => {
+    process.env.PI_SIDEBAR_MODELS = "anthropic/claude-opus-*,openai-codex/gpt-*-sol";
+    const branch = [{ type: "message", message: { role: "assistant", provider: "anthropic", model: "claude-opus-5-5", stopReason: "stop", usage: {} } }];
+    const { pi, controller, ctx } = setup(branch);
+    (ctx as any).model = { provider: "anthropic", id: "opusplan", api: "pi-virtual" };
+    (ctx.modelRegistry as any).getAvailable = () => MODELS;
+    (ctx.modelRegistry as any).find = (provider: string, id: string) => MODELS.find((m) => m.provider === provider && m.id === id);
+    await pi.emit("session_start", { reason: "startup" }, ctx);
+    await controller.modelCommand("opus", ctx as never);
+    expect(controller.sidebarModel()).toEqual({ kind: "same" });
+  });
+
   it("restores the choice from main's branch", async () => {
     process.env.PI_SIDEBAR_MODELS = "openai-codex/gpt-*-sol";
     const branch = [{ type: "custom", customType: "sidebar:model", data: { version: 1, model: "openai-codex/gpt-*-sol", at: 1 } }];

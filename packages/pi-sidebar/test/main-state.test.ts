@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { isConversationRequest, MainState, payloadSystemText, resultPreview } from "../src/main-state.ts";
+import { PLAN_PAIR_CHANNEL, type PlanPairRequest } from "../src/plan-pair-contract.ts";
 import { FakePi, fakeCtx } from "./fake.ts";
 
 const PROMPT = "You are an expert coding assistant operating inside pi.";
@@ -48,6 +49,35 @@ describe("MainState", () => {
     expect(state.request).toBeUndefined();
     await pi.emit("before_provider_request", { payload: payload() }, ctx);
     expect(state.request).toMatchObject({ api: "anthropic-messages", provider: "anthropic", model: "claude-x" });
+  });
+
+  it("resolves a virtual selection to the physical model and level main last answered on", async () => {
+    const pi = new FakePi();
+    const state = new MainState(pi as never);
+    const pair = { provider: "anthropic", id: "opusplan", api: "pi-virtual" };
+    const answered = [
+      { type: "message", message: { role: "assistant", provider: "anthropic", model: "claude-opus", thinkingLevel: "medium", stopReason: "stop" } },
+      { type: "message", message: { role: "assistant", provider: "anthropic", model: "claude-sonnet", thinkingLevel: "low", stopReason: "aborted" } },
+    ];
+    await pi.emit("session_start", { reason: "startup" }, fakeCtx({ model: pair, entries: answered }).ctx);
+    expect(state.physical()).toEqual({ model: { provider: "anthropic", id: "claude-opus", api: "anthropic-messages" }, thinkingLevel: "medium" });
+
+    // Before any answer: the model the pair routes to next, when plan-mode publishes it.
+    await pi.emit("session_start", { reason: "new" }, fakeCtx({ sessionId: "fresh", model: pair }).ctx);
+    expect(state.physical()).toBeUndefined();
+    pi.events.on(PLAN_PAIR_CHANNEL, (data) => {
+      (data as PlanPairRequest).snapshot = {
+        version: 1, pair: "anthropic/opusplan", phase: "build", thinkingLevel: "high",
+        next: { provider: "anthropic", id: "claude-sonnet" },
+        planner: { provider: "anthropic", id: "claude-opus" },
+        worker: { provider: "anthropic", id: "claude-sonnet" },
+      };
+    });
+    expect(state.physical()).toEqual({ model: { provider: "anthropic", id: "claude-sonnet", api: "anthropic-messages" }, thinkingLevel: "high" });
+
+    // A physical selection is itself.
+    await pi.emit("model_select", {}, fakeCtx({ sessionId: "fresh" }).ctx);
+    expect(state.physical()).toEqual({ model: { provider: "anthropic", id: "claude-x", api: "anthropic-messages" } });
   });
 
   it("forgets the request after /tree or a compaction, and reads main's last answer from its session", async () => {

@@ -563,7 +563,8 @@ export class SidebarController {
   private mainModel(): { provider: string; id: string } | undefined {
     const request = this.main.request;
     if (request) return { provider: request.provider, id: request.model };
-    const model = this.main.ctx?.model;
+    // Under a plan model pair, the physical model main last answered on (its cache), not the pair.
+    const model = this.main.physical()?.model ?? this.main.ctx?.model;
     return model ? { provider: model.provider, id: model.id } : undefined;
   }
 
@@ -792,7 +793,7 @@ export class SidebarController {
   /** The model a note's thread messages are attributed to (Sidebar's). */
   private noteModel(): NoteModel {
     const request = this.main.request;
-    const model = this.main.ctx?.model;
+    const model = this.main.physical()?.model ?? this.main.ctx?.model;
     const choice = this.sidebarModel();
     return choice.kind === "other"
       ? { api: choice.model.api, provider: choice.model.provider, model: choice.model.id }
