@@ -3,6 +3,7 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { config } from "../../config/config.ts";
 import { setStartupResourcesTheme } from "./startup-resources.ts";
 import type { StartupContextSnapshot } from "./startup-context.ts";
+import { createStartupSkeleton } from "./startup-skeleton.ts";
 import { renderContextTreemap } from "./startup-treemap.ts";
 import {
 	EARLY_STARTUP_HEADER_PATCH,
@@ -10,9 +11,22 @@ import {
 	patchRegistry,
 } from "../../utils/patch-keys.ts";
 
-const emptyHeader = (_tui: unknown, theme: any) => {
+/** The mode whose `ui` is this TUI; none, or an ambiguous match, yields no skeleton. */
+function modeForTui(tui: unknown): any | undefined {
+	const patch = patchRegistry.get<EarlyHeaderPatch>(EARLY_STARTUP_HEADER_PATCH);
+	if (!patch || !tui) return undefined;
+	let found: any;
+	for (const { mode } of patch.modes) {
+		if (mode?.ui !== tui) continue;
+		if (found && found !== mode) return undefined;
+		found = mode;
+	}
+	return found;
+}
+
+const startupHeader = (tui: unknown, theme: any) => {
 	setStartupResourcesTheme(() => theme);
-	return { render: (_width: number): string[] => [], invalidate() {} };
+	return createStartupSkeleton(modeForTui(tui), theme);
 };
 
 /** Explicit snapshot helper for rendering fixtures; the resource installer owns the live map. */
@@ -27,7 +41,7 @@ export function renderHeaderLines(
 /** Suppress the native banner; no snapshot lookup occurs before the resources are installed. */
 export function applyStartupHeader(ctx: any): void {
 	if (!ctx?.hasUI || typeof ctx.ui?.setHeader !== "function" || !config.showStartupHeader) return;
-	ctx.ui.setHeader(emptyHeader);
+	ctx.ui.setHeader(startupHeader);
 	updateHeaderSpacers(ctx, true);
 }
 
@@ -129,7 +143,7 @@ export function installEarlyStartupHeader(): void {
 		// through that window instead of painting the native banner.
 		patch.installedSetHeader = function (this: any, factory: unknown) {
 			if (factory === undefined && patch.active && config.showStartupHeader && !restoringNativeHeader) {
-				return originalSetHeader.call(this, emptyHeader);
+				return originalSetHeader.call(this, startupHeader);
 			}
 			return originalSetHeader.call(this, factory);
 		};
@@ -165,7 +179,7 @@ function installHeaderContainerSwap(mode: any, patch: EarlyHeaderPatch): void {
 			spacing.awaitingAfter = !!spacing.before;
 			if (config.showStartupHeader && typeof mode.setExtensionHeader === "function") {
 				try {
-					mode.setExtensionHeader(emptyHeader);
+					mode.setExtensionHeader(startupHeader);
 					// Do not hide rows if Pi could not replace its native header.
 					if (children.includes(mode.customHeader)) setSpacing(spacing, true);
 				} catch {

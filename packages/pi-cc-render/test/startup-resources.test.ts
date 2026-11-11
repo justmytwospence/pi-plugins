@@ -1148,6 +1148,40 @@ describe("startup resources", () => {
   });
 });
 
+describe("stale splash", () => {
+  test("session_shutdown hides a disposed splash until Pi relists", async () => {
+    const { replaceSections, installStartupResources, isStartupSplashSettled, stopStartupResources } = await import("../src/feature/shell/startup-resources.ts");
+    const handlers = new Map<string, () => void>();
+    installStartupResources({ on: (name: string, handler: () => void) => handlers.set(name, handler) } as any);
+    const ui = { requestRender: vi.fn(), terminal: { rows: 100 } };
+    const mode = Object.create((InteractiveMode as any).prototype, Object.fromEntries(Object.entries({
+      sessionManager: { getCwd: () => "/work" },
+      session: { promptTemplates: [], resourceLoader: {
+        getSystemPromptSource: () => undefined, getAppendSystemPromptSources: () => [], agentDir: "/h/.pi/agent",
+        getAgentsFiles: () => ({ agentsFiles: [] }), getSkills: () => ({ skills: [] }),
+        getExtensions: () => ({ extensions: [{ path: "/w/ext.ts", sourceInfo: { source: "local", scope: "project" } }] }),
+      } },
+      ui,
+      chatContainer: { render: () => [], children: [] },
+      loadedResourcesContainer: { children: [] as any[] },
+      getStartupExpansionState: () => false,
+    }).map(([key, value]) => [key, { value, writable: true }])));
+    try {
+      const extensions = { state: { expanded: false }, setExpanded() {}, invalidate() {}, render: (_width: number) => ["[Extensions]", "  native"] };
+      const spacer = new (class Spacer { render() { return [""]; } })();
+      mode.loadedResourcesContainer.children = [extensions, spacer];
+      replaceSections(mode, { force: true });
+      const rendered = () => mode.loadedResourcesContainer.children.flatMap((child: any) => child.render(80));
+      expect(rendered().length).toBeGreaterThan(0);
+      handlers.get("session_shutdown")!();
+      expect(rendered()).toEqual([]);
+      expect(isStartupSplashSettled(mode)).toBe(false);
+    } finally {
+      stopStartupResources();
+    }
+  });
+});
+
 describe("splash planning", () => {
   async function setup(rows: number, chatLines: number) {
     const { replaceSections, setStartupResourcesTheme, stopStartupResources } = await import("../src/feature/shell/startup-resources.ts");
