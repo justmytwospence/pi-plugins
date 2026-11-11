@@ -45,6 +45,8 @@ export type AllowanceInspection = {
   reason?: string;
   resetAt?: number;
   blockingQuota?: { scope: "shared" | "model" | "variant"; label: string };
+  /** The most-used applicable window, once every window is validated. */
+  tightest?: { label: string; used: number };
 };
 export function inspectAllowance(reading: ProviderUsage | undefined, now: number): AllowanceInspection {
   const unknown = (reason: string): AllowanceInspection => ({ state: "unknown", reason });
@@ -61,12 +63,14 @@ export function inspectAllowance(reading: ProviderUsage | undefined, now: number
       return unknown(`${window.label} allowance reset is unknown or due.`);
   }
   // Validate every applicable observation before claiming exhaustion/reset metadata.
+  const peak = reading.windows.reduce((max, window) => window.used! > max.used! ? window : max);
+  const tightest = { label: peak.label, used: peak.used! };
   const spent = reading.windows.filter(window => window.used! >= 95);
   const first = spent[0];
-  if (!first) return { state: "available" };
+  if (!first) return { state: "available", tightest };
   return { state: "exhausted", reason: `${first.label} allowance is ${first.used}% used (95% waterfall threshold).`,
     resetAt: Math.max(...spent.map(window => window.reset!)),
-    ...(first.scope ? { blockingQuota: { scope: first.scope, label: first.label } } : {}) };
+    ...(first.scope ? { blockingQuota: { scope: first.scope, label: first.label } } : {}), tightest };
 }
 
 /** Compatibility wrapper used by selection; inspection also supplies display state. */

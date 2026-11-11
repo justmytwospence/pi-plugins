@@ -12,6 +12,8 @@ export interface WaterfallRung {
   resetAt?: number;
   /** First applicable quota at the waterfall threshold, when its scope is known. */
   blockingQuota?: { scope: "shared" | "model" | "variant"; label: string };
+  /** The most-used applicable window (percent used), whenever the allowance could be verified. */
+  tightest?: { label: string; used: number };
 }
 export interface WaterfallSnapshot {
   version: 1;

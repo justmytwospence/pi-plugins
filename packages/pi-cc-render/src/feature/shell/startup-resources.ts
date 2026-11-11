@@ -1088,9 +1088,15 @@ export type ModelEntry = { provider: string; id: string; contextWindow?: number;
 /** The subscription vendor a provider bills: Muse SDK/Code and OpenAI/Codex share one rung. */
 const vendorOf = (provider: string) => provider.replace(/-(sdk|code|codex)$/, "");
 const hours = (ms: number) => ms >= 86_400_000 ? `${Math.round(ms / 86_400_000)}d` : ms >= 3_600_000 ? `${Math.round(ms / 3_600_000)}h` : `${Math.max(1, Math.round(ms / 60_000))}m`;
-/** A rung's heading suffix: why the waterfall would skip it now, or nothing when it would not. */
+/**
+ * A rung's heading suffix: why the waterfall would skip it now, or, when it would not, its most-used quota
+ * window (`week 62%`).
+ */
 function rungNote(rung: WaterfallRung, now: number): string | undefined {
-	if (rung.state === "available") return undefined;
+	if (rung.state === "available") {
+		const tightest = rung.tightest;
+		return tightest && Number.isFinite(tightest.used) ? `${tightest.label} ${Math.round(tightest.used)}%` : undefined;
+	}
 	if (rung.state === "exhausted") {
 		const reset = rung.resetAt !== undefined && Number.isFinite(rung.resetAt) && rung.resetAt > now ? `resets ${hours(rung.resetAt - now)}` : undefined;
 		if (rung.provider === "google" && rung.blockingQuota?.label) return [rung.blockingQuota.label, reset].filter(Boolean).join(" · ");
@@ -1268,10 +1274,12 @@ export function buildModelsSection(
 		const marks = list.map((model) => (current && key(model) === key(current) ? CURRENT_MARK : undefined));
 		const prefixes = list.map((model) => (favoriteKeys.has(key(model)) ? FAVORITE_MARK : undefined));
 		const index = rungOf(provider);
-		const note = index < 0 || !rungs[index] ? undefined : rungNote(rungs[index]!, now);
+		const rung = index < 0 ? undefined : rungs[index];
+		const note = rung ? rungNote(rung, now) : undefined;
+		const skipped = rung !== undefined && rung.state !== "available";
 		return {
 			label: index < 0 ? provider : `${index + 1} ${provider}${note ? ` · ${note}` : ""}`,
-			...(note ? { tones: list.map(() => "dim") } : {}),
+			...(skipped ? { tones: list.map(() => "dim") } : {}),
 			items: list.map((model) => {
 				const label = provider === "google" ? model.id.replace(/^antigravity-/, "") : model.id;
 				return model.thinkingLevel ? `${label}:${model.thinkingLevel}` : label;

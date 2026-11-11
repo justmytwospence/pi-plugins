@@ -62,15 +62,17 @@ describe("subscription waterfall decision", () => {
     const blocked = { ...window(100, "Argon weekly"), scope: "model", reset: now + 120_000 };
     const valid = window(95, "Argon high");
     const result = inspectAllowance(reading([blocked, valid]), now);
-    assert.deepEqual(result, { state: "exhausted", reason: "Argon weekly allowance is 100% used (95% waterfall threshold).", resetAt: now + 120_000, blockingQuota: { scope: "model", label: "Argon weekly" } });
+    assert.deepEqual(result, { state: "exhausted", reason: "Argon weekly allowance is 100% used (95% waterfall threshold).", resetAt: now + 120_000, blockingQuota: { scope: "model", label: "Argon weekly" }, tightest: { label: "Argon weekly", used: 100 } });
     for (const bad of [window(undefined), window(NaN), { ...valid, reset: undefined }, { ...valid, reset: NaN }, { ...valid, reset: now }, { ...valid, observedAt: now - 600_000 }]) {
       const inspected = inspectAllowance(reading([blocked, bad]), now);
       assert.equal(inspected.state, "unknown");
       assert.equal(inspected.resetAt, undefined);
       assert.equal(inspected.blockingQuota, undefined);
+      assert.equal(inspected.tightest, undefined);
       assert.equal(evaluateAllowance(reading([blocked, bad]), now), inspected.reason);
     }
-    assert.deepEqual(inspectAllowance(reading([window(94.99)]), now), { state: "available" });
+    assert.deepEqual(inspectAllowance(reading([window(94.99)]), now), { state: "available", tightest: { label: "5h", used: 94.99 } });
+    assert.deepEqual(inspectAllowance(reading([window(20, "5h"), window(62, "week"), window(62, "Opus")]), now).tightest, { label: "week", used: 62 });
     assert.equal(inspectAllowance({ ...reading([blocked]), access: { allowed: false } }, now).state, "unknown");
   });
   it("publishes only fresh, valid scoped exhaustion, never stale reset claims", () => {

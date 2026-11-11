@@ -1265,6 +1265,14 @@ describe("waterfall-ordered models", () => {
 		expect(section.groups[3]!.items).toEqual(["muse-wonder-1.0"]);
 		const noReset = buildModelsSection(models, [], undefined, { now, rungs: [...rungs.slice(0, 2), { ...rungs[2]!, resetAt: Number.NaN }] })!;
 		expect(noReset.groups.map((group) => group.label)).toEqual(["1 anthropic", "2 openai", "3 google · Argon weekly"]);
+		const quotas = buildModelsSection(models, [], undefined, { now, rungs: [
+			{ ...rungs[0]!, tightest: { label: "week", used: 61.6 } },
+			{ ...rungs[1]!, tightest: { label: "5h", used: 0 } },
+			{ ...rungs[2]!, tightest: { label: "Argon weekly", used: 100 } },
+		] })!;
+		// Available rungs show their most-used window, undimmed; exhausted ones keep why and when.
+		expect(quotas.groups.map((group) => group.label)).toEqual(["1 anthropic · week 62%", "2 openai · 5h 0%", "3 google · Argon weekly · resets 3h"]);
+		expect(quotas.groups.map((group) => group.tones)).toEqual([undefined, undefined, ["dim"]]);
 	});
 
 	test("virtual models stay out; providers follow the waterfall with skipped rungs dimmed and labeled", async () => {
