@@ -1,6 +1,6 @@
 {
   "name": "@justmytwospence/pi-tool-gate",
-  "version": "0.1.46",
+  "version": "0.1.47",
   "description": "Claude Code permission modes for Pi (manual, accept edits, plan, auto, yolo) on Shift+Tab. Auto mode: fixed rules for the clear cases, Jev for the gray zone, one push-back to the agent, then asks you.",
   "type": "module",
   "license": "MIT",
