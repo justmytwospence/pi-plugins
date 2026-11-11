@@ -1,5 +1,5 @@
-// Plan model pairs at run time: virtual models that route each request to the planner while planning,
-// chatting or consulting, and to the worker otherwise, plus ask_planner / planner_answer for in-transcript
+// Plan model pairs at run time: virtual models that route each request to the worker only while an approved
+// plan is being implemented, and to the planner otherwise (planning, chatting, consulting, ordinary work), plus ask_planner / planner_answer for in-transcript
 // consultation. Nothing here changes the selected model.
 import { relative, resolve } from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
@@ -24,6 +24,8 @@ const ANSWER_TYPE = "plan-mode-planner-answer";
 export interface PairState {
   version: 1;
   consult: boolean;
+  /** An approved plan is being implemented (the worker serves until the run settles). */
+  implementing?: boolean;
   planFile?: string;
   planLevel?: ModelSpecThinkingLevel;
 }
@@ -69,7 +71,15 @@ export function registerPairs(pi: ExtensionAPI, host: PairHost): PairController 
   let manualSincePlanEntry = false;
   let wasPlanning = false;
   const phaseOf = (): PlanPairPhase =>
-    state.consult ? "consult" : host.planning() ? "plan" : host.workflow() === "chat" ? "chat" : "build";
+    state.consult
+      ? "consult"
+      : host.planning()
+        ? "plan"
+        : host.workflow() === "chat"
+          ? "chat"
+          : state.implementing
+            ? "build"
+            : "work";
   let latest: ExtensionContext | undefined;
   const virtualApi = typeof (pi as { registerVirtualModel?: unknown }).registerVirtualModel === "function";
 
@@ -177,6 +187,7 @@ export function registerPairs(pi: ExtensionAPI, host: PairHost): PairController 
         state = {
           version: 1,
           consult: data.consult,
+          ...(data.implementing === true ? { implementing: true } : {}),
           ...(typeof data.planFile === "string" ? { planFile: data.planFile } : {}),
           ...(typeof data.planLevel === "string" &&
           (MODEL_SPEC_THINKING_LEVELS as readonly string[]).includes(data.planLevel)
@@ -242,6 +253,12 @@ export function registerPairs(pi: ExtensionAPI, host: PairHost): PairController 
   pi.on("session_shutdown", () => {
     latest = undefined;
   });
+  // The implementation is over once the run settles (an aborted run stays on the worker, to continue).
+  pi.on("agent_settled", (event) => {
+    if (!state.implementing || (event as { aborted?: boolean }).aborted) return;
+    state = { ...state, implementing: false };
+    persist();
+  });
 
   pi.on("session_start", (_event, ctx) => {
     latest = ctx;
@@ -301,6 +318,10 @@ export function registerPairs(pi: ExtensionAPI, host: PairHost): PairController 
       if (host.planning()) return text("You are in plan mode: you are the planner. Keep planning.") as never;
       if (host.workflow() === "chat")
         return text("You are in chat mode: the planner already answers. Answer directly.") as never;
+      if (!state.implementing)
+        return text(
+          "No approved plan is being implemented: the planner already answers here. Answer directly.",
+        ) as never;
       if (state.consult) return text("A consultation is already open: answer it with planner_answer.") as never;
       state = { ...state, consult: true };
       persist();
@@ -398,7 +419,13 @@ export function registerPairs(pi: ExtensionAPI, host: PairHost): PairController 
     pairFor,
     approve(ctx, planFile) {
       if (!selected(ctx)) return;
-      state = { version: 1, consult: false, planFile, planLevel: pi.getThinkingLevel() as ModelSpecThinkingLevel };
+      state = {
+        version: 1,
+        consult: false,
+        implementing: true,
+        planFile,
+        planLevel: pi.getThinkingLevel() as ModelSpecThinkingLevel,
+      };
       noted.clear();
       persist();
     },

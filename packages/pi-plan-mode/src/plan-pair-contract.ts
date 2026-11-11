@@ -1,7 +1,7 @@
 // Package-local contract; optional consumers copy this file, never import a sibling runtime.
 export const PLAN_PAIR_CHANNEL = "pi-plugins.plan-pair.v1";
-/** plan: plan mode; chat: chat workflow; consult: an ask_planner question is open; build: everything else. */
-export type PlanPairPhase = "plan" | "chat" | "consult" | "build";
+/** plan: plan mode; chat: chat workflow; consult: an ask_planner question is open; build: an approved plan is being implemented (the worker); work: ordinary work on the planner. */
+export type PlanPairPhase = "plan" | "chat" | "consult" | "build" | "work";
 export interface PlanPairModel {
   provider: string;
   id: string;

@@ -97,21 +97,40 @@ test("route sends planning to the planner, building to the worker, consulting to
   assert.equal(t.route().model.id, "claude-opus-4-5");
   assert.equal(t.route("direct").model.id, "claude-opus-4-5");
   t.state.planning = false;
-  assert.equal(t.route().model.id, "claude-sonnet-4-5");
-  assert.equal(t.route("retry").model.id, "claude-sonnet-4-5");
+  assert.equal(t.route().model.id, "claude-opus-4-5", "ordinary work stays on the planner");
   t.controller.approve(t.ctx as never, "/p/plan.md");
   assert.equal(t.controller.state.planLevel, "off");
+  assert.equal(t.route().model.id, "claude-sonnet-4-5", "an approved plan is implemented on the worker");
+  assert.equal(t.route("retry").model.id, "claude-sonnet-4-5");
   await t.call("ask_planner", { question: "why?" });
   const consulting = t.route("continuation", "low");
   assert.equal(consulting.model.id, "claude-opus-4-5");
   assert.equal(consulting.thinkingLevel, "off");
 });
 
-test("chat routes to the planner, work to the worker", () => {
+test("chat routes to the planner, and the worker serves only while implementing", () => {
   const t = setup({ workflow: "chat" });
   assert.equal(t.route().model.id, "claude-opus-4-5");
+  t.controller.approve(t.ctx as never, "/p/plan.md");
+  assert.equal(t.route().model.id, "claude-opus-4-5", "chat outranks implementing");
   t.state.workflow = "work";
   assert.equal(t.route().model.id, "claude-sonnet-4-5");
+});
+
+test("the implementation ends when the run settles, unless aborted", async () => {
+  const t = setup();
+  t.controller.approve(t.ctx as never, "/p/plan.md");
+  assert.equal(t.controller.state.implementing, true);
+  await t.fire("agent_settled", { aborted: true });
+  assert.equal(t.route().model.id, "claude-sonnet-4-5", "an aborted run keeps the worker");
+  await t.fire("agent_settled", { aborted: false });
+  assert.equal(t.controller.state.implementing, false);
+  assert.equal(t.route().model.id, "claude-opus-4-5", "back on the planner in work mode");
+  assert.ok(
+    t.mock.entries.some(
+      (entry) => entry.customType === PAIR_ENTRY && (entry.data as { implementing?: boolean }).implementing === false,
+    ),
+  );
 });
 
 test("ask_planner refuses in chat mode", async () => {
@@ -126,12 +145,12 @@ test("the pair query publishes phase, next model and level", async () => {
   const query = () => queryPlanPair(t.mock.eventBus);
   const opus = { provider: "anthropic", id: "claude-opus-4-5" };
   const sonnet = { provider: "anthropic", id: "claude-sonnet-4-5" };
-  const build = query();
-  assert.deepEqual(build, {
+  const work = query();
+  assert.deepEqual(work, {
     version: 1,
     pair: "anthropic/opusplan",
-    phase: "build",
-    next: sonnet,
+    phase: "work",
+    next: opus,
     planner: opus,
     worker: sonnet,
     thinkingLevel: t.mock.thinkingLevel,
@@ -143,6 +162,7 @@ test("the pair query publishes phase, next model and level", async () => {
   assert.deepEqual([query()?.phase, query()?.next], ["chat", opus]);
   t.state.workflow = "work";
   t.controller.approve(t.ctx as never, "/p/plan.md");
+  assert.deepEqual([query()?.phase, query()?.next], ["build", sonnet]);
   await t.call("ask_planner", { question: "why?" });
   const consult = query();
   assert.deepEqual([consult?.phase, consult?.next], ["consult", opus]);
@@ -172,6 +192,8 @@ test("ask_planner and planner_answer refuse out of phase", async () => {
   );
   const t = setup();
   assert.match(await t.call("planner_answer", { answer: "a" }), /only answers an open ask_planner question/u);
+  assert.match(await t.call("ask_planner", { question: "x" }), /No approved plan is being implemented/u);
+  t.controller.approve(t.ctx as never, "/p/plan.md");
   const text = await t.call("ask_planner", { question: "which file?" });
   assert.match(text, /The implementer asks the planner \(Opus 4\.5\):\n\nwhich file\?/u);
   assert.equal(t.controller.state.consult, true);
@@ -186,6 +208,7 @@ test("ask_planner and planner_answer refuse out of phase", async () => {
 
 test("planner_answer hands back, with and without an amended plan", async () => {
   const t = setup();
+  t.controller.approve(t.ctx as never, "/p/plan.md");
   await t.call("ask_planner", { question: "q" });
   const plain = await t.call("planner_answer", { answer: "Do X." });
   assert.equal(plain, "Planner's answer:\n\nDo X.\n\nImplementer: continue implementing, following this answer.");
@@ -220,6 +243,7 @@ test("the consult guard allows the plan file and read-only commands only", async
 
 test("a consult that ends without planner_answer is recovered at settle", async () => {
   const completed = setup();
+  completed.controller.approve(completed.ctx as never, "/p/plan.md");
   await completed.call("ask_planner", { question: "q" });
   const result = (await completed.fire("agent_before_settle", { outcome: "completed", entries: [] })) as {
     continue: boolean;
@@ -229,6 +253,7 @@ test("a consult that ends without planner_answer is recovered at settle", async 
   assert.equal(result.entries.at(-1)?.customType, "plan-mode-planner-answer");
   assert.equal(completed.controller.state.consult, false);
   const aborted = setup();
+  aborted.controller.approve(aborted.ctx as never, "/p/plan.md");
   await aborted.call("ask_planner", { question: "q" });
   assert.equal(await aborted.fire("agent_before_settle", { outcome: "aborted" }), undefined);
   assert.equal(aborted.controller.state.consult, false);
@@ -355,12 +380,19 @@ test("the plan factory registers the built-in pairs, then custom pairs from the 
       getAvailable: () => available,
       find: (provider: string, id: string) => available.find((model) => model.provider === provider && model.id === id),
     },
-    sessionManager: { getBranch: () => [], getSessionId: () => "s", getLeafId: () => null },
+    sessionManager: {
+      getBranch: () => [
+        { type: "custom", customType: PAIR_ENTRY, data: { version: 1, consult: false, implementing: true } },
+      ],
+      getSessionId: () => "s",
+      getLeafId: () => null,
+    },
   };
   assert.ok(registered.has("openai/deep"), "a custom pair is registered");
   assert.equal(registered.get("anthropic/opusplan")?.name, "Mine", "a built-in key is replaced by the custom pair");
   assert.ok(registered.has("anthropic/fableplan"), "the other built-ins stay");
   assert.ok(session.length > 0);
+  for (const handler of session) await handler({ reason: "startup" }, ctx);
   const request = { model: { provider: "anthropic", id: "opusplan" }, thinkingLevel: "medium", reason: "user" };
   const routed = registered.get("anthropic/opusplan")?.route(request, ctx) as { model: { id: string } };
   assert.equal(routed.model.id, "claude-haiku-4-5", "the replacement's worker routes the build phase");

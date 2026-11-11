@@ -79,7 +79,7 @@ readings fresh; the working row is independent of the footer mode.
    (a pi-plan-mode virtual model such as `opusplan`), the model row shows the pair
    dimmed and the model that will answer next, as `opusplan ▸ opus-5.5` (example):
    the planner in plan and chat modes and while it answers `ask_planner` (marked
-   `consulting`), the worker in work mode. If the last answer came from a model
+   `consulting`), the worker only while an approved plan is being implemented, and the planner again once it finishes. If the last answer came from a model
    outside the pair, a warning `last <model>` follows. The pair name and warning
    are dropped first at narrow widths. Without pi-plan-mode's phase, the row shows
    the model that last answered, as `opusplan → sonnet-5.5`. Workflow and Approvals rows follow
