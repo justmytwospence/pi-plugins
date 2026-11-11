@@ -762,6 +762,14 @@ function setupWorkflowLifecycle() {
   return { mock, context, ctx, inline, emit, approved, compactHere, implementHere, plansDirectory };
 }
 
+test("the gate's workflow is exposed once announced", async () => {
+  const h = setupWorkflowLifecycle();
+  await h.emit("session_start");
+  assert.equal(h.inline.workflow, undefined);
+  h.mock.eventBus.emit(MODE_CHANGED, { mode: "chat", cycle: ["work", "chat", "plan"], source: "restore" });
+  assert.equal(h.inline.workflow, "chat");
+});
+
 test("standalone toggles preview without allocation and apply only the final local selection", async () => {
   vi.useFakeTimers();
   try {

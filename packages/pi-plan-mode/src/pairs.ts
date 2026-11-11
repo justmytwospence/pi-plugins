@@ -1,5 +1,5 @@
-// Plan model pairs at run time: virtual models that route each request to the planner while planning
-// (or consulting) and to the worker otherwise, plus ask_planner / planner_answer for in-transcript
+// Plan model pairs at run time: virtual models that route each request to the planner while planning,
+// chatting or consulting, and to the worker otherwise, plus ask_planner / planner_answer for in-transcript
 // consultation. Nothing here changes the selected model.
 import { relative, resolve } from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
@@ -9,6 +9,12 @@ import { MODEL_SPEC_THINKING_LEVELS, type ModelSpec, type ModelSpecThinkingLevel
 import { type PairDefinition, pairKey, resolvePair } from "./model-pairs.js";
 import { inPlan, isPlanFile, planPaths, readPlan } from "./plan-file.js";
 import { expandHome } from "./plan-hook.js";
+import {
+  PLAN_PAIR_CHANNEL,
+  type PlanPairPhase,
+  type PlanPairRequest,
+  type PlanPairSnapshot,
+} from "./plan-pair-contract.js";
 import { findBlockedCommandSegment, readCommand, type SafeSubcommands } from "./tool-policy.js";
 
 export const PAIR_ENTRY = "plan-mode:pair";
@@ -25,6 +31,8 @@ export interface PairState {
 export interface PairHost {
   /** Whether inline plan mode is on. */
   planning(): boolean;
+  /** pi-tool-gate's workflow (work, chat or plan); undefined without it. */
+  workflow(): string | undefined;
   safeSubcommands(): SafeSubcommands | undefined;
   judgePlanEffort(ctx: ExtensionContext, prompt: string): Promise<ModelSpecThinkingLevel | undefined>;
 }
@@ -60,6 +68,9 @@ export function registerPairs(pi: ExtensionAPI, host: PairHost): PairController 
   let planEffortPending = false;
   let manualSincePlanEntry = false;
   let wasPlanning = false;
+  const phaseOf = (): PlanPairPhase =>
+    state.consult ? "consult" : host.planning() ? "plan" : host.workflow() === "chat" ? "chat" : "build";
+  let latest: ExtensionContext | undefined;
   const virtualApi = typeof (pi as { registerVirtualModel?: unknown }).registerVirtualModel === "function";
 
   const persist = () => {
@@ -119,7 +130,7 @@ export function registerPairs(pi: ExtensionAPI, host: PairHost): PairController 
         const current = defs.find((candidate) => pairKey(candidate) === pairKey(request.model)) ?? def;
         const resolved = resolvePair(current, available(ctx));
         if ("error" in resolved) throw new Error(`${current.name}: ${resolved.error}`);
-        const phase = state.consult ? "consult" : host.planning() ? "plan" : "build";
+        const phase = phaseOf();
         const target = phase === "build" ? resolved.worker : resolved.planner;
         const model = ctx.modelRegistry.find(target.provider, target.modelId);
         if (!model) throw new Error(`${current.name}: ${target.provider}/${target.modelId} is not available`);
@@ -203,7 +214,37 @@ export function registerPairs(pi: ExtensionAPI, host: PairHost): PairController 
     }
   };
 
+  const snapshot = (ctx: ExtensionContext): PlanPairSnapshot | undefined => {
+    const pair = selected(ctx);
+    if (!pair) return undefined;
+    const phase = phaseOf();
+    const target = phase === "build" ? pair.worker : pair.planner;
+    const level = pi.getThinkingLevel() as string;
+    return {
+      version: 1,
+      pair: pairKey(pair.def),
+      phase,
+      next: { provider: target.provider, id: target.modelId },
+      planner: { provider: pair.planner.provider, id: pair.planner.modelId },
+      worker: { provider: pair.worker.provider, id: pair.worker.modelId },
+      thinkingLevel: phase === "consult" ? (state.planLevel ?? level) : level,
+    };
+  };
+  pi.events?.on(PLAN_PAIR_CHANNEL, (data) => {
+    const request = data as PlanPairRequest | undefined;
+    if (request?.kind !== "query" || !latest) return;
+    try {
+      request.snapshot = snapshot(latest);
+    } catch {
+      // A footer query never breaks routing.
+    }
+  });
+  pi.on("session_shutdown", () => {
+    latest = undefined;
+  });
+
   pi.on("session_start", (_event, ctx) => {
+    latest = ctx;
     restore(ctx);
     wasPlanning = host.planning();
     define(defs);
@@ -211,10 +252,14 @@ export function registerPairs(pi: ExtensionAPI, host: PairHost): PairController 
     syncTools(ctx);
   });
   pi.on("session_tree", (_event, ctx) => {
+    latest = ctx;
     restore(ctx);
     syncTools(ctx);
   });
-  pi.on("model_select", (_event, ctx) => syncTools(ctx));
+  pi.on("model_select", (_event, ctx) => {
+    latest = ctx;
+    syncTools(ctx);
+  });
 
   pi.on("thinking_level_select", () => {
     if (effortOrigin() !== "plan-mode") manualSincePlanEntry = true;
@@ -254,6 +299,8 @@ export function registerPairs(pi: ExtensionAPI, host: PairHost): PairController 
       if (!pair)
         return text("ask_planner works only with a plan model pair selected, such as anthropic/opusplan.") as never;
       if (host.planning()) return text("You are in plan mode: you are the planner. Keep planning.") as never;
+      if (host.workflow() === "chat")
+        return text("You are in chat mode: the planner already answers. Answer directly.") as never;
       if (state.consult) return text("A consultation is already open: answer it with planner_answer.") as never;
       state = { ...state, consult: true };
       persist();

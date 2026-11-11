@@ -125,6 +125,8 @@ export interface InlineHost {
 export interface InlinePlanMode {
   readonly active: boolean;
   readonly planFile: string | undefined;
+  /** pi-tool-gate's current workflow (work, chat or plan); undefined without the gate. */
+  readonly workflow: string | undefined;
   /** Enter plan mode (through the gate when it is there). */
   enter(ctx: ExtensionContext, planFile?: string): Promise<void>;
   /** Return to ordinary work without changing approvals. */
@@ -809,6 +811,9 @@ export function registerInlinePlanMode(pi: ExtensionAPI, host: InlineHost): Inli
     },
     get planFile() {
       return state.planFile;
+    },
+    get workflow() {
+      return gate?.mode;
     },
     async enter(ctx, planFile) {
       await enter(ctx, planFile);

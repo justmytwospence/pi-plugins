@@ -919,6 +919,7 @@ export default async function plan(pi: ExtensionAPI, dependencies: PlanDependenc
     `\n\nWhen the plan does not fit what you find, call ask_planner; ${plannerName} planned it and reads this conversation.`;
   const pairs = registerPairs(pi, {
     planning: () => inline.active,
+    workflow: () => inline.workflow,
     safeSubcommands: () => settings.safeSubcommands,
     judgePlanEffort,
   });

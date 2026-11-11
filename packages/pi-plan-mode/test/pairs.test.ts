@@ -6,6 +6,7 @@ import { test } from "vitest";
 import { EXIT_TOOL, INLINE_ENTRY } from "../src/inline-plan.js";
 import { BUILTIN_PAIRS, pairKey } from "../src/model-pairs.js";
 import { PAIR_ENTRY, registerPairs } from "../src/pairs.js";
+import { PLAN_PAIR_CHANNEL, queryPlanPair } from "../src/plan-pair-contract.js";
 import { createMockContext } from "./shared/support.js";
 import { createMockPi } from "./support.js";
 
@@ -17,7 +18,7 @@ const models = [
 ];
 const virtual = { provider: "anthropic", id: "opusplan", api: "pi-virtual" };
 
-function setup(options: { planning?: boolean; available?: typeof models; model?: unknown } = {}) {
+function setup(options: { planning?: boolean; workflow?: string; available?: typeof models; model?: unknown } = {}) {
   const mock = createMockPi();
   const registered = new Map<string, { route(request: unknown, ctx: unknown): unknown }>();
   const unregistered: string[] = [];
@@ -33,9 +34,15 @@ function setup(options: { planning?: boolean; available?: typeof models; model?:
     registered.delete(`${provider}/${id}`);
     unregistered.push(`${provider}/${id}`);
   };
-  const state = { planning: options.planning ?? false, judged: [] as string[], level: "high" as string | undefined };
+  const state = {
+    planning: options.planning ?? false,
+    workflow: options.workflow as string | undefined,
+    judged: [] as string[],
+    level: "high" as string | undefined,
+  };
   const controller = registerPairs(mock.pi, {
     planning: () => state.planning,
+    workflow: () => state.workflow,
     safeSubcommands: () => undefined,
     judgePlanEffort: async (_ctx, prompt) => {
       state.judged.push(prompt);
@@ -98,6 +105,53 @@ test("route sends planning to the planner, building to the worker, consulting to
   const consulting = t.route("continuation", "low");
   assert.equal(consulting.model.id, "claude-opus-4-5");
   assert.equal(consulting.thinkingLevel, "off");
+});
+
+test("chat routes to the planner, work to the worker", () => {
+  const t = setup({ workflow: "chat" });
+  assert.equal(t.route().model.id, "claude-opus-4-5");
+  t.state.workflow = "work";
+  assert.equal(t.route().model.id, "claude-sonnet-4-5");
+});
+
+test("ask_planner refuses in chat mode", async () => {
+  const t = setup({ workflow: "chat" });
+  assert.match(await t.call("ask_planner", { question: "x" }), /You are in chat mode: the planner already answers/u);
+  assert.equal(t.controller.state.consult, false);
+});
+
+test("the pair query publishes phase, next model and level", async () => {
+  const t = setup();
+  await t.fire("session_start");
+  const query = () => queryPlanPair(t.mock.eventBus);
+  const opus = { provider: "anthropic", id: "claude-opus-4-5" };
+  const sonnet = { provider: "anthropic", id: "claude-sonnet-4-5" };
+  const build = query();
+  assert.deepEqual(build, {
+    version: 1,
+    pair: "anthropic/opusplan",
+    phase: "build",
+    next: sonnet,
+    planner: opus,
+    worker: sonnet,
+    thinkingLevel: t.mock.thinkingLevel,
+  });
+  t.state.planning = true;
+  assert.deepEqual([query()?.phase, query()?.next], ["plan", opus]);
+  t.state.planning = false;
+  t.state.workflow = "chat";
+  assert.deepEqual([query()?.phase, query()?.next], ["chat", opus]);
+  t.state.workflow = "work";
+  t.controller.approve(t.ctx as never, "/p/plan.md");
+  await t.call("ask_planner", { question: "why?" });
+  const consult = query();
+  assert.deepEqual([consult?.phase, consult?.next], ["consult", opus]);
+  assert.equal(consult?.thinkingLevel, t.controller.state.planLevel);
+  const none = setup({ model: { provider: "anthropic", id: "claude-opus-4-5", api: "anthropic-messages" } });
+  await none.fire("session_start");
+  const request: { kind: "query"; snapshot?: unknown } = { kind: "query" };
+  none.mock.eventBus.emit(PLAN_PAIR_CHANNEL, request);
+  assert.equal(request.snapshot, undefined);
 });
 
 test("route throws when a pair cannot be resolved", () => {
