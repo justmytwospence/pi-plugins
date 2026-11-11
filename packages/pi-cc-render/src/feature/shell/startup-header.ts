@@ -46,6 +46,8 @@ type EarlyHeaderPatch = {
 	installed: (...args: any[]) => unknown;
 	originalSetHeader?: (factory: unknown) => unknown;
 	installedSetHeader?: (factory: unknown) => unknown;
+	originalScopeNotice?: (...args: any[]) => unknown;
+	installedScopeNotice?: (...args: any[]) => unknown;
 	modes: Set<HeaderSpacing>;
 };
 
@@ -134,6 +136,20 @@ export function installEarlyStartupHeader(): void {
 			return originalSetHeader.call(this, factory);
 		};
 		prototype.setExtensionHeader = patch.installedSetHeader;
+	}
+	if (typeof prototype.getModelScopeNotice === "function") {
+		const originalScopeNotice: (...args: any[]) => unknown =
+			previous?.installedScopeNotice && prototype.getModelScopeNotice === previous.installedScopeNotice
+				? previous.originalScopeNotice!
+				: prototype.getModelScopeNotice;
+		patch.originalScopeNotice = originalScopeNotice;
+		// The splash lists the scoped models itself, so Pi's "Model scope: ..." line (printed before the TUI,
+		// or added to the fullscreen header) is redundant while the splash replaces the native header.
+		patch.installedScopeNotice = function (this: any, ...args: any[]) {
+			if (patch.active && config.showStartupHeader) return undefined;
+			return originalScopeNotice.apply(this, args);
+		};
+		prototype.getModelScopeNotice = patch.installedScopeNotice;
 	}
 	patchRegistry.install(EARLY_STARTUP_HEADER_PATCH, patch);
 	// A reload reclaims live containers without stacking another addChild wrapper.

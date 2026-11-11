@@ -78,6 +78,31 @@ describe("extension factory", () => {
     expect((InteractiveMode as any).prototype.init).toBe(second.installed);
   });
 
+  test("the splash suppresses Pi's redundant model scope line and restores it when disabled", async () => {
+    const { config } = await import("../src/config/config.ts");
+    const { installEarlyStartupHeader } = await import("../src/feature/shell/startup-header.ts");
+    const { EARLY_STARTUP_HEADER_PATCH, patchRegistry } = await import("../src/utils/patch-keys.ts");
+    const prototype = (InteractiveMode as any).prototype;
+    const saved = prototype.getModelScopeNotice;
+    const savedPatch = patchRegistry.get(EARLY_STARTUP_HEADER_PATCH);
+    const enabled = config.showStartupHeader;
+    try {
+      prototype.getModelScopeNotice = () => "Model scope: a, b";
+      patchRegistry.delete(EARLY_STARTUP_HEADER_PATCH);
+      installEarlyStartupHeader();
+      installEarlyStartupHeader();
+      config.showStartupHeader = true;
+      expect(prototype.getModelScopeNotice.call({})).toBeUndefined();
+      config.showStartupHeader = false;
+      expect(prototype.getModelScopeNotice.call({})).toBe("Model scope: a, b");
+    } finally {
+      config.showStartupHeader = enabled;
+      prototype.getModelScopeNotice = saved;
+      if (savedPatch) patchRegistry.install(EARLY_STARTUP_HEADER_PATCH, savedPatch);
+      installEarlyStartupHeader();
+    }
+  });
+
   test("early paint hides only native header spacers, restores them on disable/shutdown, and reclaims the wrapper on reload", async () => {
     const { config } = await import("../src/config/config.ts");
     const { applyStartupHeader, clearStartupHeader, default: startupHeader, installEarlyStartupHeader } = await import("../src/feature/shell/startup-header.ts");
