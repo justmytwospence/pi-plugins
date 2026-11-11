@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
+import { fileURLToPath } from "node:url";
 import { test } from "vitest";
 
 // A plain Node process proves there are no Vitest mocks masking import-time work.
@@ -12,12 +13,21 @@ test("import and idle/message/turn activity schedule no quota work or side effec
     import fsp from "node:fs/promises";
     import cp from "node:child_process";
     import { syncBuiltinESMExports } from "node:module";
+    import { fileURLToPath } from "node:url";
     const calls = [];
     const forbidden = name => () => { calls.push(name); throw new Error(name); };
     const idle = globalThis.setTimeout;
     for (const name of ["fetch", "setTimeout", "setInterval"])
       globalThis[name] = forbidden(name);
-    fs.readFileSync = forbidden("config read");
+    // Node 26's ESM loader reads module sources with fs.readFileSync: let it load this package's
+    // own sources and dependencies, and forbid every other read (config, cache, auth files).
+    const src = ${JSON.stringify(fileURLToPath(new URL("../src/", import.meta.url)))};
+    const read = fs.readFileSync;
+    fs.readFileSync = (file, ...rest) => {
+      const path = file instanceof URL ? fileURLToPath(file) : String(file);
+      if (path.startsWith(src) || path.includes("/node_modules/")) return read(file, ...rest);
+      return forbidden("config read")();
+    };
     for (const name of ["mkdir", "open", "lstat", "realpath", "rename", "unlink", "rmdir"])
       fsp[name] = forbidden("cache " + name);
     cp.spawn = forbidden("spawn");
