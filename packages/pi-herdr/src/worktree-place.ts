@@ -3,7 +3,7 @@ import { realpathSync } from "node:fs";
 import { basename, resolve } from "node:path";
 import { slugName } from "./core/children.ts";
 import { type Call, errorText } from "./core/herdr.ts";
-import type { PlaceRequest, PlaceResult } from "./place-contract.ts";
+import type { CloseResult, PlaceRequest, PlaceResult } from "./place-contract.ts";
 import { PI_CHILD } from "./session.ts";
 
 export interface PlaceDeps {
@@ -17,6 +17,23 @@ export interface PlaceDeps {
 const realpath = (p: string) => {
   try { return realpathSync(p); } catch { return resolve(p); }
 };
+
+/**
+ * Close this session's pane after a move. Herdr refuses to close the last pane of a repository's
+ * main space while worktree spaces are grouped under it (confirmation_required): that pane stays.
+ */
+export async function closeSelf(deps: Pick<PlaceDeps, "call" | "selfPane">): Promise<CloseResult> {
+  let pane: string;
+  try { pane = await deps.selfPane(); } catch (err) {
+    return { ok: false, error: `Could not find this pane in Herdr: ${err instanceof Error ? err.message : String(err)}.` };
+  }
+  const r = await deps.call("pane.close", { pane_id: pane });
+  if (!r.error) return { ok: true };
+  if (r.error.code === "confirmation_required") {
+    return { ok: false, error: "Herdr keeps it: it is the last pane of the repository's main space, and closing it would close the worktree spaces grouped under it." };
+  }
+  return { ok: false, error: `Herdr did not close it: ${errorText(r)}.` };
+}
 
 export async function placeSession(deps: PlaceDeps, req: PlaceRequest): Promise<PlaceResult> {
   const { call } = deps;
@@ -77,6 +94,6 @@ export async function placeSession(deps: PlaceDeps, req: PlaceRequest): Promise<
   return {
     ok: true,
     detail: `Continuing in ${req.path} (${name}, ${paneId}).`,
-    close: async () => { await call("pane.close", { pane_id: await deps.selfPane() }); },
+    close: () => closeSelf(deps),
   };
 }

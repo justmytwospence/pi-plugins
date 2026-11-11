@@ -12,7 +12,7 @@ Start a task in its own git worktree under `<repo>/.worktrees/<branch>` and carr
 
 The conversation is forked into a session file whose working folder is the worktree. Where that session starts depends on who answers the `worktree:place` event:
 
-- **pi-herdr** (inside Herdr) opens the worktree's grouped space, starts the forked session in a new pane there and closes this pane. Closing the last pane of a space may close that space.
+- **pi-herdr** (inside Herdr) opens the worktree's grouped space, starts the forked session in a new pane there and closes this pane. Herdr keeps the last pane of a repository's main space while worktree spaces are grouped under it; that pane then stays open with the earlier copy of the conversation, and pi-worktree says so. Closing the last pane of any other space closes that space.
 - **No provider** and an interactive Pi: this terminal switches to the forked session in place, and project trust, settings and `AGENTS.md` follow the new folder.
 - **Switchyard**: a session there stays in the workspace it started in, so an in-place switch is refused. `new` still creates the worktree; start a session in it from Switchyard.
 

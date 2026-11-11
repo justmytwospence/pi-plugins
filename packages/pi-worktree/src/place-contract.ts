@@ -34,8 +34,11 @@ export interface PlaceOpen {
 
 export type PlaceRequest = PlaceMove | PlaceOpen;
 
+/** Whether the source pane closed; `error` is a full sentence saying why it stayed open. */
+export type CloseResult = { ok: true } | { ok: false; error: string };
+
 export type PlaceResult =
-  | { ok: true; detail: string; /** Moves only: close this session's pane. Call it last. */ close?: () => Promise<void> }
+  | { ok: true; detail: string; /** Moves only: close this session's pane. Call it last. */ close?: () => Promise<CloseResult> }
   | { ok: false; error: string };
 
 export interface PlaceEvent {

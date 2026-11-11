@@ -19,8 +19,25 @@ test("moves into a closed worktree and closes the source pane last", async () =>
   expect(args).toEqual(expect.arrayContaining(["--session", "/s/f.jsonl", "--", "go"]));
   expect(f.of("agent.start")[0].params.pane_id).toBe("p1");
   expect(f.of("pane.close")).toEqual([]);
-  if (res.ok) await res.close!();
+  if (res.ok) expect(await res.close!()).toEqual({ ok: true });
   expect(f.of("pane.close")).toEqual([{ method: "pane.close", params: { pane_id: "self" } }]);
+});
+
+test("reports a source pane Herdr keeps as the anchor of a worktree group", async () => {
+  const f = fakeCall({ ...opened(), "pane.close": () => ({ error: { code: "confirmation_required", message: "closing this pane would close a worktree group" } }) });
+  const res = await placeSession(deps(f), move);
+  expect(res.ok && (await res.close!())).toEqual({
+    ok: false,
+    error: "Herdr keeps it: it is the last pane of the repository's main space, and closing it would close the worktree spaces grouped under it.",
+  });
+});
+
+test("reports any other pane-close failure with Herdr's error", async () => {
+  const f = fakeCall({ ...opened(), "pane.close": () => ({ error: { code: "pane_not_found", message: "no pane self" } }) });
+  const res = await placeSession(deps(f), move);
+  expect(res.ok && (await res.close!())).toEqual({ ok: false, error: "Herdr did not close it: no pane self (pane_not_found)." });
+  const lost = await placeSession(deps(fakeCall(opened()), { selfPane: async () => { throw new Error("not in Herdr"); } }), move);
+  expect(lost.ok && (await lost.close!())).toEqual({ ok: false, error: "Could not find this pane in Herdr: not in Herdr." });
 });
 
 test("an already open worktree gets a tab", async () => {

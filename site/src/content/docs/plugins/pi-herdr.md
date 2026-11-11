@@ -64,7 +64,7 @@ Workspace metadata is recomputed for the destination rather than copied. The dep
 
 This handles an external move automatically: there is no new UI, command or `herdr` move action, and no checkout or cwd migration. A grouped worktree space can contain the existing session; spawning a child creates a separate session instead.
 
-To carry this conversation into a worktree, use pi-worktree (`/worktree new <branch>` or its `worktree` tool): it starts the forked session in the worktree's space through pi-herdr (the `worktree:place` event) and closes this pane.
+To carry this conversation into a worktree, use pi-worktree (`/worktree new <branch>` or its `worktree` tool): it starts the forked session in the worktree's space through pi-herdr (the `worktree:place` event) and closes this pane. Herdr refuses to close the last pane of a repository's main space while worktree spaces are grouped under it (`confirmation_required`); that pane stays, and pi-worktree reports why, as it does for any other close failure.
 
 ## The herdr tool
 

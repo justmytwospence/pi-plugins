@@ -68,7 +68,7 @@ To carry this conversation into a worktree, use pi-worktree (`/worktree new <bra
 
 ### Worktree placement
 
-pi-herdr answers pi-worktree's `worktree:place` event on Pi's event bus. For a move it opens the worktree's grouped space with `worktree.open` (or adds a tab if the space is already open; the main checkout uses its own space, else a new one), starts `pi --session <fork>` there with the continuation prompt, and then closes this session's pane. For an open it resumes the worktree's latest session (`pi --continue`). A startup dialog or failure leaves this pane open and reports the session file.
+pi-herdr answers pi-worktree's `worktree:place` event on Pi's event bus. For a move it opens the worktree's grouped space with `worktree.open` (or adds a tab if the space is already open; the main checkout uses its own space, else a new one), starts `pi --session <fork>` there with the continuation prompt, and then closes this session's pane. Herdr refuses to close the last pane of a repository's main space while worktree spaces are grouped under it (`confirmation_required`); that pane stays, and pi-worktree reports why, as it does for any other close failure. For an open it resumes the worktree's latest session (`pi --continue`). A startup dialog or failure leaves this pane open and reports the session file.
 
 ## The `herdr` tool
 

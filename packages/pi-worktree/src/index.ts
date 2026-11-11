@@ -27,7 +27,7 @@ import {
   type Worktree,
 } from "./git.ts";
 import { HOLD_CHANNELS, Holds } from "./holds.ts";
-import { place, type PlaceResult } from "./place-contract.ts";
+import { place, type CloseResult, type PlaceResult } from "./place-contract.ts";
 import { declareReadOnlyCalls } from "./read-only-call.ts";
 import { latestSession, sessionDirFor, sessionInto, writeEmptySession, type CurrentSession } from "./sessions.ts";
 
@@ -126,6 +126,17 @@ export function createWorktree(pi: ExtensionAPI, deps: Deps): void {
       : `Could not remove ${path}: ${res.error}`;
   const refusal = (m: Mover, path: string) => (m === "switchyard" ? switchyardText(path) : m === "none" ? "Moving needs an interactive Pi." : undefined);
 
+  /** Close this pane last; say so when the provider could not (the conversation already moved). */
+  const closeSource = async (ctx: ExtensionContext, res: PlaceResult, path: string) => {
+    if (!res.ok || !res.close) return;
+    let closed: CloseResult;
+    try { closed = await res.close(); } catch (err) { closed = { ok: false, error: err instanceof Error ? err.message : String(err) }; }
+    if (closed.ok) return;
+    try {
+      ctx.ui.notify(`This pane stayed open: ${closed.error} The conversation continues in ${path}; what is here is the earlier copy.`, "warning");
+    } catch { /* stale */ }
+  };
+
   const awaitPlacement = async (result: Promise<PlaceResult>): Promise<PlaceResult> => {
     let timer: ReturnType<typeof setTimeout> | undefined;
     const timeout = new Promise<PlaceResult>((resolve) => {
@@ -151,7 +162,7 @@ export function createWorktree(pi: ExtensionAPI, deps: Deps): void {
       if (!res.ok) { ctx.ui.notify(`${res.error} Session file kept: ${file}`, "error"); return false; }
       pi.appendEntry(MOVED_ENTRY, { path: t.path, branch: t.branch, file, provider: claimed.provider });
       ctx.ui.notify(res.detail, "info");
-      if (res.close) await res.close();
+      await closeSource(ctx, res, t.path);
       return true;
     }
     pi.appendEntry(MOVED_ENTRY, { path: t.path, branch: t.branch, file, provider: "in-place" });
@@ -234,7 +245,7 @@ export function createWorktree(pi: ExtensionAPI, deps: Deps): void {
       }
       pi.appendEntry(MOVED_ENTRY, { path: root, file, provider: claimed.provider, removed: w.path });
       ctx.ui.notify(removalMessage(w.path, branch, removed), "info");
-      if (res.close) await res.close();
+      await closeSource(ctx, res, root);
       return;
     }
     pi.appendEntry(MOVED_ENTRY, { path: root, file, provider: "in-place", removed: w.path });
@@ -312,7 +323,7 @@ export function createWorktree(pi: ExtensionAPI, deps: Deps): void {
   let pending: Pending | undefined;
   const queued = new Map<string, Pending>();
   const tail = (m: Mover) =>
-    `${m === "provider" ? " in a new pane in the worktree's space, and this pane closes" : " in this terminal"}. End your turn now with one short line.`;
+    `${m === "provider" ? " in a new pane in the worktree's space, and this pane closes (Herdr keeps it when it is the last pane of the repository's main space, which anchors the worktree spaces)" : " in this terminal"}. End your turn now with one short line.`;
 
   const text = (t: string) => ({ content: [{ type: "text" as const, text: t }], details: {} });
 

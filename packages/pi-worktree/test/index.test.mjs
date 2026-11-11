@@ -167,6 +167,23 @@ test('the tool creates a worktree, moves through a provider after the turn, and 
     assert.match(requests[0].prompt, /^\[pi-worktree\] This conversation moved from /);
     assert.deepEqual(f.order, ['entry:pi-worktree:moved', 'close']);
     assert.ok(notes.some(([m]) => m === 'placed'));
+    assert.ok(!notes.some(([m]) => /stayed open/.test(m)));
+  } finally { rmSync(tmp, { recursive: true, force: true }); }
+});
+
+test('a move whose source pane stays open says so', async () => {
+  const { tmp, root, agentDir } = setup();
+  try {
+    const f = fakePi();
+    createWorktree(f.pi, { run: nodeRun, agentDir, env: {} });
+    provider(null, f.pi, () => ({ ok: true, detail: 'placed', close: async () => ({ ok: false, error: 'Herdr keeps it: last pane.' }) }));
+    const { ctx, notes } = fakeCtx(root, agentDir);
+    await f.tool.execute('1', { action: 'new', branch: 'kept' }, undefined, undefined, ctx);
+    f.handlers.get('agent_settled')({ aborted: false }, ctx);
+    await tick();
+    await f.commands.get('worktree-continue').handler(f.sent[0][0].split(' ')[1], ctx);
+    const wt = join(root, '.worktrees', 'kept');
+    assert.ok(notes.some(([m, level]) => level === 'warning' && m === `This pane stayed open: Herdr keeps it: last pane. The conversation continues in ${wt}; what is here is the earlier copy.`));
   } finally { rmSync(tmp, { recursive: true, force: true }); }
 });
 
