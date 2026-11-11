@@ -1,6 +1,6 @@
 {
   "name": "@justmytwospence/pi-interactive-shell",
-  "version": "0.1.51",
+  "version": "0.1.52",
   "description": "Explicit human-operated terminal handoffs for Pi: !i runs a foreground command without capturing input or output.",
   "type": "module",
   "license": "MIT",

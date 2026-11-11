@@ -1,6 +1,6 @@
 {
   "name": "@justmytwospence/pi-cache-guard",
-  "version": "0.1.51",
+  "version": "0.1.52",
   "description": "Asks before a Pi prompt that would re-cache a large conversation, shows the prompt cache's time left, and keeps the context lean with Jev: trimmed tool output and one-second compaction.",
   "type": "module",
   "license": "MIT",
