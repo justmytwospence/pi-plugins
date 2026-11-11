@@ -1,12 +1,12 @@
 ---
 title: pi-worktree
-description: Start a task in its own git worktree, carry this conversation there, and remove the checkout once its pull request has merged.
+description: Start a task in its own git worktree, carry this conversation there, and remove the checkout once its branch has merged.
 plugin: pi-worktree
 ---
 
 ## Quick reference
 
-- **Use it for:** Starting a task in its own git worktree under `.worktrees/`, continuing this conversation there, and removing the checkout once its pull request has merged.
+- **Use it for:** Starting a task in its own git worktree under `.worktrees/`, continuing this conversation there, and removing the checkout once its branch has merged into origin's default branch (or by pull request).
 - **Enable:** Select `packages/pi-worktree/src/index.ts` with [`pi config`](/guides/install/#enable-an-explicit-subset).
 - **Controls:** `/worktree new <branch> [--base <ref>] [--fresh]`, `/worktree move <branch>`, `/worktree open <branch>`, `/worktree done [--force]`, `/worktree ls`, and the model-callable `worktree` tool (`new`, `move`, `done`, `list`). No shortcut.
 - **Settings:** None. New branches start from `--base`, else `origin/HEAD` (else `origin/main`, else `HEAD`), without an upstream.
@@ -19,7 +19,7 @@ plugin: pi-worktree
 
 The `worktree` tool defers the move until the turn has settled: the agent ends its turn with a short line, the move runs, and the moved session starts with a note that the conversation moved and the task continues. A turn that is aborted cancels the pending move.
 
-`/worktree done` runs inside a worktree whose pull request has merged. It refuses uncommitted changes, checks the merge with `gh`, continues the conversation in the main checkout, and then removes the worktree and its local branch (`git branch -D`, since squash merges are not ancestors). `--force` discards an unmerged branch after a confirmation; the tool never forces.
+`/worktree done` runs inside a worktree whose branch has merged. It refuses uncommitted changes, fetches `origin`, and accepts the branch when its current commit is contained in `origin/HEAD` (else `origin/main`): a local merge, fast-forward or rebase landing such as `bin/land`, or a merge-commit pull request. Otherwise it asks `gh` for a merged pull request whose head is that commit (squash merges). It then continues the conversation in the main checkout, and then removes the worktree and its local branch (`git branch -D`, since squash merges are not ancestors). `--force` discards an unmerged branch after a confirmation; the tool never forces.
 
 ## Development
 

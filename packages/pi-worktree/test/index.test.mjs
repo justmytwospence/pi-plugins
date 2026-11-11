@@ -146,7 +146,7 @@ test('the tool creates a worktree, moves through a provider after the turn, and 
   try {
     const f = fakePi();
     createWorktree(f.pi, { run: nodeRun, agentDir, env: {} });
-    const requests = provider(null, f.pi, (req) => ({ ok: true, detail: 'placed', close: async () => { f.order.push('close'); } }));
+    const requests = provider(null, f.pi, (req) => ({ ok: true, detail: 'placed', close: async () => { f.order.push('close'); return { ok: true }; } }));
     const { ctx, notes } = fakeCtx(root, agentDir);
     const res = await f.tool.execute('1', { action: 'new', branch: 'try-move' }, undefined, undefined, ctx);
     const wt = join(root, '.worktrees', 'try-move');
@@ -260,11 +260,12 @@ test('done refuses an unmerged branch and removes a merged one after the provide
     const f = fakePi();
     createWorktree(f.pi, { run, agentDir, env: {} });
     let ok = true;
-    const requests = provider(null, f.pi, () => (ok ? { ok: true, detail: 'back', close: async () => { f.order.push('close'); } } : { ok: false, error: 'no space' }));
+    const requests = provider(null, f.pi, () => (ok ? { ok: true, detail: 'back', close: async () => { f.order.push('close'); return { ok: true }; } } : { ok: false, error: 'no space' }));
     git(root, 'worktree', 'add', '-q', '--no-track', '-b', 'fin', join(root, '.worktrees', 'fin'), 'origin/main');
     const wt = join(root, '.worktrees', 'fin');
+    git(wt, 'commit', '-q', '--allow-empty', '-m', 'work');
     const { ctx } = fakeCtx(wt, agentDir);
-    await assert.rejects(f.tool.execute('1', { action: 'done' }, undefined, undefined, ctx), /has no merged pull request/);
+    await assert.rejects(f.tool.execute('1', { action: 'done' }, undefined, undefined, ctx), /fin is not in origin\/main and has no merged pull request/);
     merged = true;
     await f.tool.execute('1', { action: 'done' }, undefined, undefined, ctx);
     f.handlers.get('agent_settled')({ aborted: false }, ctx);
@@ -281,5 +282,26 @@ test('done refuses an unmerged branch and removes a merged one after the provide
     assert.throws(() => git(root, 'rev-parse', '--verify', 'refs/heads/fin'));
     assert.equal(requests.at(-1).path, root);
     assert.deepEqual(f.order.filter((o) => o === 'close'), ['close']);
+  } finally { rmSync(tmp, { recursive: true, force: true }); }
+});
+
+test('done accepts a branch landed in origin\'s default branch without a pull request', async () => {
+  const { tmp, root, agentDir } = setup();
+  try {
+    const run = async (cmd, args, opts) => (cmd === 'gh' ? { code: 0, stdout: '[]', stderr: '' } : nodeRun(cmd, args, opts));
+    const f = fakePi();
+    createWorktree(f.pi, { run, agentDir, env: {} });
+    provider(null, f.pi, () => ({ ok: true, detail: 'back', close: async () => ({ ok: true }) }));
+    git(root, 'worktree', 'add', '-q', '--no-track', '-b', 'landed', join(root, '.worktrees', 'landed'), 'origin/main');
+    const wt = join(root, '.worktrees', 'landed');
+    git(wt, 'commit', '-q', '--allow-empty', '-m', 'work');
+    git(root, 'push', '-q', 'origin', 'landed:main');
+    const { ctx } = fakeCtx(wt, agentDir);
+    const res = await f.tool.execute('1', { action: 'done' }, undefined, undefined, ctx);
+    assert.match(res.content[0].text, /are removed/);
+    f.handlers.get('agent_settled')({ aborted: false }, ctx);
+    await tick();
+    await f.commands.get('worktree-continue').handler(f.sent[0][0].split(' ')[1], ctx);
+    assert.equal(existsSync(wt), false);
   } finally { rmSync(tmp, { recursive: true, force: true }); }
 });

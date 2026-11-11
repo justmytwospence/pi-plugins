@@ -97,23 +97,46 @@ export async function isClean(run: Run, path: string): Promise<boolean> {
   return res.code === 0 && res.stdout.trim() === "";
 }
 
-/** Merged = a merged pull request whose head is exactly the branch's current commit. */
-export async function isMerged(run: Run, root: string, branch: string): Promise<{ merged: boolean; sha?: string; note?: string }> {
+export interface MergeState {
+  merged: boolean;
+  sha?: string;
+  /** The remote base checked for containment (origin/HEAD, else origin/main); absent without a remote. */
+  base?: string;
+  /** How it merged: contained in `base`, or a merged pull request at the branch's tip (squash merges). */
+  via?: "base" | "pull request";
+  note?: string;
+}
+
+/**
+ * Merged = the branch's current commit is contained in origin's default branch (a local merge, a
+ * fast-forward, a rebase landing or a merge-commit PR), or a merged pull request's head is exactly
+ * that commit (squash merges). Call after fetchOrigin.
+ */
+export async function isMerged(run: Run, root: string, branch: string): Promise<MergeState> {
   const rev = await run("git", ["-C", root, "rev-parse", "--verify", "--quiet", `refs/heads/${branch}`]);
   if (rev.code !== 0 || !rev.stdout.trim()) return { merged: false, note: "no such branch" };
   const sha = rev.stdout.trim();
+  const ref = await defaultBase(run, root);
+  const base = ref === "HEAD" ? undefined : ref;
+  if (base && (await run("git", ["-C", root, "merge-base", "--is-ancestor", sha, base])).code === 0) {
+    return { merged: true, sha, base, via: "base" };
+  }
   const gh = await run("gh", ["pr", "list", "--head", branch, "--state", "merged", "--json", "headRefOid", "--limit", "20"], { cwd: root });
   if (gh.code !== 0) {
     const line = gh.stderr.trim().split("\n")[0] || `exit ${gh.code}`;
-    return { merged: false, sha, note: `gh could not check pull requests: ${line}` };
+    return { merged: false, sha, base, note: `gh could not check pull requests: ${line}` };
   }
   try {
     const prs = JSON.parse(gh.stdout) as Array<{ headRefOid?: string }>;
-    return { merged: prs.some((pr) => pr.headRefOid === sha), sha };
+    return prs.some((pr) => pr.headRefOid === sha) ? { merged: true, sha, base, via: "pull request" } : { merged: false, sha, base };
   } catch {
-    return { merged: false, sha, note: "unreadable gh output" };
+    return { merged: false, sha, base, note: "unreadable gh output" };
   }
 }
+
+/** Why `done` refuses: "x is not in origin/dev and has no merged pull request at abc1234 (note)". */
+export const notMergedText = (branch: string, m: MergeState) =>
+  `${branch} is not ${m.base ? `in ${m.base}` : "in a remote default branch"} and has no merged pull request at ${m.sha ? m.sha.slice(0, 7) : "?"}${m.note ? ` (${m.note})` : ""}`;
 
 /** Remove a worktree (never with git's --force) and then its branch. */
 export async function removeWorktree(run: Run, root: string, w: Worktree): Promise<{ ok: boolean; error?: string }> {

@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import {
-  addWorktree, defaultBase, fetchOrigin, isClean, isManaged, isMerged, listWorktrees, nodeRun,
+  addWorktree, defaultBase, fetchOrigin, isClean, isManaged, isMerged, listWorktrees, nodeRun, notMergedText,
   parseWorktrees, removeWorktree, verifyRef, worktreePath,
 } from '../src/git.ts';
 
@@ -53,14 +53,24 @@ test('paths and managed worktrees', () => {
   assert.equal(isManaged('/r', w('/elsewhere/x')), false);
 });
 
-const fakeRun = (sha, gh) => async (cmd, args) => {
-  if (cmd === 'git') return sha ? { code: 0, stdout: `${sha}\n`, stderr: '' } : { code: 1, stdout: '', stderr: '' };
-  return gh;
+// git: rev-parse of the branch gives `sha`, origin/HEAD is origin/main, and the branch is
+// contained in it when `contained`; gh answers `gh`.
+const fakeRun = (sha, gh, contained = false) => async (cmd, args) => {
+  if (cmd !== 'git') return gh;
+  if (args.includes('symbolic-ref')) return { code: 0, stdout: 'origin/main\n', stderr: '' };
+  if (args.includes('merge-base')) return { code: contained ? 0 : 1, stdout: '', stderr: '' };
+  return sha ? { code: 0, stdout: `${sha}\n`, stderr: '' } : { code: 1, stdout: '', stderr: '' };
 };
 
-test('isMerged needs a merged PR at the exact branch tip', async () => {
+test('isMerged accepts a branch contained in origin/HEAD without asking gh', async () => {
+  const none = { code: 0, stdout: '[]', stderr: '' };
+  assert.deepEqual(await isMerged(fakeRun('abc', none, true), '/r', 'x'), { merged: true, sha: 'abc', base: 'origin/main', via: 'base' });
+  assert.deepEqual(await isMerged(fakeRun('abc', none), '/r', 'x'), { merged: false, sha: 'abc', base: 'origin/main' });
+});
+
+test('isMerged otherwise needs a merged PR at the exact branch tip', async () => {
   const ok = { code: 0, stdout: JSON.stringify([{ headRefOid: 'abc' }]), stderr: '' };
-  assert.deepEqual(await isMerged(fakeRun('abc', ok), '/r', 'x'), { merged: true, sha: 'abc' });
+  assert.deepEqual(await isMerged(fakeRun('abc', ok), '/r', 'x'), { merged: true, sha: 'abc', base: 'origin/main', via: 'pull request' });
   assert.equal((await isMerged(fakeRun('def', ok), '/r', 'x')).merged, false);
   const failed = await isMerged(fakeRun('abc', { code: 1, stdout: '', stderr: 'not logged in\nmore' }), '/r', 'x');
   assert.equal(failed.merged, false);
@@ -105,6 +115,26 @@ test('worktree lifecycle against real git', async () => {
     assert.equal(existsSync(wt), false);
     assert.throws(() => git(root, 'rev-parse', '--verify', 'refs/heads/feat'));
     assert.equal((await fetchOrigin(nodeRun, root)), true);
+  } finally { rmSync(tmp, { recursive: true, force: true }); }
+});
+
+test('isMerged follows origin/HEAD, e.g. a dev default branch, against real git', async () => {
+  const { tmp, root } = setup();
+  const noGh = async (cmd, args, opts) => (cmd === 'gh' ? { code: 1, stdout: '', stderr: 'gh: not here' } : nodeRun(cmd, args, opts));
+  try {
+    git(root, 'push', '-q', 'origin', 'main:dev');
+    git(root, 'remote', 'set-head', 'origin', 'dev');
+    const wt = (await addWorktree(nodeRun, root, 'feat', 'origin/dev')).path;
+    git(wt, 'commit', '-q', '--allow-empty', '-m', 'work');
+    const before = await isMerged(noGh, root, 'feat');
+    assert.equal(before.merged, false);
+    assert.equal(notMergedText('feat', before), `feat is not in origin/dev and has no merged pull request at ${before.sha.slice(0, 7)} (gh could not check pull requests: gh: not here)`);
+    git(root, 'push', '-q', 'origin', 'feat:dev');
+    await fetchOrigin(nodeRun, root);
+    assert.deepEqual(await isMerged(noGh, root, 'feat'), { merged: true, sha: before.sha, base: 'origin/dev', via: 'base' });
+    // main never got it: containment is checked against the default branch only.
+    git(root, 'remote', 'set-head', 'origin', 'main');
+    assert.equal((await isMerged(noGh, root, 'feat')).merged, false);
   } finally { rmSync(tmp, { recursive: true, force: true }); }
 });
 

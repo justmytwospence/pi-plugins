@@ -4,7 +4,7 @@ Start a task in its own git worktree under `<repo>/.worktrees/<branch>` and carr
 
 - `/worktree new <branch> [--base <ref>] [--fresh]` fetches `origin`, creates the worktree from `--base` (default `origin/HEAD`, else `origin/main`, else `HEAD`) without an upstream, and continues this conversation there. `--fresh` starts an empty session instead of forking the conversation.
 - `/worktree move <branch>` continues it in an existing worktree; `/worktree open <branch>` shows a worktree's latest session.
-- `/worktree done [--force]` (inside a worktree) checks that its pull request merged at the branch's current commit, returns the conversation to the main checkout, and removes the worktree and branch.
+- `/worktree done [--force]` (inside a worktree) checks that the branch is merged (below), returns the conversation to the main checkout, and removes the worktree and branch.
 - `/worktree ls` lists them.
 - The `worktree` tool (`action`: `new`, `move`, `done`, `list`) does the same for an agent. A move the agent starts happens when its turn ends, and the moved session gets a one-line note to continue the task.
 
@@ -18,7 +18,7 @@ The conversation is forked into a session file whose working folder is the workt
 
 A move is refused while background work (`herdr:background` or `herdr:working` holds: async subagents, planners, awaited children) is running, because closing the pane would end it. If placement fails, the session file is kept and its path is reported.
 
-"Merged" means a merged pull request whose head is the branch's current commit, checked with a signed-in GitHub CLI (`gh`). `done` refuses uncommitted changes and, without `--force`, unmerged work.
+"Merged" means the branch's current commit is contained in `origin/HEAD` (origin's default branch, such as `main` or `dev`; else `origin/main`) after a fetch, which covers local merges, fast-forwards and merge-commit pull requests, or else a merged pull request whose head is that commit (squash merges), checked with a signed-in GitHub CLI (`gh`). `done` refuses uncommitted changes and, without `--force`, unmerged work.
 
 Part of [Pi Plugins](https://github.com/justmytwospence/pi-plugins). Reference: <https://pi-plugins.vercel.app/plugins/pi-worktree/>.
 

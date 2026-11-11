@@ -18,6 +18,7 @@ import {
   isMerged,
   listWorktrees,
   nodeRun,
+  notMergedText,
   real,
   removeWorktree,
   validBranch,
@@ -39,7 +40,7 @@ export const SUBCOMMANDS = [
   { value: "new", label: "new <branch> [--base <ref>] [--fresh] -- create .worktrees/<branch> and continue this conversation there" },
   { value: "move", label: "move <branch> -- continue this conversation in an existing worktree" },
   { value: "open", label: "open <branch> -- show an existing worktree's latest session" },
-  { value: "done", label: "done [--force] -- leave a merged worktree and remove it" },
+  { value: "done", label: "done [--force] -- leave a worktree merged into origin's default branch (or by pull request) and remove it" },
   { value: "ls", label: "ls -- list this repository's worktrees" },
 ];
 
@@ -203,10 +204,9 @@ export function createWorktree(pi: ExtensionAPI, deps: Deps): void {
     await fetchOrigin(run, root);
     const merged = await isMerged(run, root, branch);
     if (!merged.merged) {
-      const sha = merged.sha ? merged.sha.slice(0, 7) : "?";
       if (!force || !interactive) {
         return void ctx.ui.notify(
-          `${branch} has no merged pull request at ${sha}${merged.note ? ` (${merged.note})` : ""}. Ship it first${interactive ? ", or /worktree done --force to discard it" : ""}.`,
+          `${notMergedText(branch, merged)}. Ship it first${interactive ? ", or /worktree done --force to discard it" : ""}.`,
           "warning",
         );
       }
@@ -214,7 +214,7 @@ export function createWorktree(pi: ExtensionAPI, deps: Deps): void {
       pi.events.emit("herdr:blocked", { active: true, id, label: "Discard unmerged worktree" });
       let ok = false;
       try {
-        ok = await ctx.ui.confirm(`Discard ${branch}?`, "Its commits are not in a merged pull request and will be deleted with the worktree.");
+        ok = await ctx.ui.confirm(`Discard ${branch}?`, `Its commits are not in ${merged.base ?? "a remote default branch"} or a merged pull request and will be deleted with the worktree.`);
       } finally {
         pi.events.emit("herdr:blocked", { active: false, id });
       }
@@ -320,17 +320,17 @@ export function createWorktree(pi: ExtensionAPI, deps: Deps): void {
     name: TOOL,
     label: "Worktree",
     description:
-      "Task worktrees in <repo>/.worktrees/<branch>, with this conversation carried along. new creates one and, when this turn ends, continues the conversation there (in Herdr a new pane in the worktree's space, closing this one; elsewhere this terminal switches); move does the same for an existing worktree; done, inside a worktree whose pull request has merged, removes it and its branch and returns the conversation to the main checkout; list shows them.",
+      "Task worktrees in <repo>/.worktrees/<branch>, with this conversation carried along. new creates one and, when this turn ends, continues the conversation there (in Herdr a new pane in the worktree's space, closing this one; elsewhere this terminal switches); move does the same for an existing worktree; done, inside a worktree whose branch is merged (contained in origin's default branch, or a merged pull request at its tip), removes it and its branch and returns the conversation to the main checkout; list shows them.",
     promptSnippet: "Create a task worktree and continue this conversation in it; remove it and return once merged",
     promptGuidelines: [
       "Use worktree action=new only when the user asks for a worktree or branch isolation; otherwise ask first. Name the branch with a short bare slug.",
       "A worktree request keeps this conversation: use the worktree tool rather than spawning another agent there, moving Herdr panes, or running git worktree add for the current task.",
       "After worktree action=new, move or done succeeds, end your turn with one short line and do nothing else in this session: the move happens when the turn ends, and the moved session gets a note to continue the task.",
-      "worktree action=done refuses uncommitted or unmerged work; tell the user what blocks it instead of forcing it.",
+      "worktree action=done refuses uncommitted or unmerged work (not in origin's default branch and no merged pull request); tell the user what blocks it instead of forcing it.",
     ],
     parameters: Type.Object({
       action: Type.Union([Type.Literal("new"), Type.Literal("move"), Type.Literal("done"), Type.Literal("list")], {
-        description: "new: create <repo>/.worktrees/<branch> and continue this conversation there when the turn ends; move: continue it in an existing worktree; done: inside a worktree whose pull request merged, remove it and return to the main checkout; list: show the worktrees",
+        description: "new: create <repo>/.worktrees/<branch> and continue this conversation there when the turn ends; move: continue it in an existing worktree; done: inside a merged worktree (in origin's default branch, or a merged pull request), remove it and return to the main checkout; list: show the worktrees",
       }),
       branch: Type.Optional(Type.String({ description: "new/move: the branch; a short bare slug for a new one (no feature/ or chore/ prefix unless the repository requires one)" })),
       base: Type.Optional(Type.String({ description: "new: the ref to branch from (default: origin's default branch, fetched first)" })),
@@ -354,7 +354,7 @@ export function createWorktree(pi: ExtensionAPI, deps: Deps): void {
         if (no) throw new Error(no);
         await fetchOrigin(run, target.root);
         const merged = await isMerged(run, target.root, target.branch);
-        if (!merged.merged) throw new Error(`${target.branch} has no merged pull request at ${merged.sha ? merged.sha.slice(0, 7) : "?"}. Ship it first.`);
+        if (!merged.merged) throw new Error(`${notMergedText(target.branch, merged)}. Ship it first.`);
         pending = { kind: "done" };
         return text(`When this turn ends, ${target.w.path} and branch ${target.branch} are removed and this conversation returns to ${target.root}. End your turn now with one short line.`);
       }
