@@ -1,6 +1,6 @@
 {
   "name": "@justmytwospence/pi-bg",
-  "version": "0.1.45",
+  "version": "0.1.46",
   "description": "Background jobs and services for pi: the agent waits on a job inside its turn (so it shows as working), or is woken when it ends; services wake it when ready. A footer status, a /bg viewer, and herdr integration through pi-herdr's event bus.",
   "type": "module",
   "license": "MIT",
