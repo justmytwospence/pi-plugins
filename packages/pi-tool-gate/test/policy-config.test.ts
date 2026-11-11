@@ -1,11 +1,11 @@
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { afterEach, expect, test, vi } from "vitest";
-import { loadConfig, policyErrors, policyFiles } from "../src/policy-config.ts";
+import { loadConfig, loadConfigReport, policyErrors, policyFiles } from "../src/policy-config.ts";
 import type { ProjectContext } from "../src/project.ts";
 import { editDirectoryGrant } from "../src/permissions.ts";
 
-const defaults: Record<string, unknown> = { enabled: true, denyInsteadOfPrompting: false, jev: { model: "jev-latest", timeoutMs: 1500 }, list: ["a"] };
+const defaults: Record<string, unknown> = { flag: true, denyInsteadOfPrompting: false, nested: { model: "default", timeoutMs: 1500 }, list: ["a"] };
 
 const dirs: string[] = [];
 afterEach(() => {
@@ -33,24 +33,29 @@ test("active shared policy and main local policy override users without inheriti
   const { cwd: root, root: dir } = setup();
   const main = path.join(dir, "main");
   const project: ProjectContext = { cwd: path.join(root, "components"), root, main, isGit: true };
-  write(path.join(dir, "xdg/agents/tool-gate.json"), { source: "user", jev: { model: "user" } });
-  write(path.join(main, ".agents/tool-gate.json"), { source: "wrong-main", enabled: false });
-  write(path.join(main, ".pi/tool-gate.json"), { source: "wrong-main", enabled: false });
-  write(path.join(project.cwd, ".pi/tool-gate.json"), { source: "wrong-subdirectory", enabled: false });
-  write(path.join(root, ".agents/tool-gate.json"), { source: "agents", jev: { timeoutMs: 10 } });
+  write(path.join(dir, "xdg/agents/tool-gate.json"), { source: "user", nested: { model: "user" } });
+  write(path.join(main, ".agents/tool-gate.json"), { source: "wrong-main", flag: false });
+  write(path.join(main, ".pi/tool-gate.json"), { source: "wrong-main", flag: false });
+  write(path.join(project.cwd, ".pi/tool-gate.json"), { source: "wrong-subdirectory", flag: false });
+  write(path.join(root, ".agents/tool-gate.json"), { source: "agents", nested: { timeoutMs: 10 } });
   write(path.join(root, ".pi/tool-gate.json"), { source: "active" });
-  expect(loadConfig("tool-gate", defaults, project)).toEqual({ ...defaults, source: "active", jev: { model: "user", timeoutMs: 10 } });
-  write(path.join(main, ".pi/tool-gate.local.json"), { source: "local", jev: { timeoutMs: 20 } });
-  expect(loadConfig("tool-gate", defaults, project)).toEqual({ ...defaults, source: "local", jev: { model: "user", timeoutMs: 20 } });
+  expect(loadConfig("tool-gate", defaults, project)).toEqual({ ...defaults, source: "active", nested: { model: "user", timeoutMs: 10 } });
+  write(path.join(main, ".pi/tool-gate.local.json"), { source: "local", nested: { timeoutMs: 20 } });
+  expect(loadConfig("tool-gate", defaults, project)).toEqual({ ...defaults, source: "local", nested: { model: "user", timeoutMs: 20 } });
 });
 
-test("prompting defaults to false, user true and project false follow existing config precedence", () => {
+test("prompting defaults to false, user true wins over a project false, and a project may set it true", () => {
   const { cwd, root } = setup();
   expect(loadConfig("tool-gate", defaults, cwd)).toEqual(defaults);
-  write(path.join(root, "xdg/agents/tool-gate.json"), { denyInsteadOfPrompting: true, jev: { timeoutMs: 42 } });
-  expect(loadConfig("tool-gate", defaults, cwd)).toEqual({ ...defaults, denyInsteadOfPrompting: true, jev: { model: "jev-latest", timeoutMs: 42 } });
+  write(path.join(root, "xdg/agents/tool-gate.json"), { denyInsteadOfPrompting: true, nested: { timeoutMs: 42 } });
+  expect(loadConfig("tool-gate", defaults, cwd)).toEqual({ ...defaults, denyInsteadOfPrompting: true, nested: { model: "default", timeoutMs: 42 } });
+  // A project may not turn prompting back on.
   write(path.join(cwd, ".pi/tool-gate.json"), { denyInsteadOfPrompting: false });
-  expect(loadConfig("tool-gate", defaults, cwd)).toEqual({ ...defaults, jev: { model: "jev-latest", timeoutMs: 42 } });
+  expect(loadConfig("tool-gate", defaults, cwd)).toEqual({ ...defaults, denyInsteadOfPrompting: true, nested: { model: "default", timeoutMs: 42 } });
+  // It may turn it off (tighten).
+  write(path.join(root, "xdg/agents/tool-gate.json"), { denyInsteadOfPrompting: false });
+  write(path.join(cwd, ".pi/tool-gate.json"), { denyInsteadOfPrompting: true });
+  expect(loadConfig("tool-gate", defaults, cwd)).toEqual({ ...defaults, denyInsteadOfPrompting: true });
 });
 
 test.each(["true", "false", 0, 1, null, [], {}])("wrong-typed prompting %j preserves the earlier boolean and unrelated fields", invalid => {
@@ -59,8 +64,8 @@ test.each(["true", "false", 0, 1, null, [], {}])("wrong-typed prompting %j prese
   write(user, { denyInsteadOfPrompting: invalid });
   expect(loadConfig("tool-gate", defaults, cwd)).toEqual(defaults);
   write(user, { denyInsteadOfPrompting: true });
-  write(path.join(cwd, ".pi/tool-gate.json"), { denyInsteadOfPrompting: invalid, enabled: false, list: ["project"] });
-  expect(loadConfig("tool-gate", defaults, cwd)).toEqual({ ...defaults, denyInsteadOfPrompting: true, enabled: false, list: ["project"] });
+  write(path.join(cwd, ".pi/tool-gate.json"), { denyInsteadOfPrompting: invalid, flag: false, list: ["project"] });
+  expect(loadConfig("tool-gate", defaults, cwd)).toEqual({ ...defaults, denyInsteadOfPrompting: true, flag: false, list: ["project"] });
 });
 
 test("directory read/write grants union and deduplicate defaults and every policy scope", () => {
@@ -117,24 +122,69 @@ test.each(["read", "write"] as const)("saving local directory %s grant B does no
   expect(loadConfig("tool-gate", {}, project)).toEqual({ directories: { [access]: ["/shared/A"] } });
 });
 
-test("only user files control userWritable, while project persistence and other fields can override", () => {
+test("persistence is user-owned: project files cannot change it, and say so", () => {
   const { cwd, root } = setup();
   const base = { persistence: { project: "local", userWritable: true } };
   write(path.join(root, "xdg/agents/tool-gate.json"), { persistence: { project: "shared", userWritable: false } });
   write(path.join(root, "pi/tool-gate.json"), { persistence: { userWritable: true } });
   write(path.join(cwd, ".agents/tool-gate.json"), { persistence: { userWritable: false } });
   write(path.join(cwd, ".pi/tool-gate.local.json"), { persistence: { project: "local", userWritable: false } });
-  expect(loadConfig("tool-gate", base, cwd)).toEqual(base);
+  const report = loadConfigReport("tool-gate", base, cwd);
+  expect(report.config).toEqual({ persistence: { project: "shared", userWritable: true } });
+  expect(report.ignored.map(i => [path.basename(i.file), i.key])).toEqual([["tool-gate.json", "persistence"], ["tool-gate.local.json", "persistence"]]);
   write(path.join(root, "pi/tool-gate.json"), { persistence: { userWritable: false } });
   write(path.join(cwd, ".pi/tool-gate.json"), { persistence: { userWritable: true } });
   write(path.join(cwd, ".pi/tool-gate.local.json"), { persistence: { project: "shared", userWritable: true } });
   expect(loadConfig("tool-gate", base, cwd)).toEqual({ persistence: { project: "shared", userWritable: false } });
 });
 
-test("project files cannot supply userWritable when no user value exists", () => {
+test("project files cannot supply persistence when no user value exists", () => {
   const { cwd } = setup();
   write(path.join(cwd, ".pi/tool-gate.json"), { persistence: { project: "shared", userWritable: false } });
-  expect(loadConfig("tool-gate", {}, cwd)).toEqual({ persistence: { project: "shared" } });
+  expect(loadConfig("tool-gate", {}, cwd)).toEqual({});
+});
+
+const LOOSENING: Array<[string, unknown, string]> = [
+  ["enabled", false, "enabled"],
+  ["allowTools", ["bash"], "allowTools"],
+  ["readOnlyCommands", ["make"], "readOnlyCommands"],
+  ["thresholds", { irreversible: 1 }, "thresholds"],
+  ["jev", { enabled: false }, "jev"],
+  ["modes", ["auto"], "modes"],
+  ["defaultApproval", "yolo", "defaultApproval"],
+  ["defaultMode", "bypass", "defaultMode"],
+  ["denyInsteadOfPrompting", false, "denyInsteadOfPrompting"],
+  ["planShell", "scoped", "planShell"],
+];
+
+test.each(LOOSENING)("a project file cannot loosen %s; user files can", (key, value, reported) => {
+  const { cwd, root } = setup();
+  for (const file of [".agents/tool-gate.json", ".pi/tool-gate.json", ".pi/tool-gate.local.json"]) {
+    write(path.join(cwd, file), { [key]: value });
+    const report = loadConfigReport("tool-gate", {}, cwd);
+    expect(report.config).toEqual({});
+    expect(report.ignored.map(i => i.key)).toEqual([reported]);
+    rmSync(path.join(cwd, file));
+  }
+  write(path.join(root, "pi/tool-gate.json"), { [key]: value });
+  expect(loadConfigReport("tool-gate", {}, cwd)).toEqual({ config: { [key]: value }, ignored: [] });
+});
+
+test("a project file may tighten: manual approvals, prompting off, read-only plan shell", () => {
+  const { cwd } = setup();
+  write(path.join(cwd, ".pi/tool-gate.json"), { defaultApproval: "manual", denyInsteadOfPrompting: true, planShell: "read-only" });
+  expect(loadConfigReport("tool-gate", {}, cwd)).toEqual({ config: { defaultApproval: "manual", denyInsteadOfPrompting: true, planShell: "read-only" }, ignored: [] });
+});
+
+test("project directories keep private and derived roots, add to them, and cannot loosen the rest", () => {
+  const { cwd, root } = setup();
+  write(path.join(root, "pi/tool-gate.json"), { directories: { private: ["~/A"], derived: [{ path: "~/.config" }], alwaysWrite: ["/tmp"], enabled: true } });
+  write(path.join(cwd, ".pi/tool-gate.json"), {
+    directories: { private: ["~/B", "~/A"], derived: [{ path: "~/.config" }, { path: "~/.x" }], alwaysWrite: ["/"], exemptCommands: ["make"], enabled: false },
+  });
+  const report = loadConfigReport("tool-gate", { directories: { enabled: true, private: [], derived: [], alwaysWrite: [] } }, cwd);
+  expect(report.config).toEqual({ directories: { enabled: true, private: ["~/A", "~/B"], derived: [{ path: "~/.config" }, { path: "~/.x" }], alwaysWrite: ["/tmp"] } });
+  expect(report.ignored.map(i => i.key).sort()).toEqual(["directories.alwaysWrite", "directories.enabled", "directories.exemptCommands"]);
 });
 
 test.each([false, true, "managed", null, [], 42])("project persistence scalar %j cannot bypass managed globals", persistence => {

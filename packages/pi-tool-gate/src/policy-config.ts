@@ -2,6 +2,7 @@ import { readFileSync } from "node:fs";
 import path from "node:path";
 
 import { agentDir, sharedConfigDir, isRecord } from "./config.ts";
+import { parseLegacyCombinedMode } from "./modes.ts";
 import { projectFiles, type ProjectContext } from "./project.ts";
 
 function context(project: ProjectContext | string): ProjectContext {
@@ -54,31 +55,78 @@ export function policyErrors(project: ProjectContext | string): string[] {
   return policyIssues(project).map(issue => issue.message);
 }
 
+export interface IgnoredSetting { file: string; key: string }
+
+/** Settings a project file may not loosen: they are honored only from the user's own files. */
+const USER_ONLY_KEYS = ["enabled", "allowTools", "readOnlyCommands", "thresholds", "jev", "persistence", "modes"] as const;
+const USER_ONLY_DIRECTORIES = ["alwaysWrite", "exemptCommands"] as const;
+
+/** Remove what a project file may not set (it may only tighten), recording each removed key. */
+function tightenOnly(file: string, value: Record<string, unknown>, ignored: IgnoredSetting[]): Record<string, unknown> {
+  const out: Record<string, unknown> = { ...value };
+  const drop = (key: string, path = key) => {
+    if (key in out) { delete out[key]; ignored.push({ file, key: path }); }
+  };
+  for (const key of USER_ONLY_KEYS) drop(key);
+  for (const key of ["defaultApproval", "defaultMode"]) {
+    if (key in out && parseLegacyCombinedMode(out[key]) === "bypassPermissions") drop(key);
+  }
+  if (out.denyInsteadOfPrompting === false) drop("denyInsteadOfPrompting");
+  if ("planShell" in out && out.planShell !== "read-only") drop("planShell");
+  if (isRecord(out.directories)) {
+    const directories = { ...out.directories };
+    for (const key of USER_ONLY_DIRECTORIES) {
+      if (key in directories) { delete directories[key]; ignored.push({ file, key: `directories.${key}` }); }
+    }
+    if (directories.enabled === false) { delete directories.enabled; ignored.push({ file, key: "directories.enabled" }); }
+    out.directories = directories;
+  }
+  return out;
+}
+
 /**
  * Merge user, active shared project and main local project config. Invalid files never throw;
  * policyErrors exposes diagnostics separately. Wrong-typed fields retain the earlier value.
- * A string retains the legacy launch-directory lookup; callers resolve Git roots asynchronously.
+ * Project files (the last three) may only tighten: loosening settings are dropped and reported in
+ * `ignored`. A string retains the legacy launch-directory lookup; callers resolve Git roots asynchronously.
  */
-export function loadConfig<T extends Record<string, unknown>>(name: string, defaults: T, project: ProjectContext | string): T {
+export function loadConfigReport<T extends Record<string, unknown>>(name: string, defaults: T, project: ProjectContext | string): { config: T; ignored: IgnoredSetting[] } {
   let merged: Record<string, unknown> = merge({}, structuredClone(defaults));
+  const ignored: IgnoredSetting[] = [];
   for (const [index, file] of configFiles(name, project).entries()) {
     const { value } = readPolicy(file);
     if (!value) continue;
-    const { persistence: rawPersistence, ...settings } = value;
+    const fromProject = index >= 2;
+    const settings = fromProject ? tightenOnly(file, value, ignored) : { ...value };
+    const { persistence: rawPersistence, ...rest } = settings;
     if (isRecord(rawPersistence)) {
       const persistence = { ...rawPersistence };
       if (persistence.project !== "local" && persistence.project !== "shared") delete persistence.project;
-      if (index >= 2 || typeof persistence.userWritable !== "boolean") delete persistence.userWritable;
-      merged = merge(merged, { ...settings, persistence });
+      if (typeof persistence.userWritable !== "boolean") delete persistence.userWritable;
+      merged = merge(merged, { ...rest, persistence }, [], fromProject);
     } else {
       // A scalar must not replace the persistence object or its user-owned writable flag.
-      merged = merge(merged, settings);
+      merged = merge(merged, rest, [], fromProject);
     }
   }
-  return merged as T;
+  return { config: merged as T, ignored };
 }
 
-function merge(base: Record<string, unknown>, over: Record<string, unknown>, keys: string[] = []): Record<string, unknown> {
+export function loadConfig<T extends Record<string, unknown>>(name: string, defaults: T, project: ProjectContext | string): T {
+  return loadConfigReport(name, defaults, project).config;
+}
+
+function union(current: unknown[] | undefined, value: unknown[]): unknown[] {
+  const seen = new Set<string>();
+  return [...(current ?? []), ...value].filter((item) => {
+    const key = typeof item === "string" ? item : JSON.stringify(item);
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
+function merge(base: Record<string, unknown>, over: Record<string, unknown>, keys: string[] = [], fromProject = false): Record<string, unknown> {
   const out: Record<string, unknown> = { ...base };
   for (const [key, value] of Object.entries(over)) {
     const current = out[key];
@@ -88,8 +136,11 @@ function merge(base: Record<string, unknown>, over: Record<string, unknown>, key
         && (current === undefined || (Array.isArray(current) && current.every(item => typeof item === "string")))) {
         out[key] = [...new Set([...(current ?? []), ...value])];
       }
+    } else if (fromProject && keys.length === 1 && keys[0] === "directories" && (key === "private" || key === "derived")) {
+      // A project may add private roots and derived paths, never remove the user's.
+      if (Array.isArray(value) && (current === undefined || Array.isArray(current))) out[key] = union(current as unknown[] | undefined, value);
     } else if (isRecord(current) || (current === undefined && keys.length === 0 && key === "directories" && isRecord(value))) {
-      if (isRecord(value)) out[key] = merge(isRecord(current) ? current : {}, value, [...keys, key]);
+      if (isRecord(value)) out[key] = merge(isRecord(current) ? current : {}, value, [...keys, key], fromProject);
     } else if (Array.isArray(current)) {
       if (Array.isArray(value) && (!current.length || value.every(item => typeof item === typeof current[0]))) out[key] = value;
     } else if (current === undefined || (typeof value === typeof current && (typeof value !== "number" || Number.isFinite(value)))) out[key] = value;

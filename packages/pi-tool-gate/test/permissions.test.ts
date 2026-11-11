@@ -5,6 +5,7 @@ import path from "node:path";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import { bashUnits } from "../src/bash.ts";
 import {
+  absolutizeRule,
   allowing,
   allowsPath,
   blocking,
@@ -594,9 +595,9 @@ describe("suggested rules", () => {
     expect(suggest(call("write", { path: `${ROOT}/src/new.ts` }))).toEqual(["Write(src/**)"]);
     expect(suggest(call("edit", { path: "package.json" }))).toEqual(["Edit(./package.json)"]);
     expect(suggest(call("write", { path: `${homedir()}/.zshrc` }))).toEqual(["Write(~/.zshrc)"]);
-    expect(suggest(call("edit", { path: "../other/a.ts" }))).toEqual(["Edit(/Users/me/Projects/other/**)"]);
+    expect(suggest(call("edit", { path: "../other/a.ts" }))).toEqual(["Edit(//Users/me/Projects/other/**)"]);
     expect(suggest(call("write", { path: `${homedir()}/notes/a.md` }))).toEqual(["Write(~/notes/**)"]);
-    expect(suggest(call("write", { path: "/etc/x/y" }))).toEqual(["Write(/etc/x/**)"]);
+    expect(suggest(call("write", { path: "/etc/x/y" }))).toEqual(["Write(//etc/x/**)"]);
     expect(suggest(call("web_fetch", { url: "https://x" }))).toEqual(["web_fetch"]);
     expect(suggest(call("mcp__paperless__update_document", {}))).toEqual(["mcp__paperless__update_document"]);
     expect(suggest(call("read", { path: "x" }))).toEqual([]);
@@ -623,8 +624,8 @@ describe("saved grants from before rules", () => {
     expect(m("bash:git push")).toEqual({ kind: "rule", list: "allow", text: "Bash(git push:*)" });
     expect(m("bash:docker compose up")).toEqual({ kind: "rule", list: "allow", text: "Bash(docker compose up:*)" });
     expect(m("tool:web_fetch")).toEqual({ kind: "rule", list: "allow", text: "web_fetch" });
-    expect(m("edit:/Users/me/Projects/app/src")).toEqual({ kind: "rule", list: "allow", text: "Edit(/Users/me/Projects/app/src/**)" });
-    expect(m("write:/tmp/")).toEqual({ kind: "rule", list: "allow", text: "Write(/tmp/**)" });
+    expect(m("edit:/Users/me/Projects/app/src")).toEqual({ kind: "rule", list: "allow", text: "Edit(//Users/me/Projects/app/src/**)" });
+    expect(m("write:/tmp/")).toEqual({ kind: "rule", list: "allow", text: "Write(//tmp/**)" });
     expect(m("dir:read:/Users/me/Downloads")).toEqual({ kind: "dir", key: "dir:read:/Users/me/Downloads", access: "read", dir: "/Users/me/Downloads" });
     expect(m("dir:write:/x")).toMatchObject({ kind: "dir", access: "write" });
     // What an old unparsed key meant, exactly; reads with substitutions have no rule.
@@ -903,5 +904,26 @@ describe("rule files", () => {
   test("a missing file is created with the rule", async () => {
     await editUserRules("add", "ask", "Bash(npm publish:*)");
     expect(JSON.parse(readFileSync(userRulesFile(), "utf8"))).toEqual({ permissions: { ask: ["Bash(npm publish:*)"] } });
+  });
+});
+
+describe("rules saved for every project", () => {
+  test("project-relative path rules become absolute; everything else is unchanged", () => {
+    expect(absolutizeRule("Edit(src/a/**)", "/r")).toBe("Edit(//r/src/a/**)");
+    expect(absolutizeRule("Edit(./a.ts)", "/r")).toBe("Edit(//r/a.ts)");
+    expect(absolutizeRule("Write(docs/**)", "/r")).toBe("Write(//r/docs/**)");
+    for (const text of ["Edit(~/x/**)", "Edit(//abs/x)", "Read(name)", "Bash(npm test:*)", "web_fetch", "Edit"]) {
+      expect(absolutizeRule(text, "/r"), text).toBe(text);
+    }
+  });
+
+  test("the absolute rule covers the same files from any project", () => {
+    const text = absolutizeRule("Edit(src/**)", ROOT);
+    const parsed = parseRule(text);
+    expect(parsed.ok).toBe(true);
+    if (!parsed.ok) return;
+    const rules = [{ list: "allow" as const, text, raw: text, rule: parsed.rule, origin: { scope: "user" as const, shared: false, source: "u", writable: false } }];
+    expect(allowsPath(rules, "edit", `${ROOT}/src/a/b.ts`, "/elsewhere")).toBe(true);
+    expect(allowsPath(rules, "edit", "/elsewhere/src/a/b.ts", "/elsewhere")).toBe(false);
   });
 });

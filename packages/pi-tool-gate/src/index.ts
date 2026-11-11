@@ -28,14 +28,16 @@ import {
   shellDir,
 } from "./bash.ts";
 import { isRecord } from "./config.ts";
-import { loadConfig, policyIssues, policyFiles } from "./policy-config.ts";
-import { type ProjectContext, ProjectResolutionError, projectFiles, projectSaveFile, resolveProject } from "./project.ts";
+import { loadConfig, loadConfigReport, policyIssues, policyFiles } from "./policy-config.ts";
+import { type ProjectContext, ProjectResolutionError, projectContextSync, projectFiles, projectSaveFile, resolveProject } from "./project.ts";
 import {
   DEFAULT_DIRECTORIES,
   type DirectoriesConfig,
   type Policy,
   canWrite,
+  canonicalPath,
   describePolicy,
+  effectiveDirectories,
   grantKey,
   resolvePolicy,
   shown,
@@ -44,6 +46,7 @@ import {
 import { Downloads, downloadedRunReasons, downloadsOf, type Script, scriptFor, trackCall } from "./downloads.ts";
 import { grantsFile, legacyGrantErrors, loadGrants, removeGrant } from "./grants.ts";
 import {
+  absolutizeRule,
   allowing,
   allowsPath,
   blocking,
@@ -63,6 +66,7 @@ import {
   type Scope,
   sessionRule,
   suggest,
+  userRulesFile,
 } from "./permissions.ts";
 import { type DirGrant, rulesCommand, type RuleStore } from "./rules-command.ts";
 import { whileBlocked } from "./herdr.ts";
@@ -180,6 +184,8 @@ export interface GateConfig extends Record<string, unknown> {
   /** Which directories this project reads and writes without asking (dirs.ts). */
   directories: DirectoriesConfig;
   persistence: { project: "local" | "shared"; userWritable: boolean };
+  /** Plan workflow shell commands: `scoped` lets those that leave the repository unchanged through (then approvals); `read-only` allows only reads. */
+  planShell: "scoped" | "read-only";
 }
 
 export const DEFAULT_CONFIG: GateConfig = {
@@ -201,6 +207,7 @@ export const DEFAULT_CONFIG: GateConfig = {
   approvalShortcut: "alt+a",
   directories: DEFAULT_DIRECTORIES,
   persistence: { project: "local", userWritable: true },
+  planShell: "scoped",
 };
 
 /** The dialog's first and last rows. */
@@ -216,7 +223,8 @@ export function choiceLabels(kind: "rules" | "dirs", plural: boolean, userWritab
   return {
     session: `Allow ${noun} for this session`,
     project: `Allow ${noun} in this project`,
-    ...(kind === "rules" ? { ...(userWritable ? { everywhere: `Allow ${noun} everywhere` } : {}), edit: `Edit the ${noun}...` } : {}),
+    ...(userWritable ? { everywhere: `Allow ${noun} everywhere` } : {}),
+    ...(kind === "rules" ? { edit: `Edit the ${noun}...` } : {}),
   };
 }
 
@@ -289,7 +297,7 @@ export interface PlanContext {
   annotations?: (tool: string) => Annotations | undefined;
   /** The tool owner's answer on the read-only-call contract; undefined when no owner answers. */
   readOnlyCall?: ReadOnlyCall;
-  /** Whether a folder grant (`dir:read:/abs`) was made for the session or the project. */
+  /** Whether a wildcard-named folder was granted (exact key `dir:read:/abs`); other grants are in `config.directories`. */
   granted?: (key: string) => boolean;
   /** Every permission rule in force (permissions.ts): session, project and user. */
   rules?: readonly ScopedRule[];
@@ -322,6 +330,8 @@ export function planCall(tool: string, input: Record<string, unknown>, cwd: stri
   return { kind: "ask", reasons, key: `rule:${hit.text}`, args, direct: true, ...(planned.kind === "ask" && planned.advice ? { advice: planned.advice } : {}) };
 }
 
+const scopesKey = (holds: ReadonlyArray<{ access: string; file: string }>) => holds.map((v) => `${v.access}:${v.file}`).join("|");
+
 function planWithHolds(tool: string, input: Record<string, unknown>, cwd: string, c: PlanContext, call: Call): Plan {
   const base = basePlan(tool, input, cwd, c, call);
   const holds = base.kind === "allow" && base.why === "allow list" ? [] : directoryHolds(tool, input, cwd, c, call);
@@ -332,14 +342,15 @@ function planWithHolds(tool: string, input: Record<string, unknown>, cwd: string
       : `${v.access === "write" ? "writes" : "reads"} ${shown(v.file)}, outside this project's directories`))];
   const hints = [...new Set(holds.flatMap((v) => (v.hint !== undefined ? [v.hint || "Edit its source instead."] : [])))];
   const advice = hints.length ? hints.join(" ") : undefined;
-  const scopes = [...new Map(holds.map((v) => [grantKey(v), v])).values()];
-  const offer = dirsOffer(scopes.map((v) => [grantKey(v), `${v.access}s in ${shown(v.scope)}`] as const));
+  // A derived path is never opened by a folder grant: only Allow once or Block.
+  const scopes = [...new Map(holds.filter((v) => v.hint === undefined).map((v) => [grantKey(v), v])).values()];
+  const offer = scopes.length ? dirsOffer(scopes.map((v) => [grantKey(v), `${v.access}s in ${shown(v.scope)}`] as const)) : undefined;
   const args = base.kind === "allow" || base.kind === "deny" ? clip(SHELL_TOOLS.has(tool) ? String(input.command ?? "") : JSON.stringify(input), 6_000) : base.args;
   if (base.kind === "ask") return { ...base, reasons: [...base.reasons, ...reasons], key: `${base.key}; dirs`, advice };
   return {
     kind: "ask",
     reasons,
-    key: `dirs:${offer.items.join("|")}`,
+    key: `dirs:${offer ? offer.items.join("|") : scopesKey(holds)}`,
     args,
     offer,
     advice,
@@ -347,7 +358,7 @@ function planWithHolds(tool: string, input: Record<string, unknown>, cwd: string
 }
 
 /**
- * Paths this call touches that the directory policy does not cover, minus granted folders and, for
+ * Paths this call touches that the directory policy (folder grants included) does not cover, minus, for
  * `edit`, `write` and the reading tools, files an allow rule for the tool names.
  */
 function directoryHolds(tool: string, input: Record<string, unknown>, cwd: string, c: PlanContext, call: Call) {
@@ -363,7 +374,7 @@ function directoryHolds(tool: string, input: Record<string, unknown>, cwd: strin
   } else return [];
   const policy = resolvePolicy(config.directories, c.projects ?? [path.resolve(cwd)]);
   // The plan file pi-plan-mode hands out is always writable.
-  if ((tool === "edit" || tool === "write") && c.planFile && access.writes[0] === c.planFile) return [];
+  if ((tool === "edit" || tool === "write") && c.planFile && access.writes[0] !== undefined && canonicalPath(access.writes[0]) === c.planFile) return [];
   const rules = c.rules ?? [];
   const root = call.root ?? cwd;
   const opened = (v: { file: string; hint?: string }) =>
@@ -407,7 +418,7 @@ function basePlan(tool: string, input: Record<string, unknown>, cwd: string, c: 
   }
   if (BUILTIN_READ.has(tool)) {
     const file = String(input.path ?? "");
-    if (tool === "read" && file && isCredentialPath(expandHome(file)) && !allowing(rules, call, true)) {
+    if (file && isCredentialPath(expandHome(file)) && !allowing(rules, call, true)) {
       return { kind: "ask", reasons: [`reads credentials (${file})`], key: `read:${file}`, args: clip(JSON.stringify(input), 2_000) };
     }
     return { kind: "allow", why: "read-only tool" };
@@ -533,7 +544,13 @@ export default function toolGate(pi: ExtensionAPI) {
   let ignoredRules: IgnoredRule[] = [];
   /** Every rule in force, as of the last `refreshRules`. */
   let allRules: readonly ScopedRule[] = [];
-  const granted = (key: string) => sessionDirs.has(key) || localDirs.has(key);
+  /** Folder grants whose name has a wildcard character match by exact key only (see `effectiveDirectories`). */
+  const exactGrant = (key: string) => /[*?]/u.test(key) && (sessionDirs.has(key) || localDirs.has(key));
+  /** The directory policy as granted: config, saved and session folder grants, and a worktree's main checkout (read). */
+  const directoriesFor = async (cwd: string): Promise<DirectoriesConfig> => {
+    const { root, main } = await contextFor(cwd);
+    return effectiveDirectories(config.directories, [...sessionDirs, ...localDirs.keys()], main !== root ? main : undefined);
+  };
   /** Files this session downloaded (downloads.ts), rebuilt from the branch on start and tree moves. */
   let downloads = new Downloads();
   const pendingUsage = new Map<string, ClassifierUsage>();
@@ -592,7 +609,7 @@ export default function toolGate(pi: ExtensionAPI) {
     return { reads, judged: p !== undefined };
   };
 
-  const keyConfig = loadConfig("tool-gate", DEFAULT_CONFIG, process.cwd());
+  const keyConfig = loadConfig("tool-gate", DEFAULT_CONFIG, projectContextSync(process.cwd()));
   const shortcut = (typeof keyConfig.workflowShortcut === "string" ? keyConfig.workflowShortcut
     : typeof keyConfig.cycleShortcut === "string" ? keyConfig.cycleShortcut : "shift+tab").trim();
   const approvalShortcut = (typeof keyConfig.approvalShortcut === "string" ? keyConfig.approvalShortcut : "alt+a").trim();
@@ -639,7 +656,7 @@ export default function toolGate(pi: ExtensionAPI) {
   pi.events.on(WORKFLOW_QUERY, (data) => {
     const query = data as { entries?: unknown; cwd?: unknown; reply?: unknown } | undefined;
     if (!Array.isArray(query?.entries) || typeof query.cwd !== "string" || typeof query.reply !== "function") return;
-    const restored = restoreBranchModes(query.entries, defaults(loadConfig("tool-gate", DEFAULT_CONFIG, query.cwd)));
+    const restored = restoreBranchModes(query.entries, defaults(loadConfig("tool-gate", DEFAULT_CONFIG, projectContext && projectLaunch === path.resolve(query.cwd) ? projectContext : projectContextSync(query.cwd))));
     const snapshot: WorkflowSnapshot = {
       mode: restored.workflow,
       cycle: cycle(), ...(shortcut ? { key: shortcut } : {}), source: "restore",
@@ -764,7 +781,7 @@ export default function toolGate(pi: ExtensionAPI) {
   });
   pi.events.on(PLAN_PROVIDER, (data) => {
     const file = (data as { planFile?: unknown } | undefined)?.planFile;
-    const nextFile = typeof file === "string" && file ? path.resolve(file) : undefined;
+    const nextFile = typeof file === "string" && file ? canonicalPath(file) : undefined;
     if (nextFile !== planFile) { planFile = nextFile; invalidate(); }
     const available = planProvider;
     planProvider = true;
@@ -845,7 +862,7 @@ export default function toolGate(pi: ExtensionAPI) {
   };
   // Main is only for local persistence and legacy keys, never active project access.
   const projectOf = async (cwd: string) => [(await contextFor(cwd)).root];
-  const policyFor = async (cwd: string): Promise<Policy> => resolvePolicy(config.directories, await projectOf(cwd));
+  const policyFor = async (cwd: string): Promise<Policy> => resolvePolicy(await directoriesFor(cwd), await projectOf(cwd));
   const projectKey = async (cwd: string) => (await contextFor(cwd)).main;
   const destination = async (cwd: string) => projectSaveFile(await contextFor(cwd), config.persistence.project);
   /** Reload what is saved (this project's grants, the config files) and merge it with the session's rules. */
@@ -864,7 +881,8 @@ export default function toolGate(pi: ExtensionAPI) {
       return;
     }
     const previousPrompting = denyInsteadOfPrompting();
-    config = loadConfig("tool-gate", DEFAULT_CONFIG, project);
+    const loaded = loadConfigReport("tool-gate", DEFAULT_CONFIG, project);
+    config = loaded.config;
     if (previousPrompting !== denyInsteadOfPrompting()) invalidate();
     status(hostCtx);
     const local = localGrants(loadGrants(project.main), grantsFile());
@@ -877,7 +895,8 @@ export default function toolGate(pi: ExtensionAPI) {
     erroredPolicyFiles = [...issues.map(issue => issue.file), ...(legacyErrors.length ? [grantsFile()] : [])];
     fileDirs = [];
     const target = projectSaveFile(project, config.persistence.project);
-    for (const file of projectFiles(project)) {
+    const userFile = userRulesFile();
+    for (const file of policyFiles(project)) {
       try {
         const json: unknown = JSON.parse(readFileSync(file, "utf8"));
         if (!isRecord(json) || !isRecord(json.directories)) continue;
@@ -886,7 +905,12 @@ export default function toolGate(pi: ExtensionAPI) {
           if (!Array.isArray(entries)) continue;
           for (const dir of entries) if (typeof dir === "string") {
             const absolute = path.resolve(project.root, expandHome(dir));
-            fileDirs.push({ key: `dir:${access}:${absolute}`, access, dir, source: file, writable: file === target, shared: file !== path.join(project.main, ".pi", "tool-gate.local.json") });
+            const user = file === userFile || !projectFiles(project).includes(file);
+            fileDirs.push({
+              key: `dir:${access}:${absolute}`, access, dir, source: file,
+              writable: user ? file === userFile && config.persistence.userWritable : file === target,
+              shared: user || file !== path.join(project.main, ".pi", "tool-gate.local.json"),
+            });
           }
         }
       } catch { /* policyErrors reports malformed files; missing files are normal. */ }
@@ -901,6 +925,7 @@ export default function toolGate(pi: ExtensionAPI) {
     }
     const fileDiagnostics = [
       ...policyLoadErrors,
+      ...loaded.ignored.map((i) => `${shown(i.file)}: \`${i.key}\` is ignored in project files (they may only tighten); set it in ${shown(userRulesFile())}.`),
       ...(loadGrants(project.main).length ? [`Legacy grants: ${shown(grantsFile())}; migrate explicitly before removing.`] : []),
       ...files.ignored.map((r) => `Invalid ${r.list} rule ${r.raw} in ${shown(r.origin.source)}: ${r.error}; it provides no protection.`),
       ...files.rules.flatMap((r) => { const warning = ruleWarning(r.list, r.rule); return warning ? [`${r.text} in ${shown(r.origin.source)}: ${warning}.`] : []; }),
@@ -926,7 +951,8 @@ export default function toolGate(pi: ExtensionAPI) {
       await editRulesFile(await destination(cwd), "add", list, text);
     } else {
       if (!config.persistence.userWritable) throw new Error(MANAGED);
-      await editUserRules("add", list, text);
+      // A user rule applies in every project: a path relative to this project must name it absolutely.
+      await editUserRules("add", list, list === "allow" ? absolutizeRule(text, (await contextFor(cwd)).root) : text);
     }
     await refreshRules(cwd);
   };
@@ -951,13 +977,13 @@ export default function toolGate(pi: ExtensionAPI) {
     const checksPaths = !listed && config.directories.enabled !== false &&
       (SHELL_TOOLS.has(tool) || tool === "edit" || tool === "write" || BUILTIN_READ.has(tool));
     return planCall(tool, input, (await contextFor(cwd)).cwd, {
-      config,
+      config: checksPaths ? { ...config, directories: await directoriesFor(cwd) } : config,
       branch: shell ? (await git(dir))?.branch : undefined,
       ignored: shell ? await ignoredByGit(secretGitAdds(command, dir)) : undefined,
       projects: checksPaths ? await projectOf(cwd) : undefined,
       annotations,
       readOnlyCall,
-      granted,
+      granted: exactGrant,
       rules: allRules,
       root: (await projectOf(cwd))[0],
       planFile,
@@ -1092,9 +1118,11 @@ export default function toolGate(pi: ExtensionAPI) {
       for (const key of items) sessionDirs.add(key);
       return;
     }
+    if (scope === "user" && !config.persistence.userWritable) throw new Error(MANAGED);
+    const file = scope === "user" ? userRulesFile() : await destination(cwd);
     for (const key of items) {
       const grant = migrateGrant(key);
-      if (grant?.kind === "dir") await editDirectoryGrant(await destination(cwd), "add", grant.access, grant.dir);
+      if (grant?.kind === "dir") await editDirectoryGrant(file, "add", grant.access, grant.dir);
     }
     await refreshRules(cwd);
   };
@@ -1214,12 +1242,15 @@ export default function toolGate(pi: ExtensionAPI) {
     config = structuredClone(DEFAULT_CONFIG);
     promptingOverride = restorePromptingOverride(ctx.sessionManager.getBranch());
     rebuildDownloads(ctx);
-    sessionRules = [];
-    sessionDirs.clear();
+    // Session rules and folder grants last until the session ends: /tree moves within it.
+    if (newSession) {
+      sessionRules = [];
+      sessionDirs.clear();
+    }
     localDirs.clear();
     localRules = [];
     fileRules = [];
-    allRules = [];
+    allRules = [...sessionRules];
     ignoredRules = [];
     gitInfo = undefined;
     dialogs = Promise.resolve();
@@ -1321,13 +1352,14 @@ export default function toolGate(pi: ExtensionAPI) {
       if (stale()) return staleResult();
       if (policyLoadErrors.length) {
         // Only direct diagnosis of the broken file is safe. Never enter retry/approval handling.
-        const forbidden = blocking(allRules, { tool, input, cwd: ctx.cwd, root: projectContext?.root ?? ctx.cwd, readOnlyCommands: config.readOnlyCommands });
+        const where = projectContext?.cwd ?? ctx.cwd;
+        const forbidden = blocking(allRules, { tool, input, cwd: where, root: projectContext?.root ?? ctx.cwd, readOnlyCommands: config.readOnlyCommands });
         if (forbidden?.list === "deny") return deniedBy(tool, forbidden);
         if (tool === "read" && typeof input.path === "string") {
-          const file = path.resolve(ctx.cwd, expandHome(input.path));
+          const file = path.resolve(where, expandHome(input.path));
           try {
             const canonical = realpathSync(file);
-            const canonicalDeny = blocking(allRules, { tool, input: { ...input, path: canonical }, cwd: ctx.cwd, root: projectContext?.root ?? ctx.cwd, readOnlyCommands: config.readOnlyCommands });
+            const canonicalDeny = blocking(allRules, { tool, input: { ...input, path: canonical }, cwd: where, root: projectContext?.root ?? ctx.cwd, readOnlyCommands: config.readOnlyCommands });
             if (canonicalDeny?.list === "deny") return deniedBy(tool, canonicalDeny);
             if (!isCredentialPath(file) && !isCredentialPath(canonical) && erroredPolicyFiles.some(policy => {
               try { return realpathSync(policy) === canonical; } catch { return false; }
@@ -1349,7 +1381,7 @@ export default function toolGate(pi: ExtensionAPI) {
         if (stale()) return staleResult();
         if (forbidden?.list === "deny") return deniedBy(tool, forbidden);
         if (current === "plan" && (tool === "edit" || tool === "write")) {
-          const file = path.resolve(ctx.cwd, expandHome(String(input.path ?? "")));
+          const file = canonicalPath(path.resolve((await contextFor(ctx.cwd)).cwd, expandHome(String(input.path ?? ""))));
           // The plan file is the workflow's own artifact: no approval applies to it.
           if (planFile && file === planFile) return allow(ctx);
           return {
@@ -1399,7 +1431,7 @@ export default function toolGate(pi: ExtensionAPI) {
         if (forbidden?.list === "deny") return deniedBy(tool, forbidden);
         if (!SHELL_TOOLS.has(tool)) return undefined;
         const command = String(input.command ?? "");
-        const critical = alwaysAskBash(command, shellDir(tool, input, ctx.cwd), undefined, undefined, 0, ctx.cwd)
+        const critical = alwaysAskBash(command, shellDir(tool, input, call.cwd), undefined, undefined, 0, call.cwd)
           .filter((reason) => reason.startsWith("deletes ") || reason === "shell analysis depth exhausted (opaque command)");
         if (!critical.length) return undefined;
         return ask(ctx, { tool, input, held: critical.join("; "), noUIReason: `tool-gate held this call: it ${critical.join("; ")}. There is no user to approve it.` }, undefined);
@@ -1411,7 +1443,7 @@ export default function toolGate(pi: ExtensionAPI) {
       const ruled = ruleOutcome(ctx, event.toolCallId, tool, input, p);
       if (ruled) return ruled.result;
       if (p.kind === "allow") return allow(ctx);
-      if (p.kind === "deny") return undefined;
+      if (p.kind === "deny") return deniedBy(tool, p.rule);
 
       if (approval === "default") return askUser(ctx, tool, input, p);
       if (approval === "acceptEdits") {
@@ -1542,14 +1574,16 @@ export default function toolGate(pi: ExtensionAPI) {
 
   /** Accept-edits mode: edits and filesystem commands inside the project. */
   const acceptsEdit = async (tool: string, input: Record<string, unknown>, cwd: string) => {
-    const root = (await contextFor(cwd)).root;
+    const context = await contextFor(cwd);
+    const root = context.root;
+    const real = context.cwd;
     if (tool === "edit" || tool === "write") {
       // Inside the project, or a directory it may write (the plan has already held any other).
-      const file = path.resolve(cwd, expandHome(String(input.path ?? "")));
+      const file = path.resolve(real, expandHome(String(input.path ?? "")));
       return file.startsWith(`${root}${path.sep}`) || (config.directories.enabled !== false && canWrite(await policyFor(cwd), file));
     }
     if (!SHELL_TOOLS.has(tool)) return false;
-    const dir = shellDir(tool, input, cwd);
+    const dir = shellDir(tool, input, real);
     // bg_run in another directory still counts only for files inside the project.
     return isAcceptEditsBash(String(input.command ?? ""), dir, config.readOnlyCommands) &&
       (dir === root || dir.startsWith(`${root}${path.sep}`));

@@ -3,7 +3,7 @@ import { homedir, tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import { bashPathAccess } from "../src/bash.ts";
-import { DEFAULT_DIRECTORIES, canRead, canWrite, describePolicy, resolvePolicy, scopeOf, under, violations } from "../src/dirs.ts";
+import { DEFAULT_DIRECTORIES, canRead, canWrite, canonicalPath, describePolicy, effectiveDirectories, resolvePolicy, scopeOf, under, violations } from "../src/dirs.ts";
 import { Downloads, downloadedRunReasons, trackCall, trackCommand } from "../src/downloads.ts";
 import toolGate from "../src/index.ts";
 import { assistantEntry, fakeJev, harness, userEntry } from "./harness.ts";
@@ -320,7 +320,7 @@ describe("the gate", () => {
     expect(first.reason).toMatch(/reads ~\/Projects\/other\/a\.ts, outside this project's directories/u);
     ctx.ui.selectAnswers.push("Allow folder for this session");
     expect(await h.emit("tool_call", call("read", { path: "~/Projects/other/a.ts" }, "t2"), ctx)).toBeUndefined();
-    expect(ctx.ui.selects[0]?.options).toEqual(["Allow once", "Allow folder for this session", "Allow folder in this project", "Block", "Block with a message"]);
+    expect(ctx.ui.selects[0]?.options).toEqual(["Allow once", "Allow folder for this session", "Allow folder in this project", "Allow folder everywhere", "Block", "Block with a message"]);
     expect(ctx.ui.selects[0]?.title).toMatch(/\nFolder: reads in ~\/Projects\/other\nProject saves:/u);
     // The folder is granted for the session: no more asking, no Jev.
     expect(await h.emit("tool_call", call("bash", { command: "rg foo ~/Projects/other" }, "t3"), ctx)).toBeUndefined();
@@ -477,5 +477,42 @@ EOF`;
     await h.emit("session_start", {}, ctx);
     await h.commands.get("gate").handler("", ctx);
     expect(ctx.ui.notes.at(-1)?.message).toMatch(/Writes: the project, ~\/dotfiles, and/u);
+  });
+});
+
+describe("effectiveDirectories", () => {
+  const base = { ...DEFAULT_DIRECTORIES, read: ["~/r"], write: ["~/w"] };
+
+  test("session and saved folder grants act like directories.read and directories.write: subtrees, a write grant reads", () => {
+    const policy = resolvePolicy(effectiveDirectories(base, ["dir:read:/x/read", "dir:write:/x/write", "not a grant"]), [app]);
+    expect(canRead(policy, "/x/read/sub/f")).toBe(true);
+    expect(canWrite(policy, "/x/read/sub/f")).toBe(false);
+    expect(canWrite(policy, "/x/write/sub/f")).toBe(true);
+    expect(canRead(policy, `${P}/other/f`)).toBe(false);
+    const inPrivate = resolvePolicy(effectiveDirectories(base, [`dir:write:${P}/granted`]), [app]);
+    expect(canRead(inPrivate, `${P}/granted/sub/f`)).toBe(true);
+  });
+
+  test("a wildcard folder name is never expanded into a pattern", () => {
+    const policy = resolvePolicy(effectiveDirectories(base, [`dir:read:${P}/a*b`]), [app]);
+    expect(canRead(policy, `${P}/axb/f`)).toBe(false);
+  });
+
+  test("a worktree's main checkout is readable, not writable", () => {
+    const policy = resolvePolicy(effectiveDirectories(base, [], `${P}/main`), [`${P}/main/.worktrees/b`]);
+    expect(canRead(policy, `${P}/main/src/a.ts`)).toBe(true);
+    expect(canWrite(policy, `${P}/main/src/a.ts`)).toBe(false);
+    expect(canWrite(policy, `${P}/main/.worktrees/b/src/a.ts`)).toBe(true);
+  });
+
+  test("canonicalPath resolves symlinks of the nearest existing ancestor", () => {
+    const dir = realpathSync(mkdtempSync(path.join(tmpdir(), "pi-tool-gate-canon-")));
+    try {
+      symlinkSync(dir, `${dir}-link`);
+      expect(canonicalPath(`${dir}-link/new/file.md`)).toBe(`${dir}/new/file.md`);
+    } finally {
+      rmSync(`${dir}-link`, { force: true });
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });

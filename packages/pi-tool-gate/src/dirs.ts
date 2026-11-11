@@ -1,7 +1,7 @@
 // The directory policy: which paths a project's agent may read and write without asking.
 //
-// The project (its git checkout, and the main checkout of a worktree) is always readable and
-// writable. Private roots (`~/Projects`, `~/Documents`, ...) hold other people's work and your
+// The project (the active git checkout) is always readable and writable; a worktree's main
+// checkout is readable only (writing it from a worktree is the classic mistake). Private roots (`~/Projects`, `~/Documents`, ...) hold other people's work and your
 // own: nothing in them outside the project is read or written unasked unless the project grants
 // it. Everything else (system and toolchain paths, `~/.config`) is readable, and writable only in
 // `alwaysWrite` (temp and cache directories) or a `write` grant. `read: ["*"]` reads anywhere.
@@ -112,6 +112,43 @@ function globToRegExp(pattern: string): RegExp {
 export function under(file: string, pattern: string): boolean {
   if (!/[*?]/u.test(pattern)) return file === pattern || file.startsWith(pattern === "/" ? "/" : `${pattern}/`);
   return globToRegExp(pattern).test(file);
+}
+
+/**
+ * `file` with symlinks resolved, also when it does not exist yet: the nearest existing ancestor is
+ * resolved and the rest appended. The gate compares paths in this form.
+ */
+export function canonicalPath(file: string): string {
+  const absolute = path.resolve(file);
+  const rest: string[] = [];
+  for (let dir = absolute; ; dir = path.dirname(dir)) {
+    try {
+      return path.join(realpathSync(dir), ...rest);
+    } catch {
+      rest.unshift(path.basename(dir));
+    }
+    if (path.dirname(dir) === dir) return absolute;
+  }
+}
+
+/**
+ * The directories config with folder grants folded in: `dir:read:/abs` and `dir:write:/abs` keys
+ * (session grants and the legacy saved ones) behave exactly like saved `directories.read/write`
+ * entries (subtrees; a write grant also reads), and the worktree's main checkout, when it is not
+ * the project itself, is readable.
+ */
+export function effectiveDirectories(base: DirectoriesConfig, grants: Iterable<string>, main?: string): DirectoriesConfig {
+  const read = [...(Array.isArray(base.read) ? base.read : [])];
+  const write = [...(Array.isArray(base.write) ? base.write : [])];
+  for (const key of grants) {
+    const match = /^dir:(read|write):(.+)$/u.exec(key);
+    // A folder whose name has a wildcard character would expand into other folders as a pattern: it
+    // stays an exact key (`exactGrant` in the gate).
+    if (!match || /[*?]/u.test(match[2] as string)) continue;
+    (match[1] === "read" ? read : write).push(match[2] as string);
+  }
+  if (main) read.push(main);
+  return { ...base, read: [...new Set(read)], write: [...new Set(write)] };
 }
 
 /** The policy for a project whose checkouts are `project` (first: where the agent works). */

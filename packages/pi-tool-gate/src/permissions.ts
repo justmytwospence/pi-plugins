@@ -559,6 +559,18 @@ export function suggestBash(command: string, readOnlyCommands: readonly string[]
 }
 
 /**
+ * A rule that is saved where it applies to every project (your user file) must name its paths
+ * absolutely: `Edit(src/a/**)` becomes `Edit(//<root>/src/a/**)`. Rules that are not project-relative
+ * path rules come back unchanged.
+ */
+export function absolutizeRule(text: string, root: string): string {
+  const parsed = parseRule(text);
+  if (!parsed.ok || !parsed.rule.path || parsed.rule.path.anchor !== "root") return text;
+  const spec = parsed.rule.path.spec.replace(/^\.\//u, "").replace(/^\/(?!\/)/u, "");
+  return `${parsed.rule.tool}(/${path.join(root, spec)})`;
+}
+
+/**
  * `Edit(src/a/**)` for a file in `src/a`: its folder, relative to the project when inside it, else
  * under `~` or absolute. A file directly in the project, in home or in `/` is named itself, since a
  * pattern for its folder would cover everything below it.
@@ -572,7 +584,7 @@ function folderRule(kind: string, file: string, root: string): string {
   else if (!rel.startsWith("..") && !path.isAbsolute(rel)) pattern = `${rel}/**`;
   else if (dir === home) pattern = `~/${path.basename(file)}`;
   else if (dir.startsWith(`${home}/`)) pattern = `~/${path.relative(home, dir)}/**`;
-  else pattern = dir === "/" ? `/${path.basename(file)}` : `${dir}/**`;
+  else pattern = dir === "/" ? `//${path.basename(file)}` : `/${dir}/**`;
   return `${kind}(${pattern})`;
 }
 
@@ -600,7 +612,7 @@ export type Migrated =
 /**
  * What a saved project grant key means now: new keys are `allow:<rule>` (also `ask:`, `deny:`);
  * `bash:<key>` is `Bash(<key>:*)`, `tool:<x>` is `<x>`, `edit:<dir>` and `write:<dir>` are
- * `Edit(<dir>/**)` and `Write(<dir>/**)`; `dir:` keys stay folder grants. A key for reads with
+ * `Edit(//<dir>/**)` and `Write(//<dir>/**)`; `dir:` keys stay folder grants. A key for reads with
  * substitutions or redirects has no rule that says it and is dropped.
  */
 export function migrateGrant(key: string): Migrated | undefined {
@@ -621,7 +633,7 @@ export function migrateGrant(key: string): Migrated | undefined {
   const tool = /^tool:(.+)$/u.exec(key);
   if (tool) return { kind: "rule", list: "allow", text: tool[1] as string };
   const folder = /^(edit|write):(.+)$/u.exec(key);
-  if (folder) return { kind: "rule", list: "allow", text: `${folder[1] === "edit" ? "Edit" : "Write"}(${(folder[2] as string).replace(/\/+$/u, "")}/**)` };
+  if (folder) return { kind: "rule", list: "allow", text: `${folder[1] === "edit" ? "Edit" : "Write"}(/${(folder[2] as string).replace(/\/+$/u, "")}/**)` };
   return undefined;
 }
 

@@ -1,3 +1,4 @@
+import { execFileSync } from "node:child_process";
 import { lstatSync, realpathSync } from "node:fs";
 import path from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
@@ -221,4 +222,26 @@ export function projectSaveFile(project: ProjectContext, persistence: "local" | 
   return persistence === "shared"
     ? path.join(project.root, ".pi", "tool-gate.json")
     : path.join(project.main, ".pi", "tool-gate.local.json");
+}
+
+/**
+ * A synchronous best-effort project lookup for the few readers that cannot await (key bindings,
+ * workflow queries). The checkout is the Git root and the main checkout of its worktrees; outside
+ * Git, or when Git does not answer, the resolved directory itself (the legacy launch-directory lookup).
+ */
+export function projectContextSync(cwd: string): ProjectContext | string {
+  const launch = path.resolve(cwd);
+  try {
+    const out = execFileSync("git", ["-C", launch, "rev-parse", "--path-format=absolute", "--show-toplevel", "--git-common-dir"], {
+      timeout: TIMEOUT_MS, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"],
+    }).split("\n");
+    const top = out[0]?.trim();
+    const common = out[1]?.trim();
+    if (!top || !common) return launch;
+    const root = realpathSync(top);
+    const main = path.basename(common) === ".git" ? realpathSync(path.dirname(common)) : root;
+    return { cwd: realpathSync(launch), root, main, isGit: true };
+  } catch {
+    return launch;
+  }
 }

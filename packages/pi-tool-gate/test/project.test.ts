@@ -6,7 +6,7 @@ import path from "node:path";
 import { promisify } from "node:util";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { afterEach, expect, test, vi } from "vitest";
-import { ProjectResolutionError, projectFiles, projectSaveFile, resolveProject } from "../src/project.ts";
+import { ProjectResolutionError, projectContextSync, projectFiles, projectSaveFile, resolveProject } from "../src/project.ts";
 
 vi.mock("node:fs", async importOriginal => {
   const original = await importOriginal<typeof import("node:fs")>();
@@ -558,4 +558,24 @@ test("successful initial lookup with invalid path metadata is not a non-Git fall
   const cwd = setup();
   const invalid = vi.fn<ExtensionAPI["exec"]>().mockResolvedValue({ stdout: "", stderr: "", code: 0, killed: false });
   await expect(resolveProject(cwd, invalid)).rejects.toThrow("Policy resolution failed");
+});
+
+test("projectContextSync finds a worktree's root and main checkout, and falls back to the directory outside Git", async () => {
+  const base = realpathSync(mkdtempSync("/tmp/pi-tool-gate-sync-"));
+  try {
+    const main = path.join(base, "main");
+    mkdirSync(main);
+    await run("git", ["init", "-q", main]);
+    await run("git", ["-C", main, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "--allow-empty", "-m", "x"]);
+    expect(projectContextSync(main)).toMatchObject({ root: main, main, isGit: true });
+    const worktree = path.join(base, "wt");
+    await run("git", ["-C", main, "worktree", "add", "-q", worktree, "-b", "b"]);
+    mkdirSync(path.join(worktree, "sub"));
+    expect(projectContextSync(path.join(worktree, "sub"))).toMatchObject({ root: worktree, main, isGit: true });
+    const plain = path.join(base, "plain");
+    mkdirSync(plain);
+    expect(projectContextSync(plain)).toBe(plain);
+  } finally {
+    rmSync(base, { recursive: true, force: true });
+  }
 });

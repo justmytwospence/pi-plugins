@@ -982,3 +982,81 @@ describe("RuleStore command contract", () => {
     expect(notes(s).at(-1)).toBe(`Removed: reads in ${dir.dir}.`);
   });
 });
+
+describe("hierarchy: session lifetime, user-wide saves and folder grants", () => {
+  test("session rules and folder grants survive /tree and end with the session", async () => {
+    const s = setup(risky);
+    await start(s);
+    await run(s, "bash", { command: "npm publish" });
+    s.ctx.ui.selectAnswers.push("Allow rule for this session");
+    expect(await run(s, "bash", { command: "npm publish" }, "t2")).toBeUndefined();
+    const file = `${homedir()}/Projects/tool-gate-tree-outside/a.txt`;
+    expect((await run(s, "read", { path: file }, "r1")).block).toBe(true);
+    s.ctx.ui.selectAnswers.push("Allow folder for this session");
+    expect(await run(s, "read", { path: file }, "r2")).toBeUndefined();
+    const selects = s.ctx.ui.selects.length;
+    await s.h.emit("session_tree", {}, s.ctx);
+    expect(await run(s, "bash", { command: "npm publish" }, "t3")).toBeUndefined();
+    expect(await run(s, "read", { path: file }, "r3")).toBeUndefined();
+    expect(s.ctx.ui.selects).toHaveLength(selects);
+    await s.h.emit("session_start", {}, s.ctx);
+    expect((await run(s, "bash", { command: "npm publish" }, "t4")).block).toBe(true);
+    expect((await run(s, "read", { path: file }, "r4")).block).toBe(true);
+  });
+
+  test("an allow rule saved everywhere names its project paths absolutely", async () => {
+    const s = setup(risky);
+    await start(s);
+    await run(s, "edit", { path: "src/a.ts", edits: [] });
+    s.ctx.ui.selectAnswers.push("Allow rule everywhere");
+    expect(await run(s, "edit", { path: "src/a.ts", edits: [] }, "t2")).toBeUndefined();
+    expect(JSON.parse(readFileSync(userFile(), "utf8")).permissions.allow).toEqual([`Edit(/${cwd}/src/**)`]);
+  });
+
+  test("a folder can be allowed everywhere, and user-file folder grants are listed", async () => {
+    const folder = "~/Projects/tool-gate-everywhere-outside";
+    const file = `${homedir()}/Projects/tool-gate-everywhere-outside/a.txt`;
+    const s = setup(safe);
+    await start(s);
+    expect((await run(s, "read", { path: file })).block).toBe(true);
+    s.ctx.ui.selectAnswers.push("Allow folder everywhere");
+    expect(await run(s, "read", { path: file }, "save")).toBeUndefined();
+    expect(JSON.parse(readFileSync(userFile(), "utf8")).directories.read).toEqual([folder]);
+    const fresh = setup(safe);
+    await start(fresh);
+    expect(await run(fresh, "read", { path: file })).toBeUndefined();
+    await gate(fresh, "rules list");
+    expect(notes(fresh).at(-1)).toContain(`reads in ${folder}`);
+  });
+
+  test("a managed user file offers no folder everywhere row", async () => {
+    write(userFile(), { persistence: { userWritable: false } });
+    const s = setup(safe);
+    await start(s);
+    const file = `${homedir()}/Projects/tool-gate-managed-outside/a.txt`;
+    await run(s, "read", { path: file });
+    s.ctx.ui.selectAnswers.push("Allow once");
+    await run(s, "read", { path: file }, "t2");
+    expect(s.ctx.ui.selects.at(-1)?.options).not.toContain("Allow folder everywhere");
+  });
+
+  test("a derived path is never opened by a folder grant: its dialog offers no folder rows", async () => {
+    const derived = path.join(root, "derived");
+    write(userFile(), { directories: { derived: [{ path: derived, hint: "Edit the source." }] } });
+    const s = setup(safe);
+    await start(s);
+    const file = path.join(derived, "a.txt");
+    expect((await run(s, "write", { path: file, content: "x" })).block).toBe(true);
+    s.ctx.ui.selectAnswers.push("Allow once");
+    await run(s, "write", { path: file, content: "x" }, "t2");
+    expect(s.ctx.ui.selects.at(-1)?.options).toEqual(["Allow once", "Block", "Block with a message"]);
+  });
+
+  test("the grep tool is held on a credential file like read", async () => {
+    const s = setup(safe);
+    await start(s);
+    const first = await run(s, "grep", { pattern: "x", path: ".env" });
+    expect(first.block).toBe(true);
+    expect(first.reason).toContain("reads credentials (.env)");
+  });
+});

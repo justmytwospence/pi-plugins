@@ -207,7 +207,8 @@ Rule: Bash(git push:*)
 - **No rule** is offered for a command containing `*`, which a rule would read as a wildcard.
 - **The exact command** is offered instead of a prefix for programs whose arguments are the risk: `rm`, `mv`, `chmod`, `chown`, `dd`, `curl`, `wget`, `ssh`, `scp`, `rsync`, `nc`, `sudo`, `gh api`, and inline code (`python -c`, `node -e`, `bash -c`, `sh -c`, an interpreter fed on stdin). The whole call is the rule when the gate cannot read a command in it as a program with arguments (`export A=1`, a program named by a substitution), when its commands all read and are held only for a substitution or redirect, and when a here-document is fed to one of those risky programs (`git commit -F - <<EOF` is still a prefix). When a rule cannot be written back as exact (a command ending in a bare `*`), none is offered.
 - **Always-held calls** offer only Allow once, Block and Block with a message. Add an exact rule with `/gate rules add` to open one.
-- A hold by the [directory policy](#directories) offers the folder instead (`Allow folder for this session`, `in this project`; no everywhere), listed with the rules.
+- A hold by the [directory policy](#directories) offers the folder instead (`Allow folder for this session`, `in this project`, `everywhere` when your user file is writable), listed with the rules. A hold on a derived path offers none: only Allow once or Block.
+- A rule saved **everywhere** names its paths absolutely (`Edit(//Users/you/app/src/**)`), so it never applies to another project's `src`.
 
 Without Pi's terminal UI the same rows are a plain select, and Edit opens Pi's editor with the rule.
 
@@ -246,7 +247,8 @@ Different:
 
 Pi has no directory boundary of its own, so the gate keeps one. Under auto, manual and accept-edits approvals, in every workflow (in chat and plan only reads get this far), a call is held when it touches a path outside its project's directories, before any classifier call. Auto mode pushes it back once, as with any held call, and then asks you. The dialog's **Allow folder for this session** and **in this project** grant that folder (listed by `/gate rules` beside the rules): a folder under a private root (`~/Projects/other`), the private root itself for a file directly in it (`~/Downloads/shot.png` grants `~/Downloads`), else the file's directory, or the directory itself when the write is to an existing one (a writing command's working directory: `cd ~ && chezmoi apply` grants `~`, not `/Users`).
 
-- The project (the git checkout of the working directory, and the main checkout of a worktree) is always readable and writable.
+- The project (the active git checkout of the working directory) is always readable and writable. A worktree's main checkout is readable, not writable.
+- A folder grant, whether for the session, the project or everywhere, covers the folder and everything under it, exactly like a saved `directories.read`/`write` entry (a write grant also reads). A folder whose name contains `*` or `?` is granted for the session by its exact name only.
 - Private roots (`directories.private`: `~/Projects`, `~/Documents`, `~/Desktop`, `~/Downloads`, iCloud Drive) are neither read nor written outside the project and its grants.
 - Other paths (system and toolchain directories, `~/.config`) can be read. They can be written only under `alwaysWrite` (temp and cache directories) or a `write` grant.
 - `directories.read` grants extra readable directories (`["*"]` reads anywhere). `directories.write` grants extra directories to read and write. Paths take `~` and globs (`~/Projects/herdr-*`). Relative paths are relative to the project.
@@ -356,9 +358,10 @@ The `agents` locations are shared with the opencode and Claude Code ports of thi
 - `modes` is deprecated and no longer controls either cycle. `cycleShortcut` is a legacy fallback when `workflowShortcut` is not a string.
 - `workflowShortcut` and `approvalShortcut`: keys read at startup; `""` disables each. Reload after changing them. A duplicate key registers workflow only and reports the collision.
 - `jev`: the classifier model (`provider`/`model`, looked up among Pi's classifier models) and its timeout; `enabled: false` blocks calls requiring classification.
-- `persistence.project`: `local` (default) saves to the main checkout's `.pi/tool-gate.local.json`; `shared` saves to the active root's `.pi/tool-gate.json`. Saves are not committed automatically. `persistence.userWritable: false` manages global rules: the global save choice is hidden and user-scope edits are refused. Project files cannot override this user setting.
+- `persistence.project`: `local` (default) saves to the main checkout's `.pi/tool-gate.local.json`; `shared` saves to the active root's `.pi/tool-gate.json`. Saves are not committed automatically. `persistence.userWritable: false` manages global rules: the global save choice is hidden and user-scope edits are refused. Project files cannot change it.
 - `thresholds`: the bars described above; `readOnly` is the chat and plan workflows' read check, the rest are the auto approval judge's.
 - `allowTools`: tools that never need a decision. Setting it replaces the whole default list.
+- **Project files may only tighten.** `.agents/tool-gate.json`, `.pi/tool-gate.json` and `.pi/tool-gate.local.json` are honored for permission rules, directory grants (`directories.read`/`write`), `directories.private` and `directories.derived` (added to yours, never replacing them), prompting set to `true`, and approvals or `planShell` set to something stricter. `enabled`, `allowTools`, `readOnlyCommands`, `thresholds`, `jev`, `persistence`, `modes`, a yolo default, `denyInsteadOfPrompting: false`, `planShell: "scoped"`, `directories.enabled: false`, `directories.alwaysWrite` and `directories.exemptCommands` are honored only from your user files (`~/.pi/agent/tool-gate.json`, `~/.config/agents/tool-gate.json`); from a project they are ignored and `/gate` says so.
 - `readOnlyCommands`: extra programs treated as read-only in shell commands.
 - `pushBack`: `false` asks you on the first hold instead of blocking it once, unless permission prompting is off.
 - `denyInsteadOfPrompting`: `true` denies calls that need a permission prompt and lets the agent continue. Defaults to `false`; branch overrides and inherited subagent values take precedence.
@@ -385,7 +388,7 @@ The `agents` locations are shared with the opencode and Claude Code ports of thi
 - Classifier failure blocks calls routed to classification, but bypasses and explicit rules still apply; this is not an OS security boundary.
 - Downloaded code is found by the forms above. Files whose names the command does not give (`gh release download` without `-O`, `-D` or `-p`, `curl -J`), files unpacked from a downloaded archive, downloads by other programs or tools, and a downloaded program run by bare name from `PATH` are not tracked.
 - A script's content is read when the call is judged; a script that changes it while it runs is not seen.
-- Session rules and folder grants are held in memory; project saves go to the configured local or shared project file. The mode is saved in the session.
+- Session rules and folder grants are held in memory until the session ends (`/tree` and branch moves keep them); project saves go to the configured local or shared project file. The mode is saved in the session.
 - Production string rules can catch identifiable commands and flags (for example blog production deploys, Git pushes and PR merges), but cannot enforce arbitrary scripts or API semantics. Preview commands may remain allowed; yolo bypasses ask rules. Use platform access controls as well.
 - Permission rules match command syntax, not what a program does: `Bash(rm -rf:*)` does not deny `rm -fr x` or `rm -r -f x`, and a rule for a script's name does not follow what the script runs. Path rules cover Pi's file tools, not the paths a shell command names. Treat deny rules as guardrails, not as a sandbox.
 
