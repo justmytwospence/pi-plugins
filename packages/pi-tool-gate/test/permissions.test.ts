@@ -16,6 +16,7 @@ import {
   editRulesFile,
   editDirectoryGrant,
   loadFileRules,
+  matchPath,
   localGrants,
   migrateGrant,
   parseRule,
@@ -67,7 +68,7 @@ describe("parsing", () => {
 
   test("Edit, Write and Read take gitignore-style paths; other tools are named alone", () => {
     expect(text("Edit(src/**)")).toBe("Edit(src/**)");
-    expect(text("write(~/notes/**)")).toBe("Write(~/notes/**)");
+    expect(text("write(~/notes/**)")).toBe("Edit(~/notes/**)"); // Write(path) is Edit(path)
     expect(text("Read(//etc/hosts)")).toBe("Read(//etc/hosts)");
     expect(text("web_fetch")).toBe("web_fetch");
     expect(text("mcp__server")).toBe("mcp__server");
@@ -439,18 +440,48 @@ describe("paths", () => {
     expect(allows(rules("allow", "Edit(~/notes/**)"), edit(`${home}/notes/a/b.md`))).toBeDefined();
     expect(allows(rules("allow", "Edit(~/notes/**)"), edit("~/notes/a.md"))).toBeDefined();
     expect(allows(rules("allow", "Edit(~/notes/**)"), edit(`${home}/other/a.md`))).toBeUndefined();
-    expect(allows(rules("allow", "Edit(/etc/app/**)"), edit("/etc/app/x.conf"))).toBeDefined();
     expect(allows(rules("allow", "Edit(//etc/app/**)"), edit("/etc/app/x.conf"))).toBeDefined();
-    expect(allows(rules("allow", "Edit(/etc/app/**)"), edit("/etc/other/x.conf"))).toBeUndefined();
+    expect(allows(rules("allow", "Edit(//etc/app/**)"), edit("/etc/other/x.conf"))).toBeUndefined();
   });
 
-  test("allow rules are per tool; deny and ask for Edit and Write cover both file-writing tools", () => {
+  test("a single slash is relative to the file the rule is written in, not the filesystem root", () => {
+    // A session rule (no file) and a project file: the project root.
+    expect(allows(rules("allow", "Edit(/etc/app/**)"), edit("etc/app/x.conf"))).toBeDefined();
+    expect(allows(rules("allow", "Edit(/etc/app/**)"), edit("/etc/app/x.conf"))).toBeUndefined();
+    // A user file: its own directory.
+    const parsed = parseRule("Read(/notes/**)", { sourceDir: "/home/u/.pi/agent" });
+    expect(parsed.ok).toBe(true);
+    if (!parsed.ok) return;
+    const user = [{ list: "allow" as const, text: parsed.rule.text, raw: "Read(/notes/**)", rule: parsed.rule, origin: { scope: "user" as const, shared: false, source: "/home/u/.pi/agent/tool-gate.json", writable: false } }];
+    expect(allowsPath(user, "read", "/home/u/.pi/agent/notes/a", ROOT)).toBe(true);
+    expect(allowsPath(user, "read", "/notes/a", ROOT)).toBe(false);
+    // An old file (no marker): the single slash was an absolute path.
+    const legacy = parseRule("Read(/notes/**)", { legacyPaths: true });
+    expect(legacy.ok && legacy.rule.path?.anchor).toBe("absolute");
+  });
+
+  test("an Edit rule covers every file-writing tool in every list; Write(path) is Edit(path)", () => {
     const edits = rules("allow", "Edit(src/**)");
-    expect(allows(edits, call("write", { path: "src/a.ts" }))).toBeUndefined();
+    expect(allows(edits, call("write", { path: "src/a.ts" }))).toBeDefined();
+    expect(allows(rules("allow", "Write(src/**)"), call("edit", { path: "src/a.ts" }))).toBeDefined();
     expect(allows(rules("allow", "Write(src/**)"), call("write", { path: "src/a.ts" }))).toBeDefined();
+    expect(allows(rules("allow", "Edit(src/**)"), call("read", { path: "src/a.ts" }))).toBeUndefined();
+    // A bare Write rule allows only the write tool, and denies and asks about both.
+    expect(allows(rules("allow", "Write"), call("edit", { path: "src/a.ts" }))).toBeUndefined();
+    expect(allows(rules("allow", "Write"), call("write", { path: "src/a.ts" }))).toBeDefined();
+    expect(blocking(rules("deny", "Write"), call("edit", { path: "src/a.ts" }))?.list).toBe("deny");
     expect(blocking(rules("deny", "Edit(src/gen/**)"), call("write", { path: "src/gen/a.ts" }))?.list).toBe("deny");
     expect(blocking(rules("ask", "Write(src/gen/**)"), call("edit", { path: "src/gen/a.ts" }))?.list).toBe("ask");
     expect(blocking(rules("deny", "Edit(src/gen/**)"), call("read", { path: "src/gen/a.ts" }))).toBeUndefined();
+  });
+
+  test("a Read deny rule also blocks editing and writing that file; ask rules and bare Read do not", () => {
+    const deny = rules("deny", "Read(secret/**)");
+    expect(blocking(deny, call("edit", { path: "secret/a" }))?.list).toBe("deny");
+    expect(blocking(deny, call("write", { path: "secret/new" }))?.list).toBe("deny");
+    expect(blocking(deny, call("write", { path: "public/a" }))).toBeUndefined();
+    expect(blocking(rules("ask", "Read(secret/**)"), call("edit", { path: "secret/a" }))).toBeUndefined();
+    expect(blocking(rules("deny", "Read"), call("edit", { path: "secret/a" }))).toBeUndefined();
   });
 
   test("Read rules cover read, grep, find and ls", () => {
@@ -464,10 +495,10 @@ describe("paths", () => {
     expect(blocking(rules("ask", "Read(./*)"), call("grep", { pattern: "x" }))).toBeUndefined();
   });
 
-  test("a path rule opens the directory policy for its tool, not for another", () => {
+  test("a path rule opens the directory policy for the tools it covers, not for another", () => {
     const rs = rules("allow", "Edit(~/dotfiles/**)", "Read(~/Projects/other/**)");
     expect(allowsPath(rs, "edit", `${homedir()}/dotfiles/x`, ROOT)).toBe(true);
-    expect(allowsPath(rs, "write", `${homedir()}/dotfiles/x`, ROOT)).toBe(false);
+    expect(allowsPath(rs, "write", `${homedir()}/dotfiles/x`, ROOT)).toBe(true);
     expect(allowsPath(rs, "read", `${homedir()}/Projects/other/a.ts`, ROOT)).toBe(true);
     expect(allowsPath(rs, "edit", `${homedir()}/Projects/other/a.ts`, ROOT)).toBe(false);
   });
@@ -592,12 +623,12 @@ describe("suggested rules", () => {
 
   test("edit and write by folder, other tools by name, reads not at all", () => {
     expect(suggest(call("edit", { path: "src/a/b.ts" }))).toEqual(["Edit(src/a/**)"]);
-    expect(suggest(call("write", { path: `${ROOT}/src/new.ts` }))).toEqual(["Write(src/**)"]);
+    expect(suggest(call("write", { path: `${ROOT}/src/new.ts` }))).toEqual(["Edit(src/**)"]);
     expect(suggest(call("edit", { path: "package.json" }))).toEqual(["Edit(./package.json)"]);
-    expect(suggest(call("write", { path: `${homedir()}/.zshrc` }))).toEqual(["Write(~/.zshrc)"]);
+    expect(suggest(call("write", { path: `${homedir()}/.zshrc` }))).toEqual(["Edit(~/.zshrc)"]);
     expect(suggest(call("edit", { path: "../other/a.ts" }))).toEqual(["Edit(//Users/me/Projects/other/**)"]);
-    expect(suggest(call("write", { path: `${homedir()}/notes/a.md` }))).toEqual(["Write(~/notes/**)"]);
-    expect(suggest(call("write", { path: "/etc/x/y" }))).toEqual(["Write(//etc/x/**)"]);
+    expect(suggest(call("write", { path: `${homedir()}/notes/a.md` }))).toEqual(["Edit(~/notes/**)"]);
+    expect(suggest(call("write", { path: "/etc/x/y" }))).toEqual(["Edit(//etc/x/**)"]);
     expect(suggest(call("web_fetch", { url: "https://x" }))).toEqual(["web_fetch"]);
     expect(suggest(call("mcp__paperless__update_document", {}))).toEqual(["mcp__paperless__update_document"]);
     expect(suggest(call("read", { path: "x" }))).toEqual([]);
@@ -625,7 +656,7 @@ describe("saved grants from before rules", () => {
     expect(m("bash:docker compose up")).toEqual({ kind: "rule", list: "allow", text: "Bash(docker compose up:*)" });
     expect(m("tool:web_fetch")).toEqual({ kind: "rule", list: "allow", text: "web_fetch" });
     expect(m("edit:/Users/me/Projects/app/src")).toEqual({ kind: "rule", list: "allow", text: "Edit(//Users/me/Projects/app/src/**)" });
-    expect(m("write:/tmp/")).toEqual({ kind: "rule", list: "allow", text: "Write(//tmp/**)" });
+    expect(m("write:/tmp/")).toEqual({ kind: "rule", list: "allow", text: "Edit(//tmp/**)" });
     expect(m("dir:read:/Users/me/Downloads")).toEqual({ kind: "dir", key: "dir:read:/Users/me/Downloads", access: "read", dir: "/Users/me/Downloads" });
     expect(m("dir:write:/x")).toMatchObject({ kind: "dir", access: "write" });
     // What an old unparsed key meant, exactly; reads with substitutions have no rule.
@@ -711,6 +742,64 @@ describe("rule files", () => {
     expect(errors).toEqual([{ source: path.join(cwd, ".pi", "tool-gate.json"), error: expect.stringContaining("not valid JSON") }]);
   });
 
+  test("path syntax: an unmarked file with a single-slash path rule keeps the absolute meaning and is reported; a marked file does not", () => {
+    const file = path.join(cwd, ".pi", "tool-gate.json");
+    write(file, { permissions: { allow: ["Edit(/etc/app/**)", "Edit(src/**)"] } });
+    let loaded = loadFileRules(cwd);
+    expect(loaded.legacyFiles).toEqual([file]);
+    expect(loaded.rules[0]?.rule.path?.anchor).toBe("absolute");
+    write(file, { pathSyntax: "claude-code", permissions: { allow: ["Edit(/etc/app/**)"] } });
+    loaded = loadFileRules(cwd);
+    expect(loaded.legacyFiles).toEqual([]);
+    expect(loaded.rules[0]?.rule.path?.anchor).toBe("root");
+    // Files with no single-slash path rule are never legacy.
+    write(file, { permissions: { allow: ["Edit(//etc/app/**)", "Edit(~/x)", "Bash(git push:*)"] } });
+    expect(loadFileRules(cwd).legacyFiles).toEqual([]);
+  });
+
+  test("a user file's single slash is relative to its own directory", () => {
+    const user = path.join(root, "pi", "tool-gate.json");
+    write(user, { pathSyntax: "claude-code", permissions: { allow: ["Read(/notes/**)"] } });
+    const [rule] = loadFileRules(cwd).rules;
+    expect(rule?.rule.path?.anchor).toBe("absolute");
+    expect(rule && matchPath(rule.rule.path!, path.join(root, "pi", "notes", "a"), cwd)).toBe(true);
+  });
+
+  test("the first save into an old file converts its path rules and marks it; a marked file is saved as it is", async () => {
+    const file = path.join(root, "pi", "tool-gate.json");
+    write(file, { pushBack: false, permissions: { allow: ["Edit(/etc/app/**)", "Read(/x)", "Edit(//already)", "Edit(src/**)", "Bash(npm test:*)"] } });
+    await editRulesFile(file, "add", "allow", "web_fetch");
+    const saved = JSON.parse(readFileSync(file, "utf8"));
+    expect(saved.pathSyntax).toBe("claude-code");
+    expect(saved.permissions.allow).toEqual(["Edit(//etc/app/**)", "Read(//x)", "Edit(//already)", "Edit(src/**)", "Bash(npm test:*)", "web_fetch"]);
+    expect(saved.pushBack).toBe(false);
+    expect(loadFileRules(cwd).legacyFiles).toEqual([]);
+    await editRulesFile(file, "add", "allow", "other_tool");
+    expect(JSON.parse(readFileSync(file, "utf8")).permissions.allow.slice(0, 2)).toEqual(["Edit(//etc/app/**)", "Read(//x)"]);
+  });
+
+  test("saving a rule with the new meaning of a single slash marks the file so it is not read as old", async () => {
+    const file = path.join(cwd, ".pi", "tool-gate.local.json");
+    await editRulesFile(file, "add", "allow", "Edit(/docs/**)");
+    expect(JSON.parse(readFileSync(file, "utf8"))).toEqual({ pathSyntax: "claude-code", permissions: { allow: ["Edit(/docs/**)"] } });
+    const [rule] = loadFileRules(cwd).rules;
+    expect(rule?.rule.path?.anchor).toBe("root");
+  });
+
+  test("files without path rules are not marked", async () => {
+    const file = path.join(cwd, ".pi", "tool-gate.local.json");
+    await editRulesFile(file, "add", "allow", "Bash(git push:*)");
+    expect(JSON.parse(readFileSync(file, "utf8"))).toEqual({ permissions: { allow: ["Bash(git push:*)"] } });
+  });
+
+  test("Write(path) is read as Edit(path) and warns", () => {
+    write(path.join(cwd, ".pi", "tool-gate.json"), { permissions: { allow: ["Write(src/**)"] } });
+    const [rule] = loadFileRules(cwd).rules;
+    expect(rule?.text).toBe("Edit(src/**)");
+    expect(rule?.raw).toBe("Write(src/**)");
+    expect(ruleWarning("allow", rule!.rule)).toMatch(/read as Edit/u);
+  });
+
   test("ambiguous persisted rules stay visible and produce warnings", () => {
     const file = path.join(cwd, ".pi", "tool-gate.json");
     const raw = ["Bash(rm tmp?)", "Bash(rm 'open)", "Bash(python3 'a*.py':*)"];
@@ -758,7 +847,7 @@ describe("rule files", () => {
   });
 
   test("nonobject policies are errors, missing files are normal, and replacements need no mtime change", () => {
-    expect(loadFileRules(cwd)).toEqual({ rules: [], ignored: [], errors: [] });
+    expect(loadFileRules(cwd)).toEqual({ rules: [], ignored: [], errors: [], legacyFiles: [] });
     const file = path.join(cwd, ".pi", "tool-gate.json");
     for (const value of ["null", "[]", "true", "7", '"text"']) {
       write(file, value);
@@ -911,7 +1000,7 @@ describe("rules saved for every project", () => {
   test("project-relative path rules become absolute; everything else is unchanged", () => {
     expect(absolutizeRule("Edit(src/a/**)", "/r")).toBe("Edit(//r/src/a/**)");
     expect(absolutizeRule("Edit(./a.ts)", "/r")).toBe("Edit(//r/a.ts)");
-    expect(absolutizeRule("Write(docs/**)", "/r")).toBe("Write(//r/docs/**)");
+    expect(absolutizeRule("Write(docs/**)", "/r")).toBe("Edit(//r/docs/**)");
     for (const text of ["Edit(~/x/**)", "Edit(//abs/x)", "Read(name)", "Bash(npm test:*)", "web_fetch", "Edit"]) {
       expect(absolutizeRule(text, "/r"), text).toBe(text);
     }

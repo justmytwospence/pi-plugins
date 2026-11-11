@@ -208,8 +208,8 @@ describe("allowing rules from the dialog", () => {
     expect(s.ctx.ui.selects[0]?.title).toMatch(/\nRule: Edit\(src\/a\/\*\*\)\nProject saves: .*tool-gate\.local\.json \(local\)$/u);
     expect(await run(s, "edit", { path: "src/a/c/d.ts", edits: [] }, "t3")).toBeUndefined();
     expect((await run(s, "edit", { path: "src/other.ts", edits: [] }, "t4")).block).toBe(true);
-    // Edit rules do not allow the write tool.
-    expect((await run(s, "write", { path: "src/a/new.ts", content: "" }, "t5")).block).toBe(true);
+    // An Edit rule covers the write tool too.
+    expect(await run(s, "write", { path: "src/a/new.ts", content: "" }, "t5")).toBeUndefined();
 
     await run(s, "web_fetch", { url: "https://example.com" }, "t6");
     s.ctx.ui.selectAnswers.push("Allow rule for this session");
@@ -626,7 +626,8 @@ describe("compound commands and the calls the gate always holds", () => {
     expect(held.reason).toMatch(/outside this project's directories/u);
     expect(await run(s, "read", { path: `${home}/Projects/other-gate-test/a.txt` }, "t2")).toBeUndefined();
     expect((await run(s, "edit", { path: `${home}/Projects/other-gate-test/a.txt`, edits: [] }, "t3")).block).toBe(true);
-    expect((await run(s, "write", { path: `${home}/dotfiles-gate-test/a.txt`, content: "" }, "t4")).block).toBe(true);
+    // Edit rules open the directory policy for every file-writing tool.
+    expect(await run(s, "write", { path: `${home}/dotfiles-gate-test/a.txt`, content: "" }, "t4")).toBeUndefined();
     expect(s.judged()).toBe(0);
     // `edit` is allowed there by its rule: no policy hold, and no judgment needed.
     expect(await run(s, "edit", { path: `${home}/dotfiles-gate-test/a.txt`, edits: [] }, "t5")).toBeUndefined();
@@ -1058,5 +1059,20 @@ describe("hierarchy: session lifetime, user-wide saves and folder grants", () =>
     const first = await run(s, "grep", { pattern: "x", path: ".env" });
     expect(first.block).toBe(true);
     expect(first.reason).toContain("reads credentials (.env)");
+  });
+});
+
+describe("path syntax", () => {
+  test("a file with old single-slash path rules is reported, keeps its meaning, and is converted on the next save", async () => {
+    write(userFile(), { permissions: { allow: [`Edit(${root}/elsewhere/**)`] } });
+    const s = setup(risky);
+    await start(s);
+    expect(notes(s).join("\n")).toMatch(/path rules use the old syntax/u);
+    // It still allows what it did: an absolute path.
+    expect(await run(s, "edit", { path: `${root}/elsewhere/a.ts`, edits: [] })).toBeUndefined();
+    await gate(s, "rules add allow web_fetch --scope user");
+    const saved = JSON.parse(readFileSync(userFile(), "utf8"));
+    expect(saved.pathSyntax).toBe("claude-code");
+    expect(saved.permissions.allow).toEqual([`Edit(/${root}/elsewhere/**)`, "web_fetch"]);
   });
 });

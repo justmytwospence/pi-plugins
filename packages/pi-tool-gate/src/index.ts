@@ -925,6 +925,7 @@ export default function toolGate(pi: ExtensionAPI) {
     }
     const fileDiagnostics = [
       ...policyLoadErrors,
+      ...files.legacyFiles.map((file) => `${shown(file)}: path rules use the old syntax (a leading / meant absolute); they keep that meaning until the gate next saves a rule there, or add "pathSyntax": "claude-code" and write absolute paths as //path.`),
       ...loaded.ignored.map((i) => `${shown(i.file)}: \`${i.key}\` is ignored in project files (they may only tighten); set it in ${shown(userRulesFile())}.`),
       ...(loadGrants(project.main).length ? [`Legacy grants: ${shown(grantsFile())}; migrate explicitly before removing.`] : []),
       ...files.ignored.map((r) => `Invalid ${r.list} rule ${r.raw} in ${shown(r.origin.source)}: ${r.error}; it provides no protection.`),

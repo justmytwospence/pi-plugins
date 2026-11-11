@@ -70,6 +70,8 @@ export interface Rule {
   command?: { kind: "prefix" | "glob" | "exact"; text: string; tokens?: string[]; re?: RegExp };
   /** A path rule. */
   path?: PathPattern;
+  /** Written as `Write(path)`, which is read as `Edit(path)` (an Edit rule covers every file-writing tool). */
+  alias?: "Write";
 }
 
 export type Parsed = { ok: true; rule: Rule } | { ok: false; error: string };
@@ -86,8 +88,20 @@ export function ruleTool(tool: string): string {
   return tool;
 }
 
+/**
+ * How the path in a Read, Edit or Write rule is anchored, as in Claude Code: `//p` is absolute, `~/p`
+ * is under home, `/p` is relative to the file the rule is written in (`sourceDir`: your user file's
+ * directory; otherwise, and for session rules, the project root), `./p` or `a/b` is relative to the
+ * project root, and a bare name matches at any depth.
+ */
+export interface PathOptions {
+  sourceDir?: string;
+  /** A file written before this syntax (no `"pathSyntax": "claude-code"`): `/p` meant the absolute path. */
+  legacyPaths?: boolean;
+}
+
 /** Parse a rule: `Tool` or `Tool(specifier)`. */
-export function parseRule(raw: string): Parsed {
+export function parseRule(raw: string, options: PathOptions = {}): Parsed {
   const text = raw.trim();
   if (!text) return { ok: false, error: "The rule is empty." };
   const shape = /^([^\s()]+)\s*(?:\(([\s\S]*)\))?$/u.exec(text);
@@ -100,9 +114,12 @@ export function parseRule(raw: string): Parsed {
   if (!specifier.trim()) return { ok: false, error: `${tool}() has nothing inside the parentheses; name the tool alone to cover every call.` };
   if (tool === "Bash") return parseCommandRule(specifier);
   if (FILE_TOOLS.has(tool)) {
-    const pattern = compilePath(specifier);
+    const pattern = compilePath(specifier, options);
     if (!pattern.ok) return pattern;
-    return { ok: true, rule: { text: `${tool}(${specifier.trim()})`, tool, path: pattern.pattern } };
+    // Write(path) is Edit(path): one rule covers every tool that changes a file.
+    const edit = tool === "Write";
+    const name = edit ? "Edit" : tool;
+    return { ok: true, rule: { text: `${name}(${specifier.trim()})`, tool: name, path: pattern.pattern, ...(edit ? { alias: "Write" as const } : {}) } };
   }
   return { ok: false, error: `${tool}(...) is not supported: only Bash, Edit, Write and Read take a specifier. Name the tool alone (${tool}).` };
 }
@@ -182,13 +199,25 @@ function globSource(pattern: string): string {
   return re;
 }
 
-function compilePath(specifier: string): { ok: true; pattern: PathPattern } | { ok: false; error: string } {
+function compilePath(specifier: string, options: PathOptions = {}): { ok: true; pattern: PathPattern } | { ok: false; error: string } {
   let p = specifier.trim();
-  if (p.startsWith("//")) p = p.slice(1);
-  p = expandHome(p);
   let anchor: PathPattern["anchor"];
-  if (p.startsWith("/")) anchor = "absolute";
-  else {
+  if (p.startsWith("//")) {
+    p = p.slice(1);
+    anchor = "absolute";
+  } else if (p === "~" || p.startsWith("~/")) {
+    p = expandHome(p);
+    anchor = "absolute";
+  } else if (p.startsWith("/")) {
+    if (options.legacyPaths) anchor = "absolute";
+    else if (options.sourceDir) {
+      p = path.join(options.sourceDir, p);
+      anchor = "absolute";
+    } else {
+      p = p.slice(1);
+      anchor = "root";
+    }
+  } else {
     const dotted = p.startsWith("./");
     p = dotted ? p.slice(2) : p;
     anchor = dotted || p.replace(/\/+$/u, "").includes("/") ? "root" : "anywhere";
@@ -368,12 +397,15 @@ function nameMatches(pattern: string, tool: string): boolean {
  * Whether a rule's tool covers a Pi tool. To deny or ask, Edit and Write cover both file-writing
  * tools, as Claude Code's Edit rules do; to allow, each covers its own.
  */
-function covers(ruleName: string, tool: string, blocking: boolean): boolean {
+function covers(ruleName: string, tool: string, list: RuleList): boolean {
   const kind = ruleTool(tool);
-  if (ruleName === "Bash" || ruleName === "Edit" || ruleName === "Write" || ruleName === "Read") {
-    if (blocking && (ruleName === "Edit" || ruleName === "Write") && (kind === "Edit" || kind === "Write")) return true;
-    return kind === ruleName;
-  }
+  const edits = kind === "Edit" || kind === "Write";
+  // An Edit rule covers every file-writing tool, in every list. A bare Write rule allows only `write`
+  // (it is not Edit), but denies and asks about both. A Read deny rule also stops edits of that file.
+  if (ruleName === "Edit") return edits;
+  if (ruleName === "Write") return kind === "Write" || (list !== "allow" && kind === "Edit");
+  if (ruleName === "Read") return kind === "Read" || (list === "deny" && edits);
+  if (ruleName === "Bash") return kind === "Bash";
   return nameMatches(ruleName, tool);
 }
 
@@ -382,9 +414,10 @@ function bare(r: Rule): boolean {
 }
 
 /** Whether a deny or ask rule matches the call. */
-function blocks(r: Rule, call: Call): boolean {
-  if (!covers(r.tool, call.tool, true)) return false;
-  if (bare(r)) return true;
+function blocks(r: Rule, call: Call, list: RuleList): boolean {
+  if (!covers(r.tool, call.tool, list)) return false;
+  // A bare Read deny removes the Read tool; only a path rule reaches into edits.
+  if (bare(r)) return !(r.tool === "Read" && ruleTool(call.tool) !== "Read");
   if (r.command) {
     const command = String(call.input.command ?? "");
     if (r.command.kind === "exact" && sameCommand(r.command.text, command)) return true;
@@ -400,6 +433,7 @@ function blocks(r: Rule, call: Call): boolean {
  * options that make the program run something else (`git -c core.fsmonitor=...`).
  */
 export function ruleWarning(list: RuleList, rule: Rule): string | undefined {
+  if (rule.alias === "Write") return "Write(path) is read as Edit(path), which covers every tool that edits a file";
   const c = rule.command;
   if (!c) return undefined;
   if (c.kind === "exact" && !literalShellArguments(c.text)) {
@@ -420,7 +454,7 @@ export function ruleWarning(list: RuleList, rule: Rule): string | undefined {
 /** The deny rule that stops the call, else the ask rule that makes it ask, else undefined. */
 export function blocking(rules: readonly ScopedRule[], call: Call): ScopedRule | undefined {
   for (const list of ["deny", "ask"] as const) {
-    const hit = rules.find((r) => r.list === list && blocks(r.rule, call));
+    const hit = rules.find((r) => r.list === list && blocks(r.rule, call, list));
     if (hit) return hit;
   }
   return undefined;
@@ -433,7 +467,7 @@ export function blocking(rules: readonly ScopedRule[], call: Call): ScopedRule |
  * holds) only a rule naming the exact command, or a wildcard-free path, opens it.
  */
 export function allowing(rules: readonly ScopedRule[], call: Call, exact = false): ScopedRule[] | undefined {
-  const mine = rules.filter((r) => r.list === "allow" && covers(r.rule.tool, call.tool, false));
+  const mine = rules.filter((r) => r.list === "allow" && covers(r.rule.tool, call.tool, "allow"));
   if (!mine.length) return undefined;
   const root = call.root ?? call.cwd;
   if (ruleTool(call.tool) !== "Bash") {
@@ -466,7 +500,7 @@ export function allowing(rules: readonly ScopedRule[], call: Call, exact = false
 
 /** The allow rule that covers writing or reading `file` with `tool`, for the directory policy (derived paths are never opened by one). */
 export function allowsPath(rules: readonly ScopedRule[], tool: string, file: string, root: string): boolean {
-  return rules.some((r) => r.list === "allow" && covers(r.rule.tool, tool, false) && r.rule.path !== undefined && matchPath(r.rule.path, file, root));
+  return rules.some((r) => r.list === "allow" && covers(r.rule.tool, tool, "allow") && r.rule.path !== undefined && matchPath(r.rule.path, file, root));
 }
 
 // ---- suggestions ----------------------------------------------------------------------------
@@ -597,7 +631,8 @@ export function suggest(call: Call): string[] {
   if (kind === "Bash") return suggestBash(String(call.input.command ?? ""), call.readOnlyCommands);
   if (kind === "Edit" || kind === "Write") {
     const file = fileOf(call);
-    return file ? [folderRule(kind, file, call.root ?? call.cwd)] : [];
+    // One Edit rule covers every file-writing tool.
+    return file ? [folderRule("Edit", file, call.root ?? call.cwd)] : [];
   }
   if (kind === "Read") return [];
   return parseRule(call.tool).ok ? [call.tool] : [];
@@ -612,7 +647,7 @@ export type Migrated =
 /**
  * What a saved project grant key means now: new keys are `allow:<rule>` (also `ask:`, `deny:`);
  * `bash:<key>` is `Bash(<key>:*)`, `tool:<x>` is `<x>`, `edit:<dir>` and `write:<dir>` are
- * `Edit(//<dir>/**)` and `Write(//<dir>/**)`; `dir:` keys stay folder grants. A key for reads with
+ * `Edit(//<dir>/**)` (an Edit rule covers writes too); `dir:` keys stay folder grants. A key for reads with
  * substitutions or redirects has no rule that says it and is dropped.
  */
 export function migrateGrant(key: string): Migrated | undefined {
@@ -633,7 +668,7 @@ export function migrateGrant(key: string): Migrated | undefined {
   const tool = /^tool:(.+)$/u.exec(key);
   if (tool) return { kind: "rule", list: "allow", text: tool[1] as string };
   const folder = /^(edit|write):(.+)$/u.exec(key);
-  if (folder) return { kind: "rule", list: "allow", text: `${folder[1] === "edit" ? "Edit" : "Write"}(/${(folder[2] as string).replace(/\/+$/u, "")}/**)` };
+  if (folder) return { kind: "rule", list: "allow", text: `Edit(/${(folder[2] as string).replace(/\/+$/u, "")}/**)` };
   return undefined;
 }
 
@@ -661,7 +696,8 @@ export function localGrants(grants: readonly Grant[], file: string): { rules: Sc
       dirs.push(m);
       continue;
     }
-    const parsed = parseRule(m.text);
+    // Grants saved before the Claude Code path syntax name absolute paths with one slash.
+    const parsed = parseRule(m.text, { legacyPaths: true });
     if (parsed.ok) rules.push({ list: m.list, text: parsed.rule.text, raw: m.text, rule: parsed.rule, origin, key: g.key });
     else ignored.push({ list: m.list, raw: m.text, error: parsed.error, origin });
   }
@@ -684,6 +720,31 @@ export interface FileRules {
   rules: ScopedRule[];
   ignored: IgnoredRule[];
   errors: PolicyLoadError[];
+  /** Files whose path rules still use the old syntax (a leading `/` meant an absolute path). */
+  legacyFiles: string[];
+}
+
+/** The marker that says a policy file's path rules use Claude Code's syntax (`//abs`, `/rel-to-file`). */
+export const PATH_SYNTAX = "claude-code";
+const SINGLE_SLASH_PATH = /^(\s*(?:read|edit|write)\(\s*)(\/(?!\/))/iu;
+
+function singleSlashRules(json: Record<string, unknown>): boolean {
+  const permissions = json.permissions;
+  return isRecord(permissions) && LISTS.some((list) => Array.isArray(permissions[list]) && (permissions[list] as unknown[]).some((e) => typeof e === "string" && SINGLE_SLASH_PATH.test(e)));
+}
+
+/**
+ * Rewrite an unmarked policy file's path rules from the old syntax to Claude Code's
+ * (`Edit(/abs/**)` becomes `Edit(//abs/**)`). True when it rewrote anything; a marked file is left as it is.
+ */
+export function migratePathSyntax(json: Record<string, unknown>): boolean {
+  if (json.pathSyntax === PATH_SYNTAX || !singleSlashRules(json)) return false;
+  const permissions = json.permissions as Record<string, unknown>;
+  for (const list of LISTS) {
+    const entries = permissions[list];
+    if (Array.isArray(entries)) permissions[list] = entries.map((entry) => (typeof entry === "string" ? entry.replace(SINGLE_SLASH_PATH, "$1/$2") : entry));
+  }
+  return true;
 }
 
 export interface PersistenceOptions {
@@ -714,15 +775,17 @@ function readRuleFile(file: string, origin: Origin): FileRules {
   const rules: ScopedRule[] = [];
   const ignored: IgnoredRule[] = [];
   const errors: PolicyLoadError[] = [];
+  let legacy = false;
   try {
-    const permissions = readPolicy(file).permissions;
+    const json = readPolicy(file);
+    const permissions = json.permissions;
     if (isRecord(permissions)) {
+      const entriesOf = (list: RuleList) => (Array.isArray(permissions[list]) ? (permissions[list] as unknown[]).filter((e): e is string => typeof e === "string") : []);
+      legacy = json.pathSyntax !== PATH_SYNTAX && LISTS.some((list) => entriesOf(list).some((e) => SINGLE_SLASH_PATH.test(e)));
+      const options: PathOptions = { ...(origin.scope === "user" ? { sourceDir: path.dirname(origin.source) } : {}), ...(legacy ? { legacyPaths: true } : {}) };
       for (const list of LISTS) {
-        const entries = permissions[list];
-        if (!Array.isArray(entries)) continue;
-        for (const raw of entries) {
-          if (typeof raw !== "string") continue;
-          const parsed = parseRule(raw);
+        for (const raw of entriesOf(list)) {
+          const parsed = parseRule(raw, options);
           if (parsed.ok) rules.push({ list, text: parsed.rule.text, raw, rule: parsed.rule, origin });
           else ignored.push({ list, raw, error: parsed.error, origin });
         }
@@ -731,7 +794,7 @@ function readRuleFile(file: string, origin: Origin): FileRules {
   } catch (error) {
     errors.push({ source: file, error: error instanceof Error ? error.message : String(error) });
   }
-  return { rules, ignored, errors };
+  return { rules, ignored, errors, legacyFiles: legacy ? [file] : [] };
 }
 
 /** Merged permission lists, user scopes then active shared policy and main-checkout local policy. */
@@ -740,6 +803,7 @@ export function loadFileRules(project: ProjectContext | string, options: Persist
   const rules: ScopedRule[] = [];
   const ignored: IgnoredRule[] = [];
   const errors: PolicyLoadError[] = [];
+  const legacyFiles: string[] = [];
   const local = path.join(context.main, ".pi", "tool-gate.local.json");
   const destination = options.project === "shared" ? path.join(context.root, ".pi", "tool-gate.json") : local;
   const files: Origin[] = [
@@ -756,8 +820,9 @@ export function loadFileRules(project: ProjectContext | string, options: Persist
     rules.push(...read.rules);
     ignored.push(...read.ignored);
     errors.push(...read.errors);
+    legacyFiles.push(...read.legacyFiles);
   }
-  return { rules, ignored, errors };
+  return { rules, ignored, errors, legacyFiles };
 }
 
 /** Your user rules' file: `~/.pi/agent/tool-gate.json` (`PI_CODING_AGENT_DIR` honored). */
@@ -790,7 +855,13 @@ async function editPolicy(file: string, mutate: (json: Record<string, unknown>) 
     const tmp = `${file}.${process.pid}.${randomUUID()}.tmp`;
     try {
       const json = readPolicy(file);
+      // The first save into a file written before the Claude Code path syntax converts its path rules.
+      const rewrote = migratePathSyntax(json);
+      const marked = json.pathSyntax === PATH_SYNTAX;
       mutate(json);
+      // A file gets the marker once it has been converted, or when a rule with the new meaning of a
+      // single slash is saved into it (otherwise the next read would take that rule for an old one).
+      if (!marked && (rewrote || singleSlashRules(json))) json.pathSyntax = PATH_SYNTAX;
       await writeFile(tmp, `${JSON.stringify(json, null, 2)}\n`, { flag: "wx" });
       await rename(tmp, file);
     } finally {
