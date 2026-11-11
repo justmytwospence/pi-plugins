@@ -76,9 +76,13 @@ readings fresh; the working row is independent of the footer mode.
    the Git summary stays quiet and the project remains visible. Model and labeled
    reasoning level get their own left-aligned row immediately below. Waiting/errors
    appear on that model row and take priority. With a plan model pair selected
-   (a pi-plan-mode virtual model such as `opusplan`), the model row adds the model
-   that last answered after the pair, as `opusplan → claude-sonnet-5-1` (example);
-   that segment is dropped first at narrow widths. Workflow and Approvals rows follow
+   (a pi-plan-mode virtual model such as `opusplan`), the model row shows the pair
+   dimmed and the model that will answer next, as `opusplan ▸ opus-5.5` (example):
+   the planner in plan and chat modes and while it answers `ask_planner` (marked
+   `consulting`), the worker in work mode. If the last answer came from a model
+   outside the pair, a warning `last <model>` follows. The pair name and warning
+   are dropped first at narrow widths. Without pi-plan-mode's phase, the row shows
+   the model that last answered, as `opusplan → sonnet-5.5`. Workflow and Approvals rows follow
    when their respective providers publish them; neither is invented when absent.
 2. `Context 32% used`. The gauge itself is the editor's border lines, above and
    below the prompt: the used share of the width in heavy rule (accent, then the

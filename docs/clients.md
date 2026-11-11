@@ -22,7 +22,7 @@ Exercise pending, applying and restored history with both client parsers at 46, 
 
 ## Footer controls
 
-Model/reasoning and workflow stay on two rows, and Approvals on its own row. With a plan model pair selected, the model row also shows the model that last answered. Reasoning remains independently adjustable. Context owns usage, cache state/timer, MCP and skills; cold and unknown cache states must stay explicit.
+Model/reasoning and workflow stay on two rows, and Approvals on its own row. With a plan model pair selected, the model row also shows the model that will answer next (with a warning when the last answer came from outside the pair). Reasoning remains independently adjustable. Context owns usage, cache state/timer, MCP and skills; cold and unknown cache states must stay explicit.
 
 Main-editor control rows put one primary effective configured hint immediately after the content as a dim ` · <key>` suffix, not a right-aligned rail or a collection of hardcoded global keys. The model row uses the first effective native model-select key, or, when that has none and the model reasons, the first effort-cycle (`app.thinking.cycle`) key; Workflow and Approvals use their provider keys. Hints may disappear at narrow widths before critical state does. The one-row blocked footer has no active hit regions or primary control hints.
 

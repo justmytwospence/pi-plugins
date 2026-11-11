@@ -879,6 +879,47 @@ test("footer displays an optional read-only waterfall snapshot without owning ro
   }
 });
 
+test("footer reads the published plan pair and falls back to the last answer without it", async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "pi-footer-plan-pair-"));
+  const originalFetch = globalThis.fetch, originalCache = process.env.CLAUDE_STATUSLINE_CACHE_DIR;
+  process.env.CLAUDE_STATUSLINE_CACHE_DIR = dir;
+  globalThis.fetch = async () => { throw new Error("Offline test: no network"); };
+  const entries = [];
+  let h;
+  try {
+    h = host(entries, dir);
+    h.ctx.model = { provider: "anthropic", id: "opusplan", api: "pi-virtual", contextWindow: 0, reasoning: true };
+    h.ctx.modelRegistry.getApiKeyForProvider = async () => undefined;
+    h.ctx.modelRegistry.find = (provider, id) => ({ provider, id, api: "fake", contextWindow: 200000, reasoning: true });
+    const opus = { provider: "anthropic", id: "claude-opus-5-5" }, sonnet = { provider: "anthropic", id: "claude-sonnet-5-5" };
+    let route;
+    h.pi.events.on("pi-plugins.plan-pair.v1", request => {
+      if (request.kind === "query" && route) request.snapshot = structuredClone(route);
+    });
+    await h.handlers.get("session_start")({}, h.ctx);
+    const snapshot = (phase, next) => ({ version: 1, pair: "anthropic/opusplan", phase, next, planner: opus, worker: sonnet, thinkingLevel: "high" });
+    route = snapshot("plan", opus);
+    await refreshFrame(h);
+    assert.match(plain(h.footer.render(160).join("\n")), /opusplan ▸ opus-5\.5/);
+    route = snapshot("build", sonnet);
+    await refreshFrame(h);
+    assert.match(plain(h.footer.render(160).join("\n")), /opusplan ▸ sonnet-5\.5/);
+    entries.push({ type: "message", message: { role: "assistant", stopReason: "stop", provider: "anthropic", model: "claude-haiku-4-5" } });
+    await refreshFrame(h);
+    assert.match(plain(h.footer.render(160).join("\n")), /last haiku-4\.5/);
+    route = undefined;
+    await refreshFrame(h);
+    const fallback = plain(h.footer.render(160).join("\n"));
+    assert.match(fallback, /opusplan → haiku-4\.5/);
+    assert.doesNotMatch(fallback, /▸/);
+  } finally {
+    await h?.handlers.get("session_shutdown")?.({}, h.ctx);
+    globalThis.fetch = originalFetch;
+    if (originalCache === undefined) delete process.env.CLAUDE_STATUSLINE_CACHE_DIR; else process.env.CLAUDE_STATUSLINE_CACHE_DIR = originalCache;
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
 test("waterfall footer reads only the routed Argon variant, never a generic medium quota", async () => {
   const dir = await mkdtemp(path.join(os.tmpdir(), "pi-footer-argon-"));
   const originalFetch = globalThis.fetch;
@@ -2301,6 +2342,22 @@ test("a plan model pair shows the model behind it and drops it first when narrow
   assert.match(narrow, /opusplan/u);
   assert.doesNotMatch(narrow, /→ sonnet/u);
   assert.doesNotMatch(mod.renderFooter({ ...s, routedTo: undefined }, 120, theme).map(plain).join("\n"), /→/u);
+});
+
+test("a published plan pair shows the next model, consulting and a fallback warning", () => {
+  const s = { ...controlledFixture(), model: "opusplan", pair: { next: "claude-opus-5-5", phase: "plan" } };
+  const row = (state, width = 120) => plain(mod.renderFooter(state, width, theme)[1] ?? "");
+  assert.match(row(s), /opusplan ▸ opus-5\.5/u);
+  assert.doesNotMatch(row(s), /→/u);
+  assert.doesNotMatch(row(s), /consulting/u);
+  assert.match(row({ ...s, pair: { ...s.pair, phase: "consult" } }), /opus-5\.5 consulting/u);
+  assert.match(row({ ...s, pair: { ...s.pair, fallback: "claude-haiku-4-5" } }), /last haiku-4\.5/u);
+  const narrow = mod.renderFooter(s, 46, theme).map(plain).join("\n");
+  assert.match(narrow, /opus-5\.5/u);
+  assert.doesNotMatch(narrow, /opusplan ▸/u);
+  const layout = mod.layoutFooter(s, 180, theme);
+  const hit = layout.hits.find((candidate) => hitText(layout, candidate).includes("opus-5.5"));
+  assert.equal(hit?.action, "model.open");
 });
 
 test("final cell metadata selects only explicit values, never labels, icons, separators or inline-hint gaps", () => {

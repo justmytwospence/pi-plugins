@@ -156,7 +156,7 @@ These keys are **local to the named focused surface**, not global shortcuts. No 
 
 ## Model, reasoning and footer controls
 
-`app.model.select` opens Pi's normal model selector, where a [plan model pair](/plugins/pi-plan-mode/#plan-model-pairs) such as `anthropic/opusplan` is one entry. With the custom [pi-status-footer](/plugins/pi-status-footer/), the model row also shows the model that last answered. `app.thinking.cycle` cycles reasoning; with a pair selected the level applies to whichever model serves the request.
+`app.model.select` opens Pi's normal model selector, where a [plan model pair](/plugins/pi-plan-mode/#plan-model-pairs) such as `anthropic/opusplan` is one entry. With the custom [pi-status-footer](/plugins/pi-status-footer/), the model row also shows the model that will answer next. `app.thinking.cycle` cycles reasoning; with a pair selected the level applies to whichever model serves the request.
 
 Workflow/standalone Plan, reasoning and approval cycles share a preview: repeated keys and eligible clicks update one combined, UI-only history line and apply only the final changes. Pending values are not effective or protective; a round trip to the original settings changes nothing. With the custom footer active, the reasoning key and click share this staging; without it native reasoning remains stock. Native model cycling is unchanged. Explicit picker, command and tool choices stay immediate, while plan/tool approvals still require confirmation.
 
