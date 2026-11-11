@@ -92,10 +92,11 @@ A plan model pair is a Pi virtual model: one entry in `/model` that plans on one
 | `anthropic/opusplan` | Opus | Sonnet |
 | `openai-codex/astraplan`, `openai/astraplan` | Astra | Sol |
 | `openai-codex/solplan`, `openai/solplan` | Sol | Terra |
+| `google/argonplan` | Argon | Flash |
 
-Each family resolves at request time to the highest available generation on the pair's provider (the worker prefers the planner's generation). A pair whose models are unavailable is removed from `/model` at session start, unless it is the one selected. Define your own with `modelPairs` (see [Configuration](#configuration)).
+Each family resolves at request time to the highest available generation on the pair's provider (the worker prefers the planner's generation). A pair whose models are unavailable is removed from `/model` at session start, unless it is the one selected. On Google, the planner prefers the Antigravity (`antigravity-`) models and the worker uses the same lane as the planner. Define your own with `modelPairs` (see [Configuration](#configuration)).
 
-Routing is per request: the planner serves requests while plan mode is on or a consultation is open, and the worker serves the rest. Approving a plan therefore continues the same agent loop on the worker, with no turn end, model switch or brief message. The selection stays the pair throughout; with pi-status-footer the model row shows the pair and the model that last answered. A phase switch re-reads the conversation on the other model without its prompt cache.
+Routing is per request: the planner serves requests while plan mode is on, in chat mode (with pi-tool-gate) or while a consultation is open, and the worker serves work mode. Approving a plan therefore continues the same agent loop on the worker, with no turn end, model switch or brief message. The selection stays the pair throughout; with pi-status-footer the model row shows the pair and the model that will answer next. A phase switch re-reads the conversation on the other model without its prompt cache.
 
 **Effort.** On entering plan mode, System 1 judges effort once for the planner and applies it with your next message, unless you changed the level since entering plan mode. At approval, the picker's effort row targets the worker. Consultations use the level recorded at approval.
 
@@ -297,7 +298,7 @@ Planner sessions are stored under `~/.pi/agent/plan-mode/planners/`; runs are sa
 - Pi 0.99 or newer and its interactive terminal UI.
 - Planners, their subagents and M make ordinary model requests on the models you pick, through your session's providers, billed as those providers bill them. Each planner and each subagent is a separate session, so two planners with subagents can use several times the tokens of one agent. The planning screen shows tokens and cost per planner.
 - Classifier tool selection makes an optional classifier request through Pi's classifier models (default `typesafe/jev-latest`, which needs Pi's credentials for it, such as `TYPESAFE_API_KEY`); it can be billed. Without a classifier the Tools step uses its fallback preselection.
-- Your agent plans on your session's model. With a plan model pair, planning runs on the planner and implementation on the worker, each billed as its provider bills; a phase switch re-reads the conversation on the other model without its prompt cache.
+- Your agent plans on your session's model. With a plan model pair, planning and chat run on the planner and implementation on the worker, each billed as its provider bills; a phase switch re-reads the conversation on the other model without its prompt cache.
 - On disk: it reads and writes `~/.pi/agent/pi-plan-mode.json`, writes plan mode's plan files under `~/.pi/agent/plans/` (or `plansDirectory`), appends plan-mode state entries and hidden notices to your session, stores planner sessions under `~/.pi/agent/plan-mode/planners/`, appends run entries and plan messages to your session, writes exported plans where you choose, and writes a temporary plan file for `planCompleteCommand`.
 
 ## Optional integrations

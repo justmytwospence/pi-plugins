@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+### Chat on the planner, an Argon pair and the next model for the footer
+
+- A plan model pair now routes chat-mode requests (pi-tool-gate's chat workflow) to the planner, like plan mode and consultations; only work mode runs on the worker. `ask_planner` refuses in chat mode.
+- Added `google/argonplan` (Argon plans, Flash builds). The planner prefers the Antigravity (`antigravity-`) lane and the worker uses the planner's lane.
+- Published the selected pair's phase (plan, chat, consult or build), the model that answers next and its level on the synchronous `pi-plugins.plan-pair.v1` query, which pi-status-footer reads.
+
 ### Implement on a pair's worker from approval
 
 - With no plan model pair selected and the session model the planner of a registered pair (Opus for `anthropic/opusplan`), approval also offers **Yes, implement with <worker>** and **Yes, compact and implement with <worker>**. They switch the session to the pair (keeping the planning level for `ask_planner`), then implement on the worker. Their effort row targets the worker, with its own System 1 recommendation.

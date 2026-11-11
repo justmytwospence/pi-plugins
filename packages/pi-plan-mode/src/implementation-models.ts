@@ -130,11 +130,17 @@ export function subagentRoleModel(
   };
 }
 
-export type ModelFamily = "astra" | "sol" | "terra" | "fable" | "opus" | "sonnet";
+export type ModelFamily = "astra" | "sol" | "terra" | "fable" | "opus" | "sonnet" | "argon" | "flash";
 
 export function familyOf(
   model: ImplementationModelOverride,
 ): { family: ModelFamily; generation: number[] } | undefined {
+  if (model.provider === "google") {
+    const google = /^(?:antigravity-)?gemini-(\d+(?:\.\d+)*)-(argon|flash)$/u.exec(model.modelId);
+    return google
+      ? { family: google[2] as ModelFamily, generation: (google[1] as string).split(".").map(Number) }
+      : undefined;
+  }
   const match =
     model.provider === "openai" || model.provider === "openai-codex"
       ? /^gpt-(\d+(?:\.\d+)*)-(astra|sol|terra)$/u.exec(model.modelId)

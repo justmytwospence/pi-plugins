@@ -24,6 +24,7 @@ test("the built-in pairs are the planner families one step down", () => {
       ["openai-codex/solplan", "Sol plan, Terra build"],
       ["openai/astraplan", "Astra plan, Sol build"],
       ["openai/solplan", "Sol plan, Terra build"],
+      ["google/argonplan", "Argon plan, Flash build"],
     ],
   );
 });
@@ -77,6 +78,32 @@ test("the Astra and Sol pairs resolve on openai-codex and openai", () => {
       worker: { provider, modelId: "gpt-6-sol" },
     });
   }
+});
+
+test("argonplan resolves on one Google lane, preferring Antigravity", () => {
+  assert.deepEqual(
+    resolvePair(
+      def("google/argonplan"),
+      catalog(
+        "google/antigravity-gemini-4-argon",
+        "google/antigravity-gemini-3.8-flash",
+        "google/gemini-4-argon",
+        "google/gemini-4.1-flash",
+      ),
+    ),
+    {
+      planner: { provider: "google", modelId: "antigravity-gemini-4-argon" },
+      worker: { provider: "google", modelId: "antigravity-gemini-3.8-flash" },
+    },
+  );
+  assert.deepEqual(resolvePair(def("google/argonplan"), catalog("google/gemini-4-argon", "google/gemini-3.8-flash")), {
+    planner: { provider: "google", modelId: "gemini-4-argon" },
+    worker: { provider: "google", modelId: "gemini-3.8-flash" },
+  });
+  assert.deepEqual(
+    resolvePair(def("google/argonplan"), catalog("google/antigravity-gemini-4-argon", "google/gemini-3.8-flash")),
+    { error: "no available Flash model on google" },
+  );
 });
 
 test("a custom pair replaces a built-in key in place and a new key is appended", () => {

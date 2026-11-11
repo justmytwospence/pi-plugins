@@ -24,6 +24,8 @@ const FAMILY_NAMES: Record<ModelFamily, string> = {
   fable: "Fable",
   opus: "Opus",
   sonnet: "Sonnet",
+  argon: "Argon",
+  flash: "Flash",
 };
 
 const builtin = (provider: string, id: string, planner: ModelFamily, worker: ModelFamily): PairDefinition => ({
@@ -41,6 +43,7 @@ export const BUILTIN_PAIRS: readonly PairDefinition[] = [
   builtin("openai-codex", "solplan", "sol", "terra"),
   builtin("openai", "astraplan", "astra", "sol"),
   builtin("openai", "solplan", "sol", "terra"),
+  builtin("google", "argonplan", "argon", "flash"),
 ];
 
 export function pairKey(p: { provider: string; id: string }): string {
@@ -73,14 +76,19 @@ export function pairDefinitions(custom: CustomPairs | undefined): PairDefinition
 const has = (available: readonly AvailableImplementationModel[], spec: { provider: string; modelId: string }) =>
   available.some((model) => model.provider === spec.provider && model.id === spec.modelId);
 
+/** Google serves one model on two lanes: Antigravity (subscription, `antigravity-` prefix) and the API. */
+export const laneOf = (modelId: string): "antigravity" | "api" =>
+  modelId.startsWith("antigravity-") ? "antigravity" : "api";
+
 function bestFamily(
   available: readonly AvailableImplementationModel[],
   provider: string,
   family: ModelFamily,
   prefer?: number[],
+  lane?: "antigravity" | "api",
 ): ModelSpec | undefined {
   const siblings = available.flatMap((model) => {
-    if (model.provider !== provider) return [];
+    if (model.provider !== provider || (lane && laneOf(model.id) !== lane)) return [];
     const recognized = familyOf({ provider, modelId: model.id });
     return recognized?.family === family ? [{ id: model.id, generation: recognized.generation }] : [];
   });
@@ -108,7 +116,9 @@ export function resolvePair(
       return { error: `${def.planner.spec.provider}/${def.planner.spec.modelId} is not available` };
     planner = def.planner.spec;
   } else {
-    planner = bestFamily(available, def.provider, def.planner.family);
+    planner =
+      bestFamily(available, def.provider, def.planner.family, undefined, "antigravity") ??
+      bestFamily(available, def.provider, def.planner.family, undefined, "api");
     if (!planner) return { error: `no available ${FAMILY_NAMES[def.planner.family]} model on ${def.provider}` };
   }
   let worker: ModelSpec | undefined;
@@ -117,7 +127,13 @@ export function resolvePair(
       return { error: `${def.worker.spec.provider}/${def.worker.spec.modelId} is not available` };
     worker = def.worker.spec;
   } else {
-    worker = bestFamily(available, def.provider, def.worker.family, familyOf(planner)?.generation);
+    worker = bestFamily(
+      available,
+      def.provider,
+      def.worker.family,
+      familyOf(planner)?.generation,
+      laneOf(planner.modelId),
+    );
     if (!worker) return { error: `no available ${FAMILY_NAMES[def.worker.family]} model on ${def.provider}` };
   }
   if (planner.provider === worker.provider && planner.modelId === worker.modelId) {

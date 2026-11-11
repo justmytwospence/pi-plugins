@@ -79,7 +79,18 @@ test("familyOf reads provider-local families and numeric generations, and ignore
     family: "fable",
     generation: [5, 5],
   });
+  assert.deepEqual(familyOf({ provider: "google", modelId: "antigravity-gemini-4-argon" }), {
+    family: "argon",
+    generation: [4],
+  });
+  assert.deepEqual(familyOf({ provider: "google", modelId: "gemini-3.8-flash" }), {
+    family: "flash",
+    generation: [3, 8],
+  });
   for (const model of [
+    { provider: "google", modelId: "gemini-3.8-flash-lite" },
+    { provider: "google", modelId: "gemini-4-argon-preview" },
+    { provider: "google", modelId: "gemini-flash-latest" },
     { provider: "anthropic", modelId: "claude-sonnet-5-5-20261001" },
     { provider: "anthropic", modelId: "claude-opus-latest" },
     { provider: "openai", modelId: "gpt-6.1-astra-20261001" },

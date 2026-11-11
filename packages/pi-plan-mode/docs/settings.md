@@ -44,7 +44,7 @@ reports a collision rather than overwriting it.
 
 ### Plan model pairs
 
-Built-in plan model pairs (`anthropic/fableplan`, `anthropic/opusplan`, `openai-codex/astraplan`, `openai-codex/solplan`, `openai/astraplan`, `openai/solplan`) need no settings; see the README's [Plan model pairs](../README.md#plan-model-pairs). Planner and worker are Fable and Opus, Opus and Sonnet, Astra and Sol, and Sol and Terra. Each family resolves to the highest available generation on the pair's provider (the worker prefers the planner's generation), and a pair whose models are unavailable is not offered.
+Built-in plan model pairs (`anthropic/fableplan`, `anthropic/opusplan`, `openai-codex/astraplan`, `openai-codex/solplan`, `openai/astraplan`, `openai/solplan`, `google/argonplan`) need no settings; see the README's [Plan model pairs](../README.md#plan-model-pairs). Planner and worker are Fable and Opus, Opus and Sonnet, Astra and Sol, Sol and Terra, and Argon and Flash. Each family resolves to the highest available generation on the pair's provider (the worker prefers the planner's generation), and a pair whose models are unavailable is not offered.
 
 `modelPairs` adds or replaces pairs. Each key is the `provider/id` the pair registers under in `/model`:
 
