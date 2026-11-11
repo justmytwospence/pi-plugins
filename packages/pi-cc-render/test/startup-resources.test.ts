@@ -1369,7 +1369,7 @@ describe("/splash", () => {
 		const frozen = freezeSplash(mode)!;
 		expect(frozen.sections.Models).toBeTruthy();
 		const lines = renderFrozenSplash(frozen, 80, plainTheme);
-		expect(lines[0]).toBe("");
+		expect(lines[0]).not.toBe("");
 		expect(lines.at(-1)).toBe("");
 		expect(lines.join("\n")).toContain(" Models 1");
 		expect(freezeSplash({})).toBeUndefined();

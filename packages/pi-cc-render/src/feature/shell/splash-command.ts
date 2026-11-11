@@ -45,7 +45,8 @@ export function renderFrozenSplash(frozen: Frozen, width: number, theme: Startup
 	// Leave room for the editor and footer below; fold whole sections like startup does.
 	const listed = Object.fromEntries([...ORDER, "Models"].filter((name) => frozen.sections[name]).map((name) => [name, frozen.sections[name]!]));
 	const planned = planSplashSections(listed, width, theme, Math.max(0, frozen.rows - map.length - 10));
-	const lines: string[] = [""];
+	// Pi already spaces a custom entry from the one above it.
+	const lines: string[] = [];
 	for (const name of ORDER) {
 		const section = planned[name];
 		if (section) lines.push(...renderSection(section, width, theme), "");
