@@ -86,7 +86,7 @@ a terminal with Kitty graphics. Environment variables for unusual setups:
 
 ### Safe shell subcommands
 
-`safeSubcommands` maps any command prefix to subcommand prefixes that the user chooses to trust completely in limited `bash` and `powershell`.
+`safeSubcommands` maps any command prefix to subcommand prefixes that the user chooses to trust completely in limited `bash` and `powershell`. It applies only without pi-tool-gate: with the gate loaded, planning's shell checks (the consult guard and `/planners`) follow the gate's read-only analysis (`pi-plugins.shell-reads.v1`), which `readOnlyCommands` in the gate's configuration extends, and command grants still add specific commands.
 For example, `"kubectl": ["get", "apply"]` trusts commands beginning with `kubectl get` or `kubectl apply`, while `"npm": ["run inspect-custom"]` trusts commands beginning with `npm run inspect-custom`.
 Command keys and subcommand entries are trimmed and must be non-empty strings.
 Matches are literal and case-sensitive after leading whitespace in the submitted command is ignored.

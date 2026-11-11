@@ -3,10 +3,12 @@ import { initTheme, type ToolDefinition } from "@earendil-works/pi-coding-agent"
 import { visibleWidth } from "@earendil-works/pi-tui";
 import { test, vi } from "vitest";
 import type { FamilyService, PreparedAgent } from "../src/family-contract.js";
+import { bindGateShell } from "../src/gate-shell.js";
 import { otherTools, otherToolsNode, resolveAccess } from "../src/planner/access.js";
 import { type PlannerAccessConfig, PlannerAgent } from "../src/planner/agent.js";
 import { plannerExtension } from "../src/planner/extension.js";
 import type { PlannerSessionFactory, PlannerSessionOptions } from "../src/planner/session.js";
+import { SHELL_READS_CHANNEL } from "../src/shell-reads.js";
 import { buildToolTree, leaves } from "../src/tool-tree.js";
 
 type Tool = Partial<Pick<ToolDefinition, "renderCall" | "renderResult">> & {
@@ -70,6 +72,38 @@ test("the planner policy keeps planning read-only and limited to the chosen tool
 
   await tools.get("plan_mode_complete")?.execute("1", { plan: "# Plan" });
   assert.deepEqual(plans, ["# Plan"]);
+});
+
+test("with pi-tool-gate answering, the planner follows its verdict; command grants still win", async () => {
+  const verdicts: Record<string, boolean> = { "npm test": true, "git status": false };
+  bindGateShell({
+    on: () => undefined,
+    emit: (channel, data) => {
+      const request = data as { command: string; reads?: boolean };
+      if (channel === SHELL_READS_CHANNEL && request.command in verdicts) request.reads = verdicts[request.command];
+    },
+  });
+  try {
+    const { toolCall } = loadExtension(
+      plannerExtension({
+        ...access(["read", "bash"]).policy,
+        ask: async () => undefined,
+        onPlan: () => undefined,
+      }) as never,
+    );
+    assert.equal(await toolCall("bash", { command: "npm test" }), undefined, "the gate's yes runs it");
+    assert.match((await toolCall("bash", { command: "git status" }))?.reason ?? "", /Blocked command: git status/u);
+    assert.equal(
+      await toolCall("bash", { command: "~/.local/bin/jev-ask <<'JSON'\n{}\nJSON" }),
+      undefined,
+      "a grant needs no verdict",
+    );
+    // No answer: this package's policy, as before.
+    assert.equal(await toolCall("bash", { command: "rg foo" }), undefined);
+    assert.match((await toolCall("bash", { command: "rm -rf src" }))?.reason ?? "", /Blocked command: rm -rf src/u);
+  } finally {
+    bindGateShell(undefined);
+  }
 });
 
 test("with a plan file, edit and write may change that file only", async () => {

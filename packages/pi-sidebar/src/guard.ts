@@ -65,6 +65,8 @@ export interface GuardHost {
   tool(name: string): Pick<ToolInfo, "name" | "description" | "annotations"> | undefined;
   /** The tool owner's answer on the read-only-call contract (herdr list, subagent status); undefined when none answers. */
   readOnlyCall?(name: string, input: unknown): boolean | undefined;
+  /** pi-tool-gate's verdict on a shell command (the shell-reads contract); undefined when the gate does not answer. */
+  shellReads?(command: string): boolean | undefined;
   /** Whether a subagent started now would run under this guard. */
   subagentsGuarded(): boolean;
   signal?: AbortSignal;
@@ -96,9 +98,15 @@ export async function judgeCall(toolName: string, input: unknown, host: GuardHos
   if (info?.annotations?.readOnlyHint === true) return { allowed: true, why: "read-only hint" };
   if (COMMAND_TOOLS.has(toolName)) {
     const command = readCommand(input);
-    const blocked = toolName === "powershell"
-      ? findBlockedPowerShellCommandSegment(command, {}, host.cwd)
-      : findBlockedCommandSegment(command, {}, host.cwd);
+    // The gate's read-only analysis is the suite's one: its yes runs the command, its no goes to the
+    // judgment below. This package's own policy decides only when the gate does not answer.
+    const gate = toolName === "bash" ? host.shellReads?.(command) : undefined;
+    if (gate === true) return { allowed: true, why: "read-only command" };
+    const blocked = gate === false
+      ? command
+      : toolName === "powershell"
+        ? findBlockedPowerShellCommandSegment(command, {}, host.cwd)
+        : findBlockedCommandSegment(command, {}, host.cwd);
     if (blocked === undefined) return { allowed: true };
     return askJev(host, toolName, info?.description, { command }, `\`${blocked.trim().slice(0, 200)}\``);
   }

@@ -5,6 +5,7 @@ import { relative, resolve } from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { setToolsActive } from "./active-tools.js";
 import { effortOrigin, withEffortOrigin } from "./effort-origin.js";
+import { gateShellReads } from "./gate-shell.js";
 import { MODEL_SPEC_THINKING_LEVELS, type ModelSpec, type ModelSpecThinkingLevel } from "./implementation-models.js";
 import { type PairDefinition, pairKey, resolvePair } from "./model-pairs.js";
 import { inPlan, isPlanFile, planPaths, readPlan } from "./plan-file.js";
@@ -366,7 +367,14 @@ export function registerPairs(pi: ExtensionAPI, host: PairHost): PairController 
       return { block: true, reason: `${lead} nothing may change except the plan file.` };
     }
     if (tool === "bash") {
-      const blocked = findBlockedCommandSegment(readCommand(input), host.safeSubcommands() ?? {}, ctx.cwd);
+      const command = readCommand(input);
+      // pi-tool-gate's read-only analysis, when it is loaded; otherwise this package's own policy.
+      const gate = gateShellReads(command, ctx.cwd);
+      if (gate === true) return undefined;
+      const blocked =
+        gate === false
+          ? command.trim() || "(empty command)"
+          : findBlockedCommandSegment(command, host.safeSubcommands() ?? {}, ctx.cwd);
       if (blocked === undefined) return undefined;
       return { block: true, reason: `${lead} only read-only commands run. Blocked: ${blocked}` };
     }

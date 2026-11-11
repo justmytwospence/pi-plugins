@@ -217,3 +217,31 @@ describe("Sidebar's shell policy", () => {
     ]) expect(allowed(command), command).toBe(false);
   });
 });
+
+describe("the gate's verdict on shell commands", () => {
+  it("its yes runs a command without Jev; its no goes to Jev even when the local policy would allow it", async () => {
+    const h = host({ probability: 0.01 });
+    const reads = vi.fn((command: string): boolean | undefined => (command === "make check" ? true : command === "git status" ? false : undefined));
+    h.host.shellReads = reads;
+    // The gate's yes: no judgment, though this package's own policy cannot clear it.
+    expect(await judgeCall("bash", { command: "make check" }, h.host)).toEqual({ allowed: true, why: "read-only command" });
+    expect(h.asked).toHaveLength(0);
+    // The gate's no: the local policy is skipped and the one Jev question decides.
+    expect(await judgeCall("bash", { command: "git status" }, h.host)).toMatchObject({ allowed: true });
+    expect(h.asked).toHaveLength(1);
+    const refused = host({ probability: 0.99 });
+    refused.host.shellReads = () => false;
+    expect(await judgeCall("bash", { command: "git status" }, refused.host)).toMatchObject({ allowed: false });
+    // No answer: this package's policy, as before.
+    expect(await judgeCall("bash", { command: "rg foo" }, h.host)).toEqual({ allowed: true });
+    expect(h.asked).toHaveLength(1);
+    expect(reads).toHaveBeenCalledWith("rg foo");
+  });
+
+  it("the gate is not asked about PowerShell, which it does not parse", async () => {
+    const h = host();
+    h.host.shellReads = vi.fn(() => false);
+    await judgeCall("powershell", { command: "Get-ChildItem" }, h.host);
+    expect(h.host.shellReads).not.toHaveBeenCalled();
+  });
+});

@@ -13,6 +13,7 @@ import { subagentsGuarded } from "./child.ts";
 import { MODEL_HELP, QUIZ_HELP, SIDEBAR_HEADSUP_HELP, SidebarController } from "./controller.ts";
 import { HEADSUP_HELP, headsUpChange } from "./headsup/headsup.ts";
 import { askReadOnlyCall } from "./read-only-call.ts";
+import { askShellReads } from "./shell-reads.ts";
 import { GUARD_ENV, judgeCall, SUBAGENT_ENV_CHANNEL, type SubagentEnvRequest } from "./guard.ts";
 import { installSystem1Notifications } from "./system1.ts";
 
@@ -31,6 +32,7 @@ export function installGuardOnly(pi: ExtensionAPI): void {
       registry: ctx.modelRegistry,
       tool: (name) => pi.getAllTools().find((tool) => tool.name === name),
       readOnlyCall: (name, input) => askReadOnlyCall(pi.events, name, input),
+      shellReads: (command) => askShellReads(pi.events, command, ctx.cwd),
       subagentsGuarded: () => subagentsGuarded(pi.events),
       ...(ctx.signal ? { signal: ctx.signal } : {}),
     });

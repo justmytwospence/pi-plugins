@@ -3,10 +3,12 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "vitest";
+import { bindGateShell } from "../src/gate-shell.js";
 import { EXIT_TOOL, INLINE_ENTRY } from "../src/inline-plan.js";
 import { BUILTIN_PAIRS, pairKey } from "../src/model-pairs.js";
 import { PAIR_ENTRY, registerPairs } from "../src/pairs.js";
 import { PLAN_PAIR_CHANNEL, queryPlanPair } from "../src/plan-pair-contract.js";
+import { SHELL_READS_CHANNEL } from "../src/shell-reads.js";
 import { createMockContext } from "./shared/support.js";
 import { createMockPi } from "./support.js";
 
@@ -239,6 +241,37 @@ test("the consult guard allows the plan file and read-only commands only", async
     ((await t.fire("tool_call", { toolName: "bg_run", input: { command: "ls" } })) as { reason: string }).reason,
     /The planner is answering a question/u,
   );
+});
+
+test("with pi-tool-gate answering, the consult guard follows its verdict instead of this package's policy", async () => {
+  const verdicts: Record<string, boolean> = { "npm test": false, ls: true, "git status": false };
+  bindGateShell({
+    on: () => undefined,
+    emit: (channel, data) => {
+      const request = data as { command: string; reads?: boolean };
+      if (channel === SHELL_READS_CHANNEL && request.command in verdicts) request.reads = verdicts[request.command];
+    },
+  });
+  try {
+    const t = setup();
+    t.controller.approve(t.ctx as never, "/p/plan.md");
+    await t.call("ask_planner", { question: "q" });
+    // The gate says no to a command this package's own policy would allow, and names the whole command.
+    assert.match(
+      ((await t.fire("tool_call", { toolName: "bash", input: { command: "git status" } })) as { reason: string })
+        .reason,
+      /only read-only commands run\. Blocked: git status/u,
+    );
+    assert.equal(await t.fire("tool_call", { toolName: "bash", input: { command: "ls" } }), undefined);
+    // No answer for a command: this package's own policy decides.
+    assert.equal(await t.fire("tool_call", { toolName: "bash", input: { command: "pwd" } }), undefined);
+    assert.equal(
+      ((await t.fire("tool_call", { toolName: "bash", input: { command: "rm x" } })) as { block: boolean }).block,
+      true,
+    );
+  } finally {
+    bindGateShell(undefined);
+  }
 });
 
 test("a consult that ends without planner_answer is recovered at settle", async () => {

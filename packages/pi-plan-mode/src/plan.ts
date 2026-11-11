@@ -37,6 +37,7 @@ import {
 import { effortOrigin, withEffortOrigin } from "./effort-origin.js";
 import { editExternally, externalEditorCommand, prepareEditor } from "./external-editor.js";
 import { discoverFamily, FAMILY_ENTRY, type FamilyMembership } from "./family-contract.js";
+import { bindGateShell } from "./gate-shell.js";
 import { directImplementationBrief } from "./handoff.js";
 import { HERDR_BLOCKED_CHANNEL, holdBlocked, holdWorking, isOwnEmit } from "./herdr-blocked.js";
 import {
@@ -917,6 +918,8 @@ export default async function plan(pi: ExtensionAPI, dependencies: PlanDependenc
   };
   const askPlannerNote = (plannerName: string) =>
     `\n\nWhen the plan does not fit what you find, call ask_planner; ${plannerName} planned it and reads this conversation.`;
+  // The guards read pi-tool-gate's verdict on shell commands from the main session's bus.
+  bindGateShell(pi.events);
   const pairs = registerPairs(pi, {
     planning: () => inline.active,
     workflow: () => inline.workflow,

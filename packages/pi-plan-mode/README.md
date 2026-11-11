@@ -102,7 +102,7 @@ Routing is per request: the worker serves requests only while an approved plan i
 
 **`ask_planner` and `planner_answer`.** While a pair is selected, your implementing agent has `ask_planner`: when the approved plan does not fit what it finds, it hands the next requests of the same conversation to the planner. The planner reads the whole conversation, including the implementer's changes, may amend the plan file (adding a dated line under `## Amendments`), asks you with `ask_user_question` when the decision is yours, and ends the consultation with `planner_answer`. If the planner finishes without calling it, its reply is taken as the answer and the implementer continues. Both tools refuse outside their phase.
 
-**Consult guard.** While the planner answers, `edit` and `write` are blocked except for the plan file, `bash` is limited to the read-only policy (and `safeSubcommands`), and `bg_run` is blocked.
+**Consult guard.** While the planner answers, `edit` and `write` are blocked except for the plan file, `bash` is limited to read-only commands (pi-tool-gate's read-only analysis when it is loaded; otherwise this package's policy and `safeSubcommands`), and `bg_run` is blocked.
 
 **Unplanned files.** The first edit or write of each file the plan does not list (paths in backticks in its Changes) gets a note appended to the tool result, telling the implementer to call `ask_planner` if the change departs from the plan. Nothing is blocked, and a plan that names no paths gets no notes.
 
@@ -212,7 +212,7 @@ Planners are stopped from this screen (Stop planning, Discard, or implementing a
 Each planner is its own in-process Pi session (created with Pi's SDK):
 
 - It starts with your main conversation's messages, so it has your context.
-- It runs on its own model and effort, with only the tools you chose, under a read-only policy (this package's planner extension): `edit` and `write` are blocked, `bash` is limited to reviewed read-only commands plus your command grants and `safeSubcommands`, MCP calls are limited to the servers and tools you selected, and tools you did not select are refused.
+- It runs on its own model and effort, with only the tools you chose, under a read-only policy (this package's planner extension): `edit` and `write` are blocked, `bash` is limited to read-only commands (pi-tool-gate's analysis when it is loaded; otherwise this package's reviewed policy and `safeSubcommands`) plus your command grants, MCP calls are limited to the servers and tools you selected, and tools you did not select are refused.
 - It reaches models through the providers your session registered, so subscriptions and custom providers work without extra setup.
 - It asks you questions with `plan_mode_question` (shown in its lane) and submits its plan with `plan_mode_complete`; resubmitting makes a new version.
 - Its subagents (`plan_subagents`) are read-only `pi` subprocesses on the subagent model. Planners and subagents start without your extensions, so a provider extension the parent session loaded (detected: pi-anthropic-auth, which keeps a Claude subscription paying) is passed to them; `providerExtensions` overrides this per provider (`[]` turns it off).
@@ -311,7 +311,7 @@ Planner sessions are stored under `~/.pi/agent/plan-mode/planners/`; runs are sa
 
 ## Limitations
 
-- The read-only policy covers Pi's `edit`/`write` (blocked), shell commands and MCP calls. Toolset and Other tools you select run as their own extensions implement them, and command grants and `safeSubcommands` bypass the shell review (see the [settings reference](./docs/settings.md)). It is not a sandbox.
+- The read-only policy covers Pi's `edit`/`write` (blocked), shell commands and MCP calls. Toolset and Other tools you select run as their own extensions implement them, and command grants (and, without pi-tool-gate, `safeSubcommands`) bypass the shell review (see the [settings reference](./docs/settings.md)). It is not a sandbox.
 - M (your main agent) is only asked to leave files alone while planning.
 - At most two planners per run.
 - `/planners` does nothing outside the interactive terminal UI. Plan mode works without a UI, but nobody can approve a plan there.

@@ -12,6 +12,7 @@ import {
   planModeCompleted,
 } from "../completion-tool.js";
 import { discoverFamily } from "../family-contract.js";
+import { gateShellReads } from "../gate-shell.js";
 import { formatModelSpec, type ModelSpec } from "../implementation-models.js";
 import {
   checkMcpResourceCall,
@@ -235,7 +236,15 @@ export function plannerExtension(policy: PlannerPolicy): ExtensionFactory {
       if (name === "bash") {
         const command = readCommand(event.input);
         if (commandGrantAllows(command, policy.grantPrefixes)) return undefined;
-        const blocked = findBlockedCommandSegment(command, policy.safeSubcommands, ctx.cwd);
+        // pi-tool-gate's read-only analysis, when it is loaded (it is the suite's one); otherwise this
+        // package's own policy and `safeSubcommands`. Command grants above apply either way.
+        const gate = gateShellReads(command, ctx.cwd);
+        const blocked =
+          gate === true
+            ? undefined
+            : gate === false
+              ? command.trim() || "(empty command)"
+              : findBlockedCommandSegment(command, policy.safeSubcommands, ctx.cwd);
         if (blocked !== undefined) {
           return {
             block: true,

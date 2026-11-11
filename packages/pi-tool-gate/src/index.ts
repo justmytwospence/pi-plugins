@@ -130,6 +130,7 @@ import { callView, describeCallPresentation } from "./view.ts";
 import { registerWorkflowRenderer, sendWorkflowTransition } from "./workflow-ui.ts";
 import { FOOTER_ACTIONS_CHANNEL, queryFooterActions, type FooterActionsRequest } from "./footer-actions.ts";
 import { askReadOnlyCall } from "./read-only-call.ts";
+import { declareShellReads } from "./shell-reads.ts";
 import { settingsCycles, type SettingCycleTrigger } from "./settings-cycle.ts";
 
 /** A declined call's result (Block). */
@@ -593,6 +594,8 @@ export default function toolGate(pi: ExtensionAPI) {
     return info?.annotations;
   };
   const readOnlyCall: ReadOnlyCall = (tool, input) => askReadOnlyCall(pi.events, tool, input);
+  // The suite's one answer to "does this shell command only read?" (shell-reads.ts): plan-mode's guards and Sidebar ask it.
+  declareShellReads(pi.events, (command) => isReadOnlyBash(command, config.readOnlyCommands) || isReadOnlyBash(command, config.readOnlyCommands, { expansions: true }));
   /**
    * The chat and plan workflows' fallback for a shell command the parser could not prove read-only:
    * System 1's probability that it only reads, against `thresholds.readOnly`. Never reads when
