@@ -84,6 +84,7 @@ describe("extension factory", () => {
     const { EARLY_STARTUP_HEADER_PATCH, EARLY_STARTUP_HEADER_SWAP_KEY, patchRegistry } = await import("../src/utils/patch-keys.ts");
     const prototype = (InteractiveMode as any).prototype;
     const savedInit = prototype.init;
+    const savedSetHeader = prototype.setExtensionHeader;
     const savedPatch = patchRegistry.get(EARLY_STARTUP_HEADER_PATCH);
     const enabled = config.showStartupHeader;
     const makeMode = (id: string) => {
@@ -156,14 +157,65 @@ describe("extension factory", () => {
 
       const handlers = new Map<string, (event: any, ctx: any) => Promise<void>>();
       startupHeader({ on: (name: string, handler: any) => handlers.set(name, handler) } as any);
-      await handlers.get("session_shutdown")!({}, native.ctx);
-      expect(native.headerRows()).toEqual(["", "native", ""]);
+      // Shutdown precedes /reload and session switches: it must not repaint the native header.
+      expect(handlers.has("session_shutdown")).toBe(false);
+      expect(native.headerRows()).toEqual([]);
       expect(first.headerRows()).toEqual(["", "native", ""]);
     } finally {
       // Leave no mutated spacer or wrapper ownership behind for other tests.
       clearStartupHeader({});
       config.showStartupHeader = enabled;
       prototype.init = savedInit;
+      prototype.setExtensionHeader = savedSetHeader;
+      if (savedPatch) patchRegistry.install(EARLY_STARTUP_HEADER_PATCH, savedPatch);
+      else patchRegistry.delete(EARLY_STARTUP_HEADER_PATCH);
+    }
+  });
+
+  test("Pi's extension UI reset keeps the empty header unless /ccstyle restores the native one", async () => {
+    const { config } = await import("../src/config/config.ts");
+    const { applyStartupHeader, clearStartupHeader, installEarlyStartupHeader } = await import("../src/feature/shell/startup-header.ts");
+    const { EARLY_STARTUP_HEADER_PATCH, patchRegistry } = await import("../src/utils/patch-keys.ts");
+    const prototype = (InteractiveMode as any).prototype;
+    const savedInit = prototype.init;
+    const savedSetHeader = prototype.setExtensionHeader;
+    const savedPatch = patchRegistry.get(EARLY_STARTUP_HEADER_PATCH);
+    const enabled = config.showStartupHeader;
+    const calls: unknown[] = [];
+    try {
+      prototype.setExtensionHeader = function (this: any, factory: unknown) {
+        calls.push(factory);
+        this.customHeader = (factory as any)?.({}, { fg: (_c: string, text: string) => text });
+      };
+      const native = prototype.setExtensionHeader;
+      patchRegistry.delete(EARLY_STARTUP_HEADER_PATCH);
+      config.showStartupHeader = true;
+      installEarlyStartupHeader();
+      const first = prototype.setExtensionHeader;
+      expect(first).not.toBe(native);
+      installEarlyStartupHeader(); // a reload reclaims the original instead of stacking wrappers
+      expect(prototype.setExtensionHeader).not.toBe(first);
+      expect(patchRegistry.get<any>(EARLY_STARTUP_HEADER_PATCH).originalSetHeader).toBe(native);
+
+      const mode: any = Object.create(prototype);
+      const ctx = { hasUI: true, ui: { setHeader: (factory: any) => mode.setExtensionHeader(factory) } };
+      applyStartupHeader(ctx);
+      // resetExtensionUI() on /reload, /new, /resume and fork.
+      mode.setExtensionHeader(undefined);
+      expect(typeof calls.at(-1)).toBe("function");
+      expect(mode.customHeader.render(80)).toEqual([]);
+
+      clearStartupHeader(ctx);
+      expect(calls.at(-1)).toBeUndefined();
+      expect(mode.customHeader).toBeUndefined();
+
+      config.showStartupHeader = false;
+      mode.setExtensionHeader(undefined);
+      expect(calls.at(-1)).toBeUndefined();
+    } finally {
+      config.showStartupHeader = enabled;
+      prototype.init = savedInit;
+      prototype.setExtensionHeader = savedSetHeader;
       if (savedPatch) patchRegistry.install(EARLY_STARTUP_HEADER_PATCH, savedPatch);
       else patchRegistry.delete(EARLY_STARTUP_HEADER_PATCH);
     }
@@ -196,9 +248,8 @@ describe("extension factory", () => {
       expect(attachStartupHost(mode)).toBe(state);
       expect(getStartupHost("header-session-1")).toBeUndefined();
       expect(getStartupHost(id.value)).toBe(state);
-      handlers.get("session_shutdown")!({}, ctx);
+      expect(handlers.has("session_shutdown")).toBe(false);
       expect(getStartupHost(id.value)).toBe(state);
-      expect(factory).toBeUndefined();
       // Header installation never creates or replaces the resource owner.
       applyStartupHeader(ctx);
       expect(getStartupHost(id.value)).toBe(state);

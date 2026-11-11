@@ -44,8 +44,13 @@ type EarlyHeaderPatch = {
 	active: boolean;
 	original: (...args: any[]) => unknown;
 	installed: (...args: any[]) => unknown;
+	originalSetHeader?: (factory: unknown) => unknown;
+	installedSetHeader?: (factory: unknown) => unknown;
 	modes: Set<HeaderSpacing>;
 };
+
+/** Set only while /ccstyle deliberately restores Pi's native header. */
+let restoringNativeHeader = false;
 
 type HeaderContainerSwap = {
 	original: (child: any) => unknown;
@@ -113,6 +118,23 @@ export function installEarlyStartupHeader(): void {
 		},
 	};
 	prototype.init = patch.installed;
+	if (typeof prototype.setExtensionHeader === "function") {
+		const originalSetHeader: (factory: unknown) => unknown =
+			previous?.installedSetHeader && prototype.setExtensionHeader === previous.installedSetHeader
+				? previous.originalSetHeader!
+				: prototype.setExtensionHeader;
+		patch.originalSetHeader = originalSetHeader;
+		// Pi resets extension UI (setExtensionHeader(undefined)) on /reload and every session switch, then
+		// rebinds extensions before session_start reapplies the header: keep the splash's empty header
+		// through that window instead of painting the native banner.
+		patch.installedSetHeader = function (this: any, factory: unknown) {
+			if (factory === undefined && patch.active && config.showStartupHeader && !restoringNativeHeader) {
+				return originalSetHeader.call(this, emptyHeader);
+			}
+			return originalSetHeader.call(this, factory);
+		};
+		prototype.setExtensionHeader = patch.installedSetHeader;
+	}
 	patchRegistry.install(EARLY_STARTUP_HEADER_PATCH, patch);
 	// A reload reclaims live containers without stacking another addChild wrapper.
 	for (const spacing of patch.modes) {
@@ -167,7 +189,14 @@ function installHeaderContainerSwap(mode: any, patch: EarlyHeaderPatch): void {
 
 /** Restore Pi's header when /ccstyle disables this feature. */
 export function clearStartupHeader(ctx: any): void {
-	if (ctx?.hasUI && typeof ctx.ui?.setHeader === "function") ctx.ui.setHeader(undefined);
+	if (ctx?.hasUI && typeof ctx.ui?.setHeader === "function") {
+		restoringNativeHeader = true;
+		try {
+			ctx.ui.setHeader(undefined);
+		} finally {
+			restoringNativeHeader = false;
+		}
+	}
 	updateHeaderSpacers(ctx, false);
 }
 
@@ -176,7 +205,6 @@ export default function piStartupHeader(pi: ExtensionAPI) {
 		if (ctx.hasUI) setStartupResourcesTheme(() => ctx.ui.theme);
 		applyStartupHeader(ctx);
 	});
-	pi.on("session_shutdown", async (_event, ctx) => {
-		clearStartupHeader(ctx);
-	});
+	// No session_shutdown restore: shutdown precedes /reload and every session switch, and restoring
+	// Pi's header there would paint the native banner until the next session_start.
 }
