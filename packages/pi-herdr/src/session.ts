@@ -51,6 +51,7 @@ export const PI_CHILD: ChildAgent = {
     const args = ["--name", name];
     if (opts.model) args.push("--model", opts.model);
     if (opts.thinking) args.push("--thinking", opts.thinking);
+    if (opts.session) args.push("--session", opts.session);
     return args;
   },
   reply: async (rec) => (rec.session ? readReply(rec.session) : undefined),

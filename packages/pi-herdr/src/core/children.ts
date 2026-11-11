@@ -13,6 +13,7 @@
 // integration for that agent reports (a pi session file, an opencode session id). Turns the user
 // starts in the child's pane are not sent back.
 import { randomUUID } from "node:crypto";
+import { realpathSync } from "node:fs";
 import { type Call, errorText, splitDirection } from "./herdr.ts";
 
 export type Where = "tab" | "split" | "worktree";
@@ -113,7 +114,15 @@ export interface SpawnOptions {
   thinking?: string;
   focus?: boolean;
   cwd: string;
+  /** A session file for the child to continue (`pi --session`): a fork of the parent's conversation. */
+  session?: string;
+  /** where=worktree: called with the checkout's path once it exists, before the child starts; returns `session`. */
+  onCheckout?: (path: string) => string;
 }
+
+const real = (p: string): string => {
+  try { return realpathSync(p); } catch { return p; }
+};
 
 const NAME_RE = /^[a-z][a-z0-9_-]{0,31}$/u;
 const STOP_WORDS = new Set(["a", "an", "the", "and", "or", "to", "of", "in", "on", "for", "with", "please", "this", "that", "it", "is"]);
@@ -137,10 +146,11 @@ export function slugName(text: string): string {
   return out.slice(0, 24);
 }
 
-export function childPreamble(kind: string, parentPane: string, rec: Pick<ChildRecord, "where" | "branch" | "cwd">): string {
+export function childPreamble(kind: string, parentPane: string, rec: Pick<ChildRecord, "where" | "branch" | "cwd">, forked = false): string {
   const lines = [
     `[You are a child ${kind} session. Another ${kind} session (herdr pane ${parentPane}) started you and gave you the task below. Your final reply to each of its messages is sent back to it, so end each turn with a self-contained answer: what you did, what you found, and what is left. The user can also talk to you directly in this pane.`,
   ];
+  if (forked) lines.push("This session continues the parent's conversation: everything above the task is that conversation, carried over.");
   if (rec.where === "worktree" && rec.branch) lines.push(`You are in a git worktree of your own (${rec.cwd}) on branch ${rec.branch}: work and commit there.`);
   return `${lines.join(" ")}]\n\n`;
 }
@@ -246,11 +256,19 @@ export class Children {
     const path = `${root}/.worktrees/${opts.branch.replaceAll("/", "-")}`;
     const list = await exec("git", ["worktree", "list", "--porcelain"], root);
     const exists = list.stdout.split("\n").includes(`worktree ${path}`);
-    // herdr checks out an existing branch or creates it from the repo's HEAD.
+    // herdr checks out an existing branch or creates it from origin's default branch.
+    let base: string | undefined;
+    if (!exists) {
+      await exec("git", ["fetch", "--prune", "--quiet", "origin"], root);
+      const head = await exec("git", ["symbolic-ref", "--quiet", "--short", "refs/remotes/origin/HEAD"], root);
+      base = head.code === 0 ? head.stdout.trim() || undefined : undefined;
+    }
     const open = exists
       ? await call("worktree.open", { cwd: root, path, focus: !!opts.focus }, 15_000)
-      : await call("worktree.create", { cwd: root, branch: opts.branch, path, focus: !!opts.focus }, 60_000);
+      : await call("worktree.create", { cwd: root, branch: opts.branch, path, ...(base ? { base } : {}), focus: !!opts.focus }, 60_000);
     if (open.error) throw new Error(`herdr could not open the worktree: ${errorText(open)}`);
+    // A new branch must not track the default branch: a bare `git push` would target it.
+    if (!exists) await exec("git", ["-C", path, "branch", "--unset-upstream"], path);
     const workspaceId: string | undefined = open.result?.workspace?.workspace_id;
     if (!open.result?.already_open && open.result?.root_pane?.pane_id) return { paneId: open.result.root_pane.pane_id, workspaceId, cwd: path };
     // Already open (someone works there): the child gets a tab of its own in that space.
@@ -337,7 +355,9 @@ export class Children {
     }
 
     const { agent } = this.deps;
-    const args = agent.args(opts, name);
+    const session = opts.onCheckout && where === "worktree" ? opts.onCheckout(cwd) : opts.session;
+    assert();
+    const args = agent.args({ ...opts, ...(session ? { session } : {}) }, name);
     // A new pane's shell takes a moment to reach its prompt (agent_pane_busy until then).
     let start = await call("agent.start", { name, kind: agent.kind, pane_id: paneId, args, timeout_ms: 90_000 }, 95_000);
     for (let i = 0; start.error?.code === "agent_pane_busy" && i < 30; i++) {
@@ -368,7 +388,7 @@ export class Children {
     // agent.start returns before the agent takes input (pi: its extensions still loading).
     await this.waitReady(rec);
     assert();
-    await this.prompt(rec, childPreamble(agent.kind, selfPane, rec) + opts.task);
+    await this.prompt(rec, childPreamble(agent.kind, selfPane, rec, !!session) + opts.task);
     return rec;
   }
 
@@ -643,6 +663,24 @@ export class Children {
     this.save(rec);
     const kept = rec.where === "worktree" && rec.branch ? ` Its checkout and branch ${rec.branch} stay (git worktree remove ${rec.cwd} removes the checkout).` : "";
     return `Closed ${rec.name}'s pane; its ${this.deps.agent.kind} session stays${rec.session ? ` (${rec.session})` : ""}.${kept}`;
+  }
+
+  /**
+   * herdr removed the checkout at `path` (with its space): its worktree children are closed. Returns
+   * them, for the caller to tell the parent.
+   */
+  checkoutRemoved(path: string): ChildRecord[] {
+    const gone = real(path);
+    const hit: ChildRecord[] = [];
+    for (const rec of this.records.values()) {
+      if (rec.closed || rec.peer || rec.where !== "worktree" || real(rec.cwd) !== gone) continue;
+      if (rec.awaiting) this.deps.hold(rec, false);
+      rec.awaiting = false;
+      rec.closed = true;
+      this.save(rec);
+      hit.push(rec);
+    }
+    return hit;
   }
 
   /** A reply was successfully accepted by pi; save its acknowledgement on this branch. */

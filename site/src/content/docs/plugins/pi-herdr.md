@@ -11,7 +11,7 @@ plugin: pi-herdr
 - **Controls:** `/fork-here [name]` (exact current point → new tab, split or space, idle source required), `/tree-fork` (tree point → new tab, split or space), `/crew` (board, sync, claim, rule, rules, fetch) and the `herdr` tool: list/send/read/wait for any agent (optionally on a saved Herdr `machine`), `await_reply` and `bg_wait herdr:<name>` to hear back, broadcast with `names`/`cwd_prefix`; spawn/interrupt/close for children; `crew` to coordinate a repository's worktree sessions (directives, crew updates, sync). No global shortcut; child activities offer read-only inspection. `list`, `read`, `wait` and `crew` status are declared reads on the `pi-plugins.read-only-call.v1` channel, so [pi-tool-gate](/plugins/pi-tool-gate/)'s chat and plan workflows and Sidebar's guard let them run; the other actions stay gated.
 - **Settings:** No plugin JSON settings. Child location: tab; focus: false; model/effort inherit the parent. `PI_HERDR_PR=0` disables PR polling; `PI_HERDR_SUMMARY=0` disables summary and fork-naming model calls, `PI_HERDR_SUMMARY_MODEL` picks their model; `PI_HERDR_DRAFT_GUARD=0` turns off the draft guard; `PI_HERDR_INBOX_RATE` sets the loop guard (default `6/600`, `0` off); `PI_HERDR_CREW_REMOTE_MS` sets how often a crew's coordinator checks the remote (default 5 minutes, `0` never).
 - **Requirements, cost & privacy:** Interactive Herdr socket/pane, Pi/provider access for children; Git for worktrees, `gh` for PRs. Herdr socket operations create/open checkouts; no external worktree CLI. The `$summary` line can use a small Haiku request per settled turn; fork naming can make one small request after destination confirmation; children are paid sessions.
-- **Integrations & limits:** Optional event-bus bridge, placement of pi-worktree's moved sessions (`worktree:place`), `/tasks`/FleetView child entries (awaited agents as `peer` rows, never stoppable), and pi-bg `bg:external` for awaited replies. An activity stop interrupts an awaited turn, never closes the pane. Herdr itself owns pane state.
+- **Integrations & limits:** Optional event-bus bridge, carrying this conversation into a worktree child (`spawn` with `fork`) and hearing when the worktree-reaper plugin removes it, `/tasks`/FleetView child entries (awaited agents as `peer` rows, never stoppable), and pi-bg `bg:external` for awaited replies. An activity stop interrupts an awaited turn, never closes the pane. Herdr itself owns pane state.
 
 pi-herdr adds Pi-specific metadata and an event-bus bridge inside Herdr. It complements Herdr's own Pi integration rather than replacing it: Herdr's integration owns working, blocked, and idle state, while this plugin adds background labels, presentation, pull-request status, messaging between agents, and interactive children.
 
@@ -64,7 +64,7 @@ Workspace metadata is recomputed for the destination rather than copied. The dep
 
 This handles an external move automatically: there is no new UI, command or `herdr` move action, and no checkout or cwd migration. A grouped worktree space can contain the existing session; spawning a child creates a separate session instead.
 
-To carry this conversation into a worktree, use pi-worktree (`/worktree new <branch>` or its `worktree` tool): it starts the forked session in the worktree's space through pi-herdr (the `worktree:place` event) and closes this pane. Herdr refuses to close the last pane of a repository's main space while worktree spaces are grouped under it (`confirmation_required`); that pane stays, and pi-worktree reports why, as it does for any other close failure.
+To carry this conversation into a worktree, use `spawn` with `where: "worktree"` and `fork: true`: the forked conversation continues there as a child and this session stays in the main checkout. Worktree checkouts are Herdr's job (the worktree-reaper plugin removes landed ones); pi-worktree is retired. Herdr refuses to close the last pane of a repository's main space while worktree spaces are grouped under it (`confirmation_required`); that pane stays, and pi-worktree reports why, as it does for any other close failure.
 
 ## The herdr tool
 
@@ -76,7 +76,7 @@ One tool reaches every agent in Herdr, on this machine or, with `machine`, on a 
 | `send` | `name` and `message`, optional `machine` and `await_reply`. While the agent is working, `delivery` is required: `steer` (into its current turn) or `queue` (after it). The result says whether the message started a turn, was steered in, queued, held (a dialog is open, or its user is typing) or deferred (a loop guard). A child's reply is delivered automatically; any other agent's only with `await_reply`. `names` or `cwd_prefix` instead of `name` broadcasts. |
 | `read` | `name`; optional `lines` (default 80), `machine`. A local Pi's last reply from its session file when idle, otherwise its screen, labeled as a screen read. |
 | `wait` | `name`; optional `timeout_ms` (default 10 minutes), `machine`. Blocks until the agent's turn ends, then reads it. Prefer `await_reply`; refused for an agent whose reply is already awaited, and for children. |
-| `spawn` | Required `task`; optional `name`, `where`, `branch`, `model`, `thinking`, `focus`. |
+| `spawn` | Required `task`; optional `name`, `where`, `branch`, `fork`, `model`, `thinking`, `focus`. |
 | `interrupt` | A child's `name`; sends Escape to end its current turn. |
 | `close` | A child's `name`; closes the pane, retaining the session file. |
 | `crew` | `op`: `status` (default), `claim` or `sync`; optional `takeover`. The repository's worktree sessions, coordinated from this session; see [Crews](#crews). |
@@ -149,7 +149,17 @@ For a requested interactive handoff in the same checkout:
 
 The default location is a new tab; `split` places it beside the parent. Both share the checkout. `worktree` requires `branch`: Herdr creates `<repo>/.worktrees/<branch>` (slashes as dashes) and opens it in its grouped space, reusing an existing checkout or space when available. Closing that child does not remove its checkout or branch.
 
-Model and thinking default to the parent's choices, and focus defaults to false. Give a complete task: the child cannot see the parent conversation.
+Model and thinking default to the parent's choices, and focus defaults to false. Give a complete task: the child cannot see the parent conversation, unless it was forked.
+
+### Continuing this conversation in a worktree
+
+```json
+{ "action": "spawn", "where": "worktree", "branch": "login-retry", "fork": true, "task": "Implement the retry we just designed." }
+```
+
+`fork: true` (with `where: "worktree"`) forks this conversation into a session file for the worktree and starts the child on it, so the child continues the conversation and `task` is the next step. Its replies arrive like any child's. This session stays in the main checkout: Herdr keeps a repository's main space as the anchor of its worktree spaces. A new branch starts from origin's default branch (after a fetch) and tracks nothing, so a bare `git push` cannot target it. The conversation must be saved first.
+
+pi-herdr never removes a checkout. Herdr's worktree-reaper plugin removes landed, clean, idle worktrees with their space and branch. While this session has an open worktree child it listens for Herdr's `worktree.removed` event; when the child's checkout is removed, the child is marked closed and a passive `herdr-worktree` note arrives with the next prompt, starting no turn.
 
 ## Replies and persistence
 

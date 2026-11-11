@@ -17,7 +17,7 @@ test("Herdr guidance separates report-back delegation from persistent handoffs a
     registerTool(tool: Parameters<ExtensionAPI["registerTool"]>[0]) { registered = tool; },
   } as unknown as ExtensionAPI);
   expect(registered?.name).toBe("herdr");
-  expect(channels).toContain("worktree:place");
+  expect(channels).not.toContain("worktree:place");
   expect(registered?.description).toContain("persistent, human-led");
   expect(registered?.description).toContain("use a headless subagent instead");
   expect(registered?.description).toContain("even for long or multi-step tasks");
@@ -29,8 +29,10 @@ test("Herdr guidance separates report-back delegation from persistent handoffs a
   expect(guidelines).toContain("where=split only for deliberate side-by-side");
   expect(guidelines).toContain("otherwise ask before creating one");
   expect(guidelines).toContain("already open");
-  expect(guidelines).toContain("pi-worktree's `worktree` tool");
-  expect(guidelines).toContain("spawn where=worktree starts a separate session");
+  expect(guidelines).toContain("herdr action=spawn where=worktree fork=true");
+  expect(guidelines).toContain("this session stays in the main checkout");
+  expect(guidelines).toContain("a new checkout starts from origin's default branch");
+  expect(guidelines).not.toContain("pi-worktree");
   expect(guidelines).not.toContain("move its existing Herdr pane");
   expect(guidelines).not.toContain("Use herdr_child when the work is long or open-ended");
   // Messaging any agent goes through the tool, not bash `herdr agent prompt`.
@@ -50,4 +52,5 @@ test("Herdr guidance separates report-back delegation from persistent handoffs a
   const schema = JSON.stringify(registered?.parameters);
   expect(schema).toContain("user-requested independent branch/checkout");
   expect(schema).toContain("do not create a worktree without the user's request");
+  expect(schema).toContain('"fork"');
 });

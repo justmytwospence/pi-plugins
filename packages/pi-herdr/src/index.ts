@@ -38,7 +38,7 @@ import { existsSync, realpathSync } from "node:fs";
 import { hostname } from "node:os";
 import { resolve as resolvePath } from "node:path";
 import { matchesKey } from "@earendil-works/pi-tui";
-import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { getAgentDir, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import { transcriptCheckpoint } from "./transcript-contract.ts";
 import { declareReadOnlyCalls } from "./read-only-call.ts";
@@ -52,7 +52,8 @@ import { BASE_TOKEN, Crew, CREW_MESSAGE, CrewWatch, type CrewWatchDeps, DRIFT_TO
 import { computeDrift, currentBranch, defaultBase, driftMatters, driftNote, driftToken, RefWatcher } from "./drift.ts";
 import { type ChildRecord, Children, type Exec, type Where } from "./core/children.ts";
 import { DraftGuard } from "./draft-guard.ts";
-import { FORK_BOUNDARY } from "./fork-session.ts";
+import { createTreeFork, FORK_BOUNDARY } from "./fork-session.ts";
+import { HerdrSubscription } from "./events.ts";
 import { ACK_TTL_MS, ackTokenName, type Delivery, formatAck, Inbox, INBOX_SOURCE, INBOX_TOKEN, INBOX_TTL_MS, inboxTokenValue, messageText, type Outcome, parseRate, Presence, processInboxState, type Reason, type Sender, TYPING_IDLE_MS } from "./inbox.ts";
 import { type Call, herdrTarget, socketCall } from "./core/herdr.ts";
 import { displayAgent, firstUserText, titleFromPrompt } from "./identity.ts";
@@ -62,8 +63,7 @@ import { withIntents } from "./intent.ts";
 import { SelfLocation, type LocationDependencies } from "./location.ts";
 import { PI_CHILD } from "./session.ts";
 import { registerTreeFork } from "./tree-fork.ts";
-import { PLACE_EVENT, type PlaceEvent } from "./place-contract.ts";
-import { placeSession } from "./worktree-place.ts";
+import { sessionDirFor } from "./session-dir.ts";
 import { blockedSummary, type SummaryRegistry, turnSummary } from "./summary.ts";
 
 const TOOL = "herdr";
@@ -125,7 +125,8 @@ const Params = Type.Object({
       description: "spawn: tab in this space for a persistent session sharing this checkout (default); split for side-by-side interaction; worktree for a user-requested independent branch/checkout in its own space (needs branch)",
     }),
   ),
-  branch: Type.Optional(Type.String({ description: "spawn with where=worktree: the user-requested independent branch (checked out, tracked or created from HEAD); do not create a worktree without the user's request" })),
+  branch: Type.Optional(Type.String({ description: "spawn with where=worktree: the user-requested independent branch (checked out if it exists, else created from origin's default branch); do not create a worktree without the user's request" })),
+  fork: Type.Optional(Type.Boolean({ description: "spawn with where=worktree: carry this conversation into the child, which continues it in the worktree; its replies come back here and this session stays in the main checkout" })),
   model: Type.Optional(Type.String({ description: "spawn: provider/model; default this session's" })),
   thinking: Type.Optional(Type.String({ description: "spawn: off|minimal|low|medium|high|xhigh|max; default this session's" })),
   focus: Type.Optional(Type.Boolean({ description: "spawn: switch to the child's pane (default false)" })),
@@ -147,6 +148,8 @@ export interface HerdrDependencies {
   call?: Call;
   /** Tests: the coordinator's herdr event subscription. */
   subscribe?: CrewWatchDeps["subscribe"];
+  /** Tests: the `worktree.removed` subscription for worktree children. */
+  subscribeWorktrees?: (onEvent: (e: { event: string; data: any }) => void, onResync: () => void) => { close(): void };
   /** Tests: this session's pane-move subscription, independent of CrewWatch. */
   subscribeLocation?: LocationDependencies["subscribe"];
   exec?: Exec;
@@ -381,6 +384,43 @@ export default function piHerdr(pi: ExtensionAPI, dependencies: HerdrDependencie
     driftSoon = setTimeout(() => { driftSoon = undefined; void recomputeDrift(); }, ms);
     driftSoon.unref?.();
   }
+  // herdr removed a worktree child's checkout (the worktree-reaper plugin, or by hand): the child
+  // is closed and the parent hears of it with its next prompt.
+  let worktreeWatch: { close(): void } | undefined;
+  const stopWorktreeWatch = () => {
+    worktreeWatch?.close();
+    worktreeWatch = undefined;
+  };
+  const tellRemoved = (rec: ChildRecord, path: string) => {
+    safely(() => pi.sendMessage({
+      customType: "herdr-worktree",
+      content: `[herdr] ${rec.name}'s worktree ${rec.branch ?? path} was removed with its space (${path}); its pane is closed.`,
+      display: true,
+    }, { deliverAs: "nextTurn" }));
+  };
+  const syncWorktreeWatch = () => {
+    const open = [...children.records.values()].some((r) => !r.closed && !r.peer && r.where === "worktree");
+    if (!active || !open) return stopWorktreeWatch();
+    if (worktreeWatch) return;
+    const onEvent = (e: { event: string; data: any }) => {
+      const path = e.event === "worktree_removed" ? e.data?.worktree?.path : undefined;
+      if (typeof path !== "string") return;
+      for (const rec of children.checkoutRemoved(path)) tellRemoved(rec, path);
+      syncWorktreeWatch();
+    };
+    // After every (re)connection events may have been missed: a checkout that is gone is removed.
+    const onResync = () => {
+      for (const rec of [...children.records.values()]) {
+        if (!rec.closed && !rec.peer && rec.where === "worktree" && !existsSync(rec.cwd)) {
+          for (const gone of children.checkoutRemoved(rec.cwd)) tellRemoved(gone, rec.cwd);
+        }
+      }
+      syncWorktreeWatch();
+    };
+    worktreeWatch = dependencies.subscribeWorktrees
+      ? dependencies.subscribeWorktrees(onEvent, onResync)
+      : dependencies.call ? undefined : new HerdrSubscription({ socketPath: target.socketPath, subscriptions: [{ type: "worktree.removed" }], onEvent, onResync });
+  };
   const stopCrewWatches = () => {
     refWatch?.close();
     crewWatch?.close();
@@ -735,20 +775,6 @@ export default function piHerdr(pi: ExtensionAPI, dependencies: HerdrDependencie
   pi.events.on("herdr:probe", (e) => {
     if (active) (e as { reply?: () => void })?.reply?.();
   });
-  pi.events.on(PLACE_EVENT, (e) => {
-    const ev = e as PlaceEvent | undefined;
-    if (!active || !branchCurrent() || typeof ev?.claim !== "function" || !ev.claim("pi-herdr") || !ev.request) return;
-    const epoch = generation;
-    const revision = location.revision;
-    void placeSession({
-      call,
-      selfPane: async () => (await location.require()).paneId,
-      uniqueName: (w) => children.uniqueName(w),
-      isCurrent: () => active && epoch === generation && revision === location.revision && branchCurrent(),
-      ...(dependencies.pollMs ? { pollMs: dependencies.pollMs } : {}),
-    }, ev.request).then((r) => ev.done(r), (err) => ev.done({ ok: false, error: err instanceof Error ? err.message : String(err) }));
-  });
-
   const restoreBranch = (ctx: ExtensionContext) => {
     lastCtx = ctx;
     anchorBranch();
@@ -772,6 +798,7 @@ export default function piHerdr(pi: ExtensionAPI, dependencies: HerdrDependencie
       if (e.type === "custom_message" && e.customType === "herdr-child") restoreReceipt(e.details?.turnKey);
     }
     children.restore(saved.values());
+    syncWorktreeWatch();
     childrenActivity.restored();
     offerChildren();
     for (const rec of children.records.values()) if (rec.pendingReply) deliver(rec, rec.pendingReply, rec.pendingReply);
@@ -783,6 +810,7 @@ export default function piHerdr(pi: ExtensionAPI, dependencies: HerdrDependencie
     childrenActivity.dispose();
     endExternals("the conversation moved to another branch");
     children.shutdown();
+    stopWorktreeWatch();
     generation++;
     workspace = undefined;
     restoreBranch(ctx);
@@ -796,6 +824,7 @@ export default function piHerdr(pi: ExtensionAPI, dependencies: HerdrDependencie
     if (active) {
       endExternals("the session ended");
       children.shutdown();
+      stopWorktreeWatch();
     }
     active = false;
     generation++;
@@ -884,6 +913,7 @@ export default function piHerdr(pi: ExtensionAPI, dependencies: HerdrDependencie
     childrenActivity.dispose();
     endExternals("the session ended");
     children.shutdown();
+    stopWorktreeWatch();
     // A surviving host may synchronously announce itself from activity:gone. Invalidate first,
     // so its announcement cannot resurrect a source belonging to this departing runtime.
     active = false;
@@ -1100,13 +1130,13 @@ export default function piHerdr(pi: ExtensionAPI, dependencies: HerdrDependencie
     name: TOOL,
     label: "Herdr",
     description:
-      "Herdr: talk to any agent in herdr (on this machine, or on a saved herdr machine with `machine`) and start persistent, human-led pi sessions (children) for an explicit interactive-session request or a clear handoff to the user. Children are not for delegated work whose purpose is to report back to this session: use a headless subagent instead, even for long or multi-step tasks. action=list shows the agents. send (name, message; delivery when the agent is working) messages any agent; a pi with pi-herdr gets it through its inbox, which never touches the draft in its editor, and the result says whether it started a turn, was steered, queued, held (a dialog is open, or its user is typing) or deferred (it has had many messages from you without its user answering). With await_reply, any agent's answer to that message arrives as a message when its turn ends, like a child's; `bg_wait herdr:<name>` waits for it, alone or with others. send with `names` or `cwd_prefix` instead of `name` broadcasts to several agents at once, with one result line each. read (name) returns its last reply or its screen; wait (name) blocks until its turn ends, then reads it (prefer await_reply). spawn takes `task` (plus optional name, where, branch, model, thinking, focus): a tab shares this checkout in the existing space; a split is for side-by-side interaction; a worktree gets its own space and requires a user-requested independent branch/checkout. A child's replies arrive as messages, so do not poll or wait on it. interrupt and close act on children only. crew (op status|claim|sync) coordinates this repository's worktree sessions from this session: status shows each one's state, PR and last turn; sync opens every worktree's space, resumes its pi and makes it your child; standing rules for all of them go in the directives file it names.",
+      "Herdr: talk to any agent in herdr (on this machine, or on a saved herdr machine with `machine`) and start persistent, human-led pi sessions (children) for an explicit interactive-session request or a clear handoff to the user. Children are not for delegated work whose purpose is to report back to this session: use a headless subagent instead, even for long or multi-step tasks. action=list shows the agents. send (name, message; delivery when the agent is working) messages any agent; a pi with pi-herdr gets it through its inbox, which never touches the draft in its editor, and the result says whether it started a turn, was steered, queued, held (a dialog is open, or its user is typing) or deferred (it has had many messages from you without its user answering). With await_reply, any agent's answer to that message arrives as a message when its turn ends, like a child's; `bg_wait herdr:<name>` waits for it, alone or with others. send with `names` or `cwd_prefix` instead of `name` broadcasts to several agents at once, with one result line each. read (name) returns its last reply or its screen; wait (name) blocks until its turn ends, then reads it (prefer await_reply). spawn takes `task` (plus optional name, where, branch, model, thinking, focus): a tab shares this checkout in the existing space; a split is for side-by-side interaction; a worktree gets its own space and requires a user-requested independent branch/checkout (new branches start from origin's default branch); fork=true carries this conversation there instead of a fresh task. A child's replies arrive as messages, so do not poll or wait on it. interrupt and close act on children only. crew (op status|claim|sync) coordinates this repository's worktree sessions from this session: status shows each one's state, PR and last turn; sync opens every worktree's space, resumes its pi and makes it your child; standing rules for all of them go in the directives file it names.",
     promptSnippet: "Message, read and wait on any herdr agent; start persistent human-led pi sessions in herdr for interactive requests or user handoffs, not report-back subagents",
     promptGuidelines: [
-      "Moving this conversation into a worktree (a user-requested feature or PR checkout) is pi-worktree's `worktree` tool when it is available, not spawn: spawn where=worktree starts a separate session. Moving a Herdr pane by hand does not change Pi's working directory or checkout.",
+      "To continue this conversation in a worktree (a user-requested feature or PR checkout), use herdr action=spawn where=worktree fork=true with the branch, and the next step as task: the child carries this conversation, its replies come back here, and this session stays in the main checkout. herdr's worktree-reaper removes the checkout and its space once the branch lands; do not remove worktrees yourself. Moving a Herdr pane by hand does not change Pi's working directory or checkout.",
       "Start a herdr child (herdr action=spawn) only for an explicit interactive-session request or a clear persistent, human-led handoff that the user will continue independently. Duration, complexity, the user possibly wanting to watch, and a child's ability to report back are not reasons to use one instead of a headless subagent.",
       "For an interactive handoff sharing the current checkout and branch, use where=tab in the existing Herdr space. Tabs and splits share files; do not treat them as isolated parallel editors. Use where=split only for deliberate side-by-side interaction or when requested, and preserve focus unless asked to switch.",
-      "Use where=worktree for an independent branch/checkout only when the user requests a worktree or branch isolation; otherwise ask before creating one. It opens the checkout in its own Herdr space (or adds a tab there if already open). Do not create a new space or worktree merely because work is delegated, long, or parallel.",
+      "Use where=worktree for an independent branch/checkout only when the user requests a worktree or branch isolation; otherwise ask before creating one. It opens the checkout in its own Herdr space (or adds a tab there if already open); a new checkout starts from origin's default branch. Do not create a new space or worktree merely because work is delegated, long, or parallel.",
       "Give a herdr child a complete, self-contained task: it cannot see this conversation.",
       "A herdr child's reply arrives as a message when its turn ends; end your turn instead of polling, and use herdr action=send for follow-ups.",
       "Message another agent (a child or any other, here or on a saved herdr machine) with herdr action=send, not `herdr agent prompt` in bash: a pi with pi-herdr gets it through its inbox without touching the user's draft there, and the result says whether it started a turn, was steered in, was queued, is held behind a dialog or its user's typing, or was deferred. If the target is working, choose delivery: steer for a correction to the work it is doing now; queue for new or separate work that should not derail its current turn.",
@@ -1183,18 +1213,36 @@ export default function piHerdr(pi: ExtensionAPI, dependencies: HerdrDependencie
         case "spawn": {
           if (machine) throw new Error("Children start on this machine only; drop `machine`.");
           const where: Where = params.where ?? "tab";
-          const rec = await children.spawn({
-            task: need(params.task, "task"),
-            name: params.name,
-            where,
-            branch: params.branch,
-            model: params.model ?? (ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : undefined),
-            thinking: params.thinking ?? pi.getThinkingLevel(),
-            focus: params.focus,
-            cwd: ctx.cwd,
-          });
+          let onCheckout: ((path: string) => string) | undefined;
+          if (params.fork) {
+            if (where !== "worktree") throw new Error("fork needs where=worktree.");
+            const source = ctx.sessionManager.getSessionFile();
+            const leaf = ctx.sessionManager.getLeafId();
+            if (!source || !leaf) throw new Error("This session is not saved yet, so it cannot be carried into a worktree.");
+            const sessionDir = ctx.sessionManager.getSessionDir();
+            onCheckout = (path) => createTreeFork(source, sessionDirFor(path, { cwd: ctx.cwd, sessionDir }, getAgentDir()), path, leaf);
+          }
+          let rec: ChildRecord;
+          try {
+            rec = await children.spawn({
+              task: need(params.task, "task"),
+              name: params.name,
+              where,
+              branch: params.branch,
+              model: params.model ?? (ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : undefined),
+              thinking: params.thinking ?? pi.getThinkingLevel(),
+              focus: params.focus,
+              cwd: ctx.cwd,
+              ...(onCheckout ? { onCheckout } : {}),
+            });
+          } finally {
+            syncWorktreeWatch();
+          }
           const place = where === "worktree" ? `worktree ${rec.branch} (${rec.cwd})` : where === "split" ? "a split beside this pane" : "a new tab";
           const identity = agentLabel(await agents.get(rec.paneId).catch(() => undefined));
+          if (params.fork) {
+            return text(`Continuing this conversation in worktree ${rec.branch} (${rec.cwd}) as child ${identity} (routing handle ${rec.name}, pane ${rec.paneId}); its replies arrive here as messages. This session stays in the main checkout. herdr's worktree-reaper removes the checkout and its space once the branch lands.`);
+          }
           return text(`Started herdr child ${identity} in ${place} and sent it the task. Routing handle: ${rec.name}; pane: ${rec.paneId}. Its reply arrives as a message when its turn ends; do not poll.`);
         }
         case "send": {
