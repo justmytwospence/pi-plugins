@@ -1148,10 +1148,24 @@ test("/plan enters plan mode: only the plan file may be written, and only read-o
   );
   assert.match(
     (await emit("tool_call", { toolName: "edit", input: { path: "src/a.ts" } })).reason,
-    /only file you may write is the plan file/u,
+    /nothing in the repository may be edited.*the plan file, .*, and scratch files under .*\.spike/su,
+  );
+  // The scratch directory beside the plan file takes spikes; a sibling that merely starts with its name does not.
+  const scratch = planFile.replace(/\.md$/u, ".spike");
+  assert.equal(
+    await emit("tool_call", { toolName: "write", input: { path: `${scratch}/probe.ts`, content: "x" } }),
+    undefined,
+  );
+  assert.equal(
+    (await emit("tool_call", { toolName: "write", input: { path: `${scratch}s/probe.ts`, content: "x" } })).block,
+    true,
   );
   assert.equal(await emit("tool_call", { toolName: "bash", input: { command: "git status && rg foo" } }), undefined);
   assert.equal((await emit("tool_call", { toolName: "bash", input: { command: "npm install left-pad" } })).block, true);
+  const background = await emit("tool_call", { toolName: "bg_run", input: { command: "npm install left-pad" } });
+  assert.match(background.reason, /without pi-tool-gate only read-only commands run/u);
+  assert.equal(await emit("tool_call", { toolName: "bg_run", input: { command: "git status" } }), undefined);
+  assert.equal((await emit("tool_call", { toolName: "powershell", input: { command: "Remove-Item x" } })).block, true);
 
   // Your agent is told once, with your next prompt.
   const first = await emit("before_agent_start", { prompt: "x" });
@@ -1467,7 +1481,7 @@ test("revision summaries are bounded, suppressed on first/identical plans and cl
 });
 
 test("with pi-tool-gate, /plan requests planning and approval requests ordinary work", async () => {
-  const { mock, context, tool, inline, gateEvents, selects } = await setup({
+  const { mock, context, tool, emit, inline, gateEvents, selects } = await setup({
     gate: true,
     select: ["Yes, implement here"],
   });
@@ -1485,6 +1499,11 @@ test("with pi-tool-gate, /plan requests planning and approval requests ordinary 
   assert.equal(context.statuses.get("permission-mode"), undefined);
   const planFile = inline().planFile as string;
   assert.ok(gateEvents.some((event) => event.channel === PLAN_PROVIDER && event.data.planFile === planFile));
+  const provider = gateEvents.filter((event) => event.channel === PLAN_PROVIDER).at(-1)?.data;
+  assert.equal(provider.scratchDir, planFile.replace(/\.md$/u, ".spike"), "the gate is told where spikes may go");
+  // The gate enforces plan's scope; this extension stays out of its way, whichever handler runs first.
+  assert.equal(await emit("tool_call", { toolName: "edit", input: { path: "src/a.ts" } }), undefined);
+  assert.equal(await emit("tool_call", { toolName: "bash", input: { command: "npm install left-pad" } }), undefined);
   writeFileSync(planFile, "# Plan\n");
   await tool(EXIT_TOOL).execute("t1", {}, undefined, undefined, context.ctx);
   assert.deepEqual(selects[0]?.options, [
@@ -1505,6 +1524,32 @@ test("with pi-tool-gate, /plan requests planning and approval requests ordinary 
   assert.equal(inline().active, true);
   mock.eventBus.emit(MODE_CHANGED, { mode: "work", cycle: [] });
   assert.equal(inline().active, false);
+});
+
+test("a session whose parent is planning is not itself planning: no plan file, no notice, no entering", async () => {
+  const { mock, context, emit, inline, gateEvents } = await setup({ gate: true });
+  mock.eventBus.emit(MODE_CHANGED, { mode: "plan", cycle: ["work", "chat", "plan"], delegated: true });
+  assert.notEqual(inline()?.active, true);
+  assert.equal(inline()?.planFile, undefined);
+  assert.equal(await emit("before_agent_start", { prompt: "x" }), undefined, "no plan-mode notice");
+  await mock.commands.get("plan")?.handler("", context.ctx);
+  assert.notEqual(inline()?.active, true);
+  assert.deepEqual(
+    gateEvents.filter((event) => event.channel === MODE_SET),
+    [],
+    "it never asks the gate for plan",
+  );
+  // Its own planning starts again once the workflow is no longer inherited.
+  mock.eventBus.emit(MODE_CHANGED, { mode: "work", cycle: ["work", "chat", "plan"] });
+  await mock.commands.get("plan")?.handler("", context.ctx);
+  assert.equal(inline()?.active, true);
+});
+
+test("a restored session whose gate says plan is delegated is not planning", async () => {
+  const { mock, context, inline } = await setup({ gate: true });
+  mock.eventBus.on("workflow-mode:query", (query: any) => query.reply({ mode: "plan", cycle: [], delegated: true }));
+  for (const handler of mock.events.get("session_start") ?? []) await handler({ reason: "startup" }, context.ctx);
+  assert.notEqual(inline()?.active, true);
 });
 
 test("with the gate's chat mode enabled, leaving into chat grants nothing", async () => {

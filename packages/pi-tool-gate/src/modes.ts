@@ -4,11 +4,14 @@
 //   workflow-mode:cycle         any -> gate { result?: Promise<boolean> } requests the next base workflow
 //     The gate assigns result synchronously. Await that promise, never event emission itself.
 //     Legacy callers may ignore it; the gate handles failures internally.
-//   workflow-mode:changed       gate -> all { mode: work|chat|plan, previous?, cycle: BaseWorkflowMode[], key?, source: transition|restore }
+//   workflow-mode:changed       gate -> all { mode: work|chat|plan, previous?, cycle: BaseWorkflowMode[], key?, source: transition|restore, delegated? }
+//     delegated: true marks plan inherited from a planning parent (a subagent): plan providers must
+//     not treat it as their own planning session (no plan file, no notice, no entering or exiting).
 //     Restore/capability announcements are snapshots, never user transitions.
-//   workflow-mode:plan-provider plan -> gate { planFile? } announces plan support and its file
+//   workflow-mode:plan-provider plan -> gate { planFile?, scratchDir? } announces plan support, its file
+//     and the directory the agent may write scratch files under while planning
 //   workflow-mode:query         any -> gate { entries: readonly unknown[], cwd: string, reply(snapshot): void }
-//     Synchronously replies with { mode, cycle, key?, source: restore } using destination entries/cwd defaults.
+//     Synchronously replies with { mode, cycle, key?, source: restore, delegated? } using destination entries/cwd defaults.
 //     Registered at factory time; no mutations, persistence, notices, or further events.
 //   permission-mode:set         any -> gate { mode } requests approvals only
 //   permission-mode:cycle       any -> gate {} toggles auto/yolo
@@ -34,6 +37,8 @@ export interface WorkflowSnapshot {
   cycle: BaseWorkflowMode[];
   key?: string;
   source: WorkflowSource;
+  /** `mode` is plan inherited from a planning parent: not this session's own planning. */
+  delegated?: true;
 }
 export const WORKFLOW_CYCLE = "workflow-mode:cycle";
 export const PLAN_PROVIDER = "workflow-mode:plan-provider";

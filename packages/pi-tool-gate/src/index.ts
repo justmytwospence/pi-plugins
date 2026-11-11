@@ -28,6 +28,7 @@ import {
   shellDir,
 } from "./bash.ts";
 import { isRecord } from "./config.ts";
+import { delegatedPlanText, inScratch, planEditBlockReason, planShellBlockReason, repoWriteCandidates } from "./plan-scope.ts";
 import { loadConfig, loadConfigReport, policyIssues, policyFiles } from "./policy-config.ts";
 import { type ProjectContext, ProjectResolutionError, projectContextSync, projectFiles, projectSaveFile, resolveProject } from "./project.ts";
 import {
@@ -41,6 +42,7 @@ import {
   grantKey,
   resolvePolicy,
   shown,
+  under,
   violations,
 } from "./dirs.ts";
 import { Downloads, downloadedRunReasons, downloadsOf, type Script, scriptFor, trackCall } from "./downloads.ts";
@@ -79,6 +81,7 @@ import {
   WORKAROUNDS,
   judgeQuestions,
   judgeState,
+  planScopeQuestion,
   readOnlyQuestion,
   steerReason,
   suggestions,
@@ -231,6 +234,8 @@ export function choiceLabels(kind: "rules" | "dirs", plural: boolean, userWritab
 const STATUS_KEY = "tool-gate";
 /** Records whether the agent was last told chat mode is on, so it hears each change once. */
 const CHAT_ENTRY = "tool-gate:chat-notice";
+/** Records that a session whose parent is planning was told so. */
+const DELEGATED_ENTRY = "tool-gate:delegated-plan-notice";
 
 /** How a workflow block tells the agent to get a read through that one part of its command stopped. */
 export const SPLIT_HINT =
@@ -305,6 +310,8 @@ export interface PlanContext {
   root?: string;
   /** pi-plan-mode's plan file, always writable. */
   planFile?: string;
+  /** The plan workflow's scratch directory: writes under it are never held by the directory policy. */
+  scratchDir?: string;
   /** The chat or plan workflow's System 1 read check judged this shell call read-only: approvals treat it as a parsed read. */
   judgedRead?: boolean;
   /** Subagent runs start children in chat (a chat or plan parent whose subagent provider honors subagent-env): they only read. */
@@ -377,9 +384,15 @@ function directoryHolds(tool: string, input: Record<string, unknown>, cwd: strin
   if ((tool === "edit" || tool === "write") && c.planFile && access.writes[0] !== undefined && canonicalPath(access.writes[0]) === c.planFile) return [];
   const rules = c.rules ?? [];
   const root = call.root ?? cwd;
+  // The plan file and the plan's scratch directory are the workflow's own: never held, even when derived.
+  const planOwn = (v: { access: string; file: string }) => {
+    if (v.access !== "write") return false;
+    const file = canonicalPath(v.file);
+    return file === c.planFile || (c.scratchDir !== undefined && under(file, c.scratchDir));
+  };
   const opened = (v: { file: string; hint?: string }) =>
     v.hint === undefined && rules.length > 0 && (tool === "edit" || tool === "write" || BUILTIN_READ.has(tool)) && allowsPath(rules, tool, v.file, root);
-  return violations(policy, access).filter((v) => !c.granted?.(grantKey(v)) && !opened(v));
+  return violations(policy, access).filter((v) => !planOwn(v) && !c.granted?.(grantKey(v)) && !opened(v));
 }
 
 function basePlan(tool: string, input: Record<string, unknown>, cwd: string, c: PlanContext, call: Call): Plan {
@@ -462,7 +475,8 @@ export function onlyReads(
 
 /**
  * Whether a subagent call starts or resumes a child (not `worktree: true`, which creates
- * checkouts); it only reads when the child starts in chat (`chatChildren`, subagent-env.ts).
+ * checkouts); it only reads when the child starts in chat, and a child of a planning session inherits plan
+ * and its scratch directory (`chatChildren`, subagent-env.ts), so it counts as allowed there too.
  */
 export function startsChatChild(tool: string, input: Record<string, unknown>): boolean {
   if (tool !== "subagent" || input.worktree === true) return false;
@@ -524,6 +538,10 @@ export default function toolGate(pi: ExtensionAPI) {
   /** pi-plan-mode is installed and offers plan mode; the plan file it may write. */
   let planProvider = false;
   let planFile: string | undefined;
+  /** Plan inherited from a planning parent (a subagent): its scratch directory, and whether it was told. */
+  const delegated = () => inheritedModes().workflow === "plan";
+  let scratchDir: string | undefined = inheritedModes().scratchDir;
+  let delegatedTold = false;
   let hostCtx: ExtensionContext | undefined;
   let sessionGeneration = 0;
   let sessionReady = false;
@@ -592,7 +610,10 @@ export default function toolGate(pi: ExtensionAPI) {
     };
     const outcome = await askJev(ctx.modelRegistry, config.jev, state, readOnlyQuestion({ script: script !== undefined }), ctx.signal);
     if (outcome.usage) recordUsage(outcome.usage);
-    if (!outcome.ok) return { reads: false, judged: false };
+    if (!outcome.ok) {
+      recordCheckFailure(tool, input, "only-reads", outcome);
+      return { reads: false, judged: false };
+    }
     if (outcome.selectionKey !== selectionKey) return { reads: false, judged: false, stale: true };
     const p = bool(outcome.answers, "only_reads");
     const reads = p !== undefined && p >= (config.thresholds.readOnly ?? DEFAULT_THRESHOLDS.readOnly);
@@ -607,6 +628,68 @@ export default function toolGate(pi: ExtensionAPI) {
       ...(outcome.usage ? { usage: outcome.usage } : {}),
     });
     return { reads, judged: p !== undefined };
+  };
+
+  /** A workflow check that System 1 could not answer is a block: record it, as the answers are. */
+  function recordCheckFailure(tool: string, input: Record<string, unknown>, check: string, outcome: { code?: unknown; usage?: ClassifierUsage }): void {
+    pi.appendEntry("tool-gate:decision", {
+      tool,
+      args: clip(String(input.command ?? ""), 500),
+      check,
+      action: "block",
+      errorClass: String(outcome.code ?? "ClassifierUnavailableError"),
+      ...(outcome.usage ? { usage: outcome.usage } : {}),
+    });
+  }
+
+  /**
+   * The plan workflow's check for a shell command that does more than read: writes it names inside
+   * the repository (git state always; other files unless git ignores them) block outright, and
+   * otherwise System 1 must be sure it leaves the repository unchanged (`thresholds.planScope`).
+   * Returns the block, "stale" when modes or System 1 changed meanwhile, or undefined to let the
+   * call go on to approvals.
+   */
+  const scopedPlanShell = async (
+    ctx: ExtensionContext, tool: string, input: Record<string, unknown>, recordUsage: (usage: ClassifierUsage) => void,
+  ): Promise<{ block: true; reason: string } | "stale" | undefined> => {
+    const context = await contextFor(ctx.cwd);
+    const root = context.root;
+    const command = String(input.command ?? "");
+    const dir = shellDir(tool, input, context.cwd);
+    const access = bashPathAccess(command, dir, config.readOnlyCommands, config.directories.exemptCommands, context.cwd);
+    const { git, other } = repoWriteCandidates(access.writes, { root, planFile, scratchDir });
+    const ignored = other.length ? await ignoredByGit(new Map([[root, other]])) : new Set<string>();
+    const files = [...git, ...other.filter((file) => !ignored.has(file))];
+    if (files.length) return { block: true, reason: planShellBlockReason(tool, { files }, scratchDir) };
+    const selectionKey = refreshSystem1Target().key;
+    const script = scriptOfCall(tool, input, ctx.cwd, downloads);
+    const state = {
+      cwd: ctx.cwd,
+      repo_root: root,
+      ...(scratchDir ? { scratch_dir: scratchDir } : {}),
+      tool_call: { tool, arguments: clip(command, 6_000) },
+      ...(script ? { script: { path: script.path, content: script.content } } : {}),
+    };
+    const outcome = await askJev(ctx.modelRegistry, config.jev, state, planScopeQuestion({ script: script !== undefined }), ctx.signal);
+    if (outcome.usage) recordUsage(outcome.usage);
+    if (!outcome.ok) {
+      recordCheckFailure(tool, input, "plan-scope", outcome);
+      return { block: true, reason: planShellBlockReason(tool, { unavailable: true }, scratchDir) };
+    }
+    if (outcome.selectionKey !== selectionKey) return "stale";
+    const p = bool(outcome.answers, "leaves_repo_unchanged");
+    const leaves = p !== undefined && p >= (config.thresholds.planScope ?? DEFAULT_THRESHOLDS.planScope);
+    pi.appendEntry("tool-gate:decision", {
+      tool,
+      args: clip(command, 500),
+      check: "plan-scope",
+      scores: p === undefined ? {} : { leaves_repo_unchanged: p },
+      action: leaves ? "allow" : "block",
+      latencyMs: outcome.latencyMs,
+      classifier: provenanceOf(outcome),
+      ...(outcome.usage ? { usage: outcome.usage } : {}),
+    });
+    return leaves ? undefined : { block: true, reason: planShellBlockReason(tool, p === undefined ? { unavailable: true } : {}, scratchDir) };
   };
 
   const keyConfig = loadConfig("tool-gate", DEFAULT_CONFIG, projectContextSync(process.cwd()));
@@ -641,7 +724,7 @@ export default function toolGate(pi: ExtensionAPI) {
       approval: inherited.approval ?? parseApproval(config.defaultApproval) ?? (!config.enabled ? "bypassPermissions" : parseApproval(legacy) ?? "auto"),
     } as const;
   };
-  pi.events.on(SUBAGENT_ENV_CHANNEL, (data: unknown) => answerSubagentEnv(data, () => subagentEnv(approval, effectiveWorkflow(), denyInsteadOfPrompting())));
+  pi.events.on(SUBAGENT_ENV_CHANNEL, (data: unknown) => answerSubagentEnv(data, () => subagentEnv(approval, effectiveWorkflow(), denyInsteadOfPrompting(), scratchDir)));
   const emit = (name: string, data: unknown) => {
     try { pi.events.emit(name, data); } catch { /* A listener's failure is its own. */ }
   };
@@ -649,6 +732,7 @@ export default function toolGate(pi: ExtensionAPI) {
     const mode = effectiveWorkflow();
     emit(WORKFLOW_CHANGED, {
       mode, ...(previous ? { previous } : {}), cycle: cycle(), ...(shortcut ? { key: shortcut } : {}), source,
+      ...(delegated() && mode === "plan" ? { delegated: true } : {}),
     });
     if (announce && source === "transition" && previous && previous !== mode) sendWorkflowTransition(pi, previous, mode);
   };
@@ -660,6 +744,7 @@ export default function toolGate(pi: ExtensionAPI) {
     const snapshot: WorkflowSnapshot = {
       mode: restored.workflow,
       cycle: cycle(), ...(shortcut ? { key: shortcut } : {}), source: "restore",
+      ...(delegated() && restored.workflow === "plan" ? { delegated: true as const } : {}),
     };
     query.reply(snapshot);
   });
@@ -780,9 +865,15 @@ export default function toolGate(pi: ExtensionAPI) {
     if (data && typeof data === "object") (data as { result?: Promise<boolean> }).result = result;
   });
   pi.events.on(PLAN_PROVIDER, (data) => {
-    const file = (data as { planFile?: unknown } | undefined)?.planFile;
-    const nextFile = typeof file === "string" && file ? canonicalPath(file) : undefined;
-    if (nextFile !== planFile) { planFile = nextFile; invalidate(); }
+    const announced = data as { planFile?: unknown; scratchDir?: unknown } | undefined;
+    // A delegated session has no plan file of its own: its parent's scratch directory stays.
+    if (!delegated()) {
+      const file = announced?.planFile;
+      const nextFile = typeof file === "string" && file ? canonicalPath(file) : undefined;
+      const dir = announced?.scratchDir;
+      const nextScratch = typeof dir === "string" && dir ? canonicalPath(dir) : undefined;
+      if (nextFile !== planFile || nextScratch !== scratchDir) { planFile = nextFile; scratchDir = nextScratch; invalidate(); }
+    }
     const available = planProvider;
     planProvider = true;
     if (!available) broadcastWorkflow("restore");
@@ -988,6 +1079,7 @@ export default function toolGate(pi: ExtensionAPI) {
       rules: allRules,
       root: (await projectOf(cwd))[0],
       planFile,
+      ...(workflow === "plan" && scratchDir ? { scratchDir } : {}),
       downloads,
       ...reads,
     });
@@ -1266,6 +1358,7 @@ export default function toolGate(pi: ExtensionAPI) {
     approval = restored.approval;
     const told = [...entries].reverse().find((entry) => entry.type === "custom" && entry.customType === CHAT_ENTRY);
     chatTold = told?.type === "custom" && (told.data as { told?: unknown } | undefined)?.told === true;
+    delegatedTold = entries.some((entry) => entry.type === "custom" && entry.customType === DELEGATED_ENTRY);
     sessionReady = true;
     noticeRemovedLinked(ctx, entries);
     if (duplicateShortcut) ctx.ui.notify("tool-gate: duplicate workflow and approval shortcut; registering workflow only.", "warning");
@@ -1292,7 +1385,12 @@ export default function toolGate(pi: ExtensionAPI) {
     classifierFailures.clear();
     gitInfo = undefined;
     // A removed plan provider must not strand a restored session in planning.
-    if (workflow === "plan" && !planProvider) await setWorkflow("work", ctx);
+    if (workflow === "plan" && !planProvider && !delegated()) await setWorkflow("work", ctx);
+    if (delegated() && workflow === "plan" && !delegatedTold) {
+      delegatedTold = true;
+      try { pi.appendEntry(DELEGATED_ENTRY, { told: true }); } catch { /* No session yet. */ }
+      return { message: { customType: DELEGATED_ENTRY, content: delegatedPlanText(scratchDir), display: false, details: { scratchDir } } };
+    }
     if ((effectiveWorkflow() === "chat") === chatTold) return undefined;
     const content = chatNotice();
     markChatTold();
@@ -1383,24 +1481,29 @@ export default function toolGate(pi: ExtensionAPI) {
         if (forbidden?.list === "deny") return deniedBy(tool, forbidden);
         if (current === "plan" && (tool === "edit" || tool === "write")) {
           const file = canonicalPath(path.resolve((await contextFor(ctx.cwd)).cwd, expandHome(String(input.path ?? ""))));
-          // The plan file is the workflow's own artifact: no approval applies to it.
-          if (planFile && file === planFile) return allow(ctx);
-          return {
-            block: true,
-            reason: `Plan mode is on: nothing may be edited until the user approves a plan.${planFile ? ` The only file you may write is the plan file, ${planFile}.` : ""}`,
-          };
+          // The plan file and its scratch directory are the workflow's own: no approval applies to them.
+          if (inScratch(file, { planFile, scratchDir })) return allow(ctx);
+          return { block: true, reason: planEditBlockReason(planFile, scratchDir) };
         }
         // Chat lets only reads run (an allow rule does not make a command read-only); plan lets only
         // read-only shell commands run, and leaves other tools to the approval setting.
         let reads = onlyReads(tool, input, config, annotations, readOnlyCall, chatChildren);
         let judged = false;
+        // Scoped plan: a command that does more than read runs when it leaves the repository unchanged.
+        const scoped = current === "plan" && config.planShell !== "read-only";
         if (!reads && SHELL_TOOLS.has(tool)) {
-          // A command the parser cannot follow (a Python one-off, a heredoc) runs when System 1 is sure it only reads.
-          const outcome = await judgedReadOnly(ctx, tool, input, recordUsage);
-          if (stale() || outcome.stale) return staleResult();
-          reads = outcome.reads;
-          judgedRead = outcome.reads;
-          judged = outcome.judged;
+          if (scoped) {
+            const refused = await scopedPlanShell(ctx, tool, input, recordUsage);
+            if (stale() || refused === "stale") return staleResult();
+            if (refused) return refused;
+          } else {
+            // A command the parser cannot follow (a Python one-off, a heredoc) runs when System 1 is sure it only reads.
+            const outcome = await judgedReadOnly(ctx, tool, input, recordUsage);
+            if (stale() || outcome.stale) return staleResult();
+            reads = outcome.reads;
+            judgedRead = outcome.reads;
+            judged = outcome.judged;
+          }
         }
         const judgedNote = judged ? "System 1 judged that it may do more than read. " : "";
         if (current === "chat" && !reads) {
@@ -1412,7 +1515,7 @@ export default function toolGate(pi: ExtensionAPI) {
               `If it does more than read, do not retry it or work around it: answer from what you can read, or tell the user what you would do; they can switch modes (${shortcut || "/mode"}) to let you act.`,
           };
         }
-        if (current === "plan" && SHELL_TOOLS.has(tool) && !reads) {
+        if (current === "plan" && !scoped && SHELL_TOOLS.has(tool) && !reads) {
           return {
             block: true,
             reason:

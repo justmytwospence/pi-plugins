@@ -12,6 +12,10 @@ test("the self-contained plan standard is in every prompt that asks for a plan",
     /make every implementation decision in the plan yourself, after checking it in the code/u,
   );
   assert.ok(enterPlanText("/p/calm-river.md", false).includes(PLAN_STANDARD));
+  const entered = enterPlanText("/p/calm-river.md", false);
+  assert.match(entered, /write scratch files under \/p\/calm-river\.spike \(create it when you need it\)/u);
+  assert.match(entered, /Apart from the scratch directory, it is the only file you may write/u);
+  assert.doesNotMatch(entered, /Only read-only shell commands run/u);
   const prompt = buildPlanModePrompt();
   assert.ok(prompt.includes(PLAN_STANDARD));
   assert.doesNotMatch(prompt, /behavior-level/u);

@@ -1,17 +1,19 @@
 // Inline plan mode, as Claude Code does it: in your own conversation, no extra screen. While it is
-// on, your agent researches read-only and writes its plan to a plan file (the only file it may
-// write), then calls exit_plan_mode, which shows you the plan and asks how to implement it: here
+// on, your agent researches, may spike in a scratch directory beside the plan file, and writes its
+// plan to a plan file, while the repository stays unchanged; then it calls exit_plan_mode, which shows you the plan and asks how to implement it: here
 // (optionally after compacting to the plan), save a snapshot for later, edit the plan first, or keep
 // planning. With a plan model pair selected, the worker model takes over on the next request (see
 // pairs.ts). The workflow returns to work after approval, without changing approvals.
-// With pi-tool-gate installed, the gate owns workflow and enforces plan's read-only shell under
-// either approval setting. Without it, this extension enforces a read-only shell and its configured
-// shortcut toggles work/plan.
+// With pi-tool-gate installed, the gate owns workflow and enforces plan's scope (nothing in the
+// repository changes) under either approval setting. Without it, this extension enforces a read-only
+// shell and the plan file and scratch directory as the only writes, and its configured shortcut
+// toggles work/plan.
 // Event bus contract (shared with pi-tool-gate; no sibling imports):
 //   workflow-mode:set           any -> gate { mode: work|chat|plan } requests a base transition
 //   workflow-mode:cycle         any -> gate {} requests the next base workflow
-//   workflow-mode:changed       gate -> all { mode: work|chat|plan, previous?, cycle: BaseWorkflowMode[], key?, source: transition|restore }
-//   workflow-mode:plan-provider plan -> gate { planFile? } announces plan support and its file
+//   workflow-mode:changed       gate -> all { mode: work|chat|plan, previous?, cycle: BaseWorkflowMode[], key?, source: transition|restore, delegated? }
+//     delegated: true is plan inherited from a planning parent (a subagent): not this session's own planning.
+//   workflow-mode:plan-provider plan -> gate { planFile?, scratchDir? } announces plan support, its file and its scratch directory
 //   workflow-mode:query         any -> gate { entries: readonly unknown[], cwd: string, reply(snapshot): void }
 // Query synchronously reduces the supplied destination branch with cwd defaults, without side effects.
 // Restore publications are metadata snapshots, never requests to transition or persist.
@@ -19,7 +21,7 @@
 //   permission-mode:cycle       any -> gate {} toggles auto/yolo
 //   permission-mode:changed     gate -> all { mode, previous?, cycle } publishes approvals only
 import { existsSync, mkdirSync, writeFileSync } from "node:fs";
-import { dirname, resolve } from "node:path";
+import { dirname, resolve, sep } from "node:path";
 import {
   type ExtensionAPI,
   type ExtensionContext,
@@ -40,12 +42,14 @@ import type { ModelSpec, ModelSpecThinkingLevel } from "./implementation-models.
 import { PlanMarkdown } from "./mermaid-art.js";
 import { modelCatalog } from "./model-catalog.js";
 import {
+  isPlanFile,
   newPlanFile,
   planSlug,
   plansDirectoryPath,
   planTextTitle,
   readPlan,
   savePlanSnapshot,
+  scratchDirFor,
   writePlanFile,
 } from "./plan-file.js";
 import { expandHome } from "./plan-hook.js";
@@ -53,7 +57,12 @@ import { promptPlanName } from "./plan-name-input.js";
 import { PlanReviewViewport } from "./plan-review-viewport.js";
 import { type ReviewStatus, reviewBody, reviewTitle } from "./review-card.js";
 import { type SettingCycleTrigger, settingsCycles } from "./settings-cycle.js";
-import { findBlockedCommandSegment, readCommand, type SafeSubcommands } from "./tool-policy.js";
+import {
+  findBlockedCommandSegment,
+  findBlockedPowerShellCommandSegment,
+  readCommand,
+  type SafeSubcommands,
+} from "./tool-policy.js";
 import { transcriptCheckpoint } from "./transcript-contract.js";
 import { registerWorkflowRenderer, sendWorkflowTransition, type WorkflowKind } from "./workflow-ui.js";
 
@@ -137,13 +146,13 @@ export interface InlinePlanMode {
   toggle(ctx: ExtensionContext, trigger?: SettingCycleTrigger): Promise<boolean>;
 }
 
-export function enterPlanText(planFile: string, existing: boolean) {
+export function enterPlanText(planFile: string, existing: boolean, scratchDir = scratchDirFor(planFile)) {
   return `<system-reminder>
-Plan mode is active. The user wants you to research and plan before anything changes. You MUST NOT make any edits (except to the plan file below), run commands that change files or the system, commit, or otherwise make changes, even if asked to; this supersedes any other instructions. Only read-only shell commands run.
+Plan mode is active. The user wants you to research and plan before anything changes. You MUST NOT edit the repository (except the plan file and scratch files below), commit, or otherwise change it, even if asked to; this supersedes any other instructions. The repository must not change: shell commands that would change tracked files, add files git would not ignore, or change git state are blocked; other commands are checked as usual. For spikes and prototypes, write scratch files under ${scratchDir} (create it when you need it).
 
 ## Plan file
 ${existing ? `A plan file from earlier planning exists at ${planFile}. Read it first, then decide: if the request is a different task, overwrite it; if it continues the same task, revise it.` : `No plan file exists yet. Create it at ${planFile} with write.`}
-It is the only file you may write. Build the plan there as you go, with write and edit.
+Apart from the scratch directory, it is the only file you may write. Build the plan there as you go, with write and edit.
 
 ## How to plan
 1. Explore: read the relevant code with read-only tools (and read-only subagents for broad searches, if you have them). Reuse what exists; find the functions and utilities a change should build on.
@@ -194,6 +203,8 @@ export function registerInlinePlanMode(pi: ExtensionAPI, host: InlineHost): Inli
   let state: InlineState = { active: false, told: false };
   /** pi-tool-gate owns the mode; its current mode and cycle. */
   let gate: { mode: string; cycle: string[] } | undefined;
+  /** The gate's plan is inherited from a planning parent: this session is not itself planning. */
+  let delegated = false;
   let revision = 0;
   let generation = 0;
   /** An exit tool result supplies its own notice; do not queue a redundant planner turn. */
@@ -228,7 +239,11 @@ export function registerInlinePlanMode(pi: ExtensionAPI, host: InlineHost): Inli
   const persist = () => safely(() => pi.appendEntry(INLINE_ENTRY, { ...state }));
 
   const announce = () =>
-    safely(() => pi.events.emit(PLAN_PROVIDER, { ...(state.planFile ? { planFile: state.planFile } : {}) }));
+    safely(() =>
+      pi.events.emit(PLAN_PROVIDER, {
+        ...(state.planFile ? { planFile: state.planFile, scratchDir: scratchDirFor(state.planFile) } : {}),
+      }),
+    );
 
   const updateStatus = () => {
     const ctx = hostCtx;
@@ -263,7 +278,7 @@ export function registerInlinePlanMode(pi: ExtensionAPI, host: InlineHost): Inli
 
   const noticeText = () =>
     state.active
-      ? enterPlanText(state.planFile as string, hasPlan(state.planFile))
+      ? enterPlanText(state.planFile as string, hasPlan(state.planFile), scratchDirFor(state.planFile as string))
       : exitPlanText(state.planFile, gate?.mode);
 
   const allocatePlanFile = () => {
@@ -336,6 +351,8 @@ export function registerInlinePlanMode(pi: ExtensionAPI, host: InlineHost): Inli
     // the genuine transition before asking the gate to enter plan mode.
     if (!restored) restore(ctx);
     hostCtx = ctx;
+    // A session planning on behalf of a planning parent has no plan of its own to start.
+    if (delegated) return false;
     const enteringGeneration = generation;
     if (gate && !(await requestMode("plan"))) return false;
     if (enteringGeneration !== generation || !restored) return false;
@@ -350,7 +367,7 @@ export function registerInlinePlanMode(pi: ExtensionAPI, host: InlineHost): Inli
   };
 
   pi.events.on(MODE_CHANGED, (data) => {
-    const event = data as { mode?: unknown; cycle?: unknown; source?: unknown } | undefined;
+    const event = data as { mode?: unknown; cycle?: unknown; source?: unknown; delegated?: unknown } | undefined;
     if (typeof event?.mode !== "string" || !["work", "chat", "plan"].includes(event.mode)) return;
     const previous = gate?.mode;
     if (previous !== event.mode && !settings.isCommitting("workflow")) settings.cancel("Workflow changed externally.");
@@ -358,7 +375,8 @@ export function registerInlinePlanMode(pi: ExtensionAPI, host: InlineHost): Inli
       mode: event.mode,
       cycle: Array.isArray(event.cycle) ? event.cycle.map(String) : [],
     };
-    if (event.source === "restore") return;
+    delegated = event.delegated === true;
+    if (delegated || event.source === "restore") return;
     if (previous !== event.mode) revision++;
     // A gate loaded first may broadcast while the host is already on another branch. Do not
     // write an inline record or send a notice there before our own restoration runs.
@@ -393,9 +411,10 @@ export function registerInlinePlanMode(pi: ExtensionAPI, host: InlineHost): Inli
       pi.events.emit("workflow-mode:query", {
         entries,
         cwd: ctx.cwd,
-        reply: (snapshot: { mode: string; cycle?: string[] }) => {
+        reply: (snapshot: { mode: string; cycle?: string[]; delegated?: boolean }) => {
           gate = { mode: snapshot.mode, cycle: snapshot.cycle ?? [] };
-          state.active = snapshot.mode === "plan";
+          delegated = snapshot.delegated === true;
+          state.active = snapshot.mode === "plan" && !delegated;
         },
       }),
     );
@@ -432,24 +451,37 @@ export function registerInlinePlanMode(pi: ExtensionAPI, host: InlineHost): Inli
   });
 
   pi.on("tool_call", (event, ctx) => {
-    if (!state.active) return undefined;
+    // With the gate, its workflow guard enforces plan's scope (its own analysis), whichever of the
+    // two handlers runs first; this is only the fallback for a session without it.
+    if (!state.active || gate) return undefined;
     const tool = event.toolName;
     const input = event.input as Record<string, unknown>;
     if (tool === "edit" || tool === "write") {
-      const file = resolve(ctx.cwd, expandHome(String(input.path ?? "")));
-      if (state.planFile && file === resolve(state.planFile)) return undefined;
+      if (state.planFile) {
+        if (isPlanFile(input.path, ctx.cwd, state.planFile)) return undefined;
+        const scratch = scratchDirFor(state.planFile);
+        const file = resolve(ctx.cwd, expandHome(String(input.path ?? "")));
+        if (file === scratch || file.startsWith(`${scratch}${sep}`)) return undefined;
+      }
       return {
         block: true,
-        reason: `Plan mode is on: nothing may be edited until the user approves a plan. The only file you may write is the plan file, ${state.planFile}.`,
+        reason: `Plan mode is on: nothing in the repository may be edited until the user approves a plan. You may write ${
+          state.planFile
+            ? `the plan file, ${state.planFile}, and scratch files under ${scratchDirFor(state.planFile)}`
+            : "only outside the repository"
+        }.`,
       };
     }
-    // With the gate, its workflow guard lets only read-only commands run (its own analysis).
-    if (gate || tool !== "bash") return undefined;
-    const blocked = findBlockedCommandSegment(readCommand(input), host.safeSubcommands() ?? {}, ctx.cwd);
+    if (tool !== "bash" && tool !== "bg_run" && tool !== "powershell") return undefined;
+    const command = readCommand(input);
+    const blocked =
+      tool === "powershell"
+        ? findBlockedPowerShellCommandSegment(command, host.safeSubcommands() ?? {}, ctx.cwd)
+        : findBlockedCommandSegment(command, host.safeSubcommands() ?? {}, ctx.cwd);
     if (blocked === undefined) return undefined;
     return {
       block: true,
-      reason: `Plan mode is on: only read-only commands run until the user approves a plan. Blocked: ${blocked}`,
+      reason: `Plan mode is on: without pi-tool-gate only read-only commands run until the user approves a plan. Blocked: ${blocked}`,
     };
   });
 

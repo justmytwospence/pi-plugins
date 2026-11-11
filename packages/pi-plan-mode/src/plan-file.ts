@@ -19,6 +19,14 @@ export function isPlanFile(path: unknown, cwd: string, planFile: string): boolea
   return resolve(cwd, expandHome(String(path ?? ""))) === resolve(planFile);
 }
 
+/**
+ * The directory beside a plan file where the agent may write scratch files (spikes, prototypes)
+ * while planning: `<plan file without .md>.spike`. Nothing creates it; the agent does when it needs it.
+ */
+export function scratchDirFor(planFile: string): string {
+  return `${planFile.replace(/\.md$/u, "")}.spike`;
+}
+
 /** The plan file's name without `.md`, e.g. `calm-river`. Only a file name: never show it as what the plan is. */
 export function planName(file: string): string {
   return basename(file).replace(/\.md$/u, "");

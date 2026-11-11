@@ -22,6 +22,7 @@ import {
   planTextTitle,
   planTitle,
   savePlanSnapshot,
+  scratchDirFor,
   writePlanFile,
 } from "../src/plan-file.js";
 
@@ -52,6 +53,12 @@ const plan = (text: string) => {
   writeFileSync(file, text);
   return file;
 };
+
+test("the scratch directory sits beside the plan file and is named after it", () => {
+  assert.equal(scratchDirFor("/p/a.md"), "/p/a.spike");
+  assert.equal(scratchDirFor("/p/draft-1-x.md"), "/p/draft-1-x.spike");
+  assert.equal(scratchDirFor("/p/no-extension"), "/p/no-extension.spike");
+});
 
 test("a plan is called by its first heading, never by its file name", () => {
   assert.equal(planTitle(plan("# Toy demo: `greet.mjs` CLI\n\n## Summary\n")), "Toy demo: greet.mjs CLI");

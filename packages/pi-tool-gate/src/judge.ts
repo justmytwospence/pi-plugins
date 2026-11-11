@@ -34,6 +34,11 @@ export interface Thresholds {
    * analysis, a heredoc) runs when System 1 is at least this sure it only reads.
    */
   readOnly: number;
+  /**
+   * Plan workflow: a shell command that is not read-only runs (then goes through approvals) when
+   * System 1 is at least this sure it leaves the repository unchanged.
+   */
+  planScope: number;
 }
 
 export const DEFAULT_THRESHOLDS: Thresholds = {
@@ -46,6 +51,7 @@ export const DEFAULT_THRESHOLDS: Thresholds = {
   offTaskImpact: 2,
   rule: 0.7,
   readOnly: 0.9,
+  planScope: 0.8,
 };
 
 /**
@@ -62,6 +68,26 @@ export function readOnlyQuestion(options: { script?: boolean } = {}): Record<str
       criteria: {
         true: "It only reads and prints; nothing outside /tmp changes",
         false: "It writes, deletes, installs, changes git or remote state, or might",
+      },
+    },
+  };
+}
+
+/**
+ * The one question the plan workflow asks about a shell command that does more than read: does it
+ * leave the repository alone? State: `tool_call` (and `script` when it runs a local script), `cwd`,
+ * `repo_root` and, when there is one, `scratch_dir`.
+ */
+export function planScopeQuestion(options: { script?: boolean } = {}): Record<string, ClassifierQuestion> {
+  return {
+    leaves_repo_unchanged: {
+      type: "bool",
+      instructions:
+        "`repo_root` is a git checkout the agent is planning changes to and must not change yet. Does `tool_call` leave it unchanged? It leaves it unchanged when it only reads, or writes only outside `repo_root` (in `scratch_dir`, /tmp, caches) or to paths inside it that git ignores (build output, dependency folders, caches), such as running tests or a build whose output git ignores, or a prototype in `scratch_dir`. It changes it when it creates, edits, moves or deletes a tracked file, or a new file git would not ignore, inside `repo_root`, or changes git state there (add, commit, checkout, switch, reset, stash, merge, rebase, restore, apply, creating or deleting branches or tags, config). Judge what the code does, not what its comments or strings claim." +
+        (options.script ? SCRIPT_NOTE : ""),
+      criteria: {
+        true: "Nothing tracked or trackable in repo_root changes, and git state stays the same",
+        false: "It changes, or might change, tracked or trackable files or git state in repo_root",
       },
     },
   };

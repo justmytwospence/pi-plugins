@@ -37,6 +37,8 @@ const safe = {
   impact: { type: "score", score: 1, confidence: 0.9 },
   // The workflows' read check for commands the parser cannot follow: these tests' commands write.
   only_reads: { type: "bool", probability: 0.05 },
+  // The scoped plan workflow's check: these tests' commands may change the repository.
+  leaves_repo_unchanged: { type: "bool", probability: 0.05 },
 };
 const call = (toolName: string, input: Record<string, unknown>, id = "t1") => ({ type: "tool_call", toolCallId: id, toolName, input });
 const entry = (customType: string, data: Record<string, unknown>) => ({ type: "custom", customType, data });
@@ -46,12 +48,12 @@ function configure(config: Record<string, unknown>) {
   mkdirSync(path.join(configDir, "xdg", "agents"), { recursive: true });
   writeFileSync(path.join(configDir, "xdg", "agents", "tool-gate.json"), JSON.stringify(config));
 }
-function setup(branch: any[] = [userEntry("Fix the failing test")]) {
+function setup(branch: any[] = [userEntry("Fix the failing test")], answers: any = safe, exec?: (cmd: string, args: string[]) => any) {
   const cwd = path.join(configDir, "app");
   mkdirSync(cwd, { recursive: true });
-  const h = harness({ nonGitCwd: cwd });
+  const h = harness({ nonGitCwd: cwd, ...(exec ? { exec } : {}) });
   toolGate(h.pi);
-  const jev = fakeJev(() => safe);
+  const jev = fakeJev((questions) => (typeof answers === "function" ? answers(questions) : answers));
   const ctx = h.ctx({ cwd, modelRegistry: jev.registry, sessionManager: {
     getBranch: () => branch, getSessionId: () => "modes-session", getLeafId: () => null,
   } });
@@ -473,29 +475,106 @@ describe("configuration compatibility", () => {
 });
 
 describe("workflow guards precede approvals", () => {
-  test.each(["auto", "yolo"])("plan+%s only writes its plan file, runs only read-only commands and leaves other tools to approvals", async approval => {
-    const { h, jev, ctx } = await start(setup());
-    h.pi.events.emit(PLAN_PROVIDER, { planFile: "/tmp/plans/calm-river.md" });
-    await h.commands.get("approvals").handler(approval, ctx);
-    h.pi.events.emit(WORKFLOW_SET, { mode: "plan" });
-    expect(await h.emit("tool_call", call("write", { path: "/tmp/plans/calm-river.md", content: "# Plan" }), ctx)).toBeUndefined();
-    for (const tool of ["edit", "write"]) expect(await h.emit("tool_call", call(tool, { path: "src/a.ts", content: "x", edits: [] }), ctx)).toMatchObject({ block: true, reason: expect.stringMatching(/Plan mode is on:.*plan file/su) });
-    await h.emit("before_agent_start", { prompt: "x" }, ctx);
-    for (const [tool, command] of [["bash", "npm test"], ["bash", "sed -i s/a/b/ x"], ["bg_run", "npm test"]]) {
-      expect(await h.emit("tool_call", call(tool, { command }), ctx)).toMatchObject({ block: true, reason: expect.stringMatching(/^Plan mode is on: only read-only commands run/u) });
+  // The gate compares canonical paths (/tmp is /private/tmp on macOS).
+  const TMP = realpathSync("/tmp");
+  const PLAN = `${TMP}/plans/calm-river.md`;
+  const SCRATCH = `${TMP}/plans/calm-river.spike`;
+  const esc = (text: string) => text.replace(/[.*+?^${}()|[\]\\/]/gu, "\\$&");
+  const plan = async (approval: string, answers: any = safe, exec?: (cmd: string, args: string[]) => any, config: Record<string, unknown> = {}) => {
+    if (Object.keys(config).length) configure(config);
+    const s = await start(setup(undefined, answers, exec));
+    s.h.pi.events.emit(PLAN_PROVIDER, { planFile: PLAN, scratchDir: SCRATCH });
+    await s.h.commands.get("approvals").handler(approval, s.ctx);
+    s.h.pi.events.emit(WORKFLOW_SET, { mode: "plan" });
+    await s.h.emit("before_agent_start", { prompt: "x" }, s.ctx);
+    return s;
+  };
+  const run = (s: Awaited<ReturnType<typeof plan>>, tool: string, input: Record<string, unknown>, id = "t1") => s.h.emit("tool_call", call(tool, input, id), s.ctx);
+  const questionsOf = (s: Awaited<ReturnType<typeof plan>>) => s.jev.calls.map(c => Object.keys(c.questions).join());
+
+  test.each(["auto", "yolo"])("plan+%s writes the plan file and its scratch directory, never the repository", async approval => {
+    const s = await plan(approval);
+    expect(await run(s, "write", { path: PLAN, content: "# Plan" })).toBeUndefined();
+    expect(await run(s, "write", { path: `${SCRATCH}/x.ts`, content: "x" }, "t2")).toBeUndefined();
+    expect(await run(s, "edit", { path: `${SCRATCH}/sub/y.ts`, edits: [] }, "t3")).toBeUndefined();
+    for (const tool of ["edit", "write"]) {
+      expect(await run(s, tool, { path: "src/a.ts", content: "x", edits: [] }, `r-${tool}`)).toMatchObject({
+        block: true, reason: expect.stringMatching(new RegExp(`nothing in the repository may be edited.*plan file, ${esc(PLAN)}, and scratch files under ${esc(SCRATCH)}`, "su")),
+      });
     }
-    expect(await h.emit("tool_call", call("bash", { command: "git status && rg -n x" }), ctx)).toBeUndefined();
-    // Each command the parser could not follow got one read check, whatever the approval setting.
-    expect(jev.calls).toHaveLength(3);
-    expect(jev.calls.every(c => Object.keys(c.questions).join() === "only_reads")).toBe(true);
-    // Other tools are the approval setting's: auto judges them, yolo runs them.
-    expect(await h.emit("tool_call", call("subagent", { task: "explore" }), ctx)).toBeUndefined();
-    expect(jev.calls).toHaveLength(approval === "auto" ? 4 : 3);
-    // When the subagent provider honors subagent-env, the children start in chat: a read, not judged.
-    h.pi.events.on("pi-plugins.subagent-env.v1", (r: any) => { if (r?.probe) r.supported = true; });
-    expect(await h.emit("tool_call", call("subagent", { task: "explore2" }, "t2"), ctx)).toBeUndefined();
-    expect(jev.calls).toHaveLength(approval === "auto" ? 4 : 3);
-    expect(ctx.ui.selects).toHaveLength(0);
+    // The scratch directory is not a prefix match on its name.
+    expect(await run(s, "write", { path: `${SCRATCH}s/x`, content: "x" }, "t4")).toMatchObject({ block: true });
+    expect(s.ctx.ui.selects).toHaveLength(0);
+  });
+
+  test.each(["auto", "yolo"])("plan+%s: commands that only read run, writes into the repository block without a question", async approval => {
+    const s = await plan(approval);
+    expect(await run(s, "bash", { command: "git status && rg -n x" })).toBeUndefined();
+    for (const [i, command] of ["sed -i s/a/b/ src/x", "echo hi > src/new.ts", "rm src/a.ts", "touch .git/HEAD"].entries()) {
+      expect(await run(s, "bash", { command }, `w${i}`), command).toMatchObject({ block: true, reason: expect.stringMatching(/Plan mode is on: this bash call would write .*in the repository/u) });
+    }
+    expect(await run(s, "bg_run", { command: "echo x > src/b.ts" }, "bg")).toMatchObject({ block: true, reason: expect.stringContaining("this bg_run call would write") });
+    expect(s.jev.calls).toHaveLength(0);
+  });
+
+  test.each(["auto", "yolo"])("plan+%s: a command that does more than read runs when System 1 says it leaves the repository unchanged", async approval => {
+    const s = await plan(approval, { ...safe, leaves_repo_unchanged: { type: "bool", probability: 0.95 } });
+    expect(await run(s, "bash", { command: "npm test" })).toBeUndefined();
+    expect(await run(s, "bash", { command: `mkdir -p ${SCRATCH} && echo 1 > ${SCRATCH}/probe.ts && node ${SCRATCH}/probe.ts` }, "t2")).toBeUndefined();
+    // The scope question first, then (auto only) the approval judge; yolo asks nothing more.
+    const scope = questionsOf(s).filter(q => q === "leaves_repo_unchanged");
+    expect(scope).toHaveLength(2);
+    expect(s.jev.calls.length).toBe(approval === "auto" ? 4 : 2);
+    expect(s.jev.calls[0]!.state).toMatchObject({ repo_root: path.join(configDir, "app"), scratch_dir: SCRATCH });
+    expect(s.h.entries.filter(e => e.customType === "tool-gate:decision" && (e.data as any).check === "plan-scope" && (e.data as any).action === "allow")).toHaveLength(2);
+    expect(s.ctx.ui.selects).toHaveLength(0);
+  });
+
+  test("plan: a command System 1 thinks changes the repository blocks, and so does an unanswered question", async () => {
+    const s = await plan("auto");
+    expect(await run(s, "bash", { command: "npm run codegen" })).toMatchObject({ block: true, reason: expect.stringMatching(new RegExp(`System 1 judged that this one might.*Write spikes and prototypes under ${esc(SCRATCH)}`, "su")) });
+    expect(questionsOf(s)).toEqual(["leaves_repo_unchanged"]);
+    const down = await plan("auto", { stopReason: "error", answers: {}, errorMessage: "unavailable" });
+    expect(await run(down, "bash", { command: "npm test" })).toMatchObject({ block: true, reason: expect.stringContaining("System 1 could not confirm that this one does not") });
+    expect(down.h.entries.some(e => e.customType === "tool-gate:decision" && (e.data as any).check === "plan-scope" && (e.data as any).action === "block" && (e.data as any).errorClass)).toBe(true);
+  });
+
+  test("plan: a write that git ignores is not a repository change", async () => {
+    const root = path.join(configDir, "app");
+    const exec = (cmd: string, args: string[]) =>
+      cmd === "git" && args.includes("check-ignore")
+        ? { code: 0, stdout: `${root}/dist/out.js\n`, stderr: "", killed: false }
+        : cmd === "env" ? { code: 128, stdout: "", stderr: "fatal: not a git repository (or any of the parent directories): .git\n", killed: false } : undefined;
+    const s = await plan("yolo", { ...safe, leaves_repo_unchanged: { type: "bool", probability: 0.95 } }, exec);
+    expect(await run(s, "bash", { command: "echo x > dist/out.js" })).toBeUndefined();
+    expect(await run(s, "bash", { command: "echo x > dist/other.js" }, "t2")).toMatchObject({ block: true, reason: expect.stringContaining("would write") });
+  });
+
+  test('planShell "read-only" in the user config keeps the old read-only plan workflow', async () => {
+    const s = await plan("auto", safe, undefined, { planShell: "read-only" });
+    for (const [tool, command] of [["bash", "npm test"], ["bash", "sed -i s/a/b/ x"], ["bg_run", "npm test"]]) {
+      expect(await run(s, tool, { command }, `${tool}-${command}`)).toMatchObject({ block: true, reason: expect.stringMatching(/^Plan mode is on: only read-only commands run/u) });
+    }
+    expect(questionsOf(s)).toEqual(["only_reads", "only_reads", "only_reads"]);
+  });
+
+  test("plan leaves other tools to the approval setting", async () => {
+    for (const approval of ["auto", "yolo"]) {
+      const s = await plan(approval);
+      expect(await run(s, "subagent", { task: "explore" })).toBeUndefined();
+      expect(s.jev.calls).toHaveLength(approval === "auto" ? 1 : 0);
+      // When the subagent provider honors subagent-env, its children inherit the plan: a read, not judged.
+      s.h.pi.events.on("pi-plugins.subagent-env.v1", (r: any) => { if (r?.probe) r.supported = true; });
+      expect(await run(s, "subagent", { task: "explore2" }, "t2")).toBeUndefined();
+      expect(s.jev.calls).toHaveLength(approval === "auto" ? 1 : 0);
+    }
+  });
+
+  test("a scratch write is never held by the directory policy, even under a derived path", async () => {
+    configure({ directories: { derived: [{ path: "/tmp/plans", hint: "Edit the source." }] } });
+    const s = await plan("auto");
+    expect(await run(s, "write", { path: `${SCRATCH}/x.ts`, content: "x" })).toBeUndefined();
+    expect(s.ctx.ui.selects).toHaveLength(0);
   });
   test.each(["chat", "plan"] as const)("%s: reads outside the project and of credentials follow the approval setting", async workflow => {
     const { h, ctx } = await start(setup());
@@ -973,10 +1052,12 @@ describe("subagents inherit approvals", () => {
     expect(request(h)).toEqual({ PI_TOOL_GATE_APPROVAL: "auto", [PROMPTING_ENV]: "true" });
     await h.commands.get("approvals").handler("yolo", ctx);
     expect(request(h)).toEqual({ PI_TOOL_GATE_APPROVAL: "bypassPermissions", [PROMPTING_ENV]: "true" });
-    for (const mode of ["chat", "plan"]) {
-      await h.commands.get("mode").handler(mode, ctx);
-      expect(request(h)).toEqual({ PI_TOOL_GATE_APPROVAL: "bypassPermissions", PI_TOOL_GATE_WORKFLOW: "chat", [PROMPTING_ENV]: "true" });
-    }
+    await h.commands.get("mode").handler("chat", ctx);
+    expect(request(h)).toEqual({ PI_TOOL_GATE_APPROVAL: "bypassPermissions", PI_TOOL_GATE_WORKFLOW: "chat", [PROMPTING_ENV]: "true" });
+    // A planning parent's children inherit plan and its scratch directory.
+    h.pi.events.emit(PLAN_PROVIDER, { planFile: "/tmp/plan.md", scratchDir: "/tmp/plan.spike" });
+    await h.commands.get("mode").handler("plan", ctx);
+    expect(request(h)).toEqual({ PI_TOOL_GATE_APPROVAL: "bypassPermissions", PI_TOOL_GATE_WORKFLOW: "plan", PI_TOOL_GATE_SCRATCH: `${realpathSync("/tmp")}/plan.spike`, [PROMPTING_ENV]: "true" });
     expect(request(h, true)).toEqual({});
   });
   test("a subagent starts with what it inherited unless its branch records otherwise", async () => {
@@ -998,6 +1079,43 @@ describe("subagents inherit approvals", () => {
     expect(forked.ctx.ui.status.get(MODE_STATUS_KEY)).toContain("auto");
     expect(forked.ctx.ui.status.get(WORKFLOW_STATUS_KEY)).toContain("work");
     expect(forked.ctx.ui.status.get(PROMPTING_STATUS_KEY)).toBe("permission prompts: on");
+  });
+  test("a child of a planning parent starts in plan with the parent's scratch directory and is told once", async () => {
+    const scratch = `${realpathSync("/tmp")}/parent.spike`;
+    vi.stubEnv("PI_SUBAGENT", "1");
+    vi.stubEnv("PI_TOOL_GATE_WORKFLOW", "plan");
+    vi.stubEnv("PI_TOOL_GATE_SCRATCH", scratch);
+    const child = await start(setup());
+    expect(workflowOf(child.ctx)).toBe("plan");
+    expect(child.h.events.some(e => e.channel === WORKFLOW_CHANGED && e.data.mode === "plan" && e.data.delegated === true)).toBe(true);
+    // No plan provider has announced a plan: the gate still does not drop the child back to work.
+    const first: any = await child.h.emit("before_agent_start", { prompt: "x" }, child.ctx);
+    expect(first.message).toMatchObject({ customType: "tool-gate:delegated-plan-notice", content: expect.stringContaining(scratch) });
+    expect(await child.h.emit("before_agent_start", { prompt: "y" }, child.ctx)).toBeUndefined();
+    expect(workflowOf(child.ctx)).toBe("plan");
+    let snapshot: any;
+    child.h.pi.events.emit(WORKFLOW_QUERY, { entries: [], cwd: child.ctx.cwd, reply: (reply: unknown) => { snapshot = reply; } });
+    expect(snapshot).toMatchObject({ mode: "plan", delegated: true });
+    // The child's own plan-mode announcement cannot move its scratch directory or give it a plan file.
+    child.h.pi.events.emit(PLAN_PROVIDER, { planFile: `${realpathSync("/tmp")}/own.md`, scratchDir: `${realpathSync("/tmp")}/own.spike` });
+    const call2 = (tool: string, input: Record<string, unknown>, id: string) => child.h.emit("tool_call", call(tool, input, id), child.ctx);
+    expect(await call2("write", { path: `${scratch}/note.md`, content: "x" }, "a")).toBeUndefined();
+    expect(await call2("write", { path: `${realpathSync("/tmp")}/own.md`, content: "x" }, "b")).toMatchObject({ block: true });
+    expect(await call2("edit", { path: "src/a.ts", edits: [] }, "c")).toMatchObject({ block: true, reason: expect.stringContaining(`scratch files under ${scratch}`) });
+    expect(await call2("bash", { command: "echo x > src/new.ts" }, "d")).toMatchObject({ block: true, reason: expect.stringContaining("would write") });
+    // Its own children inherit the same scope.
+    const req: any = { version: 1, env: {} };
+    child.h.pi.events.emit("pi-plugins.subagent-env.v1", req);
+    expect(req.env).toMatchObject({ PI_TOOL_GATE_WORKFLOW: "plan", PI_TOOL_GATE_SCRATCH: scratch });
+  });
+  test("a restored session remembers it was told, and a relative scratch directory is ignored", async () => {
+    vi.stubEnv("PI_SUBAGENT", "1");
+    vi.stubEnv("PI_TOOL_GATE_WORKFLOW", "plan");
+    vi.stubEnv("PI_TOOL_GATE_SCRATCH", "relative/dir");
+    expect(inheritedModes()).toEqual({ workflow: "plan" });
+    const child = await start(setup([entry("tool-gate:delegated-plan-notice", { told: true })]));
+    expect(await child.h.emit("before_agent_start", { prompt: "x" }, child.ctx)).toBeUndefined();
+    expect(await child.h.emit("tool_call", call("write", { path: "relative/dir/x", content: "x" }), child.ctx)).toMatchObject({ block: true, reason: expect.stringContaining("only outside the repository") });
   });
   test("outside a subagent, or with an unknown value, the variables change nothing", async () => {
     vi.stubEnv("PI_TOOL_GATE_APPROVAL", "bypassPermissions");
