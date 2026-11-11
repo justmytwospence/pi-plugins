@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { draftPrompt, MAX_QUESTIONS, parsePlan, refinePrompt, replyText } from "../src/protocol.ts";
+import { draftPrompt, MAX_QUESTIONS, outlineContext, parsePlan, redraftPrompt, refinePrompt, replyText } from "../src/protocol.ts";
 
 describe("parsePlan", () => {
   it("reads the JSON reply", () => {
@@ -69,5 +69,21 @@ describe("replyText", () => {
     expect(replyText({ content: [{ type: "thinking", thinking: "x" }, { type: "text", text: "a" }, { type: "text", text: "b" }] })).toBe("a\nb");
     expect(replyText({ content: "plain" })).toBe("plain");
     expect(replyText(undefined)).toBe("");
+  });
+});
+
+describe("outline prompts", () => {
+  it("wraps the outline", () => {
+    const text = outlineContext("[user]\nhi");
+    expect(text.startsWith("<session-outline>")).toBe(true);
+    expect(text.endsWith("</session-outline>")).toBe(true);
+    expect(text).toContain("[user]\nhi");
+  });
+
+  it("asks to check a draft against the full conversation", () => {
+    const text = redraftPrompt("ship it", "- Next task: x");
+    expect(text).toContain("ship it");
+    expect(text).toContain("- Next task: x");
+    expect(text).toContain('"questions": []');
   });
 });

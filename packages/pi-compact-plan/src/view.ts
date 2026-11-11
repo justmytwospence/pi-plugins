@@ -13,10 +13,15 @@ export const OUTCOME_ENTRY = "compact-plan-outcome";
 
 export type Status = "drafting" | "pending" | "compacting" | "compacted" | "cancelled" | "failed";
 
+/** What a draft was written from. */
+export type Source = "outline" | "full";
+
 export interface DraftState {
   goal: string;
   draft: string;
   status: Status;
+  /** What the draft was written from; absent means the full conversation. */
+  source?: Source;
   edited?: boolean;
   /** Approved with "compact and continue": the next step is sent once compacted. */
   continued?: boolean;
@@ -38,7 +43,7 @@ export interface OutcomeEntry extends DraftState {
 
 /** The card's status line: what happened, then the goal and (once compacted) the drafting cost. */
 export function reviewStatus(state: DraftState): ReviewStatus {
-  const parts = [state.goal ? `next: ${state.goal.replace(/\s+/gu, " ")}` : ""];
+  const parts = [state.goal ? `next: ${state.goal.replace(/\s+/gu, " ")}` : "", state.source === "outline" ? "drafted from an outline" : ""];
   if (state.status === "compacted" && state.tokens) {
     parts.push(`drafting read ${state.tokens.toLocaleString("en-US")} tokens, ${state.cached ?? 0}% cached`);
   }

@@ -18,6 +18,8 @@ Example draft (illustration, not a screenshot):
 
 The drafting is a side request to the session's model, outside the session. Where the API allows, it reuses the session's last provider request byte for byte, so the conversation is read from the prompt cache.
 
+When the conversation is large and not (or probably not) in the prompt cache, it first asks whether to draft from the full conversation or from an outline of the session (prompts, replies, tool calls, error lines), listing the cheaper fit first; with pi-cache-guard loaded it uses its cache clock for that guess. `/compact-prompt` takes the guess without asking. The summary itself always reads the whole conversation; a plan drafted from an outline can be redrafted from the full conversation in the review.
+
 Part of [Pi Plugins](https://github.com/justmytwospence/pi-plugins). Reference: <https://pi-plugins.vercel.app/plugins/pi-compact-plan/>.
 
 ## Install

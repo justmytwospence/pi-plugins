@@ -54,6 +54,31 @@ Be specific to this session, never generic. Under 250 words.${automatic ? "" : "
 </${TAG}>`;
 }
 
+/** The system prompt of a request drafted from an outline (no session system prompt, no tools). */
+export const OUTLINE_SYSTEM = "You help plan the compaction of a coding agent's session. Reply only in the format the user's message asks for.";
+
+/** The outline as the first part of the first request, when the conversation itself is not sent. */
+export function outlineContext(outline: string): string {
+  return `<session-outline>
+An outline of the session so far, instead of the full transcript: every user prompt and assistant reply, one line per tool call, and each tool result shortened to its first and last lines and any error or warning lines. The summary will be written from the full transcript, so when a detail you need is in an omitted part, name it in the draft (for example "the exact failing assertion from the last test run") rather than guessing it.
+
+${outline}
+</session-outline>`;
+}
+
+/** A request on the full conversation that checks a draft written from an outline. */
+export function redraftPrompt(goal: string, draft: string): string {
+  return `${draftPrompt(goal, true)}
+
+<${TAG}>
+A draft written earlier from an abbreviated outline of this session, including the user's answers and edits:
+
+${draft}
+
+Check it against the full conversation: add what the outline hid, correct what it got wrong, and keep every point the user's answers and edits put in it. Reply with only the JSON object, with "questions": [].
+</${TAG}>`;
+}
+
 /** The follow-up request: the user's answers, and a revised draft. */
 export function refinePrompt(answers: readonly Answer[]): string {
   const lines = answers.map((a) => `Q: ${a.question}\nA: ${a.answer}${a.note ? `\nNote: ${a.note}` : ""}`).join("\n\n");

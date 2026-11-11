@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
-import piCompactPlan, { APPROVE, CANCEL, CHANGE, COMMAND, CONTINUE, CONTINUE_PROMPT, continuation, EDIT, messagesSince, PROMPT_COMMAND, SKIP, WRITE_OWN } from "../src/index.ts";
+import piCompactPlan, { APPROVE, CANCEL, CHANGE, COMMAND, CONTINUE, CONTINUE_PROMPT, continuation, EDIT, messagesSince, OUTLINE_MIN_TOKENS, PROMPT_COMMAND, REDRAFT, SKIP, SOURCE_FULL, SOURCE_OUTLINE, WRITE_OWN } from "../src/index.ts";
+import { OUTLINE_SYSTEM } from "../src/protocol.ts";
 import { ENTRY, OUTCOME_ENTRY } from "../src/view.ts";
 
 const SYSTEM = "You are pi, a coding agent.";
@@ -20,7 +21,7 @@ const reply = (text: string, usage = { input: 100, cacheRead: 9900, cacheWrite: 
   usage,
 });
 
-function setup(options: { replies: string[]; ui?: Partial<Record<string, any>>; branch?: any[]; failSplice?: boolean }) {
+function setup(options: { replies: string[]; ui?: Partial<Record<string, any>>; branch?: any[]; failSplice?: boolean; tokens?: number }) {
   const handlers = new Map<string, Array<(e: any, c: any) => unknown>>();
   const commands = new Map<string, any>();
   const pi: any = {
@@ -28,9 +29,16 @@ function setup(options: { replies: string[]; ui?: Partial<Record<string, any>>; 
     registerCommand: (name: string, o: any) => commands.set(name, o),
     registerEntryRenderer: () => undefined,
     appendEntry: (customType: string, data: any) => entries.push({ customType, data: structuredClone(data) }),
-    events: { emit: () => undefined, on: () => () => undefined },
+    events: {
+      emit: () => undefined,
+      on: (channel: string, h: any) => {
+        listeners.set(channel, [...(listeners.get(channel) ?? []), h]);
+        return () => undefined;
+      },
+    },
     sendUserMessage: (text: string) => sent.push(text),
   };
+  const listeners = new Map<string, Array<(data: any) => void>>();
   const sent: string[] = [];
   const entries: Array<{ customType: string; data: any }> = [];
   piCompactPlan(pi);
@@ -76,6 +84,7 @@ function setup(options: { replies: string[]; ui?: Partial<Record<string, any>>; 
     ui,
     waitForIdle: async () => undefined,
     getSystemPrompt: () => SYSTEM,
+    ...(options.tokens !== undefined ? { getContextUsage: () => ({ tokens: options.tokens, contextWindow: 1_000_000, percent: null }) } : {}),
     compact: (o: any) => {
       compacts.push(o);
       o.onComplete?.({});
@@ -91,7 +100,8 @@ function setup(options: { replies: string[]; ui?: Partial<Record<string, any>>; 
   const mainPayload = { model: model.id, system: [{ type: "text", text: SYSTEM }], tools: [{ name: "bash" }], messages: [{ role: "user", content: [{ type: "text", text: "fix the bug" }] }] };
   const sendMain = () => handlers.get("before_provider_request")?.forEach((h) => h({ payload: mainPayload }, ctx));
   const run = (args: string, command = COMMAND) => commands.get(command).handler(args, ctx);
-  return { run, commands, sendMain, requests, notes, compacts, handlers, ctx, entries, pi, sent, getEditor: () => editorText };
+  const emitEvent = (channel: string, data: unknown) => listeners.get(channel)?.forEach((h) => h(data));
+  return { run, emitEvent, commands, sendMain, requests, notes, compacts, handlers, ctx, entries, pi, sent, getEditor: () => editorText };
 }
 
 const json = (draft: string, questions: unknown[] = []) => JSON.stringify({ questions, draft });
@@ -475,5 +485,144 @@ describe("messagesSince", () => {
   it("gives up when the leaf is gone or a compaction intervenes", () => {
     expect(messagesSince(branch, "zz")).toBeUndefined();
     expect(messagesSince([...branch, { type: "compaction", id: "c" }], "u1")).toBeUndefined();
+  });
+});
+
+describe("drafting source", () => {
+  const big = OUTLINE_MIN_TOKENS * 4;
+  const asked = () => {
+    const calls: Array<{ title: string; options: string[] }> = [];
+    const select = async (title: string, options: string[]) => {
+      calls.push({ title, options });
+      return title === "Compact with this focus?" ? APPROVE : options[0];
+    };
+    return { calls, select };
+  };
+
+  it("lists the full conversation first when the cache looks warm, and splices", async () => {
+    const q = asked();
+    const t = setup({ replies: [json("Focus")], tokens: big, ui: { select: q.select } });
+    t.emitEvent("cache:state", { cold: false, tokens: big });
+    t.sendMain();
+    await t.run("ship it");
+    expect(q.calls[0]!.options).toEqual([SOURCE_FULL, SOURCE_OUTLINE]);
+    expect(q.calls[0]!.title).toContain("is in the prompt cache");
+    expect(t.requests[0]!.options.onPayload).toBeDefined();
+  });
+
+  it("lists the outline first when cache-guard says cold, and drafts from the outline", async () => {
+    const q = asked();
+    const t = setup({ replies: [json("Focus")], tokens: big, ui: { select: q.select } });
+    t.emitEvent("cache:state", { cold: true, tokens: big });
+    t.sendMain();
+    await t.run("ship it");
+    expect(q.calls[0]!.options).toEqual([SOURCE_OUTLINE, SOURCE_FULL]);
+    expect(t.requests[0]!.options.onPayload).toBeUndefined();
+    expect(t.requests[0]!.context.systemPrompt).toBe(OUTLINE_SYSTEM);
+    expect(JSON.stringify(t.requests[0]!.context.messages[0])).toContain("<session-outline>");
+    expect(t.entries.find((e) => e.customType === OUTCOME_ENTRY)!.data.source).toBe("outline");
+  });
+
+  it("lists the outline first when there is no request to reuse", async () => {
+    const q = asked();
+    const t = setup({ replies: [json("Focus")], tokens: big, ui: { select: q.select } });
+    await t.run("ship it");
+    expect(q.calls[0]!.options[0]).toBe(SOURCE_OUTLINE);
+    expect(q.calls[0]!.title).toContain("not in the prompt cache");
+  });
+
+  it("does not ask for a small conversation", async () => {
+    const q = asked();
+    const t = setup({ replies: [json("Focus")], tokens: OUTLINE_MIN_TOKENS - 1, ui: { select: q.select } });
+    t.emitEvent("cache:state", { cold: true });
+    t.sendMain();
+    await t.run("ship it");
+    expect(q.calls.map((c) => c.title)).toEqual(["Compact with this focus?"]);
+    expect(t.requests[0]!.options.onPayload).toBeDefined();
+  });
+
+  it("does not ask when the outline would not be much smaller", async () => {
+    const q = asked();
+    const t = setup({ replies: [json("Focus")], tokens: OUTLINE_MIN_TOKENS, ui: { select: q.select } });
+    t.emitEvent("cache:state", { cold: true });
+    t.sendMain();
+    t.ctx.sessionManager.buildSessionProjection = () => ({ messages: Array.from({ length: 100 }, (_, i) => ({ role: "user", content: `${i} ${"x".repeat(3_500)}`, timestamp: 1 })) });
+    await t.run("ship it");
+    expect(q.calls.map((c) => c.title)).toEqual(["Compact with this focus?"]);
+  });
+
+  it("/compact-prompt follows the guess without a dialog", async () => {
+    const q = asked();
+    const cold = setup({ replies: [json("Focus")], tokens: big, ui: { select: q.select } });
+    cold.emitEvent("cache:state", { cold: true });
+    cold.sendMain();
+    await cold.run("ship it", PROMPT_COMMAND);
+    expect(q.calls).toEqual([]);
+    expect(cold.requests[0]!.options.onPayload).toBeUndefined();
+    expect(cold.requests[0]!.context.systemPrompt).toBe(OUTLINE_SYSTEM);
+
+    const warm = setup({ replies: [json("Focus")], tokens: big, ui: { select: q.select } });
+    warm.emitEvent("cache:state", { cold: false });
+    warm.sendMain();
+    await warm.run("ship it", PROMPT_COMMAND);
+    expect(q.calls).toEqual([]);
+    expect(warm.requests[0]!.options.onPayload).toBeDefined();
+  });
+
+  it("cancels when the source question is dismissed", async () => {
+    const t = setup({ replies: [json("Focus")], tokens: big, ui: { select: async () => undefined } });
+    await t.run("ship it");
+    expect(t.requests).toHaveLength(0);
+    expect(t.compacts).toHaveLength(0);
+    expect(t.notes).toContainEqual(["Compaction cancelled", "info"]);
+  });
+
+  it("redrafts an outline draft from the full conversation", async () => {
+    const reviews = [REDRAFT, APPROVE];
+    const seen: string[][] = [];
+    const t = setup({
+      replies: [json("From outline"), json("From everything")],
+      tokens: big,
+      ui: {
+        select: async (title: string, options: string[]) => {
+          if (title === "Compact with this focus?") {
+            seen.push(options);
+            return reviews.shift();
+          }
+          return options[0];
+        },
+      },
+    });
+    t.emitEvent("cache:state", { cold: true });
+    t.sendMain();
+    await t.run("ship it");
+    expect(seen[0]).toContain(REDRAFT);
+    expect(seen[1]).not.toContain(REDRAFT);
+    expect(t.requests).toHaveLength(2);
+    expect(t.requests[1]!.options.onPayload).toBeDefined();
+    expect(JSON.stringify(t.requests[1]!.context.messages.at(-1))).toContain("From outline");
+    expect(t.compacts[0].customInstructions).toBe("From everything");
+    expect(t.entries.find((e) => e.customType === OUTCOME_ENTRY)!.data.source).toBeUndefined();
+  });
+
+  it("does not offer a redraft for a draft from the full conversation", async () => {
+    const seen: string[][] = [];
+    const t = setup({
+      replies: [json("Focus")],
+      tokens: big,
+      ui: {
+        select: async (title: string, options: string[]) => {
+          if (title === "Compact with this focus?") {
+            seen.push(options);
+            return APPROVE;
+          }
+          return SOURCE_FULL;
+        },
+      },
+    });
+    t.emitEvent("cache:state", { cold: true });
+    t.sendMain();
+    await t.run("ship it");
+    expect(seen[0]).not.toContain(REDRAFT);
   });
 });

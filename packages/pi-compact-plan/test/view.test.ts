@@ -44,6 +44,8 @@ describe("DraftView", () => {
     expect(reviewStatus({ ...base, status: "drafting" })).toEqual({ tone: "pending", text: "Revising…", context: undefined });
     expect(reviewStatus({ ...base, status: "compacted", continued: true }).text).toBe("✓ Compacted with this focus, continuing");
     expect(reviewStatus({ ...base, status: "cancelled" }).tone).toBe("warning");
+    expect(reviewStatus({ goal: "go", draft: "", status: "pending", source: "outline" }).context).toBe("next: go · drafted from an outline");
+    expect(reviewStatus({ goal: "go", draft: "", status: "pending" }).context).toBe("next: go");
     expect(reviewStatus({ ...base, status: "failed", error: "boom" })).toMatchObject({ tone: "error", text: "Compaction failed: boom" });
   });
 });
