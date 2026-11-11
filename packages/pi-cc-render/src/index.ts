@@ -6,7 +6,6 @@ import { installBashHighlight } from "./feature/shell/bash-highlight.ts";
 import { installFlushDockedBash } from "./feature/shell/flush-docked-bash.ts";
 import piStartupHeader, { installEarlyStartupHeader } from "./feature/shell/startup-header.ts";
 import { installStartupResources } from "./feature/shell/startup-resources.ts";
-import { installStartupSkeleton } from "./feature/shell/startup-skeleton.ts";
 import installNativeControls from "./feature/shell/native-controls.ts";
 import { installSplashCommand } from "./feature/shell/splash-command.ts";
 
@@ -33,7 +32,6 @@ export default function (pi: ExtensionAPI): void {
 	installEarlyStartupHeader();
 	installNativeControls(pi);
 	installStartupResources(pi);
-	installStartupSkeleton(pi);
 	installSplashCommand(pi);
 	piStartupHeader(pi);
 

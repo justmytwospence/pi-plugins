@@ -1386,16 +1386,7 @@ export function stopStartupResources(): void {
 	mcpState.mounted = false;
 }
 
-/** Modes whose real listing has been shown (or deliberately skipped) since the last shutdown; the skeleton yields to it. */
-const settledModes = new Set<object>();
-export function isStartupSplashSettled(mode: object): boolean { return settledModes.has(mode); }
-/** Marks a mounted splash stale so it renders nothing instead of degrading to Pi's native listing. */
-const staleMarkers = new Map<object, () => void>();
-
 function disposeStartupResources(): void {
-	for (const mark of staleMarkers.values()) mark();
-	staleMarkers.clear();
-	settledModes.clear();
 	stopStartupResources();
 	for (const mode of mountedModes) disposeStartupHost(mode);
 	mountedModes.clear();
@@ -1448,9 +1439,6 @@ export function replaceSections(mode: any, options: unknown, pi?: ExtensionAPI):
 	}
 	const host = attachStartupHost(mode);
 	mountedModes.add(mode);
-	staleMarkers.get(mode)?.();
-	let stale = false;
-	staleMarkers.set(mode, () => { stale = true; });
 	host.onDispose?.();
 	const controller = pi ? createSplashActionController(pi, mode, host) : undefined;
 	host.onDispose = () => controller?.dispose();
@@ -1528,11 +1516,10 @@ export function replaceSections(mode: any, options: unknown, pi?: ExtensionAPI):
 			invalidate() {},
 		};
 	};
-	const modelComponent = interactive((width, expanded) => stale ? undefined : selected("Models", width, expanded));
-	const modelSpacer = { render: () => !stale && host.resourceSections?.Models ? [""] : [], invalidate() {} };
+	const modelComponent = interactive((width, expanded) => selected("Models", width, expanded));
+	const modelSpacer = { render: () => host.resourceSections?.Models ? [""] : [], invalidate() {} };
 	const mapComponent = {
 		render(width: number) {
-			if (stale) return [];
 			return renderContextTreemap(host.contextSnapshot ?? {
 				stage: "initializing", modelLabel: "Model unknown", usedEstimate: 0, sources: [],
 				toolDeclarationsKnown: false, mcpOriginsKnown: false,
@@ -1556,13 +1543,13 @@ export function replaceSections(mode: any, options: unknown, pi?: ExtensionAPI):
 		const moved = children.splice(extensionAt, length);
 		children.splice(firstAt, 0, ...moved);
 	}
-	const component = interactive((width, expanded) => stale ? undefined : selected("MCP", width, expanded));
-	const spacer = { render: () => !stale && (mcpEntries.length > 0 || statuses.size > 0) ? [""] : [], invalidate() {} };
+	const component = interactive((width, expanded) => selected("MCP", width, expanded));
+	const spacer = { render: () => mcpEntries.length > 0 || statuses.size > 0 ? [""] : [], invalidate() {} };
 	children.push(component, spacer);
 	// Native sections (including diagnostics) end in a Spacer; when MCP is last its
 	// conditional spacer serves the same purpose. Models gets one blank row of its own,
 	// once the conversation starts below it.
-	const tailSpacer = { render: () => !stale && mode.chatContainer?.children?.length ? [""] : [], invalidate() {} };
+	const tailSpacer = { render: () => mode.chatContainer?.children?.length ? [""] : [], invalidate() {} };
 	children.push(mapComponent, modelSpacer, modelComponent, tailSpacer);
 	const dock = ["editorContainer", "footerContainer", "statusContainer", "pendingMessagesContainer", "widgetContainerAbove", "widgetContainerBelow"];
 	const height = (node: any, width: number) => typeof node?.render === "function" ? node.render(width).length : 0;
@@ -1643,13 +1630,7 @@ export function replaceSections(mode: any, options: unknown, pi?: ExtensionAPI):
 	for (const [child, title] of titled) native.set(child, child.render.bind(child));
 	for (const [child, title] of titled) {
 		const expandedRender = native.get(child)!;
-		const spacerAfter = children[children.indexOf(child) + 1];
-		if (spacerAfter?.constructor?.name === "Spacer" && typeof spacerAfter.render === "function") {
-			const savedRender = spacerAfter.render.bind(spacerAfter);
-			spacerAfter.render = (width: number) => stale ? [] : savedRender(width);
-		}
 		child.render = (width: number) => {
-			if (stale) return [];
 			const planned = ensurePlan(width);
 			const section = host.resourceSections?.[title!];
 			return !section ? expandedRender(width)
@@ -1681,7 +1662,6 @@ export function installStartupResources(pi?: ExtensionAPI): void {
 		original,
 		installed: function (this: any, ...args: any[]) {
 			const result = original.apply(this, args);
-			if (patch.active) settledModes.add(this);
 			if (!patch.active || !config.showStartupHeader) return result;
 			try {
 				replaceSections(this, args[0], pi);
