@@ -1,6 +1,6 @@
 {
   "name": "@justmytwospence/pi-sidebar",
-  "version": "0.1.53",
+  "version": "0.1.54",
   "description": "Sidebar: a live, read-only side chat in a Herdr pane beside a working Pi session, sharing its prompt cache.",
   "type": "module",
   "license": "MIT",
