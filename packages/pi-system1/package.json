@@ -1,6 +1,6 @@
 {
   "name": "@justmytwospence/pi-system1",
-  "version": "0.1.55",
+  "version": "0.1.56",
   "description": "One native System 1 classifier switch for Jev and OpenAI Decisions, with isolated API credentials.",
   "type": "module",
   "license": "MIT",

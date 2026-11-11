@@ -1,6 +1,6 @@
 {
   "name": "@justmytwospence/pi-worktree",
-  "version": "0.1.55",
+  "version": "0.1.56",
   "description": "/worktree and the worktree tool: start a task in its own git worktree under .worktrees/, continue this conversation there (a new Herdr pane with pi-herdr, else in place), and remove it once merged.",
   "type": "module",
   "license": "MIT",
