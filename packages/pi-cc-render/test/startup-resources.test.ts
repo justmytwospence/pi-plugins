@@ -1323,6 +1323,37 @@ describe("waterfall-ordered models", () => {
 		const plain = buildModelsSection([{ provider: "waterfall", id: "auto", virtual: true }, { provider: "openai", id: "gpt-6.1-sol" }, { provider: "anthropic", id: "claude-opus-5-5" }])!;
 		expect(plain.groups.map((group) => group.label)).toEqual(["anthropic", "openai"]);
 	});
+
+	test("openai-codex lists under openai, one row per id, preferring the openai route", async () => {
+		const { buildModelsSection } = await import("../src/feature/shell/startup-resources.ts");
+		const models = [
+			{ provider: "openai-codex", id: "gpt-6-astra", contextWindow: 272_000 },
+			{ provider: "openai-codex", id: "gpt-6-luna", contextWindow: 272_000 },
+			{ provider: "openai-codex", id: "gpt-6.1-sol", contextWindow: 500_000 },
+			{ provider: "openai-codex", id: "gpt-6.1-terra", contextWindow: 500_000 },
+			{ provider: "openai", id: "gpt-6-astra", contextWindow: 922_000 },
+			{ provider: "openai", id: "gpt-6.1-sol", contextWindow: 922_000 },
+			{ provider: "openai", id: "gpt-6.1-terra", contextWindow: 272_000 },
+		];
+		const rungs = [{ provider: "openai", model: "gpt-6.1-sol", state: "available" as const }];
+		const section = buildModelsSection(models, [], undefined, { rungs })!;
+		expect(section.groups.map((group) => group.label)).toEqual(["1 openai"]);
+		expect(section.count).toBe(4);
+		expect(section.groups[0]!.actions).toEqual([
+			{ kind: "model", provider: "openai", id: "gpt-6-astra" },
+			{ kind: "model", provider: "openai-codex", id: "gpt-6-luna" },
+			{ kind: "model", provider: "openai", id: "gpt-6.1-sol" },
+			{ kind: "model", provider: "openai", id: "gpt-6.1-terra" },
+		]);
+		expect(section.groups[0]!.right).toEqual(["922K", "272K", "922K", "272K"]);
+		// A favorite or the session's codex route keeps its row, marked, in place of the openai one.
+		const pinned = buildModelsSection(models, [{ provider: "openai-codex", id: "gpt-6.1-sol" }], { provider: "openai-codex", id: "gpt-6-astra" }, { rungs })!;
+		expect(pinned.groups[0]!.actions!.map((action: any) => `${action.provider}/${action.id}`)).toEqual([
+			"openai-codex/gpt-6.1-sol", "openai-codex/gpt-6-astra", "openai-codex/gpt-6-luna", "openai/gpt-6.1-terra",
+		]);
+		expect(pinned.groups[0]!.prefixes![0]).toBeDefined();
+		expect(pinned.groups[0]!.marks![1]).toBeDefined();
+	});
 });
 
 describe("/splash", () => {

@@ -1087,6 +1087,11 @@ export type ModelEntry = { provider: string; id: string; contextWindow?: number;
 
 /** The subscription vendor a provider bills: Muse SDK/Code and OpenAI/Codex share one rung. */
 const vendorOf = (provider: string) => provider.replace(/-(sdk|code|codex)$/, "");
+/**
+ * The splash group a provider's models list under. openai-codex is only the route that reports the
+ * ChatGPT subscription's quota, not another account or model family, so it lists under openai.
+ */
+const splashGroupOf = (provider: string) => (provider === "openai-codex" ? "openai" : provider);
 const hours = (ms: number) => ms >= 86_400_000 ? `${Math.round(ms / 86_400_000)}d` : ms >= 3_600_000 ? `${Math.round(ms / 3_600_000)}h` : `${Math.max(1, Math.round(ms / 60_000))}m`;
 /**
  * A rung's heading suffix: why the waterfall would skip it now, or, when it would not, its most-used quota
@@ -1243,14 +1248,24 @@ export function buildModelsSection(
 	favorites = favorites.filter((model) => shown(model) && byKey.has(key(model)));
 	const favoriteKeys = new Set(favorites.map(key));
 	const providers = new Map<string, ModelEntry[]>();
+	// One row per id in a group: a favorite's route wins, then the session's, then openai over openai-codex.
+	const isCurrent = (model: ModelEntry) => current !== undefined && key(model) === key(current);
+	const priority = (model: ModelEntry) =>
+		favoriteKeys.has(key(model)) ? 0 : isCurrent(model) ? 1 : model.provider === "openai-codex" ? 3 : 2;
 	const add = (model: ModelEntry) => {
-		const list = providers.get(model.provider) ?? [];
-		if (!list.some((entry) => entry.id === model.id)) list.push(model);
-		providers.set(model.provider, list);
+		const group = splashGroupOf(model.provider);
+		const list = providers.get(group) ?? [];
+		const index = list.findIndex((entry) => entry.id === model.id);
+		if (index < 0) list.push(model);
+		else if (priority(model) < priority(list[index]!)) list[index] = model;
+		providers.set(group, list);
 	};
 	for (const favorite of favorites) add({ ...byKey.get(key(favorite)), ...favorite });
 	const availableProviders = new Map<string, ModelEntry[]>();
-	for (const model of available) availableProviders.set(model.provider, [...(availableProviders.get(model.provider) ?? []), model]);
+	for (const model of available) {
+		const group = splashGroupOf(model.provider);
+		availableProviders.set(group, [...(availableProviders.get(group) ?? []), model]);
+	}
 	// Assessed rungs carry state; until the first assessment, the waterfall's fixed order still
 	// decides which providers belong and where they go.
 	const rungs = waterfall?.rungs ?? [];
@@ -1260,7 +1275,7 @@ export function buildModelsSection(
 		if (ladder.length && rungOf(provider) < 0) continue;
 		const current = currentGeneration(list.map((model) => model.id));
 		const rest = list.filter((model) => current.has(model.id) && !favoriteKeys.has(key(model)));
-		for (const model of rest.sort((a, b) => compareNames(a.id, b.id))) add(model);
+		for (const model of rest.sort((a, b) => compareNames(a.id, b.id) || priority(a) - priority(b))) add(model);
 	}
 	if (current && byKey.has(key(current))) add(byKey.get(key(current))!);
 	const count = [...providers.values()].reduce((sum, list) => sum + list.length, 0);
@@ -1271,7 +1286,7 @@ export function buildModelsSection(
 	const rank = (provider: string) => { const index = rungOf(provider); return index < 0 ? ladder.length : index; };
 	const ordered = [...providers].sort(([a], [b]) => rank(a) - rank(b) || compareNames(a, b));
 	const groups: ResourceGroup[] = ordered.map(([provider, list]) => {
-		const marks = list.map((model) => (current && key(model) === key(current) ? CURRENT_MARK : undefined));
+		const marks = list.map((model) => (isCurrent(model) ? CURRENT_MARK : undefined));
 		const prefixes = list.map((model) => (favoriteKeys.has(key(model)) ? FAVORITE_MARK : undefined));
 		const index = rungOf(provider);
 		const rung = index < 0 ? undefined : rungs[index];
@@ -1284,7 +1299,7 @@ export function buildModelsSection(
 				const label = provider === "google" ? model.id.replace(/^antigravity-/, "") : model.id;
 				return model.thinkingLevel ? `${label}:${model.thinkingLevel}` : label;
 			}),
-			actions: list.map((model) => ({ kind: "model", provider, id: model.id, ...(model.thinkingLevel ? { thinkingLevel: model.thinkingLevel } : {}) })),
+			actions: list.map((model) => ({ kind: "model", provider: model.provider, id: model.id, ...(model.thinkingLevel ? { thinkingLevel: model.thinkingLevel } : {}) })),
 			right: list.map((model) => formatContextWindow(model.contextWindow)),
 			...(marks.some(Boolean) ? { marks } : {}),
 			...(prefixes.some(Boolean) ? { prefixes } : {}),
