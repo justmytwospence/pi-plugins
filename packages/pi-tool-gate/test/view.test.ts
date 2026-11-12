@@ -177,7 +177,7 @@ describe("askApproval in the terminal UI", () => {
   test("n opens a message field; Enter blocks with the message", async () => {
     const { choice, message, frames } = await show({ view, options: ["Allow once", "Block"] }, ["n", ..."use a branch", "\r"]);
     // Laid out as Pi's own dialogs, which herdr-web-ui reads: question, blank, rows, blank, hint.
-    expect(frames[0]!.join("\n")).toMatch(/Action:.*bash[\s\S]*Target:.*git push --force origin main\s*\n\s*\n\s*→ Allow once[\s\S]*Block with a message\s*\n\s*\n\s*n message {2}↑↓ navigate {2}enter select {2}escape\/ctrl\+c cancel/u);
+    expect(frames[0]!.join("\n")).toMatch(/Target:.*git push --force origin main\s*\n\s*\n\s*→ Allow once[\s\S]*Block with a message\s*\n\s*\n\s*n message {2}↑↓ navigate {2}enter select {2}escape\/ctrl\+c cancel/u);
     expect(frames[1]!.join("\n")).toMatch(/Message for the agent\s*\n\s*\n\s*› \s*\n\s*\n\s*enter submit {2}escape\/ctrl\+c cancel/u);
     expect(frames.at(-2)!.join("\n")).toMatch(/› use a branch/u);
     expect(choice).toBe("Block");

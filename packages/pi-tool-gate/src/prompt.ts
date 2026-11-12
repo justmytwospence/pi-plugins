@@ -42,6 +42,8 @@ import type { CallView } from "./view.ts";
 const blockedOn = (kind: "question" | "permission" | "auth", message: string) => ({ blocked: { kind, message } }) as never;
 
 const EDITOR_SURFACE = Symbol.for("pi-plugins.editor-surface.v1");
+/** Characters of a shell command kept in the question when the preview shows all of it. */
+const TARGET_CLIP = 60;
 
 /** The extra row that refuses with a message; also `n` in the terminal dialog. */
 export const BLOCK_WITH_MESSAGE = "Block with a message";
@@ -286,12 +288,24 @@ class ApprovalDialog implements Component {
     return lines.length > 8 ? [...lines.slice(0, 7), this.theme.fg("muted", "...")] : lines;
   }
 
-  /** Keep Action/Target in one paragraph: phone readers scan only eight question rows. */
+  /**
+   * Keep Action/Target in one paragraph: phone readers scan only eight question rows and never
+   * see the preview. A shell command the preview already shows in full is cut to a short label,
+   * and an action that only repeats the title's tool name is left out.
+   */
   private question(): string[] {
     const v = this.a.view;
-    const command = (v.tool === "bash" || v.tool === "bg_run") && v.body.kind === "code" ? v.body.text.split("\n")[0]?.trim() : "";
+    const shell = (v.tool === "bash" || v.tool === "bg_run") && v.body.kind === "code";
+    const command = shell ? v.body.text.split("\n")[0]?.trim() : "";
     const flat = (s: string) => s.replace(/[\u0000-\u001f\u007f-\u009f]+/gu, " ").replace(/\s+/gu, " ").trim();
-    return [`Action: ${flat(v.action || v.tool) || "Tool"} · Target: ${flat(v.target || v.subject || command || "Not specified")}`];
+    const action = flat(v.action || v.tool) || "Tool";
+    let target = flat(v.target || v.subject || command || "Not specified");
+    if (shell && v.body.text.trim() && target.length > TARGET_CLIP) {
+      const cut = target.slice(0, TARGET_CLIP);
+      const space = cut.lastIndexOf(" ");
+      target = `${(space > TARGET_CLIP / 2 ? cut.slice(0, space) : cut).trimEnd()} …`;
+    }
+    return [action === flat(v.tool) ? `Target: ${target}` : `Action: ${action} · Target: ${target}`];
   }
 
   get focused(): boolean {

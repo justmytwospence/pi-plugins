@@ -459,7 +459,8 @@ const DIALOGS = [
     return {
       name, lines: (w) => approvalLines(w, spec),
       // Compare all target/rule characters below, ignoring whitespace inserted by screen wrapping.
-      questionIncludes: [`Action: ${spec.tool ?? 'bash'}`, `Target: ${spec.tool === 'read' ? '~/Projects/other/a.ts' : spec.command}`, ...spec.grant],
+      // A long command is cut to a label (the preview shows it in full), so match its start.
+      questionIncludes: [`Target: ${spec.tool === 'read' ? '~/Projects/other/a.ts' : spec.command.split(' ').slice(0, 4).join(' ')}`, ...spec.grant],
       herdr: { options: rows.length, multi: false, labels: rows }, collie: { kind: 'prompt-select', wraps: rows },
     };
   }),

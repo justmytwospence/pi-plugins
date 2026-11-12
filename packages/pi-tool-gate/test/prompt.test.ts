@@ -55,9 +55,10 @@ describe("the approval dialog's rule rows", () => {
     const d = open(approval({ grant: ["Rule: Bash(git push:*)", "Rule: Bash(rm -rf build)"] }), 46);
     await Promise.resolve();
     const lines = d.screen().split("\n");
-    const question = lines.findIndex((l) => l.trim().startsWith("Action:"));
+    const question = lines.findIndex((l) => l.trim().startsWith("Target:"));
     const finalQuestion = lines.slice(question, lines.findIndex((l) => l.includes("→ Allow once"))).map((l) => l.trim()).filter(Boolean);
-    expect(finalQuestion.join(" ")).toContain("Action: bash");
+    // The title already names the tool, so the question does not repeat it as an action.
+    expect(d.screen()).not.toContain("Action:");
     expect(finalQuestion.join(" ")).toContain("Target: git push origin feature");
     expect(finalQuestion).toContain("Rule: Bash(git push:*)");
     expect(finalQuestion).toContain("Rule: Bash(rm -rf build)");
@@ -80,10 +81,12 @@ describe("the approval dialog's rule rows", () => {
     // A collapsed Sidebar preserves one transcript row; activity + separator + footer need three.
     expect(lines.length + 1 + 3).toBeLessThanOrEqual(40);
     expect(lines.at(-1)).toMatch(/^─+$/u);
-    const questionLines = lines.slice(lines.findIndex((line) => line.trim().startsWith("Action:")), lines.findIndex((line) => line.includes("→ Allow once"))).filter((line) => line.trim());
+    const questionLines = lines.slice(lines.findIndex((line) => line.trim().startsWith("Target:")), lines.findIndex((line) => line.includes("→ Allow once"))).filter((line) => line.trim());
     expect(questionLines.length).toBeLessThanOrEqual(8);
     const question = questionLines.join("").replace(/\s+/gu, "");
-    for (const part of ["Action: bash", `Target: ${command}`, ...grant]) expect(question).toContain(part.replace(/\s+/gu, ""));
+    // The preview shows the whole command; the question keeps only a short label of it.
+    for (const part of ["Target: cd ~/Projects/app && git push origin feature && curl -s -X …", ...grant]) expect(question).toContain(part.replace(/\s+/gu, ""));
+    expect(question).not.toContain(command.replace(/\s+/gu, ""));
     d.press(ESC);
     expect(await d.answer).toEqual({ choice: "Block" });
   });
