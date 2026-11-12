@@ -164,7 +164,7 @@ Keyboard cycles commit when all participating modifiers are released if release 
 
 Submitting an ordinary prompt flushes the pending changes first. If application fails, the message is blocked and interactive text is recoverable from native prompt history; a newer draft is not replaced. Leaving main focus, opening dialogs/selectors, external model or relevant setting changes, session/branch navigation, compaction and reload/shutdown cancel pending previews. Restored interrupted history is never reapplied.
 
-Footer control rows show one primary effective key immediately after the content as a dim ` · <key>` suffix: the first configured model-selector key (or, without one, the effort-cycle key for a reasoning model), the provider's workflow key on the workflow row, and its approvals key. Very narrow layouts may omit a hint to keep important state. For example, `gpt-6-sol · alt+p` uses a personal model-selector binding, not a suite default; with no model-selector key, the personal profile's row shows `ctrl+t`, its effort-cycle key. Context, cache, skills and MCP do not receive invented global keys.
+Footer control rows show one primary effective key immediately after the content as a dim ` · <key>` suffix: the first configured model-selector key (or, without one, the effort-cycle key for a reasoning model), the provider's workflow key on the workflow row, and its approvals key. Very narrow layouts may omit a hint to keep important state. For example, `gpt-6-sol · alt+p` uses the personal profile's model-selector binding, not a suite default; with no model-selector key, a reasoning model's row shows the effort-cycle key instead. Context, cache, skills and MCP do not receive invented global keys.
 
 In fullscreen Pi, plain single clicks on visible footer values invoke the same owner controls when the actual main editor has focus: model/provider opens a picker, reasoning cycles, the base-workflow badge cycles, and Approvals opens its picker. Context, Skills and Cache inspect; MCP opens its native manager when the optional bridge is available. Padding, separators and omitted/truncated labels are inert. Dialogs, overlays, native selectors and blocked holds suspend clicks; selection gestures are not remapped. Regular terminal mode stays keyboard-operated, and other-session chrome is read-only. Use `/status details` for control diagnostics if a click fails; verify the actual terminal path with Sidebar closed, after `/reload`, and with Sidebar open. Isolated tests are not field verification. See the [footer reference](/plugins/pi-status-footer/#fullscreen-clicks) for optional-provider and focus limits.
 
@@ -217,11 +217,11 @@ Merge, `/reload`, then inspect `/hotkeys` and startup diagnostics. An array repl
 
 ## Optional personal profile
 
-**This is a labeled personal configuration, not stock Pi or automatic suite behavior.** It keeps every frequent control on a Ctrl key, binds dedicated history and reserves Ctrl+G for returning to the transcript tail. The model picker has no key: `/model` or the footer's model segment opens it, which also frees Ctrl+L for clear-screen. Effort cycles on Ctrl+T, opencode's variant-cycle key; Ctrl+O already expands thinking with pi-cc-render, so the native thinking-block toggle is unbound. Ctrl+Y gives up Pi's yank so that tool-gate can toggle approvals on it. The external editor remains available through pi-vim's Ctrl+X Ctrl+E chord when that component is selected.
+**This is a labeled personal configuration, not stock Pi or automatic suite behavior.** It keeps every frequent control on a Ctrl key, binds dedicated history and reserves Ctrl+G for returning to the transcript tail. The model picker moves to Alt+P, opencode's model-list key, which frees Ctrl+L for clear-screen; plan model pairs such as `opusplan` are entries in it, while the workflow stays on tool-gate's own key. Effort cycles on Ctrl+T, opencode's variant-cycle key; Ctrl+O already expands thinking with pi-cc-render, so the native thinking-block toggle is unbound. Ctrl+Y gives up Pi's yank so that tool-gate can toggle approvals on it. The external editor remains available through pi-vim's Ctrl+X Ctrl+E chord when that component is selected.
 
 ```json
 {
-  "app.model.select": [],
+  "app.model.select": "alt+p",
   "app.model.cycleForward": [],
   "app.model.cycleBackward": [],
   "app.thinking.cycle": "ctrl+t",
