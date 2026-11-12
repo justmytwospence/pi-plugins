@@ -98,3 +98,30 @@ Navigation captures current rows and actual allocated pane width. Stops do not w
 Vim's keyboard guard and cc-render's mouse/viewport wrapper use the same stable-Proxy receiver resolver. Wrappers chain the current instance handler, not the native prototype, and restore only their own property descriptors. This keeps configured native scroll bindings from stealing main checkpoint input and preserves newer owners during cleanup.
 
 Pi currently has no supported API for full live transcript-child geometry. Necessary host-layout lookups are isolated in the capability-checked viewport adapter. Unsupported/ambiguous geometry fails closed rather than scrolling a different view. Resize, same-height edits, compact rendering and session/renderer replacement require fresh captures; the implementation does not retain stale row positions or run another layout pass.
+
+## Visual language
+
+Every transcript item the suite draws has one of three shapes. The shared `transcript-style.ts` helper (canonical in `shared/transcript/`, copied into each package by `scripts/sync-transcript-helpers.mjs`) builds them, so the plugins look alike without depending on each other.
+
+- **Row**: one line, no background, ` <glyph> <title> · <detail>`. Rows of the same kind that arrive back to back, with nothing visible between them, update one row in place instead of adding lines. The first is an entry with a renderer; later ones are renderer-less state entries that update an in-memory journal rebuilt on `session_start` and `session_tree`. No Pi core component is patched for this.
+- **Block**: anything of several lines, on a tinted background with one cell of padding. Long bodies fold with an expand hint.
+- **Diff**: unchanged.
+
+Tone carries the signal. Glyphs, foreground colours and block backgrounds come from one table:
+
+| Tone | Glyph | Colour | Block background |
+|---|---|---|---|
+| running | braille spinner | `accent` | `toolPendingBg` |
+| done | `✓` | `success` | `toolSuccessBg` |
+| failed | `✗` | `error` | `toolErrorBg` |
+| stopped | `■` | `muted` | `toolPendingBg` |
+| attention | `?` | `warning` | `toolPendingBg` |
+| warning | `!` | `warning` | `toolPendingBg` |
+| info | `○` | `muted` | `customMessageBg` |
+| incoming | `◆` | `accent` | `customMessageBg` |
+
+`userMessageBg` belongs to your own prompts. Result lines use `↳`; `├ │ └` appear only inside expanded trees. Tools that draw their own rows declare `renderShell: "self"`, which pi-cc-render keeps without any `excludeRenderers` entry.
+
+### Timestamps
+
+pi-cc-render writes a right-aligned time on the middle row of each prompt, and the helper does the same for blocks and event rows (tool rows carry none; the turn summary carries the end time). Formats: `2:14 PM` today, `Tue 2:14 PM` within six days, `Mar 3, 2:14 PM` this year, `Mar 3 2025, 2:14 PM` earlier. The time appears only where the row has spare room for it and never shortens or wraps content. A prompt restored from a session shows its recorded time; a live one shows the time it was first drawn. Turn it off with `showTimestamps: false`.

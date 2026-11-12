@@ -77,7 +77,8 @@ Panel changes apply to the current transcript immediately and are saved. Feature
   "expandedInputMaxLines": 5, // expanded tool Input lines; overflow shows a hint
   "expandedOutputMaxLines": 10, // expanded tool Output lines; overflow shows a hint
   "expandedPreviewMaxLines": 40, // max lines for expanded TaskList bodies
-  "expandedCardBackground": "userMessageBg", // theme bg slot: userMessageBg, toolPendingBg, customMessageBg, selectedBg, searchMatchBg, toolSuccessBg, toolErrorBg
+  "expandedCardBackground": "state", // "state" tints a tool card by its tone (pending, success or error; summaries and thinking use customMessageBg), or a fixed theme bg slot: userMessageBg, toolPendingBg, customMessageBg, selectedBg, searchMatchBg, toolSuccessBg, toolErrorBg
+  "showTimestamps": true, // right-aligned human-readable times on your prompts, on blocks and on event rows
   "inputClip": 0, // path/command clip length in summaries; 0 = fit width, else 8..500
   "showStartupHeader": true, // suppress native logo/tips; show Models, context map and interactive resource listings; false keeps Pi's native header
   "scrollStepLines": 3, // fullscreen mouse wheel step (1..50)

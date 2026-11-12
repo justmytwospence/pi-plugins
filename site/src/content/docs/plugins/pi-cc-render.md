@@ -33,6 +33,10 @@ Entry: `packages/pi-cc-render/src/index.ts`. Enable it through [Install & select
 
 The context map and resource listings do not alter stored messages, prompt accounting or tool behavior. Clicking a model can switch the current session's model; clicking an MCP server opens Pi's native manager, where only an action you choose changes its state. One separate exception concerns `write`: the component re-registers it on `session_start` with a wrapper that records the previous file contents, so it can show the change as a diff. If another extension already owns `write`, this component yields and shows a notice instead of a diff.
 
+## Timestamps and card colors
+
+Each of your prompts shows a right-aligned, human-readable time on its middle row (`2:14 PM`, `Tue 2:14 PM`, `Mar 3, 2:14 PM`). It appears only where the row has room, never costs content, and a restored prompt shows its recorded time while a live one shows the time it was first drawn. `showTimestamps: false` (or the `/ccstyle` panel) turns it off for prompts, blocks and event rows. Expanded tool cards default to `expandedCardBackground: "state"`: a pending, successful or failed tool gets the theme's `toolPendingBg`, `toolSuccessBg` or `toolErrorBg`, while thinking, compaction and skill summaries use `customMessageBg`, so `userMessageBg` stays your prompts' color. Any fixed theme background slot is still accepted. The shared row, block and tone rules every suite plugin follows are described in [Transcript checkpoints](/architecture/transcript/#visual-language). The turn summary is a one-line row with the end time.
+
 ## Startup splash
 
 Once the conversation starts, one blank row separates the splash from the first message. `/splash` adds the splash to the transcript again: resources, the context map and models as they are now, folded to fit one screen. It is a snapshot built once when first drawn, so it neither polls nor re-plans as the chat grows, and it is not sent to the model.
