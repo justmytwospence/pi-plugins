@@ -45,7 +45,14 @@ export interface PiChatOptions {
 }
 
 type Tone = "info" | "warning" | "error";
-type Message = { role?: string; content?: unknown; stopReason?: string; errorMessage?: string; toolCallId?: string };
+type Message = {
+  role?: string;
+  content?: unknown;
+  stopReason?: string;
+  errorMessage?: string;
+  toolCallId?: string;
+  timestamp?: number;
+};
 type ToolCall = { type: "toolCall"; id: string; name: string; arguments: unknown };
 
 let sharedTheme: Theme | undefined;
@@ -134,12 +141,18 @@ export class PiChat {
     this.add(new Text(theme ? theme.fg(color, `• ${text}`) : `• ${text}`, 1, 0));
   }
 
-  /** A message to the agent, labelled with who sent it when that was not you. */
-  user(text: string, from?: string) {
+  /**
+   * A message to the agent, labelled with who sent it when that was not you. `timestamp` is when it
+   * was sent: pi-cc-render draws it as the prompt's clock (otherwise the time it was first drawn).
+   */
+  user(text: string, from?: string, timestamp?: number) {
     const theme = this.theme();
     if (!this.empty) this.add(new Spacer(1));
     if (from) this.add(new Text(theme ? theme.fg("warning", `${from} ›`) : `${from} ›`, 1, 0));
-    this.add(new UserMessageComponent(text, getMarkdownTheme()));
+    const component = new UserMessageComponent(text, getMarkdownTheme());
+    if (typeof timestamp === "number" && Number.isFinite(timestamp))
+      (component as { timestamp?: number }).timestamp = timestamp;
+    this.add(component);
   }
 
   /** Show earlier messages of the session (a restored planner, or your main session). */
@@ -154,7 +167,7 @@ export class PiChat {
       if (message.role === "user") {
         const shown = userText(contentText(message.content), users);
         users += 1;
-        if (shown?.text.trim()) this.user(shown.text.trim(), shown.from);
+        if (shown?.text.trim()) this.user(shown.text.trim(), shown.from, message.timestamp);
       } else if (message.role === "assistant") {
         this.add(this.assistant(message));
         for (const call of toolCalls(message)) {
@@ -183,7 +196,7 @@ export class PiChat {
       case "message_start":
         if (message?.role === "user" && this.options.userMessagesFromEvents) {
           const text = contentText(message.content).trim();
-          if (text) this.user(text);
+          if (text) this.user(text, undefined, message.timestamp);
         } else if (message?.role === "assistant") {
           this.streaming = this.assistant(undefined);
           this.add(this.streaming);

@@ -1,5 +1,5 @@
 import { stripVTControlCharacters } from "node:util";
-import { AssistantMessageComponent, initTheme } from "@earendil-works/pi-coding-agent";
+import { AssistantMessageComponent, initTheme, UserMessageComponent } from "@earendil-works/pi-coding-agent";
 import { getCapabilities, setCapabilities, Text } from "@earendil-works/pi-tui";
 import { afterEach, beforeAll, describe, expect, it } from "vitest";
 
@@ -169,5 +169,15 @@ describe("PiChat", () => {
     expect(calls.at(-1)).toBe(true); // a new message starts with the chat's state, not main's
     chat.setExpanded(false);
     expect(calls.at(-1)).toBe(false);
+  });
+  it("gives seeded and live prompts their recorded time for pi-cc-render's clock", () => {
+    const chat = new PiChat(() => undefined, { cwd: process.cwd(), userMessagesFromEvents: true });
+    chat.seed([{ role: "user", content: "earlier", timestamp: 1_000 }], (text) => ({ text }));
+    chat.apply({ type: "message_start", message: { role: "user", content: "now", timestamp: 2_000 } });
+    chat.user("untimed");
+    const stamps = chat.children
+      .filter((child) => child instanceof UserMessageComponent)
+      .map((child) => (child as { timestamp?: number }).timestamp);
+    expect(stamps).toEqual([1_000, 2_000, undefined]);
   });
 });
