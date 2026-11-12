@@ -74,7 +74,7 @@ describe("normalizeConfig", () => {
       writeDiffCollapsedLines: 0,
       diffWordWrap: true,
       expandedPreviewMaxLines: 40,
-      expandedCardBackground: "userMessageBg",
+      expandedCardBackground: "state",
       expandedInputMaxLines: 5,
       expandedOutputMaxLines: 10,
       inputClip: 0,
@@ -82,6 +82,7 @@ describe("normalizeConfig", () => {
       previewLines: 3,
       animationIntervalMs: 90,
       dimThinkingText: false,
+      showTimestamps: true,
       showStartupHeader: true,
       scrollStepLines: 3,
       enableAgentSummary: true,
@@ -130,7 +131,7 @@ describe("normalizeConfig", () => {
     expect(result.diffIndicatorMode).toBe("bars");
     expect(result.editDiffCollapsedLines).toBe(1);
     expect(result.writeDiffCollapsedLines).toBe(0);
-    expect(result.expandedCardBackground).toBe("userMessageBg");
+    expect(result.expandedCardBackground).toBe("state");
     expect(result.inputClip).toBe(8);
     expect(result.previewLines).toBe(0);
     expect(result.animationIntervalMs).toBe(90);

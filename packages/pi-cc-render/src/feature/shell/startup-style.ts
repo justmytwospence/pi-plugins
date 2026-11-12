@@ -5,7 +5,7 @@ export type ResourceMark = { text: string; color: string; highlight?: boolean };
 export const GLYPHS = {
 	live: { text: "●", color: "success" },
 	attention: { text: "◆", color: "warning" },
-	failed: { text: "✕", color: "error" },
+	failed: { text: "✗", color: "error" },
 	pending: { text: "◌", color: "dim" },
 	idle: { text: "○", color: "dim" },
 	favorite: { text: "★", color: "muted" },

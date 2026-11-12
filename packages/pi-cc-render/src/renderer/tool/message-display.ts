@@ -6,6 +6,7 @@ import {
 import { Markdown, Spacer, Text } from "@earendil-works/pi-tui";
 import { MESSAGE_DISPLAY_PATCH, patchRegistry } from "../../utils/patch-keys.ts";
 import { config } from "../../config/config.ts";
+import { cardBackground } from "./result.ts";
 import { showMoreHintText } from "./show-more-hint.ts";
 import { walkComponentTree } from "../../utils/component-tree.ts";
 
@@ -17,10 +18,6 @@ import { walkComponentTree } from "../../utils/component-tree.ts";
  * paths all go through updateDisplay, so patching one place covers everything. They don't go through
  * ToolExecutionComponent and can't reuse its prototype patch, so they are managed together here.
  */
-
-// Matches the success check in renderer/index.ts renderCall: bright green ✓ (truecolor ANSI).
-const BRIGHT_GREEN = "\x1b[38;2;80;220;100m";
-const ANSI_FG_RESET = "\x1b[39m";
 
 /** Latest theme synced from the event context (same source as toolGrouping.setTheme). */
 let displayTheme: any;
@@ -74,7 +71,7 @@ function renderCcstyle(component: any, kind: DisplayKind): void {
 	}
 	component.clear();
 	ensureHintHover(component);
-	const icon = `${BRIGHT_GREEN}✓${ANSI_FG_RESET}`; // Completed message, equivalent to tool success state
+	const icon = theme.fg("success", "✓"); // Completed message, equivalent to tool success state
 	const title = theme.fg("toolTitle", kind.title(component));
 	if (!component.expanded) {
 		const hovered = component.hintHovered === true;
@@ -86,7 +83,7 @@ function renderCcstyle(component: any, kind: DisplayKind): void {
 	component.paddingX = 1;
 	component.paddingY = 1;
 	if (typeof theme.bg === "function" && typeof component.setBgFn === "function") {
-		component.setBgFn((text: string) => theme.bg(config.expandedCardBackground, text));
+		component.setBgFn((text: string) => theme.bg(cardBackground(), text));
 	}
 	component.addChild(new Text(`${icon} ${title}`, 0, 0));
 	component.addChild(new Spacer(1));

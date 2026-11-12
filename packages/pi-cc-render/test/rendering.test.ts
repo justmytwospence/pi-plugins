@@ -143,6 +143,11 @@ describe("renderer gates", () => {
     expect(preservesOriginalRenderer({}, "bash", undefined, ["bash"])).toBe(false);
     expect(preservesOriginalRenderer({}, "bash", { renderShell: "self" }, ["bash"])).toBe(true);
   });
+
+  test("a tool that draws its own rows (renderShell self) is kept without excludeRenderers", async () => {
+    const { preservesOriginalRenderer } = await import("../src/renderer/default-mode.ts");
+    expect(preservesOriginalRenderer({ renderShell: "self", renderCall: () => undefined }, "todo", undefined, [])).toBe(true);
+  });
 });
 
 describe("own result rows", () => {

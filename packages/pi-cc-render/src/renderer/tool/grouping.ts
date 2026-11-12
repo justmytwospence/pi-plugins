@@ -28,7 +28,7 @@ import {
 	toolCallSummary,
 	type ToolCallSummary,
 } from "./names.ts";
-import { toolViewportWidth } from "./result.ts";
+import { cardBackground, toolViewportWidth } from "./result.ts";
 import {
 	patchRegistry,
 	TOOL_GROUPING_GENERATION_KEY as GENERATION_KEY,
@@ -459,7 +459,7 @@ export class ToolGroupComponent extends Container {
 				expandedHit.hover === this.hintHovered &&
 				expandedHit.theme === this.patch.theme &&
 				expandedHit.fullscreen === isToolTuiFullscreen() &&
-				expandedHit.bgSlot === config.expandedCardBackground &&
+				expandedHit.bgSlot === cardBackground({ isError: counts.error > 0, isPartial: counts.pending > 0 }) &&
 				expandedHit.paints.length === childPaints.length &&
 				expandedHit.paints.every((paint, index) => paint === childPaints[index])
 			) {
@@ -509,7 +509,7 @@ export class ToolGroupComponent extends Container {
 		}
 		if (this._expanded) {
 			// Expanded panels use a single background slot (ccstyle convention), not varied by state.
-			const backgroundSlot = config.expandedCardBackground;
+			const backgroundSlot = cardBackground({ isError: counts.error > 0, isPartial: counts.pending > 0 });
 			for (const line of expandedLines) {
 				lines.push(paddedBackgroundRow(theme, backgroundSlot, line, width));
 			}

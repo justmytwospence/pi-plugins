@@ -127,3 +127,6 @@ export class PatchRegistry {
 
 /** Global singleton: host is fixed to globalThis, stable across /reload and jiti reloads. */
 export const patchRegistry = new PatchRegistry();
+
+// ── user message timestamps ──
+export const USER_TIMESTAMP_PATCH = Symbol.for("pi.ccstyle.user-timestamp-patch");

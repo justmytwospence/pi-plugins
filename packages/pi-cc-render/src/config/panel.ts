@@ -4,7 +4,7 @@
  * Rendering side effects (applyStyleMode / refreshCurrentTranscript) are injected by the renderer via
  * CcstylePanelHooks, avoiding a config -> renderer circular dependency.
  */
-import { getSettingsListTheme, type ThemeBg } from "@earendil-works/pi-coding-agent";
+import { getSettingsListTheme } from "@earendil-works/pi-coding-agent";
 import { Input, SettingsList, matchesKey, truncateToWidth } from "@earendil-works/pi-tui";
 import type { CompactThinkingController } from "../feature/compact-thinking.ts";
 import { applyStartupHeader, clearStartupHeader } from "../feature/shell/startup-header.ts";
@@ -32,6 +32,7 @@ import {
 	INPUT_CLIP_VALUES,
 	WRITE_DIFF_COLLAPSED_LINES_VALUES,
 	updateConfig,
+	type CardBackground,
 	type CompactStyleMode,
 	type Config,
 	type DiffIndicatorMode,
@@ -72,7 +73,10 @@ function diffIndicatorDescription(mode: DiffIndicatorMode): string {
 	return "Vertical bar indicators on changed lines (default).";
 }
 
-function expandedCardBackgroundDescription(slot: ThemeBg): string {
+function expandedCardBackgroundDescription(slot: CardBackground): string {
+	if (slot === "state") {
+		return "Tone of the card: pending, success or error tint; summaries and thinking use the message tint.";
+	}
 	if (slot === "userMessageBg") {
 		return "Expanded cards share the user message background. Pick another slot to tell them apart.";
 	}
@@ -412,6 +416,15 @@ export async function showCcstylePanel(
 			currentValue: config.dimThinkingText ? "on" : "off",
 			values: ["on", "off"],
 		};
+		const timestampsSetting = {
+			id: "showTimestamps",
+			label: "Timestamps",
+			description: config.showTimestamps
+				? "Right-aligned times on prompts, blocks and event rows."
+				: "No times on prompts, blocks or event rows.",
+			currentValue: config.showTimestamps ? "on" : "off",
+			values: ["on", "off"],
+		};
 		const startupHeaderSetting = {
 			id: "showStartupHeader",
 			label: "Startup header",
@@ -563,7 +576,7 @@ export async function showCcstylePanel(
 					expandedMaxSetting.currentValue = String(config.expandedPreviewMaxLines);
 					break;
 				case "expandedCardBackground":
-					updateConfig({ expandedCardBackground: value as ThemeBg });
+					updateConfig({ expandedCardBackground: value as CardBackground });
 					expandedCardBgSetting.description = expandedCardBackgroundDescription(
 						config.expandedCardBackground,
 					);
@@ -586,6 +599,12 @@ export async function showCcstylePanel(
 					thinkingDimSetting.description = config.dimThinkingText
 						? "Thinking text uses the theme's dim color."
 						: "Keep the default thinking text color.";
+					break;
+				case "showTimestamps":
+					updateConfig({ showTimestamps: value === "on" });
+					timestampsSetting.description = config.showTimestamps
+						? "Right-aligned times on prompts, blocks and event rows."
+						: "No times on prompts, blocks or event rows.";
 					break;
 				case "showStartupHeader": {
 					const enabled = value === "on";
@@ -655,6 +674,7 @@ export async function showCcstylePanel(
 					thinkingPreviewSetting,
 					thinkingAnimationSetting,
 					thinkingDimSetting,
+					timestampsSetting,
 				],
 			},
 		];

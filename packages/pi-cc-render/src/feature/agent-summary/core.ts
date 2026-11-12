@@ -134,6 +134,20 @@ export function summaryMarkdown(
 	return `> *${line}*`;
 }
 
+/** The summary sentence and its duration as plain text, for the transcript row. */
+export function summaryText(data: AgentSummaryData): { title: string; detail?: string } | undefined {
+	const parts = summaryParts(data);
+	if (parts.length === 0) return undefined;
+	const title = parts
+		.map((part, index) => {
+			const verb = part.match(/^[a-z]+/)?.[0] ?? "";
+			return index === 0 && verb ? verb[0]!.toUpperCase() + verb.slice(1) + part.slice(verb.length) : part;
+		})
+		.join(", ");
+	const duration = formatDuration(data.durationMs);
+	return duration ? { title, detail: duration } : { title };
+}
+
 /**
  * Binds pi events to summary stats:
  * - agent_start resets

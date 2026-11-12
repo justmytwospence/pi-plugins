@@ -6,11 +6,13 @@
  * keeping pure rendering tests and existing behavior unchanged.
  */
 import { getKeybindings } from "@earendil-works/pi-tui";
+import { setStyleFullscreen } from "../../transcript-style.ts";
 
 let toolTuiFullscreen: boolean | undefined;
 
 export function setToolTuiFullscreen(value: boolean): void {
 	toolTuiFullscreen = value;
+	setStyleFullscreen(value);
 }
 
 export function isToolTuiFullscreen(): boolean {

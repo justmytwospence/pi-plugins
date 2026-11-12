@@ -1,4 +1,5 @@
 import type { ThemeBg } from "@earendil-works/pi-coding-agent";
+import { setTimestampsEnabled } from "../transcript-style.ts";
 import type { CompactThinkingConfig } from "../feature/compact-thinking.ts";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
@@ -39,6 +40,8 @@ export const DEFAULT_TOOL_DISPLAY_CONFIG: ToolDisplayConfig = {
 	expandedPreviewMaxLines: 40,
 };
 
+export type CardBackground = ThemeBg | "state";
+
 export type Config = {
 	mode: CompactStyleMode;
 	excludeRenderers: string[];
@@ -49,7 +52,9 @@ export type Config = {
 	writeDiffCollapsedLines: number;
 	diffWordWrap: boolean;
 	expandedPreviewMaxLines: number;
-	expandedCardBackground: ThemeBg;
+	/** `"state"` tints a tool card by its tone; any other value is a fixed theme background slot. */
+	expandedCardBackground: CardBackground;
+	showTimestamps: boolean;
 	expandedInputMaxLines: number;
 	expandedOutputMaxLines: number;
 	inputClip: number;
@@ -84,7 +89,8 @@ export const EXPANDED_PREVIEW_MAX_LINES_VALUES = ["40", "60", "80", "120", "200"
  * whitelist. Panel order puts userMessageBg (default) and toolPendingBg (neutral grey
  * in the built-in themes) first.
  */
-export const EXPANDED_CARD_BACKGROUND_SLOTS: readonly ThemeBg[] = [
+export const EXPANDED_CARD_BACKGROUND_SLOTS: readonly CardBackground[] = [
+	"state",
 	"userMessageBg",
 	"toolPendingBg",
 	"customMessageBg",
@@ -128,7 +134,8 @@ export const DEFAULT_CONFIG: Config = {
 	diffWordWrap: DEFAULT_TOOL_DISPLAY_CONFIG.diffWordWrap,
 	expandedPreviewMaxLines: DEFAULT_TOOL_DISPLAY_CONFIG.expandedPreviewMaxLines,
 	/** Expanded card background. userMessageBg matches the user message colour (original ccstyle convention). */
-	expandedCardBackground: "userMessageBg",
+	expandedCardBackground: "state",
+	showTimestamps: true,
 	expandedInputMaxLines: 5,
 	expandedOutputMaxLines: 10,
 	inputClip: 0,
@@ -244,6 +251,7 @@ export function normalizeConfig(input: unknown): Config {
 			DEFAULT_CONFIG.animationIntervalMs,
 		),
 		dimThinkingText: source.dimThinkingText === true,
+		showTimestamps: source.showTimestamps !== false,
 		showStartupHeader: source.showStartupHeader !== false,
 		scrollStepLines: pickPositiveInt(source.scrollStepLines, DEFAULT_CONFIG.scrollStepLines, 1, 50),
 		enableAgentSummary: source.enableAgentSummary !== false,
@@ -301,6 +309,7 @@ export function formatConfigStatus(source: Config = config): string {
 		`thinkingPreview=${source.previewLines}`,
 		`thinkingAnimation=${source.animationIntervalMs}ms`,
 		`thinkingDim=${source.dimThinkingText ? "on" : "off"}`,
+		`timestamps=${source.showTimestamps ? "on" : "off"}`,
 		`startupHeader=${source.showStartupHeader ? "on" : "off"}`,
 		`scrollStep=${source.scrollStepLines}`,
 		`agentSummary=${source.enableAgentSummary ? "on" : "off"}`,
@@ -313,6 +322,7 @@ export function formatConfigStatus(source: Config = config): string {
 
 /** The single live config object in this process. Read via `config.xxx`; write only through `updateConfig`. */
 export const config: Config = loadConfig();
+setTimestampsEnabled(config.showTimestamps);
 
 function loadConfig(): Config {
 	try {
@@ -334,10 +344,12 @@ export function saveConfig() {
 /** The only runtime write path: merge, normalize, persist. */
 export function updateConfig(partial: Partial<Config>): void {
 	Object.assign(config, normalizeConfig({ ...config, ...partial }));
+	setTimestampsEnabled(config.showTimestamps);
 	saveConfig();
 }
 
 /** Replace the whole config in place (the default export's configOverride path; not persisted). */
 export function setConfig(next: Config): void {
 	Object.assign(config, next);
+	setTimestampsEnabled(config.showTimestamps);
 }

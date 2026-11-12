@@ -1,4 +1,5 @@
 import { ToolExecutionComponent, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { installUserTimestamps } from "./user-timestamp.ts";
 import type { CompactThinkingController } from "../feature/compact-thinking.ts";
 import { installToolGrouping, type ToolGroupingHooks } from "./tool/grouping.ts";
 import {
@@ -108,6 +109,7 @@ export default function (
 				compactMode: CompactModeHooks;
 				disposeMessageDisplay: () => void;
 				disposeToolExpandedBackground: () => void;
+				disposeUserTimestamps: () => void;
 		  }
 		| undefined;
 
@@ -128,12 +130,14 @@ export default function (
 		const disposeMessageDisplay = installMessageDisplayRendering();
 		// The expanded background must be installed after compact-mode and released before compact on shutdown.
 		const disposeToolExpandedBackground = installToolExpandedBackground();
+		const disposeUserTimestamps = installUserTimestamps();
 		installation = {
 			defaultMode,
 			toolGrouping,
 			compactMode,
 			disposeMessageDisplay,
 			disposeToolExpandedBackground,
+			disposeUserTimestamps,
 		};
 		return installation;
 	};
@@ -272,6 +276,7 @@ export default function (
 		if (!current || !current.defaultMode.isOwner()) return;
 		current.defaultMode.shutdown();
 		current.toolGrouping.shutdown();
+		current.disposeUserTimestamps();
 		current.disposeToolExpandedBackground();
 		current.compactMode.shutdown();
 		compactModeHooks = undefined;

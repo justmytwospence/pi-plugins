@@ -1,6 +1,7 @@
 import { Text, truncateToWidth, visibleWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
 import { inspect } from "node:util";
 import { config } from "../../config/config.ts";
+import type { ThemeBg } from "@earendil-works/pi-coding-agent";
 import { formatBashCommand } from "./bash-format.ts";
 import { createBashBlockHighlighter, createCodeBlockHighlighter } from "./diff/diff-highlight.ts";
 import { showMoreHintText } from "./show-more-hint.ts";
@@ -134,6 +135,16 @@ export function scheduleAnimation(
 			if (lightFrames) tui.requestRender();
 		}, options.intervalMs ?? TOOL_LOADING_INTERVAL_MS);
 	}
+}
+
+/** Background slot of an expanded card: the tone of a tool's state, or the message tint when there is no tool. */
+export function cardBackground(context?: { isError?: boolean; isPartial?: boolean }): ThemeBg {
+	const slot = config.expandedCardBackground;
+	if (slot !== "state") return slot;
+	if (!context) return "customMessageBg";
+	if (context.isError) return "toolErrorBg";
+	if (context.isPartial) return "toolPendingBg";
+	return "toolSuccessBg";
 }
 
 export function pendingIcon(_name: string): string {

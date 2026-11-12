@@ -20,6 +20,7 @@ import {
 import { Box, Markdown, Spacer, Text, type Component } from "@earendil-works/pi-tui";
 // The expanded card background is a ccstyle rendering convention, not part of upstream CompactThinkingConfig, so read the global config directly.
 import { config as styleConfig } from "../config/config.ts";
+import { cardBackground } from "../renderer/tool/result.ts";
 import { isToolTuiFullscreen } from "../renderer/tool/show-more-hint.ts";
 import {
 	animateCompactThinkingText,
@@ -469,7 +470,7 @@ export class ThinkingPreviewBlock implements Component {
 				: heading;
 			const bgFn =
 				this.theme && typeof this.theme.bg === "function"
-					? (text: string) => this.theme!.bg(styleConfig.expandedCardBackground, text)
+					? (text: string) => this.theme!.bg(cardBackground(), text)
 					: undefined;
 			const box = new Box(1, 1, bgFn);
 			box.addChild({

@@ -45,7 +45,7 @@ import { renderRichToolResult } from "./tool/diff/index.ts";
 import type { WriteExecutionMetadataStore } from "./tool/diff/write-execution.ts";
 import { isToolCallHovered } from "./mouse/hover.ts";
 import { getToolMouseTui } from "./mouse/scroll.ts";
-import { insetComponent, renderExpandedToolResult, scheduleAnimation } from "./tool/result.ts";
+import { cardBackground, insetComponent, renderExpandedToolResult, scheduleAnimation } from "./tool/result.ts";
 import { paddedBackgroundRow } from "./tool/grouping.ts";
 import { formatDisplayPath } from "./tool/names.ts";
 import {
@@ -344,7 +344,7 @@ function editWriteExpandedCard(theme: any): any {
 		1,
 		1,
 		typeof theme.bg === "function"
-			? (text: string) => theme.bg(config.expandedCardBackground, text)
+			? (text: string) => theme.bg(cardBackground(), text)
 			: undefined,
 	);
 }
@@ -366,7 +366,7 @@ function layoutExpandedToolCard(
 	toolHits = false,
 	live = false,
 ): { lines: string[]; hits: Array<{ child: any; start: number; end: number }> } {
-	const slot = config.expandedCardBackground;
+	const slot = cardBackground();
 	const toolBgAnsi = darkenBgAnsi(theme, slot);
 	/** Width of the marker before each live row (`↳ ` on the first row, alignment spaces on the rest). */
 	const markerWidth = live ? 2 : 0;
@@ -482,7 +482,7 @@ function compactRoundCard(
 		| undefined;
 	const layout = (width: number) => {
 		const theme = themeOf();
-		const bgSlot = config.expandedCardBackground;
+		const bgSlot = cardBackground();
 		const innerWidth = contentWidth(width);
 		const paints = children.map((child) => {
 			const lines = child.render?.(innerWidth);
@@ -765,7 +765,7 @@ function compactEditWriteLines(
 			hit &&
 			hit.width === width &&
 			hit.theme === theme &&
-			hit.bgSlot === config.expandedCardBackground &&
+			hit.bgSlot === cardBackground() &&
 			hit.expanded === expanded &&
 			hit.result === component.result &&
 			hit.isPartial === isPartial &&
@@ -781,7 +781,7 @@ function compactEditWriteLines(
 		compactEditPaintCache.set(component, {
 			width,
 			theme,
-			bgSlot: config.expandedCardBackground,
+			bgSlot: cardBackground(),
 			expanded,
 			result: component.result,
 			isPartial,

@@ -20,6 +20,7 @@ import {
 	insetComponent,
 	isToolExpanded,
 	outputLineCount,
+	cardBackground,
 	pendingIcon,
 	renderCollapsedToolResultToWidth,
 	renderExpandedToolResult,
@@ -49,10 +50,6 @@ import {
 	renderToolSummary,
 	toolCallSummary,
 } from "./tool/names.ts";
-
-// Success checkmark: bright green truecolor (consistent with message-display)
-const BRIGHT_GREEN = "\x1b[38;2;80;220;100m";
-const ANSI_FG_RESET = "\x1b[39m";
 
 // Extensions such as pi-subagents provide a dedicated renderer for Agent; ccstyle must keep it.
 const DEDICATED_RENDERER_TOOLS = new Set(["Agent"]);
@@ -123,6 +120,7 @@ export function preservesOriginalRenderer(
 	builtInToolDefinition?: any,
 	excludeRenderers: readonly string[] = config.excludeRenderers,
 ): boolean {
+	if (extensionDefinition?.renderShell === "self") return true;
 	if (!excludeRenderers.includes(toolName)) return false;
 	return [extensionDefinition, builtInToolDefinition].some(
 		(definition) =>
@@ -247,10 +245,7 @@ export function createCcstyleTool(
 			const animating = isPending && Boolean(context?.executionStarted);
 			if (animating) scheduleAnimation(context, { light: true });
 			const settledRawIcon = isPending ? "" : settledIcon(toolName, visualState);
-			const settledIconStyled =
-				visualState === "success"
-					? `${BRIGHT_GREEN}${settledRawIcon}${ANSI_FG_RESET}`
-					: theme.fg(toolIconColor(context), settledRawIcon);
+			const settledIconStyled = theme.fg(toolIconColor(context), settledRawIcon);
 			// Per-frame spinner: the frame is taken inside render(); the animation timer only needs requestRender,
 			// no longer rebuilding the whole card through updateDisplay on every tick.
 			const pendingIconStyled = () => theme.fg(toolIconColor(context), pendingIcon(toolName));
@@ -714,7 +709,7 @@ export function installToolExpandedBackground(): () => void {
 				box.paddingX = 1;
 				box.paddingY = 1;
 				if (box.setBgFn) {
-					box.setBgFn((text: string) => theme.bg(config.expandedCardBackground, text));
+					box.setBgFn((text: string) => theme.bg(cardBackground({ isError: Boolean(this.result?.isError), isPartial: Boolean(this.isPartial) }), text));
 				}
 			}
 		},
