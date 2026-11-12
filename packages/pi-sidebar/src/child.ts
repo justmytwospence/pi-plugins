@@ -21,6 +21,7 @@ import {
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import type { MainSnapshot, MainState } from "./main-state.ts";
 import { askReadOnlyCall } from "./read-only-call.ts";
+import { draftsCreated } from "./slack-drafts.ts";
 import { askShellReads } from "./shell-reads.ts";
 import { GUARD_ENV, judgeCall, REFUSED_TOOLS, SUBAGENT_ENV_CHANNEL, type SubagentEnvRequest } from "./guard.ts";
 import { inertPayload, isStatusBlock, placeSideBreakpoint, requestedCacheTtlMs, splicePayload, SUPPORTED_APIS } from "./splice.ts";
@@ -475,6 +476,8 @@ export class SidebarAgent {
           readOnlyCall: (name, input) => askReadOnlyCall(cpi.events, name, input),
           // The gate is loaded in the main session, whose bus this child belongs to.
           shellReads: (command) => askShellReads(this.pi.events, command, cctx.cwd),
+          // Drafts this thread created: its stored exchanges, then this turn's messages so far.
+          slackDrafts: () => draftsCreated([...this.thread, ...((this.session?.messages.slice(this.turnStart) ?? []) as AgentMessage[])]),
           subagentsGuarded: () => subagentsGuarded(cpi.events),
           ...(cctx.signal ? { signal: cctx.signal } : {}),
         });

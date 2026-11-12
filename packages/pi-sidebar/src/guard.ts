@@ -8,6 +8,7 @@
 import type { ToolInfo } from "@earendil-works/pi-coding-agent";
 import { findBlockedCommandSegment, findBlockedPowerShellCommandSegment, readCommand } from "./bash-policy.ts";
 import { askJevBool } from "./jev.ts";
+import { parseSlackDraftCommand } from "./slack-drafts.ts";
 
 /** Tools that change files or shared state, or need a person Sidebar cannot reach. */
 export const REFUSED_TOOLS = new Set([
@@ -67,6 +68,11 @@ export interface GuardHost {
   readOnlyCall?(name: string, input: unknown): boolean | undefined;
   /** pi-tool-gate's verdict on a shell command (the shell-reads contract); undefined when the gate does not answer. */
   shellReads?(command: string): boolean | undefined;
+  /**
+   * Slack drafts Sidebar created in this thread. When set, Sidebar may create Slack drafts and
+   * delete these (see slack-drafts.ts); undefined (Sidebar's subagents) keeps Slack read-only.
+   */
+  slackDrafts?(): ReadonlySet<string>;
   /** Whether a subagent started now would run under this guard. */
   subagentsGuarded(): boolean;
   signal?: AbortSignal;
@@ -98,6 +104,10 @@ export async function judgeCall(toolName: string, input: unknown, host: GuardHos
   if (info?.annotations?.readOnlyHint === true) return { allowed: true, why: "read-only hint" };
   if (COMMAND_TOOLS.has(toolName)) {
     const command = readCommand(input);
+    if (toolName === "bash" && host.slackDrafts) {
+      const slack = slackDraftVerdict(command, host.slackDrafts);
+      if (slack) return slack;
+    }
     // The gate's read-only analysis is the suite's one: its yes runs the command, its no goes to the
     // judgment below. This package's own policy decides only when the gate does not answer.
     const gate = toolName === "bash" ? host.shellReads?.(command) : undefined;
@@ -111,6 +121,22 @@ export async function judgeCall(toolName: string, input: unknown, host: GuardHos
     return askJev(host, toolName, info?.description, { command }, `\`${blocked.trim().slice(0, 200)}\``);
   }
   return askJev(host, toolName, info?.description, input, `the ${toolName} call`);
+}
+
+/** Sidebar's Slack draft exception: a verdict for draft commands, undefined for everything else. */
+function slackDraftVerdict(command: string, created: () => ReadonlySet<string>): Verdict | undefined {
+  const parsed = parseSlackDraftCommand(command);
+  if (!parsed) {
+    if (!/\bslackcli\b[^\n|;&]*\bmessages\s+(?:draft|delete-draft)\b/.test(command)) return undefined;
+    return {
+      allowed: false,
+      reason: `${PREFIX}, except for Slack drafts in a plain form, and this command is not one, so it was not run. Pass the text with --message '<text>' or pipe it in (printf '%s' '<text>' | slackcli messages draft ... --message-file -, or a quoted heredoc <<'EOF'), use only literal text or variables assigned earlier in the same command (no $(...), files or other commands), and do not mix in other commands.`,
+    };
+  }
+  const mine = created();
+  const foreign = parsed.deletes.filter((id) => !mine.has(id));
+  if (foreign.length > 0) return refuse(`it deletes Slack draft ${foreign.join(", ")}, which Sidebar did not create in this thread, so it was not run.`);
+  return { allowed: true, why: "Slack draft" };
 }
 
 /** The question Jev answers for a call the rules cannot settle. */
