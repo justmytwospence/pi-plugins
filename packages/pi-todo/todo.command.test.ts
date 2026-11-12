@@ -1,4 +1,4 @@
-import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { createMockCtx, createMockPi } from "./test/fixtures.js";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { __resetState, registerTodosCommand, registerTodoTool, TOOL_NAME } from "./todo.js";
@@ -12,7 +12,7 @@ function setup() {
 	if (!tool) throw new Error("tool not registered");
 	const cmd = captured.commands.get("todos");
 	if (!cmd) throw new Error("command not registered");
-	return { tool, cmd };
+	return { tool, cmd, pi };
 }
 
 async function seed(tool: ReturnType<typeof setup>["tool"], actions: Array<Record<string, unknown>>) {
@@ -69,55 +69,56 @@ describe("/todos command — guard branches", () => {
 });
 
 describe("/todos command — grouped output", () => {
-	function grabOutput(ctx: ExtensionContext): string {
-		const notify = ctx.ui.notify as ReturnType<typeof vi.fn>;
-		expect(notify).toHaveBeenCalledTimes(1);
-		const [text, level] = notify.mock.calls[0];
-		expect(level).toBe("info");
-		return text as string;
+	function grabOutput(pi: ExtensionAPI): string {
+		const append = pi.appendEntry as ReturnType<typeof vi.fn>;
+		expect(append).toHaveBeenCalledTimes(1);
+		const [type, data] = append.mock.calls[0];
+		expect(type).toBe("transcript-style:report");
+		expect(data.title).toBe("Todos");
+		return data.body as string;
 	}
 
 	it("renders 'Pending' group with ○ glyph and task id", async () => {
-		const { tool, cmd } = setup();
+		const { tool, cmd, pi } = setup();
 		await seed(tool, [{ action: "create", subject: "research" }]);
 		const ctx = createMockCtx({ hasUI: true });
 		await cmd.handler("", ctx as never);
-		const out = grabOutput(ctx);
+		const out = grabOutput(pi);
 		expect(out).toContain("── Pending ──");
 		expect(out).toContain("○ #1 research");
 		expect(out).toContain("1 pending");
 	});
 
 	it("renders 'In Progress' group with ◐ glyph and activeForm suffix", async () => {
-		const { tool, cmd } = setup();
+		const { tool, cmd, pi } = setup();
 		await seed(tool, [
 			{ action: "create", subject: "build", activeForm: "Building" },
 			{ action: "update", id: 1, status: "in_progress" },
 		]);
 		const ctx = createMockCtx({ hasUI: true });
 		await cmd.handler("", ctx as never);
-		const out = grabOutput(ctx);
+		const out = grabOutput(pi);
 		expect(out).toContain("── In Progress ──");
 		expect(out).toContain("◐ #1 build (Building)");
 		expect(out).toContain("1 in progress");
 	});
 
 	it("renders 'Completed' group with ✓ glyph and 'N/M completed' header", async () => {
-		const { tool, cmd } = setup();
+		const { tool, cmd, pi } = setup();
 		await seed(tool, [
 			{ action: "create", subject: "ship" },
 			{ action: "update", id: 1, status: "completed" },
 		]);
 		const ctx = createMockCtx({ hasUI: true });
 		await cmd.handler("", ctx as never);
-		const out = grabOutput(ctx);
+		const out = grabOutput(pi);
 		expect(out).toContain("── Completed ──");
 		expect(out).toContain("✓ #1 ship");
 		expect(out).toContain("1/1 completed");
 	});
 
 	it("emits the header parts in 'completed · in progress · pending' order", async () => {
-		const { tool, cmd } = setup();
+		const { tool, cmd, pi } = setup();
 		await seed(tool, [
 			{ action: "create", subject: "p" },
 			{ action: "create", subject: "ip" },
@@ -127,7 +128,7 @@ describe("/todos command — grouped output", () => {
 		]);
 		const ctx = createMockCtx({ hasUI: true });
 		await cmd.handler("", ctx as never);
-		const out = grabOutput(ctx);
+		const out = grabOutput(pi);
 		const header = out.split("\n")[0];
 		const iC = header.indexOf("completed");
 		const iIP = header.indexOf("in progress");
@@ -138,19 +139,19 @@ describe("/todos command — grouped output", () => {
 	});
 
 	it("appends '⛓ #deps' suffix for tasks with blockedBy", async () => {
-		const { tool, cmd } = setup();
+		const { tool, cmd, pi } = setup();
 		await seed(tool, [
 			{ action: "create", subject: "base" },
 			{ action: "create", subject: "follow-up", blockedBy: [1] },
 		]);
 		const ctx = createMockCtx({ hasUI: true });
 		await cmd.handler("", ctx as never);
-		const out = grabOutput(ctx);
+		const out = grabOutput(pi);
 		expect(out).toContain("⛓ #1");
 	});
 
 	it("omits deleted tombstones from the grouped output", async () => {
-		const { tool, cmd } = setup();
+		const { tool, cmd, pi } = setup();
 		await seed(tool, [
 			{ action: "create", subject: "keep" },
 			{ action: "create", subject: "drop" },
@@ -158,7 +159,7 @@ describe("/todos command — grouped output", () => {
 		]);
 		const ctx = createMockCtx({ hasUI: true });
 		await cmd.handler("", ctx as never);
-		const out = grabOutput(ctx);
+		const out = grabOutput(pi);
 		expect(out).toContain("keep");
 		expect(out).not.toContain("drop");
 	});

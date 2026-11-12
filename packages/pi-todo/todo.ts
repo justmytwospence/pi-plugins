@@ -13,6 +13,7 @@
  */
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { appendReport, registerReportRenderer } from "./src/transcript-style.ts";
 import { loadConfig, validateGuidanceFields } from "./config.js";
 import { formatStatusLabel, t } from "./state/i18n-bridge.js";
 import { selectTasksByStatus, selectTodoCounts, selectVisibleTasks } from "./state/selectors.js";
@@ -69,6 +70,7 @@ export function registerTodoTool(pi: ExtensionAPI): void {
 		promptSnippet: guidance.promptSnippet ?? DEFAULT_PROMPT_SNIPPET,
 		promptGuidelines: guidance.promptGuidelines ?? DEFAULT_PROMPT_GUIDELINES,
 		parameters: TodoParamsSchema,
+		renderShell: "self",
 
 		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
 			const result = applyTaskMutation(getState(sid(ctx)), params.action, params as TaskMutationParams);
@@ -84,12 +86,12 @@ export function registerTodoTool(pi: ExtensionAPI): void {
 		// foreground lookup and falls back to `#<id>` (see renderTodoCall). That is the
 		// safe outcome: per-session ids restart at 1, so searching sibling slots could
 		// surface the WRONG subject — the `#<id>` fallback is intentional, not a gap.
-		renderCall(args, theme, _context) {
-			return renderTodoCall(args as never, theme, getRenderState());
+		renderCall(args, theme, context) {
+			return renderTodoCall(args as never, theme, getRenderState(), context as never);
 		},
 
-		renderResult(result, _opts, theme, _context) {
-			return renderTodoResult(result, theme);
+		renderResult(result, opts, theme, context) {
+			return renderTodoResult(result as never, theme, opts, context as never);
 		},
 	});
 }
@@ -99,6 +101,7 @@ export function registerTodoTool(pi: ExtensionAPI): void {
 // ---------------------------------------------------------------------------
 
 export function registerTodosCommand(pi: ExtensionAPI): void {
+	registerReportRenderer(pi);
 	pi.registerCommand(COMMAND_NAME, {
 		description: "Show all todos on the current branch, grouped by status",
 		handler: async (_args, ctx) => {
@@ -134,7 +137,7 @@ export function registerTodosCommand(pi: ExtensionAPI): void {
 				for (const task of groups.completed) lines.push(formatCommandTaskLine(task, "✓"));
 			}
 
-			ctx.ui.notify(lines.join("\n"), "info");
+			appendReport(pi, "Todos", lines.join("\n"));
 		},
 	});
 }

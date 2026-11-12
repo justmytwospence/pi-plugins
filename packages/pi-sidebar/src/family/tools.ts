@@ -1,5 +1,6 @@
-import type { ExtensionAPI, ToolDefinition } from "@earendil-works/pi-coding-agent";
-import { Text } from "@earendil-works/pi-tui";
+import type { ExtensionAPI, Theme, ToolDefinition } from "@earendil-works/pi-coding-agent";
+import { type Component, Text } from "@earendil-works/pi-tui";
+import { Block, expandHint, Row, toneOfTool } from "../transcript-style.ts";
 import { Type } from "typebox";
 import { contextAgent } from "./context.ts";
 import { REQUEST_TIMEOUT_MS, validId, type FamilySnapshot, type TranscriptPage, type TranscriptQuery } from "./protocol.ts";
@@ -178,12 +179,21 @@ function transcriptLabel(source: FamilyToolSource, agentId: unknown): string {
   } catch { return "Agent unavailable"; }
 }
 
-function preview(lines: string[], expanded: boolean): string {
-  if (expanded) return lines.join("\n");
-  const points = Array.from(lines.slice(0, 8).join("\n"));
-  const clipped = points.length > 1_200;
-  const text = points.slice(0, 1_200).join("");
-  return clipped || lines.length > 8 ? `${text}\n… more details (expand to view)` : text;
+/** Collapsed: one dim `↳` line holding the first line, with the expand hint when there is more. Expanded: a tone block. */
+function resultView(
+  theme: Theme,
+  lines: string[],
+  options: { expanded: boolean; isPartial: boolean },
+  context: { isError?: boolean; lastComponent?: unknown },
+  failed: boolean,
+  title: string,
+): Component {
+  const tone = toneOfTool({ ...context, isError: failed || context.isError, isPartial: options.isPartial }, !options.isPartial);
+  const clean = lines.map(displayText);
+  if (options.expanded && clean.length > 1) {
+    return new Block(theme, () => ({ tone, title, body: new Text(clean.join("\n"), 0, 0), expanded: true }));
+  }
+  return new Text(theme.fg("dim", `   ↳ ${clean[0] ?? ""}`) + (clean.length > 1 ? expandHint(theme) : ""), 0, 0);
 }
 
 function literalFailure(result: { content: Array<{ type: string; text?: string }> }): string {
@@ -195,14 +205,13 @@ const transcriptParameters = Type.Object({ agentId: Type.String(), revision: Typ
 
 function rosterRenderers(): Pick<ToolDefinition<typeof rosterParameters>, "renderCall" | "renderResult"> {
   return {
-    renderCall(args, theme) {
-      const page = args?.cursor ? " · next page" : "";
-      const limit = typeof args?.limit === "number" ? `\nLimit: ${args.limit} agents` : "";
-      return new Text(theme.fg("toolTitle", theme.bold(`Family agents${page}`)) + limit, 0, 0);
+    renderCall(args, theme, context) {
+      const detail = [args?.cursor ? "next page" : "", typeof args?.limit === "number" ? `limit ${args.limit}` : ""].filter(Boolean).join(" · ");
+      return new Row(theme, () => ({ tone: toneOfTool(context ?? {}, context?.lastComponent !== undefined), title: "Family agents", detail: detail || undefined }));
     },
     renderResult(result, options, theme, context) {
       const payload = ownPayload(result);
-      if (!payload || !Array.isArray(payload.agents)) return new Text(displayText(literalFailure(result)), 0, 0);
+      if (!payload || !Array.isArray(payload.agents)) return resultView(theme, literalFailure(result).split("\n"), options, context, context.isError, "Family agents");
       const unavailable = typeof payload.unavailable === "string" ? payload.unavailable : undefined;
       const state = context.isError || unavailable || payload.coverage === "unavailable" ? "Unavailable" : options.isPartial ? "Working…" : "Completed";
       const lines = [`${state} · Coverage: ${String(payload.coverage ?? "unavailable")}`];
@@ -213,7 +222,7 @@ function rosterRenderers(): Pick<ToolDefinition<typeof rosterParameters>, "rende
       }
       if (!payload.agents.length && !unavailable) lines.push("No enrolled agents.");
       if (payload.nextCursor) lines.push("More agents available (next page).");
-      return new Text(theme.fg(context.isError || unavailable ? "error" : "toolOutput", displayText(preview(lines, options.expanded))), 0, 0);
+      return resultView(theme, lines, options, context, Boolean(context.isError || unavailable), "Family agents");
     },
   };
 }
@@ -221,17 +230,17 @@ function rosterRenderers(): Pick<ToolDefinition<typeof rosterParameters>, "rende
 function transcriptRenderers(source: FamilyToolSource): Pick<ToolDefinition<typeof transcriptParameters>, "renderCall" | "renderResult"> {
   return {
     renderCall(args, theme, context) {
-      const lines = [`Family transcript · ${transcriptLabel(source, args?.agentId)}`];
-      if (args?.cursor) lines.push("Next transcript page");
+      const detail = [transcriptLabel(source, args?.agentId)];
+      if (args?.cursor) detail.push("next page");
       if (context.expanded) {
-        if (typeof args?.revision === "number") lines.push(`Revision: ${args.revision}`);
-        if (typeof args?.limitChars === "number") lines.push(`Limit: ${args.limitChars} characters`);
+        if (typeof args?.revision === "number") detail.push(`revision ${args.revision}`);
+        if (typeof args?.limitChars === "number") detail.push(`limit ${args.limitChars} characters`);
       }
-      return new Text(theme.fg("toolTitle", theme.bold(lines.join("\n"))), 0, 0);
+      return new Row(theme, () => ({ tone: toneOfTool(context ?? {}, context?.lastComponent !== undefined), title: "Family transcript", detail: detail.join(" · ") }));
     },
     renderResult(result, options, theme, context) {
       const payload = ownPayload(result);
-      if (!payload || typeof payload.text !== "string") return new Text(displayText(literalFailure(result)), 0, 0);
+      if (!payload || typeof payload.text !== "string") return resultView(theme, literalFailure(result).split("\n"), options, context, context.isError, "Family transcript");
       const unavailable = typeof payload.unavailable === "string" ? payload.unavailable : undefined;
       const state = context.isError || unavailable || payload.coverage === "unavailable" ? "Unavailable" : options.isPartial ? "Working…" : "Completed";
       const lines = [`${state} · Coverage: ${String(payload.coverage ?? "unavailable")}`];
@@ -239,7 +248,7 @@ function transcriptRenderers(source: FamilyToolSource): Pick<ToolDefinition<type
       if (payload.text) lines.push(...payload.text.split("\n"));
       else if (!unavailable) lines.push("No transcript text.");
       if (payload.nextCursor) lines.push("More transcript available (next page).");
-      return new Text(theme.fg(context.isError || unavailable ? "error" : "toolOutput", displayText(preview(lines, options.expanded))), 0, 0);
+      return resultView(theme, lines, options, context, Boolean(context.isError || unavailable), "Family transcript");
     },
   };
 }
@@ -251,6 +260,7 @@ export function registerFamilyTools(pi: Pick<ExtensionAPI, "registerTool">, sour
     exposure: "deferred", annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
     parameters: rosterParameters,
     outputSchema: rosterSchema,
+    renderShell: "self",
     ...({ ccstyleOwnCall: true, ccstyleOwnResult: true } as const),
     ...rosterRenderers(),
     async execute(_id, query) {
@@ -263,6 +273,7 @@ export function registerFamilyTools(pi: Pick<ExtensionAPI, "registerTool">, sour
     exposure: "deferred", annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
     parameters: transcriptParameters,
     outputSchema: transcriptSchema,
+    renderShell: "self",
     ...({ ccstyleOwnCall: true, ccstyleOwnResult: true } as const),
     ...transcriptRenderers(source),
     async execute(_id, query, signal) {

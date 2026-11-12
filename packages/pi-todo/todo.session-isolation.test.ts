@@ -20,7 +20,7 @@ function setup() {
 	if (!sessionShutdown) throw new Error("session_shutdown handler not registered");
 	if (!tool) throw new Error("todo tool not registered");
 	if (!cmd) throw new Error("todos command not registered");
-	return { sessionStart, sessionShutdown, tool, cmd };
+	return { sessionStart, sessionShutdown, tool, cmd, pi };
 }
 
 beforeEach(() => __resetState());
@@ -52,7 +52,7 @@ describe("rpiv-todo — per-session todo store isolation (Phase 1 baseline)", ()
 	});
 
 	it("a child todo call mutates only the child's slot; the parent's /todos still shows only the parent's task", async () => {
-		const { sessionStart, tool, cmd } = setup();
+		const { sessionStart, tool, cmd, pi } = setup();
 		const parent = createMockCtx({ sessionId: "parent", hasUI: true });
 		const child = createMockCtx({ sessionId: "child", hasUI: true });
 
@@ -78,18 +78,17 @@ describe("rpiv-todo — per-session todo store isolation (Phase 1 baseline)", ()
 		expect(getState("parent").tasks.map((t) => t.subject)).toEqual(["parent-task"]);
 
 		// Parent's /todos reads the parent slot — shows only the parent's task.
+		const appended = pi.appendEntry as ReturnType<typeof vi.fn>;
 		await cmd.handler("", parent as never);
-		const parentNotify = parent.ui.notify as ReturnType<typeof vi.fn>;
-		expect(parentNotify).toHaveBeenCalledTimes(1);
-		expect(parentNotify.mock.calls[0][1]).toBe("info");
-		expect(parentNotify.mock.calls[0][0]).toContain("parent-task");
-		expect(parentNotify.mock.calls[0][0]).not.toContain("child-task");
+		expect(appended).toHaveBeenCalledTimes(1);
+		expect(appended.mock.calls[0][0]).toBe("transcript-style:report");
+		expect(appended.mock.calls[0][1].body).toContain("parent-task");
+		expect(appended.mock.calls[0][1].body).not.toContain("child-task");
 
 		// Child's /todos reads the child slot — shows only the child's task.
 		await cmd.handler("", child as never);
-		const childNotify = child.ui.notify as ReturnType<typeof vi.fn>;
-		expect(childNotify.mock.calls[0][0]).toContain("child-task");
-		expect(childNotify.mock.calls[0][0]).not.toContain("parent-task");
+		expect(appended.mock.calls[1][1].body).toContain("child-task");
+		expect(appended.mock.calls[1][1].body).not.toContain("parent-task");
 	});
 
 	it("the render pointer stays on the parent slot even after a child creates tasks (creator-ownership)", async () => {

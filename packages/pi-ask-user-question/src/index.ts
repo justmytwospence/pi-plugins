@@ -5,6 +5,7 @@
 // asked, the tool holds `herdr:blocked`, so herdr shows the pane as blocked.
 import type { ExtensionAPI, ExtensionContext, Theme } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
+import { Block, expandHint, glyph, Row, toneOfTool } from "./transcript-style.ts";
 import { QuestionDialog } from "./dialog.ts";
 import { embeddedEditorFactory } from "./editor.ts";
 import { whileBlocked } from "./herdr.ts";
@@ -56,6 +57,7 @@ export default function askUserQuestion(pi: ExtensionAPI) {
     promptGuidelines: PROMPT_GUIDELINES,
     parameters: ParamsSchema,
     executionMode: "sequential",
+    renderShell: "self",
 
     async execute(_toolCallId, params, signal, _onUpdate, ctx) {
       const questions = normalize(params as Params);
@@ -67,23 +69,46 @@ export default function askUserQuestion(pi: ExtensionAPI) {
       return toolResult({ questions, ...result });
     },
 
-    renderCall(args, theme) {
+    renderCall(args, theme, context) {
       const headers = (Array.isArray(args?.questions) ? args.questions : [])
         .map((q) => (typeof q?.header === "string" ? q.header.trim() : ""))
         .filter(Boolean);
-      const title = theme.fg("toolTitle", theme.bold(TOOL_NAME));
-      return new Text(headers.length ? `${title} ${theme.fg("muted", headers.join(" · "))}` : title, 0, 0);
+      return new Row(theme, () => ({
+        tone: toneOfTool(context ?? {}, context?.lastComponent !== undefined),
+        title: "Question",
+        detail: headers.length ? headers.join(" · ") : undefined,
+      }));
     },
 
-    renderResult(result, _options, theme) {
+    renderResult(result, options, theme, context) {
       const details = result.details as Details | undefined;
-      if (!details?.questions) {
-        const first = result.content[0];
-        return new Text(first?.type === "text" ? first.text : "", 0, 0);
+      const tone = toneOfTool(context ?? {}, true);
+      const lines = details?.questions
+        ? resultLines(details, result.content, theme)
+        : [theme.fg(tone === "failed" ? "error" : "dim", firstText(result.content))];
+      if (options?.expanded && lines.length > 1) {
+        return new Block(theme, () => ({ tone, title: "Question", body: new Text(lines.join("\n"), 0, 0), expanded: true }));
       }
-      return new Text(resultLines(details, result.content, theme).join("\n"), 0, 0);
+      const summary = details?.questions ? resultSummary(details, result.content) : firstText(result.content);
+      const text = theme.fg("dim", `   ↳ ${summary}`) + (lines.length > 1 ? expandHint(theme) : "");
+      return new Text(text, 0, 0);
     },
   });
+}
+
+function firstText(content: readonly { type: string; text?: string }[]): string {
+  const first = content[0];
+  return first?.type === "text" ? (first.text ?? "").split("\n")[0]! : "";
+}
+
+/** The one-line answer summary for the collapsed result: `header: value` per answered question. */
+function resultSummary(details: Details, content: readonly { type: string; text?: string }[]): string {
+  if (details.error) return firstText(content) || details.error;
+  if (details.cancelled) return "Declined";
+  const parts = details.answers
+    .filter((a) => a.kind !== "skipped")
+    .map((a) => `${a.header || a.question}: ${a.kind === "unanswered" ? "Unanswered" : (a.answer ?? "").replace(/\s*\n\s*/gu, " ")}`);
+  return parts.join(" · ") || "no answers";
 }
 
 /** The dialog in the terminal UI; native dialogs elsewhere, or if the terminal dialog cannot show. */
@@ -130,5 +155,5 @@ function answerLine(a: Answer, theme: Theme): string {
   if (a.kind === "unanswered") return `${theme.fg("warning", "- ")}${header}: ${theme.fg("warning", "Unanswered")}${note}`;
   const value = (a.answer ?? "").replace(/\s*\n\s*/gu, " ");
   const wrote = a.kind === "custom" ? theme.fg("muted", "(wrote) ") : "";
-  return `${theme.fg("success", "✓ ")}${header}: ${wrote}${value}${note}`;
+  return `${glyph(theme, "done")} ${header}: ${wrote}${value}${note}`;
 }

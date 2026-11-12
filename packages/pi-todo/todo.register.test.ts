@@ -1,5 +1,6 @@
 import type { Theme } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
+import { Row } from "./src/transcript-style.ts";
 import { createMockCtx, createMockPi, makeTheme } from "./test/fixtures.js";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { __resetState, registerTodoTool, setActiveRenderSession, type TaskDetails, TOOL_NAME } from "./todo.js";
@@ -68,17 +69,17 @@ describe("registerTodoTool — execute mutates module state", () => {
 });
 
 describe("registerTodoTool — renderCall", () => {
-	it("create action emits 'todo +' and includes the subject", () => {
+	it("create action emits a Todo row with the create op and the subject", () => {
 		const { tool } = setup();
 		const node = tool.renderCall?.(
 			{ action: "create", subject: "hello" } as never,
 			theme,
 			undefined as never,
-		) as unknown as Text;
-		expect(node).toBeInstanceOf(Text);
-		const text = (node as unknown as { text: string }).text;
-		expect(text).toContain("todo ");
-		expect(text).toContain("+");
+		) as unknown as Row;
+		expect(node).toBeInstanceOf(Row);
+		const text = node.render(120).join("\n");
+		expect(text).toContain("Todo");
+		expect(text).toContain("create");
 		expect(text).toContain("hello");
 	});
 
@@ -88,8 +89,8 @@ describe("registerTodoTool — renderCall", () => {
 			{ action: "update", id: 42 } as never,
 			theme,
 			undefined as never,
-		) as unknown as Text;
-		expect((node as unknown as { text: string }).text).toContain("#42");
+		) as unknown as Row;
+		expect(node.render(120).join("\n")).toContain("#42");
 	});
 
 	it("update action renders the task subject when seeded", async () => {
@@ -99,8 +100,8 @@ describe("registerTodoTool — renderCall", () => {
 			{ action: "update", id: 1 } as never,
 			theme,
 			undefined as never,
-		) as unknown as Text;
-		expect((node as unknown as { text: string }).text).toContain("seeded-subject");
+		) as unknown as Row;
+		expect(node.render(120).join("\n")).toContain("seeded-subject");
 	});
 
 	it("list action with a status filter renders the humanized status label", () => {
@@ -109,78 +110,82 @@ describe("registerTodoTool — renderCall", () => {
 			{ action: "list", status: "in_progress" } as never,
 			theme,
 			undefined as never,
-		) as unknown as Text;
-		expect((node as unknown as { text: string }).text).toContain("in progress");
+		) as unknown as Row;
+		expect(node.render(120).join("\n")).toContain("in progress");
 	});
 
 	it("clear action renders only the base prefix + glyph", () => {
 		const { tool } = setup();
-		const node = tool.renderCall?.({ action: "clear" } as never, theme, undefined as never) as unknown as Text;
-		expect((node as unknown as { text: string }).text).toContain("∅");
+		const node = tool.renderCall?.({ action: "clear" } as never, theme, undefined as never) as unknown as Row;
+		expect(node.render(120).join("\n")).toContain("clear");
 	});
 });
 
 describe("registerTodoTool — renderResult", () => {
-	it("create renders the new task's status label (pending)", async () => {
+	function collapsed(tool: ReturnType<typeof setup>["tool"], r: unknown): string {
+		const node = tool.renderResult?.(r as never, {} as never, theme, { isError: false, isPartial: false } as never) as unknown as Text;
+		return node.render(120).join("\n");
+	}
+
+	it("create renders a ↳ line with the first line of the result", async () => {
 		const { tool } = setup();
 		const r = await call(tool, { action: "create", subject: "a" });
-		const node = tool.renderResult?.(r as never, {} as never, theme, undefined as never) as unknown as Text;
-		expect((node as unknown as { text: string }).text).toContain("pending");
-		expect((node as unknown as { text: string }).text).toContain("○");
+		const text = collapsed(tool, r);
+		expect(text).toContain("↳ Created #1: a (pending)");
+		expect(text).toContain("to expand");
 	});
 
-	it("update renders the transitioned status (in progress)", async () => {
+	it("update renders the transition summary", async () => {
 		const { tool } = setup();
 		await call(tool, { action: "create", subject: "a" });
 		const r = await call(tool, { action: "update", id: 1, status: "in_progress" });
-		const node = tool.renderResult?.(r as never, {} as never, theme, undefined as never) as unknown as Text;
-		const text = (node as unknown as { text: string }).text;
-		expect(text).toContain("in progress");
-		expect(text).toContain("◐");
+		expect(collapsed(tool, r)).toContain("↳ Updated #1 (pending → in_progress)");
 	});
 
-	it("delete renders the deleted-tombstone label", async () => {
+	it("delete renders the deleted summary without an expand hint", async () => {
 		const { tool } = setup();
 		await call(tool, { action: "create", subject: "a" });
 		const r = await call(tool, { action: "delete", id: 1 });
-		const node = tool.renderResult?.(r as never, {} as never, theme, undefined as never) as unknown as Text;
-		const text = (node as unknown as { text: string }).text;
-		expect(text).toContain("deleted");
-		expect(text).toContain("⊘");
+		const text = collapsed(tool, r);
+		expect(text).toContain("↳ Deleted #1: a");
 	});
 
-	it("list renders the plain '✓' fallback (no status leakage)", async () => {
+	it("list renders the first line of the list", async () => {
 		const { tool } = setup();
 		await call(tool, { action: "create", subject: "a" });
 		const r = await call(tool, { action: "list" });
-		const node = tool.renderResult?.(r as never, {} as never, theme, undefined as never) as unknown as Text;
-		expect((node as unknown as { text: string }).text).toContain("✓");
+		expect(collapsed(tool, r)).toContain("↳ ");
 	});
 
-	it("get renders the plain '✓' fallback", async () => {
+	it("get renders a ↳ line", async () => {
 		const { tool } = setup();
 		await call(tool, { action: "create", subject: "a" });
 		const r = await call(tool, { action: "get", id: 1 });
-		const node = tool.renderResult?.(r as never, {} as never, theme, undefined as never) as unknown as Text;
-		expect((node as unknown as { text: string }).text).toContain("✓");
+		expect(collapsed(tool, r)).toContain("↳ ");
 	});
 
-	it("clear renders the plain '✓' fallback", async () => {
+	it("clear renders a ↳ line", async () => {
 		const { tool } = setup();
-		await call(tool, { action: "clear" });
 		const r = await call(tool, { action: "clear" });
-		const node = tool.renderResult?.(r as never, {} as never, theme, undefined as never) as unknown as Text;
-		expect((node as unknown as { text: string }).text).toContain("✓");
+		expect(collapsed(tool, r)).toContain("↳ ");
 	});
 
-	it("missing details falls back to plain '✓'", () => {
+	it("expanded renders a block with the full text", async () => {
 		const { tool } = setup();
-		const node = tool.renderResult?.(
-			{ content: [], details: undefined } as never,
-			{} as never,
-			theme,
-			undefined as never,
-		) as unknown as Text;
-		expect((node as unknown as { text: string }).text).toContain("✓");
+		const r = await call(tool, { action: "create", subject: "a" });
+		const node = tool.renderResult?.(r as never, { expanded: true } as never, theme, { isError: false, isPartial: false } as never) as unknown as Text;
+		const text = node.render(120).join("\n");
+		expect(text).toContain("Todo");
+		expect(text).toContain("Todo list");
 	});
+
+	it("missing content falls back to a plain ↳ done", () => {
+		const { tool } = setup();
+		expect(collapsed(tool, { content: [], details: undefined })).toContain("↳ done");
+	});
+});
+
+it("registers renderShell self", () => {
+	const { tool } = setup();
+	expect(tool.renderShell).toBe("self");
 });

@@ -46,6 +46,8 @@ export function createMockPi(overrides: Partial<ExtensionAPI> = {}) {
 			captured.events.set(event, handlers);
 		}),
 		sendMessage: vi.fn(),
+		appendEntry: vi.fn(),
+		registerEntryRenderer: vi.fn(),
 		getActiveTools: vi.fn(() => [...captured.activeTools]),
 		setActiveTools: vi.fn((names: string[]) => { captured.activeTools = [...names]; }),
 		...overrides,

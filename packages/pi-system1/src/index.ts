@@ -1,3 +1,4 @@
+import { Block, expandHint, Row, toneOfTool } from "./transcript-style.ts";
 import { watch, type FSWatcher } from "node:fs";
 import { basename } from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
@@ -163,6 +164,15 @@ function resultPresentation(data: System1Outcome, expanded: boolean): string {
     if (data.attempts.length > 20) lines.push(`  … ${data.attempts.length - 20} more attempts`);
   }
   return lines.join("\n");
+}
+
+function resultSummary(data: System1Outcome): string {
+  if (data.ok) {
+    const count = Object.keys(data.answers).length;
+    return `${display(data.backend)} · ${count} answer${count === 1 ? "" : "s"}${data.fallback ? " · fallback" : ""}`;
+  }
+  const label = data.code === "refused" ? "Refused" : data.code === "cancelled" ? "Cancelled" : "Error";
+  return `${label} (${display(data.code)}): ${display(data.reason)}`;
 }
 
 export default async function system1Extension(pi: ExtensionAPI): Promise<void> {
@@ -400,7 +410,8 @@ export default async function system1Extension(pi: ExtensionAPI): Promise<void> 
     outputSchema,
     annotations: { readOnlyHint: true, destructiveHint: false },
     ...({ ccstyleOwnCall: true, ccstyleOwnResult: true } as const),
-    renderCall(args, theme) {
+    renderShell: "self",
+    renderCall(args, theme, context) {
       const entries = Object.values(args?.questions ?? {});
       const counts = new Map<string, number>();
       for (const entry of entries) {
@@ -408,15 +419,26 @@ export default async function system1Extension(pi: ExtensionAPI): Promise<void> 
         counts.set(type, (counts.get(type) ?? 0) + 1);
       }
       const types = [...counts].map(([type, count]) => `${type}: ${count}`).join(", ");
-      return new Text(`${theme.fg("toolTitle", theme.bold("System 1 judgment"))} · ${entries.length} question${entries.length === 1 ? "" : "s"}${types ? ` (${types})` : ""}`, 0, 0);
+      return new Row(theme, () => ({
+        tone: toneOfTool(context ?? {}, context?.lastComponent !== undefined),
+        title: "System 1",
+        detail: `${entries.length} question${entries.length === 1 ? "" : "s"}${types ? ` (${types})` : ""}`,
+      }));
     },
-    renderResult(result, { expanded, isPartial }, theme) {
+    renderResult(result, { expanded, isPartial }, theme, context) {
       const data = result.details as System1Outcome | undefined;
+      const tone = toneOfTool({ ...(context ?? {}), isPartial }, !isPartial);
       if (!data || typeof data.ok !== "boolean") {
         const literal = result.content.filter(block => block.type === "text").map(block => block.text).join("\n");
-        return new Text(literal ? display(literal, expanded ? 20_000 : 2_000) : theme.fg("muted", isPartial ? "Judgment pending" : "Judgment unavailable"), 0, 0);
+        if (!literal) return new Text(theme.fg("muted", `   ↳ ${isPartial ? "Judgment pending" : "Judgment unavailable"}`), 0, 0);
+        const text = display(literal, expanded ? 20_000 : 2_000);
+        if (expanded) return new Block(theme, () => ({ tone, title: "System 1", body: new Text(text, 0, 0), expanded: true }));
+        return new Text(theme.fg("dim", `   ↳ ${text}`), 0, 0);
       }
-      return new Text(resultPresentation(data, expanded), 0, 0);
+      if (expanded) {
+        return new Block(theme, () => ({ tone: data.ok ? tone : "failed", title: "System 1", body: new Text(resultPresentation(data, true), 0, 0), expanded: true }));
+      }
+      return new Text(theme.fg("dim", `   ↳ ${resultSummary(data)}`) + expandHint(theme), 0, 0);
     },
     async execute(_id, input, signal, _onUpdate, ctx) {
       const data = await askSystem1(ctx.modelRegistry, DEFAULT_CLASSIFIER, input.state, input.questions, signal);

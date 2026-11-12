@@ -1,10 +1,13 @@
 import type { Theme } from "@earendil-works/pi-coding-agent";
-import { Text } from "@earendil-works/pi-tui";
+import { type Component, Text } from "@earendil-works/pi-tui";
+import { Block, expandHint, Row, toneOfTool } from "../src/transcript-style.ts";
 import { formatStatusLabel } from "../state/i18n-bridge.js";
 import { selectTaskSubjectById } from "../state/selectors.js";
 import type { TaskState } from "../state/state.js";
 import { sanitizeTerminalText } from "../tool/sanitize.js";
-import type { Task, TaskAction, TaskDetails, TaskMutationParams, TaskStatus } from "../tool/types.js";
+import type { Task, TaskAction, TaskMutationParams, TaskStatus } from "../tool/types.js";
+
+type ToneContext = { isError?: boolean; isPartial?: boolean; executionStarted?: boolean; lastComponent?: unknown };
 
 // Re-export so legacy import paths (todo.ts, tests) continue to resolve;
 // the canonical definition lives in the i18n bridge.
@@ -104,61 +107,60 @@ export function formatCommandTaskLine(t: Task, glyph: string): string {
 // ---------------------------------------------------------------------------
 
 /**
- * `renderCall` body. Receives the parsed args, the theme, and the live
- * `TaskState` (resolved by the caller via `getState()`). Returns a `Text`
- * node identical to pre-refactor `todo.ts:507-525`.
+ * `renderCall` body: a one-line transcript row, `Todo · <op> <subject>`, whose
+ * glyph follows the tool's lifecycle tone.
  */
 export function renderTodoCall(
 	args: TaskMutationParams & { action: TaskAction },
 	theme: Theme,
 	state: TaskState,
-): Text {
-	const glyph = ACTION_GLYPH[args.action] ?? args.action;
-	let text = theme.fg("toolTitle", theme.bold("todo ")) + theme.fg("muted", glyph);
-
+	context?: ToneContext,
+): Row {
+	let subject = "";
 	if (args.action === "create" && args.subject) {
-		text += ` ${theme.fg("dim", sanitizeTerminalText(args.subject))}`;
+		subject = sanitizeTerminalText(args.subject);
 	} else if (
 		(args.action === "update" || args.action === "get" || args.action === "delete") &&
 		args.id !== undefined
 	) {
-		const subject = selectTaskSubjectById(state, args.id);
-		text += ` ${theme.fg("accent", subject ? sanitizeTerminalText(subject) : `#${args.id}`)}`;
+		const found = selectTaskSubjectById(state, args.id);
+		subject = found ? sanitizeTerminalText(found) : `#${args.id}`;
 	} else if (args.action === "list" && args.status) {
-		text += ` ${theme.fg("muted", formatStatusLabel(args.status))}`;
+		subject = formatStatusLabel(args.status);
 	}
-	return new Text(text, 0, 0);
+	const detail = `${args.action}${subject ? ` ${subject}` : ""}`;
+	return new Row(theme, () => ({
+		tone: toneOfTool(context ?? {}, context?.lastComponent !== undefined),
+		title: "Todo",
+		detail,
+	}));
 }
 
 /**
- * `renderResult` body. Inspects `details` to pick the per-action status echo
- * (only `create`/`update`/`delete` advertise a status; `list`/`get`/`clear`
- * fall back to plain `✓`). Identical visual output to pre-refactor
- * `todo.ts:533-565`.
+ * `renderResult` body. Collapsed: one dim `↳` line holding the first line of
+ * the formatted result (plus the expand hint when there is more). Expanded: a
+ * block with the full text in the tool's tone.
  */
-export function renderTodoResult(result: { details?: unknown }, theme: Theme): Text {
-	const details = result.details as TaskDetails | undefined;
-	let status: TaskStatus | undefined;
-	if (details) {
-		const params = details.params as TaskMutationParams;
-		switch (details.action) {
-			case "create":
-				status = details.tasks[details.tasks.length - 1]?.status;
-				break;
-			case "update":
-				status = params.status ?? details.tasks.find((t) => t.id === params.id)?.status;
-				break;
-			case "delete":
-				status = details.tasks.find((t) => t.id === params.id)?.status;
-				break;
-			case "list":
-			case "get":
-			case "clear":
-				break;
-		}
+export function renderTodoResult(
+	result: { content?: Array<{ type: string; text?: string }>; details?: unknown },
+	theme: Theme,
+	options: { expanded?: boolean } = {},
+	context?: ToneContext,
+): Component {
+	const text = (result.content ?? [])
+		.filter((part) => part.type === "text")
+		.map((part) => part.text ?? "")
+		.join("\n")
+		.trim();
+	const lines = text ? text.split("\n").map((line) => sanitizeTerminalText(line)) : [];
+	const tone = toneOfTool(context ?? {}, true);
+	if (options.expanded && lines.length > 1) {
+		return new Block(theme, () => ({ tone, title: "Todo", body: lines.join("\n"), expanded: true }));
 	}
-	if (status) {
-		return new Text(theme.fg(STATUS_COLOR[status], `${STATUS_GLYPH[status]} ${formatStatusLabel(status)}`), 0, 0);
-	}
-	return new Text(theme.fg("success", "✓"), 0, 0);
+	const first = lines[0] ?? "done";
+	return new Text(
+		theme.fg("dim", `   ↳ ${first}`) + (lines.length > 1 ? expandHint(theme) : ""),
+		0,
+		0,
+	);
 }

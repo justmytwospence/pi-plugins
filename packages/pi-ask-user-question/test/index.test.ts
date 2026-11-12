@@ -138,9 +138,9 @@ describe("transcript", () => {
   test("the call shows the headers", () => {
     const h = setup();
     expect(render(h.tool.renderCall({ questions: [{ header: "Library" }, { header: "Features" }] }, plainTheme, {}))).toBe(
-      "ask_user_question Library · Features",
+      " ? Question · Library · Features",
     );
-    expect(render(h.tool.renderCall({}, plainTheme, {}))).toBe("ask_user_question");
+    expect(render(h.tool.renderCall({}, plainTheme, {}))).toBe(" ? Question");
   });
 
   test("the result: one line per answer, Unanswered, Declined", () => {
@@ -154,13 +154,17 @@ describe("transcript", () => {
         { index: 2, header: "Target", question: "Where?", kind: "unanswered", answer: null },
       ],
     };
-    expect(render(h.tool.renderResult({ content: [], details }, {}, plainTheme, {}))).toBe(
-      "✓ Library: dayjs · note: small bundle\n✓ Name: (wrote) Temporal\n- Target: Unanswered",
+    expect(render(h.tool.renderResult({ content: [], details }, {}, plainTheme, {}))).toContain(
+      "↳ Library: dayjs · Name: Temporal · Target: Unanswered",
     );
-    expect(render(h.tool.renderResult({ content: [], details: { ...details, cancelled: true } }, {}, plainTheme, {}))).toBe("Declined");
+    const expanded = render(h.tool.renderResult({ content: [], details }, { expanded: true }, plainTheme, {}));
+    expect(expanded).toContain("✓ Library: dayjs · note: small bundle");
+    expect(expanded).toContain("✓ Name: (wrote) Temporal");
+    expect(expanded).toContain("- Target: Unanswered");
+    expect(render(h.tool.renderResult({ content: [], details: { ...details, cancelled: true } }, {}, plainTheme, {}))).toBe("   ↳ Declined");
     expect(
       render(h.tool.renderResult({ content: [{ type: "text", text: "Error: x" }], details: { ...details, error: "no_ui" } }, {}, plainTheme, {})),
-    ).toBe("Error: x");
+    ).toBe("   ↳ Error: x");
   });
 });
 

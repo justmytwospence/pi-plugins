@@ -144,7 +144,7 @@ afterEach(async () => {
 });
 
 describe("tool presentation", () => {
-  const theme = { fg: (_color: string, text: string) => text, bold: (text: string) => text };
+  const theme = { fg: (_color: string, text: string) => text, bg: (_color: string, text: string) => text, bold: (text: string) => text };
   const render = (component: { render(width: number): string[] }) => component.render(500).join("\n");
 
   it("shows types and typed answers without changing or exposing the payload", async () => {
@@ -154,18 +154,19 @@ describe("tool presentation", () => {
     const input = { state: { secret: "hidden evidence" }, questions };
     const before = structuredClone(input);
     const call = render(h.tool.renderCall(input, theme));
-    expect(call).toContain("3 questions (bool: 1, choice: 1, score: 1)");
+    expect(call).toContain("System 1 · 3 questions (bool: 1, choice: 1, score: 1)");
     expect(call).not.toContain("hidden evidence");
     expect(input).toEqual(before);
     const result = await judge(h);
     const snapshot = structuredClone(result);
     const compact = render(h.tool.renderResult(result, { expanded: false }, theme));
-    expect(compact).toContain("jev · typesafe/jev-latest · primary");
-    expect(compact).toContain("safe: bool probability 0.8");
-    expect(compact).toContain("action: choice keep · confidence 0.7");
-    expect(compact).toContain("effort: score 1.25 · confidence 0.9");
+    expect(compact).toContain("↳ jev · 3 answers");
     expect(compact).not.toContain("Attempts:");
     const expanded = render(h.tool.renderResult(result, { expanded: true }, theme));
+    expect(expanded).toContain("jev · typesafe/jev-latest · primary");
+    expect(expanded).toContain("safe: bool probability 0.8");
+    expect(expanded).toContain("action: choice keep · confidence 0.7");
+    expect(expanded).toContain("effort: score 1.25 · confidence 0.9");
     expect(expanded).toContain("Attempts: 1");
     expect(expanded).toContain("Usage: tokens: 19");
     expect(expanded).not.toContain(result.details.selectionKey);
@@ -181,7 +182,7 @@ describe("tool presentation", () => {
     expect(render(h.tool.renderResult({ content: [], details: {} }, { expanded: false, isPartial: true }, theme))).toContain("Judgment pending");
     const result = await judge(h);
     result.details = { ...result.details, answers: Object.fromEntries(Array.from({ length: 41 }, (_, i) => [`question-${i}`, { type: "bool", probability: 0.8 }])) };
-    expect(render(h.tool.renderResult(result, { expanded: false }, theme))).toContain("1 more answer (expand to view)");
+    expect(render(h.tool.renderResult(result, { expanded: false }, theme))).toContain("↳ jev · 41 answers");
     expect(render(h.tool.renderResult(result, { expanded: true }, theme))).toContain("question-40: bool probability 0.8");
   });
 
@@ -190,10 +191,11 @@ describe("tool presentation", () => {
     writeOrder(["jev", "openai-decisions"]);
     h.registry.classify.mockResolvedValueOnce(quotaFailure() as never);
     const fallback = await judge(h);
-    expect(render(h.tool.renderResult(fallback, { expanded: false }, theme))).toContain("openai-decisions · system1-openai/gpt-6-luna · fallback");
+    expect(render(h.tool.renderResult(fallback, { expanded: false }, theme))).toContain("↳ openai-decisions · 3 answers · fallback");
     for (const [code, label] of [["refused", "Refused"], ["exhausted", "Error"], ["cancelled", "Cancelled"]]) {
       const details = { ok: false, code, reason: "reason", attempts: [], latencyMs: 1 };
       expect(render(h.tool.renderResult({ details }, { expanded: true }, theme))).toContain(`${label} (${code}): reason`);
+      expect(render(h.tool.renderResult({ details }, { expanded: false }, theme))).toContain(`↳ ${label} (${code}): reason`);
     }
   });
 });
