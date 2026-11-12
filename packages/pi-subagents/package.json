@@ -1,6 +1,6 @@
 {
   "name": "@justmytwospence/pi-subagents",
-  "version": "0.1.60",
+  "version": "0.1.61",
   "description": "Delegates tasks to Pi subagents: agent files, single/parallel/chain runs, foreground or async, fresh or forked context, optional worktrees. Jev picks the role, model tier and effort when you don't.",
   "type": "module",
   "license": "MIT",
