@@ -254,11 +254,18 @@ function navigate(f) {
   assert.ok(targets.length >= 3, 'fixture needs multiple independently reachable checkpoints');
   index.view.scrollToEnd(); f.frame();
   let expected = [...targets].filter(row => row < index.view.scrollTop).reverse();
+  let suppressed = 0;
   for (const target of expected) {
     scrollToCheckpoint(f.reference, context, -1); f.frame();
     assert.equal(index.view.scrollTop, target, 'previous stop must use actual rendered rows and the one-row margin');
     assert.equal(index.view.isFollowingEnd, false);
+    assert.deepEqual(f.bar().component.render(index.width), [], 'a checkpoint stop lands without the sticky bar');
+    // Moving off the landing row and back brings the bar back where a prompt is scrolled off.
+    index.view.scrollTo(target + 1, { disableFollow: true }); f.frame();
+    index.view.scrollTo(target, { disableFollow: true }); f.frame();
+    if (f.bar().component.render(index.width).length) suppressed++;
   }
+  assert.ok(suppressed > 0, 'some checkpoint stop would otherwise show a pinned prompt');
   const first = index.view.scrollTop;
   scrollToCheckpoint(f.reference, context, -1); f.frame(); assert.equal(index.view.scrollTop, first, 'up never wraps');
   for (const target of targets.filter(row => row > first)) {

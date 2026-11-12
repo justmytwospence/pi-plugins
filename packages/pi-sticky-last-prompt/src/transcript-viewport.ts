@@ -95,6 +95,25 @@ export function captureTranscript(tui: unknown, context: TranscriptContext = EMP
   if (capture && capture.lines.length !== layoutLines.length) { host.requestRender?.(); return undefined; }
   return capture;
 }
+/**
+ * The row a checkpoint jump left at the top of a transcript view, recorded on the view itself so
+ * any copy of these helpers can see it. pi-sticky-last-prompt leaves its bar blank while the view
+ * still sits on that row: a jump lands on a clean view, and any other scroll brings the bar back.
+ */
+const CHECKPOINT_LANDING = Symbol.for("pi-plugins.transcript.checkpoint-landing");
+export function checkpointLanding(view: TranscriptView): number | undefined {
+  const row = (view as { [CHECKPOINT_LANDING]?: unknown })[CHECKPOINT_LANDING];
+  return typeof row === "number" ? row : undefined;
+}
+export function clearCheckpointLanding(view: TranscriptView): void {
+  try { delete (view as { [CHECKPOINT_LANDING]?: unknown })[CHECKPOINT_LANDING]; } catch { /* Frozen view. */ }
+}
+function markCheckpointLanding(view: TranscriptView, row: number | undefined): void {
+  try {
+    if (row === undefined) clearCheckpointLanding(view);
+    else Object.defineProperty(view, CHECKPOINT_LANDING, { value: row, writable: true, configurable: true, enumerable: false });
+  } catch { /* A sealed view just keeps the bar. */ }
+}
 export function scrollToCheckpoint(tui: unknown, context: TranscriptContext, direction: -1 | 1): void {
   const capture = captureTranscript(tui, context);
   if (!capture) return;
@@ -104,6 +123,10 @@ export function scrollToCheckpoint(tui: unknown, context: TranscriptContext, dir
     const end = Math.max(0, capture.lines.length - capture.viewportHeight);
     if (direction < 0) return;
     capture.view.scrollTo(end);
-  } else capture.view.scrollTo(target, { disableFollow: true });
+    markCheckpointLanding(capture.view, undefined);
+  } else {
+    capture.view.scrollTo(target, { disableFollow: true });
+    markCheckpointLanding(capture.view, capture.view.scrollTop);
+  }
   (tui as Host).requestRender?.();
 }

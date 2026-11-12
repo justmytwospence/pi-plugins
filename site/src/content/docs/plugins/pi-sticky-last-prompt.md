@@ -47,6 +47,8 @@ The pin is recomputed on each paint from the live transcript, so scrolling, stre
 
 ## Clicking and mouse behavior
 
+A checkpoint jump with [pi-vim](/plugins/pi-vim/)'s Ctrl+U/D lands on a clean view: the bar stays blank until the transcript scrolls by any other means.
+
 A left click on the bar scrolls the transcript so the pinned prompt lands just below the bar, and turns off follow-tail so new output does not pull the view back down. Only a left press or click inside the bar row is consumed. The wheel, scrollbar, text selection and other buttons keep Pi's normal behavior.
 
 To keep the scrollbar and mouse selection working while the bar is visible, the extension wraps the renderer's internal `hasOverlay()` check so its own non-capturing bar is not counted. Any other visible overlay, such as a dialog or search, restores Pi's normal suppression. The bar covers the top transcript row while it is shown.

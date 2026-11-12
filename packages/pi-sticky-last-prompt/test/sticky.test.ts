@@ -368,6 +368,27 @@ test("the pin re-derives after a transcript rebuild and a resize without polling
   expect(pin.render(20)[0]).toContain("new");
 });
 
+test("a checkpoint jump lands on a clean view until the transcript scrolls elsewhere", async () => {
+  const h = harness();
+  stickyLastPrompt(h.pi);
+  await h.emit("session_start", h.ctx);
+  const pin = bar(h.screen)!;
+  const chat = new Container();
+  chat.children = [userMessage("old", ["p"]), new Block(["x", "x", "x"])];
+  h.screen.doc.children = [chat];
+  h.screen.sv.contentHeight = 4;
+  const landing = Symbol.for("pi-plugins.transcript.checkpoint-landing");
+  h.screen.sv.scrollTop = 2;
+  Object.defineProperty(h.screen.sv, landing, { value: 2, writable: true, configurable: true });
+  expect(pin.render(40)).toEqual([]);
+  // Any other scroll brings the bar back, and returning to the row later keeps it.
+  h.screen.sv.scrollTop = 3;
+  expect(pin.render(40)[0]).toContain("old");
+  expect(Object.hasOwn(h.screen.sv, landing)).toBe(false);
+  h.screen.sv.scrollTop = 2;
+  expect(pin.render(40)[0]).toContain("old");
+});
+
 test.each(["data", "accessor"])("an untagged own %s wrapper is chained and its exact descriptor restored", async (kind) => {
   const h = harness();
   const receivers: unknown[] = [];

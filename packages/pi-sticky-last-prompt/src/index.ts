@@ -19,7 +19,7 @@ import {
 
 import { EMPTY_TRANSCRIPT_CONTEXT, type TranscriptDescription, type TranscriptIndex, type UserWordsRegistry } from "./transcript-contract.ts";
 import { collectUserWords, describeTranscriptComponent, indexTranscriptChildren } from "./transcript-index.ts";
-import { captureTranscriptView, transcriptDocument, transcriptViewWidth, type TranscriptView } from "./transcript-viewport.ts";
+import { captureTranscriptView, checkpointLanding, clearCheckpointLanding, transcriptDocument, transcriptViewWidth, type TranscriptView } from "./transcript-viewport.ts";
 export { USER_WORDS_CHANNEL, type ToolCallView, type UserWordsExtractor, type UserWordsRequest, type UserWordsRegistry } from "./transcript-contract.ts";
 
 type ScrollViewLike = TranscriptView;
@@ -410,6 +410,12 @@ export default function stickyLastPrompt(pi: ExtensionAPI): void {
       else Object.assign(barOptions, { row: 0, col: 0, width: "100%" });
       // Capture the document itself: document row hooks own clear deletion and padding.
       // Always recapture so same-height edits and group expansion cannot retain stale rows.
+      // A checkpoint jump (pi-vim's Ctrl+U/D) lands on a clean view: no bar until the view moves.
+      const landing = checkpointLanding(sv);
+      if (landing !== undefined) {
+        if (landing === sv.scrollTop) return undefined;
+        clearCheckpointLanding(sv);
+      }
       const transcript = captureTranscriptView(sv, boxWidth, { userWords });
       if (!transcript) return undefined;
       const index: AnchorIndex = { anchors: [], horizons: [] };
