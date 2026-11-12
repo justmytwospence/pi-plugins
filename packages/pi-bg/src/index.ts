@@ -50,8 +50,8 @@
 import { randomUUID } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
-import type { AgentBeforeSettleEvent, BoundaryResult, ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { Text } from "@earendil-works/pi-tui";
+import type { AgentBeforeSettleEvent, BoundaryResult, ExtensionAPI, ExtensionContext, Theme } from "@earendil-works/pi-coding-agent";
+import { Row, toneOfTool } from "./transcript-style.ts";
 import { WORKING_MESSAGE_EVENT } from "./working-message.ts";
 import { Type } from "typebox";
 import { elapsed, footerStatus, header, marimoNote, nameFromCommand, outcome, progressText, report, runtime, shortProgress, taskLine } from "./format.ts";
@@ -79,7 +79,7 @@ import { PillView } from "./pill.ts";
 import { LogViewer } from "./viewer.ts";
 import { MARIMO_READY, marimoName, marimoServer } from "./marimo.ts";
 import { type Block, blocks, blocksView } from "./result-view.ts";
-import { type KeyHint, reportResultView, runResultView, type WakeDetails, wakeView } from "./rows.ts";
+import { reportResultView, runResultView, type WakeDetails, wakeView } from "./rows.ts";
 import { transcriptCheckpoint } from "./transcript-contract.ts";
 
 const STARTUP_WAIT_MS = 1_500;
@@ -164,7 +164,10 @@ const LogsParams = Type.Object({
 const KillParams = Type.Object({ id: Type.String({ description: "Task id or name" }) });
 
 /** pi-cc-render draws these tools' call rows but leaves the result row to them (the live task line). */
-const OWN_RESULT = { ccstyleOwnResult: true } as const;
+const OWN_RESULT = { ccstyleOwnResult: true, renderShell: "self" } as const;
+
+const callRow = (theme: Theme, context: { isError?: boolean; isPartial?: boolean; executionStarted?: boolean; lastComponent?: unknown } | undefined, title: string, detail?: string) =>
+  new Row(theme, () => ({ tone: toneOfTool(context ?? {}, context?.lastComponent !== undefined), title, detail: detail || undefined }));
 
 const text = (t: string) => ({ content: [{ type: "text" as const, text: t }], details: {} });
 /** Declare an outcome where it is produced, before any wait combines it with other blocks. */
@@ -994,7 +997,7 @@ export default function piBg(pi: ExtensionAPI) {
 
   pi.registerMessageRenderer<WakeDetails>("pi-bg", (message, { expanded }, theme) => {
     const content = typeof message.content === "string" ? message.content : message.content.flatMap((c) => (c.type === "text" ? [c.text] : [])).join("\n");
-    return wakeView(content, message.details, expanded, theme);
+    return wakeView(content, message.details, expanded, theme, message.timestamp);
   });
 
   pi.registerTool({
@@ -1012,9 +1015,9 @@ export default function piBg(pi: ExtensionAPI) {
     ],
     parameters: RunParams,
     ...OWN_RESULT,
-    renderCall(args, theme) {
+    renderCall(args, theme, context) {
       const a = args as { command?: string; kind?: string };
-      return new Text(`${theme.fg("toolTitle", theme.bold("Bash"))} ${(a.command ?? "").replace(/\s+/gu, " ")}${theme.fg("dim", ` · background ${a.kind === "service" ? "service" : "job"}`)}`, 0, 0);
+      return callRow(theme, context, "Background job", `${(a.command ?? "").replace(/\s+/gu, " ")} · ${a.kind === "service" ? "service" : "job"}`);
     },
     renderResult(result, { expanded, isPartial }, theme, context) {
       const id = (result.details as { id?: string } | undefined)?.id;
@@ -1075,14 +1078,14 @@ export default function piBg(pi: ExtensionAPI) {
     promptSnippet: "Wait for a background job (keeps the turn working)",
     parameters: WaitParams,
     ...OWN_RESULT,
-    renderCall(args, theme) {
+    renderCall(args, theme, context) {
       const a = args as { id?: string };
-      return new Text(`${theme.fg("toolTitle", theme.bold("Wait"))} ${a.id ? (reg.find(a.id, sessionId)?.name ?? a.id) : "next job"}`, 0, 0);
+      return callRow(theme, context, "Wait", a.id ? (reg.find(a.id, sessionId)?.name ?? a.id) : "next job");
     },
     renderResult(result, { expanded }, theme, context) {
       // Reports keep the look of Pi's own tool output; a subagent's answer reads as Markdown.
-      const c = context as { isError?: boolean; keyHint?: KeyHint } | undefined;
-      return reportResultView(result as never, expanded, theme, Boolean(c?.isError), c?.keyHint);
+      const c = context as { isError?: boolean } | undefined;
+      return reportResultView(result as never, expanded, theme, Boolean(c?.isError), "Wait");
     },
     async execute(id, params, signal, _onUpdate, c) {
       const generation = sessionGeneration;
@@ -1202,13 +1205,13 @@ export default function piBg(pi: ExtensionAPI) {
     promptSnippet: "Read a background task's log, or list the tasks",
     parameters: LogsParams,
     ...OWN_RESULT,
-    renderCall(args, theme) {
+    renderCall(args, theme, context) {
       const a = args as { id?: string };
-      return new Text(a.id ? `${theme.fg("toolTitle", theme.bold("Task log"))} ${reg.find(a.id, sessionId)?.name ?? a.id}` : theme.fg("toolTitle", theme.bold("Tasks")), 0, 0);
+      return a.id ? callRow(theme, context, "Task log", reg.find(a.id, sessionId)?.name ?? a.id) : callRow(theme, context, "Tasks");
     },
     renderResult(result, { expanded }, theme, context) {
-      const c = context as { isError?: boolean; keyHint?: KeyHint } | undefined;
-      return reportResultView(result as never, expanded, theme, Boolean(c?.isError), c?.keyHint);
+      const c = context as { isError?: boolean } | undefined;
+      return reportResultView(result as never, expanded, theme, Boolean(c?.isError), "Task log");
     },
     async execute(_id, params) {
       if (!params.id) {
@@ -1248,13 +1251,13 @@ export default function piBg(pi: ExtensionAPI) {
     promptSnippet: "Stop a background task",
     parameters: KillParams,
     ...OWN_RESULT,
-    renderCall(args, theme) {
+    renderCall(args, theme, context) {
       const a = args as { id?: string };
-      return new Text(`${theme.fg("toolTitle", theme.bold("Stop"))} ${a.id ? (reg.find(a.id, sessionId)?.name ?? a.id) : ""}`, 0, 0);
+      return callRow(theme, context, "Stop", a.id ? (reg.find(a.id, sessionId)?.name ?? a.id) : "");
     },
     renderResult(result, { expanded }, theme, context) {
-      const c = context as { isError?: boolean; keyHint?: KeyHint } | undefined;
-      return reportResultView(result as never, expanded, theme, Boolean(c?.isError), c?.keyHint);
+      const c = context as { isError?: boolean } | undefined;
+      return reportResultView(result as never, expanded, theme, Boolean(c?.isError), "Stop");
     },
     async execute(_id, params) {
       const t = reg.find(params.id, sessionId);

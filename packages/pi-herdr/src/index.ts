@@ -40,6 +40,7 @@ import { resolve as resolvePath } from "node:path";
 import { matchesKey } from "@earendil-works/pi-tui";
 import { getAgentDir, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
+import { messageView } from "./transcript-style.ts";
 import { transcriptCheckpoint } from "./transcript-contract.ts";
 import { declareReadOnlyCalls } from "./read-only-call.ts";
 import { ACTIVITY_CHANGED, ACTIVITY_GONE, ACTIVITY_HOST, ACTIVITY_SECTION } from "./activity.ts";
@@ -160,6 +161,19 @@ export default function piHerdr(pi: ExtensionAPI, dependencies: HerdrDependencie
   const target = herdrTarget();
   if (!target) return;
   const rawCall = dependencies.call ?? socketCall(target.socketPath);
+  if (typeof pi.registerMessageRenderer === "function") {
+    const incoming: Array<[string, (details: Record<string, unknown> | undefined) => string]> = [
+      [DRIFT_MESSAGE, () => "Upstream drift"],
+      ["herdr-worktree", () => "Worktree removed"],
+      ["herdr-child", (d) => `From ${String(d?.name ?? "child")}`],
+      ["herdr-message", (d) => `From ${String(d?.from ?? "agent")}`],
+      [CREW_MESSAGE, () => "Crew"],
+      [CREW_COMMAND_MESSAGE, () => "/crew"],
+    ];
+    for (const [type, title] of incoming) {
+      pi.registerMessageRenderer<Record<string, unknown>>(type, (message, options, theme) => messageView(theme, message, options, { tone: "incoming", title: title(message.details) }));
+    }
+  }
   const location = new SelfLocation({
     call: rawCall,
     callerPaneId: target.paneId,

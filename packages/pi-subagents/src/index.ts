@@ -38,6 +38,7 @@ import { FleetView, SUCCESS_HINT_MS } from "./ui/fleet.ts";
 import type { ViewerActions } from "./ui/viewer.ts";
 import { elapsedMs, formatCount, formatElapsed, modelSourceMark, shortModel } from "./ui/format.ts";
 import { RunsWidget, WIDGET_MODES, type WidgetMode } from "./ui/widget.ts";
+import { Block, Row as RowLine, appendReport, glyph, messageView, registerReportRenderer, toneOfTool, type Tone } from "./transcript-style.ts";
 import { transcriptCheckpoint } from "./transcript-contract.ts";
 import { WORKING_MESSAGE_EVENT } from "./working-message.ts";
 import { declareReadOnlyCalls } from "./read-only-call.ts";
@@ -1477,6 +1478,7 @@ export default function subagents(pi: ExtensionAPI) {
         "Each subagent adds its own context and token usage: delegate work that runs in parallel, exceeds one context, or is routine with a long tail; keep the rest in this session. action=run (default): a single `task`, parallel `tasks`, or a `chain` whose steps can use {previous}. Pass a role as `agent` (explorer, worker, reviewer, researcher, writer, planner; general only when no other role fits) and leave `model` and `thinking` empty for independent task-calibrated selection (built-in roles provide fallbacks). Set them only for deliberate overrides. `async: true` returns run ids at once and delivers each result as a message. action=status|steer|stop|result|resume take `id` (steer also `message`); resume continues a stopped or lost run, or one that hit the rate limit, as a new one.",
       promptSnippet: "Delegate self-contained tasks to subagents with their own context windows",
       promptGuidelines: promptGuidelines(delegation),
+      renderShell: "self",
       parameters: Params,
       async execute(_toolCallId, params, signal, onUpdate, ctx) {
         config = loadConfig("pi-subagents", DEFAULT_CONFIG, ctx.cwd);
@@ -1816,7 +1818,7 @@ export default function subagents(pi: ExtensionAPI) {
         }, _toolCallId);
       },
 
-      renderCall(args, theme) {
+      renderCall(args, theme, context) {
         const a = args as { action?: string; agent?: string; task?: string; label?: string; tasks?: unknown[]; chain?: unknown[]; async?: boolean; id?: string };
         const action = a.action ?? "run";
         const what =
@@ -1827,7 +1829,7 @@ export default function subagents(pi: ExtensionAPI) {
               : a.chain?.length
                 ? `chain of ${a.chain.length}`
                 : `${taskLabel(a.task ?? "", a.label)} · ${a.agent ?? "auto"}`;
-        return new Text(`${theme.fg("toolTitle", theme.bold("subagent "))}${theme.fg("muted", what)}${a.async ? theme.fg("dim", " (async)") : ""}`, 0, 0);
+        return new RowLine(theme, () => ({ tone: toneOfTool(context, context.lastComponent !== undefined), title: "Subagent", detail: `${what}${a.async ? " (async)" : ""}` }));
       },
 
       renderResult(result, { expanded }, theme) {
@@ -1836,8 +1838,7 @@ export default function subagents(pi: ExtensionAPI) {
           const first = result.content[0];
           return new Text(first?.type === "text" ? first.text : "", 0, 0);
         }
-        const icon = (s: RunView["status"]) =>
-          s === "running" ? theme.fg("warning", "●") : s === "done" ? theme.fg("success", "✓") : s === "stopped" ? theme.fg("muted", "■") : s === "lost" ? theme.fg("warning", "?") : theme.fg("error", "✗");
+        const icon = (s: RunView["status"]) => glyph(theme, runTone(s));
         const jev = (on: boolean, pressure?: number) => (on ? theme.fg("dim", jevMark(on, pressure)) : "");
         const sep = theme.fg("muted", " · ");
         const flat = (text: string) => text.replace(/\s+/gu, " ").trim();
@@ -1855,14 +1856,23 @@ export default function subagents(pi: ExtensionAPI) {
             : r.status === "running"
               ? theme.fg("dim", flat(r.activity ?? "starting…"))
               : theme.fg("dim", flat(r.output?.split("\n").find((l) => l.trim()) ?? r.task));
-          rows.push({ left: `  ${theme.fg("muted", "└")} ${detail}` });
+          rows.push({ left: `  ${theme.fg("muted", "↳")} ${detail}` });
           if (expanded && r.output) rows.push({ left: "", markdown: r.output.split("\n").slice(0, 40).join("\n"), indent: 4 });
         }
-        return new RowsText(rows, (text) => theme.fg("dim", text));
+        const body = new RowsText(rows, (text) => theme.fg("dim", text));
+        if (!expanded) return body;
+        return new Block(theme, () => ({ tone: runsTone(d.runs), title: "Subagent", body, expanded: true }));
       },
     });
   };
   registerSubagentTool(delegationOf(config));
+  registerReportRenderer(pi);
+  pi.registerMessageRenderer<{ mode?: string; runs?: RunView[]; batches?: Array<{ runs?: RunView[] }> }>("subagent-result", (message, options, theme) => {
+    const d = message.details;
+    const runs = d?.runs ?? d?.batches?.flatMap((b) => b.runs ?? []) ?? [];
+    const text = typeof message.content === "string" ? message.content : message.content.map((p) => (p.type === "text" ? p.text : "")).join("\n");
+    return messageView(theme, message, options, { tone: runsTone(runs), title: text.trim().split("\n")[0] || "Subagent result" });
+  });
   // status and result only read run records; run, steer, stop and resume start or control agents.
   declareReadOnlyCalls(pi.events, "subagent", subagentCallReadOnly);
 
@@ -1906,7 +1916,9 @@ export default function subagents(pi: ExtensionAPI) {
         const records = all
           ? readAllRuns(path.join(agentDir(), "sessions"))
           : runRecords((ctx.sessionManager.getBranch() ?? []) as Array<{ type?: string; customType?: string; data?: unknown }>);
-        ctx.ui.notify(formatStats(computeStats(latestPerRun(records)), all ? "in all sessions" : "in this session", Math.max(40, Math.min(process.stdout.columns || 100, 120))), "info");
+        const statsText = formatStats(computeStats(latestPerRun(records)), all ? "in all sessions" : "in this session", Math.max(40, Math.min(process.stdout.columns || 100, 120)));
+        if (statsText.includes("\n") && ctx.mode === "tui") appendReport(pi, "Subagent stats", statsText);
+        else ctx.ui.notify(statsText, "info");
         return;
       }
       if (verb === "stop") {
@@ -1961,6 +1973,16 @@ export default function subagents(pi: ExtensionAPI) {
 type Row = { left: string; right?: string[]; wrap?: boolean; markdown?: string; indent?: number };
 
 /** Tool-result rows, clipped to the width (stats kept flush right) unless marked to wrap. */
+const runTone = (status: RunView["status"]): Tone =>
+  status === "running" ? "running" : status === "done" ? "done" : status === "stopped" ? "stopped" : status === "lost" ? "attention" : "failed";
+
+const runsTone = (runs: ReadonlyArray<Pick<RunView, "status">>): Tone => {
+  const bad = (st: string) => st === "failed" || st === "error";
+  if (runs.some((r) => bad(r.status))) return "failed";
+  if (runs.length && runs.every((r) => r.status === "stopped")) return "stopped";
+  return "done";
+};
+
 class RowsText implements Component {
   constructor(
     private readonly rows: Row[],

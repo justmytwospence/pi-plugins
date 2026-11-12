@@ -124,12 +124,12 @@ test("single, parallel and chain labels survive records and appear before roles 
     const record = h.entries.at(-1)?.data as any;
     expect(record).toMatchObject({ task, label: "Config audit" });
     expect(recordedRun(record)).toMatchObject({ task, label: "Config audit" });
-    expect(tool.renderCall({ task, label: "Config audit", agent: "general" }, plain).render(160).join("\n")).toContain("Config audit · general");
+    expect(tool.renderCall({ task, label: "Config audit", agent: "general" }, plain, { isError: false, isPartial: false, executionStarted: true }).render(160).join("\n")).toContain("Config audit · general");
     expect(tool.renderResult(single, { expanded: false }, plain).render(200).join("\n")).toContain("Config audit · general");
     const narrow = tool.renderResult(single, { expanded: false }, plain).render(30);
     expect(narrow[0]).toContain("Config audit");
     expect(narrow).toHaveLength(2);
-    expect(narrow[1]).toMatch(/^  └ /u);
+    expect(narrow[1]).toMatch(/^  ↳ /u);
     const result = await tool.execute("result", { action: "result", id: record.id }, undefined, undefined, ctx);
     expect(result.content[0].text).toMatch(/^\[Config audit · general · done\]/u);
 

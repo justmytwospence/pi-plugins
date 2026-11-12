@@ -63,7 +63,9 @@ test("the UI binds in the TUI only; /subagents lists recorded runs and opens one
   expect(ui.notes.at(-1)).toBe("No subagents are running.");
 
   await command.handler("stats", ctx);
-  expect(ui.notes.at(-1)).toMatch(/1 runs, \$0\.0000 total, in this session[\s\S]*unknown\s+1\s+100%[\s\S]*scout\s+1/u);
+  const report = h.entries.findLast((e: any) => e.customType === "transcript-style:report") as any;
+  expect(report?.data.title).toBe("Subagent stats");
+  expect(report?.data.body).toMatch(/1 runs, \$0\.0000 total, in this session[\s\S]*unknown\s+1\s+100%[\s\S]*scout\s+1/u);
 
   await h.emit("session_shutdown", { type: "session_shutdown" }, ctx);
   expect(ui.inputHandlers.size).toBe(0);

@@ -45,30 +45,30 @@ describe("pi-bg", () => {
     const run = x.tools.get("bg_run");
     expect(run.ccstyleOwnResult).toBe(true);
     const plain = { fg: (_c: string, t: string) => t, bold: (t: string) => t } as any;
-    expect(run.renderCall({ command: "sleep 1.6", kind: "job" }, plain).render(200)[0].trimEnd()).toBe("Bash sleep 1.6 · background job");
+    expect(run.renderCall({ command: "sleep 1.6", kind: "job" }, plain, { isError: false, isPartial: false, executionStarted: false }).render(200)[0].trimEnd()).toBe(" ? Background job · sleep 1.6 · job");
     const r = await x.call("bg_run", { command: 'echo 1/4 > "$PI_BG_PROGRESS"; sleep 1.6', kind: "job", name: "fit" });
     expect(r.details.id).toBeTruthy();
     let redraws = 0;
     const view = run.renderResult(r, { expanded: false, isPartial: false }, plain, { invalidate: () => redraws++ });
     await until(() => /25%/.test(view.render(200)[0]), 4_000);
-    expect(view.render(200)[0]).toMatch(/^↳ fit running · 25% ██░░░░░░ · 0:0\d$/u);
+    expect(view.render(200)[0]).toMatch(/^   ↳ fit running · 25% ██░░░░░░ · 0:0\d$/u);
     await until(() => /exit 0/.test(view.render(200)[0]), 6_000);
-    expect(view.render(200)[0]).toMatch(/^↳ fit exit 0 after 0:0\d$/u);
+    expect(view.render(200)[0]).toMatch(/^   ↳ fit exit 0 after 0:0\d$/u);
     expect(redraws).toBeGreaterThan(0);
     const wake = x.renderers.get("pi-bg");
     const msg = { content: "Background job fit (ab12c) ended: exit 0 after 0:02.\n\nLast lines", details: { tasks: [{ id: "ab12c", kind: "end", status: "done" }] } };
-    expect(wake(msg, { expanded: false }, plain).render(200)[0]).toMatch(/^✓ Background job fit \(ab12c\) ended: exit 0 after 0:02\. · /u);
+    expect(wake(msg, { expanded: false }, plain).render(200)[0]).toMatch(/^ ✓ Background job fit \(ab12c\) ended: exit 0 after 0:02\. · /u);
     expect(wake(msg, { expanded: true }, plain).render(200).join("\n")).toMatch(/Last lines/);
     const failed = { ...msg, details: { tasks: [{ id: "ab12c", kind: "end", status: "failed" }] } };
-    expect(wake(failed, { expanded: false }, plain).render(200)[0].startsWith("✗ ")).toBe(true);
+    expect(wake(failed, { expanded: false }, plain).render(200)[0].startsWith(" ✗ ")).toBe(true);
     await x.shutdown();
   });
 
-  it("uses Pi's injected key hint in collapsed report rows", async () => {
+  it("shows the shared expand hint in collapsed report rows", async () => {
     const x = await load();
     const plain = { fg: (_c: string, t: string) => t, bold: (t: string) => t } as any;
-    const view = x.tools.get("bg_wait").renderResult({ content: [{ type: "text", text: "one\ntwo" }] }, { expanded: false, isPartial: false }, plain, { keyHint: (id: string, d: string) => `<${id}> ${d}` });
-    expect(view.render(200)[0]).toContain("<app.tools.expand> to expand");
+    const view = x.tools.get("bg_wait").renderResult({ content: [{ type: "text", text: "one\ntwo" }] }, { expanded: false, isPartial: false }, plain, {});
+    expect(view.render(200)[0]).toMatch(/^   ↳ one · .+ to expand$/u);
     await x.shutdown();
   });
 
@@ -332,8 +332,8 @@ describe("pi-bg", () => {
     const { initTheme } = await import("@earendil-works/pi-coding-agent");
     initTheme("dark");
     const lines = x.tools.get("bg_wait").renderResult(r, { expanded: true }, theme).render(80).map((l: string) => l.replace(/\x1b\[[0-9;]*m/g, "").trimEnd());
-    expect(lines[0]).toBe("audit · general (subagent:a1): done · done after 3s");
-    expect(lines).toContain("Findings");
+    expect(lines.map((l: string) => l.trim())).toContain("audit · general (subagent:a1): done · done after 3s");
+    expect(lines.map((l: string) => l.trim())).toContain("Findings");
     expect(lines.some((l: string) => /^\s*[-•] one thing$/u.test(l))).toBe(true);
     expect(lines.join("\n")).not.toMatch(/\*\*|##/u);
     await x.shutdown();
