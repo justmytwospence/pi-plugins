@@ -36,7 +36,7 @@ Suite additions:
 
 - [pi-vim](/plugins/pi-vim/) uses Ctrl+U/D for previous/next [transcript checkpoints](/architecture/transcript/) **in Insert and idle Normal mode on the main prompt**, without Escape and without changing the draft or mode: prompts, feedback, concluding responses and explicitly delivered artifacts. Routine tools/progress are skipped without interpreting prose. Do not assign those keys globally to native half-page actions; native fullscreen bindings normally precede editor input.
 - [pi-clear-screen](/plugins/pi-clear-screen/) clears the view with Ctrl+L **after an explicit model-selector remap**. It leaves history/context and the current draft intact. `/clear` instead starts a fresh conversation while retaining model/effort.
-- [pi-sticky-last-prompt](/plugins/pi-sticky-last-prompt/) pins a scrolled-past prompt; clicking it jumps back. Ctrl+U/D checkpoint stops land without the bar. It adds no keyboard shortcut.
+- [pi-sticky-last-prompt](/plugins/pi-sticky-last-prompt/) pins a scrolled-past prompt; clicking it jumps back. Ctrl+U/D checkpoint stops put the marked block at the top row, without the bar. It adds no keyboard shortcut.
 
 ## Edit, recall and send a prompt
 

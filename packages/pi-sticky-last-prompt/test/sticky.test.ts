@@ -331,7 +331,7 @@ test("fullscreen session: overlay shown, hasOverlay ignores only our bar, click 
   h.screen.sv.contentHeight = 6;
   expect(pin!.render(40)[0]).toContain("second");
   pin!.handleMouse({ type: "click", button: "left", x: 1, y: 0, screenX: 1, screenY: 0, width: 40, height: 1, shift: false, alt: false, ctrl: false });
-  expect(h.screen.scrollTo).toEqual([{ top: 4, options: { disableFollow: true } }]);
+  expect(h.screen.scrollTo).toEqual([{ top: 5, options: { disableFollow: true } }]);
 
   await h.emit("session_shutdown", h.ctx);
   expect(h.widgets.size).toBe(0);
@@ -605,7 +605,7 @@ test("clicks revalidate identity after same-label rebuild/clear and refresh move
   pin.render(40);
   before.lines.push("more");
   pin.handleMouse(leftClick);
-  expect(h.screen.scrollTo).toEqual([{ top: 3, options: { disableFollow: true } }]);
+  expect(h.screen.scrollTo).toEqual([{ top: 4, options: { disableFollow: true } }]);
   h.screen.scrollTo.length = 0;
   h.screen.doc.children[1] = userMessage("prompt", ["p"]);
   pin.handleMouse(leftClick);
@@ -614,7 +614,7 @@ test("clicks revalidate identity after same-label rebuild/clear and refresh move
   h.screen.doc.children.push(new Block([CLEAR_SENTINEL]));
   h.screen.sv.scrollTop = 8;
   pin.handleMouse(leftClick);
-  expect(h.screen.scrollTo).toEqual([{ top: 3, options: { disableFollow: true } }]);
+  expect(h.screen.scrollTo).toEqual([{ top: 4, options: { disableFollow: true } }]);
   expect(pin.render(40)[0]).toContain("prompt");
 });
 

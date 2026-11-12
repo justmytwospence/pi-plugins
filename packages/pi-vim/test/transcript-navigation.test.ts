@@ -20,10 +20,11 @@ function transcript() {
 test("checkpoint selection skips unmarked blocks, is strict and clamps without wrapping", () => {
   const index = indexTranscript(transcript(), 80);
   assert.equal(selectCheckpoint(index, 0, 5, -1), undefined);
-  assert.equal(selectCheckpoint(index, 0, 5, 1), 9);
-  assert.equal(selectCheckpoint(index, 13, 5, -1), 9);
-  assert.equal(selectCheckpoint(index, 13, 5, 1), 14);
-  assert.equal(selectCheckpoint(index, 29, 5, 1), undefined);
+  assert.equal(selectCheckpoint(index, 0, 5, 1), 10);
+  assert.equal(selectCheckpoint(index, 13, 5, -1), 10);
+  assert.equal(selectCheckpoint(index, 13, 5, 1), 15);
+  assert.equal(selectCheckpoint(index, 29, 5, 1), 30);
+  assert.equal(selectCheckpoint(index, 30, 5, 1), undefined);
   assert.equal(selectCheckpoint(index, 30, 20, -1), 15);
   assert.equal(selectCheckpoint(index, 15, 20, 1), undefined);
   assert.equal(selectCheckpoint({ lines: ["x"], blocks: [], horizons: [] }, 0, 5, 1), undefined);
@@ -41,9 +42,9 @@ test("navigation uses the actual split width and keeps follow disabled", () => {
   const { tui, calls } = host();
   assert.equal(captureTranscript(tui)?.width, 45);
   scrollToCheckpoint(tui, context, -1);
-  assert.deepEqual(calls, [{ row: 14, options: { disableFollow: true } }]);
+  assert.deepEqual(calls, [{ row: 15, options: { disableFollow: true } }]);
   scrollToCheckpoint(tui, context, 1);
-  assert.equal(calls.at(-1)?.row, 24);
+  assert.equal(calls.at(-1)?.row, 25);
 });
 test("missing/ambiguous geometry and regular mode fail closed", () => {
   const { tui, calls } = host();
@@ -111,7 +112,7 @@ test("Ctrl+D past the last checkpoint goes to the end and resumes follow", () =>
   view.updateLayout(box.scrollContentLines.length, 10, () => {});
   view.scrollTo(0, { disableFollow: true });
   scrollToCheckpoint(tui, context, 1);
-  assert.equal(view.scrollTop, 4, "first stops at the last checkpoint");
+  assert.equal(view.scrollTop, 5, "first stops at the last checkpoint");
   assert.equal(view.isFollowingEnd, false);
   scrollToCheckpoint(tui, context, 1);
   assert.equal(view.scrollTop, 40, "then goes all the way to the end");

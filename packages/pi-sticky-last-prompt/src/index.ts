@@ -344,7 +344,7 @@ export default function stickyLastPrompt(pi: ExtensionAPI): void {
       const selected = currentSelection();
       const sv = primaryScrollView();
       if (!selected || !sv || !paintedAnchor || selected.source !== paintedAnchor.source || selected.text !== paintedAnchor.text) return;
-      sv.scrollTo(Math.max(0, selected.start - bar.renderedRows), { disableFollow: true });
+      sv.scrollTo(Math.max(0, selected.start), { disableFollow: true });
       screen?.requestRender();
     },
   );

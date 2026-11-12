@@ -530,7 +530,7 @@ describe("Pi SDK 1.2.0 loader and terminal input lifecycle", { concurrency: fals
       assert.ok(renderer instanceof TuiAltScreen);
       const snap = captureTranscript(renderer)!;
       assert.ok(snap, "real layout must expose accurate transcript geometry");
-      const targets = snap.blocks.filter(block => block.checkpoint).map(block => Math.max(0, block.start - 1));
+      const targets = snap.blocks.filter(block => block.checkpoint).map(block => block.start);
       assert.equal(targets.length, 3);
       const keyEvents = [
         { up: CTRL_U, down: CTRL_D },

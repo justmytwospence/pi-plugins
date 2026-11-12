@@ -259,6 +259,6 @@ export function indexTranscriptChildren(children: readonly unknown[], width: num
 }
 export function selectCheckpoint(index: TranscriptIndex, scrollTop: number, viewportHeight: number, direction: -1 | 1): number | undefined {
   const max = Math.max(0, index.lines.length - viewportHeight);
-  const targets = [...new Set(index.blocks.filter(block => block.checkpoint).map(block => Math.max(0, Math.min(max, block.start - 1))))].sort((a, b) => a - b);
+  const targets = [...new Set(index.blocks.filter(block => block.checkpoint).map(block => Math.max(0, Math.min(max, block.start))))].sort((a, b) => a - b);
   return direction < 0 ? targets.filter(row => row < scrollTop).at(-1) : targets.find(row => row > scrollTop);
 }

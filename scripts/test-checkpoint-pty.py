@@ -72,7 +72,7 @@ export default function(pi) {
           const checkpoints=index.blocks.filter(b=>b.checkpoint).map(b=>({start:b.start,end:b.end,...b.checkpoint}));
           const max=Math.max(0,index.lines.length-view.viewportHeight);
           out.index={lines:index.lines.length,checkpoints,
-            targets:[...new Set(checkpoints.map(b=>Math.max(0,Math.min(max,b.start-1))))].sort((a,b)=>a-b),
+            targets:[...new Set(checkpoints.map(b=>Math.max(0,Math.min(max,b.start))))].sort((a,b)=>a-b),
             up:selectCheckpoint(index,view.scrollTop,view.viewportHeight,-1)??null,
             down:selectCheckpoint(index,view.scrollTop,view.viewportHeight,1)??null,
             digest:createHash("sha256").update(JSON.stringify([index.lines,checkpoints])).digest("hex")};

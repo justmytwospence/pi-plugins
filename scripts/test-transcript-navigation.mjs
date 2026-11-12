@@ -246,7 +246,7 @@ function capture(f) {
 }
 function landingRows(index) {
   return [...new Set(index.blocks.filter(block => block.checkpoint).map(block =>
-    Math.max(0, Math.min(block.start - 1, index.lines.length - index.viewportHeight))))].sort((a, b) => a - b);
+    Math.max(0, Math.min(block.start, index.lines.length - index.viewportHeight))))].sort((a, b) => a - b);
 }
 function navigate(f) {
   let index = capture(f);
@@ -257,7 +257,7 @@ function navigate(f) {
   let suppressed = 0;
   for (const target of expected) {
     scrollToCheckpoint(f.reference, context, -1); f.frame();
-    assert.equal(index.view.scrollTop, target, 'previous stop must use actual rendered rows and the one-row margin');
+    assert.equal(index.view.scrollTop, target, 'previous stop must use actual rendered rows at the block start');
     assert.equal(index.view.isFollowingEnd, false);
     assert.deepEqual(f.bar().component.render(index.width), [], 'a checkpoint stop lands without the sticky bar');
     // Moving off the landing row and back brings the bar back where a prompt is scrolled off.
@@ -288,7 +288,7 @@ function navigate(f) {
   assert.ok(anchor); assert.equal(anchor.start, human.start); assert.equal(anchor.end, human.end);
   assert.equal(anchor.text, human.userText.replace(/\s+/gu, ' ').trim());
   entry.component.handleMouse({ type: 'click', button: 'left', x: 2, y: 0, width: index.width, height: 1 });
-  f.frame(); assert.equal(index.view.scrollTop, Math.max(0, human.start - 1), 'sticky click and navigator agree on the prompt row');
+  f.frame(); assert.equal(index.view.scrollTop, human.start, 'sticky click and navigator agree on the prompt row');
   assert.deepEqual(entry.component.render(index.width), [], 'a prompt on screen must blank its sticky heading');
 }
 
