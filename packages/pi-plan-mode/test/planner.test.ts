@@ -198,10 +198,11 @@ test("planner question owner renderers are registered and render at narrow width
   const saved = structuredClone(result);
   for (const width of [46, 120, 180]) {
     for (const expanded of [false, true]) {
-      const context = { expanded, isError: false } as never;
-      const callLines = questionTool.renderCall(args as never, {} as never, context).render(width);
+      const context = { expanded, isError: false, args } as never;
+      const theme = { fg: (_: string, t: string) => t, bg: (_: string, t: string) => t, bold: (t: string) => t } as never;
+      const callLines = questionTool.renderCall(args as never, theme, context).render(width);
       const resultLines = questionTool
-        .renderResult(result as never, { expanded, isPartial: false }, {} as never, context)
+        .renderResult(result as never, { expanded, isPartial: false }, theme, context)
         .render(width);
       assert.match(callLines.join("\n"), /Scope: How broad\?/u);
       assert.match(resultLines.join("\n"), /Questions cancelled/u);

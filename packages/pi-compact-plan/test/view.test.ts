@@ -18,14 +18,14 @@ describe("DraftView", () => {
     let raw = view.render(80);
     let lines = raw.map((l) => strip(l).trimEnd());
     expect(lines[0]).toBe("");
-    expect(lines[1]).toBe(" Compaction plan review");
+    expect(lines[1]).toBe(" ? Compaction plan review");
     expect(lines[2]).toMatch(/^ • Next task: ship|^ - Next task: ship/u);
     expect(lines.at(-2)).toBe(" Waiting for approval · next: ship it");
     expect(bgs(raw)).toEqual(new Set(["\x1b[48;5;1m"]));
     Object.assign(state, { draft: "- edited", status: "compacted", edited: true, tokens: 12345, cached: 97 });
     raw = view.render(120);
     lines = raw.map((l) => strip(l).trimEnd());
-    expect(lines[1]).toBe(" Compaction plan");
+    expect(lines[1]).toBe(" ✓ Compaction plan");
     expect(lines.at(-2)).toBe(" ✓ Compacted with this focus (edited) · next: ship it · drafting read 12,345 tokens, 97% cached");
     expect(bgs(raw)).toEqual(new Set(["\x1b[48;5;2m"]));
   });
@@ -34,7 +34,7 @@ describe("DraftView", () => {
     const draft = Array.from({ length: 20 }, (_, i) => `- item ${i}`).join("\n");
     let expanded = false;
     const view = new DraftView(() => ({ goal: "", draft, status: "cancelled" }), theme, () => expanded);
-    expect(view.render(80).map(strip).some((l) => l.includes("… 8 more lines (ctrl+o to expand)"))).toBe(true);
+    expect(view.render(80).map(strip).some((l) => l.includes("… 8 more lines · ctrl+o to expand"))).toBe(true);
     expanded = true;
     expect(view.render(80).map(strip).some((l) => l.includes("item 19"))).toBe(true);
   });

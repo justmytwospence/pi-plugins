@@ -10,6 +10,8 @@ import {
   type Theme,
 } from "@earendil-works/pi-coding-agent";
 import { Markdown, Text } from "@earendil-works/pi-tui";
+import { toolCallRow, toolResultView } from "./tool-rows.js";
+import { messageView } from "./transcript-style.js";
 import { setToolsActive } from "./active-tools.js";
 import { PiChat, piChatTheme, type ToolRenderers } from "./app/pi-chat.js";
 import type { ModelSpec } from "./implementation-models.js";
@@ -68,10 +70,10 @@ export function registerMainChat(pi: ExtensionAPI, bridge: MainChatBridge) {
     promptSnippet: "Ask a /planners planner (A or B) about its plan or research",
     promptGuidelines: MAIN_AGENT_GUIDELINES,
     defaultActive: false,
-    ...({ ccstyleOwnCall: true, ccstyleOwnResult: true } as const),
-    renderCall: (args, _theme, context) => new Text(formatMainToolCall(ASK_PLANNER_TOOL, args, context.expanded), 0, 0),
-    renderResult: (result, options, _theme, context) =>
-      new Text(formatMainToolResult(result, { ...options, isError: context.isError }), 0, 0),
+    ...({ ccstyleOwnCall: true, ccstyleOwnResult: true, renderShell: "self" } as const),
+    renderCall: (args, theme, context) => mainToolCall(ASK_PLANNER_TOOL, "Ask planner", args, theme, context),
+    renderResult: (result, options, theme, context) =>
+      mainToolResult(ASK_PLANNER_TOOL, "Ask planner", result, options, theme, context),
     parameters: {
       type: "object",
       additionalProperties: false,
@@ -121,11 +123,10 @@ export function registerMainChat(pi: ExtensionAPI, bridge: MainChatBridge) {
     promptSnippet: "Record the merged plan for the current /planners run (only when the user asks)",
     promptGuidelines: MAIN_AGENT_GUIDELINES,
     defaultActive: false,
-    ...({ ccstyleOwnCall: true, ccstyleOwnResult: true } as const),
-    renderCall: (args, _theme, context) =>
-      new Text(formatMainToolCall(SUBMIT_MERGED_TOOL, args, context.expanded), 0, 0),
-    renderResult: (result, options, _theme, context) =>
-      new Text(formatMainToolResult(result, { ...options, isError: context.isError }), 0, 0),
+    ...({ ccstyleOwnCall: true, ccstyleOwnResult: true, renderShell: "self" } as const),
+    renderCall: (args, theme, context) => mainToolCall(SUBMIT_MERGED_TOOL, "Submit plan", args, theme, context),
+    renderResult: (result, options, theme, context) =>
+      mainToolResult(SUBMIT_MERGED_TOOL, "Submit plan", result, options, theme, context),
     parameters: {
       type: "object",
       additionalProperties: false,
@@ -304,6 +305,49 @@ export class MainAgentView {
   }
 }
 
+function mainToolCall(
+  name: typeof ASK_PLANNER_TOOL | typeof SUBMIT_MERGED_TOOL,
+  title: string,
+  args: unknown,
+  theme: Theme,
+  context: { isError?: boolean; isPartial?: boolean; executionStarted?: boolean; lastComponent?: unknown },
+) {
+  return toolCallRow(theme, context, title, () => {
+    const [head = "", ...rest] = formatMainToolCall(name, args).split("\n");
+    if (name === SUBMIT_MERGED_TOOL) return head.replace(/^Submit merged plan · /u, "").replace(/ · ctrl\+o to expand$/u, "");
+    const planner = head.replace(/^Ask planner /u, "");
+    return rest[0] ? `${planner}: ${rest[0]}` : planner;
+  });
+}
+
+function mainToolResult(
+  name: typeof ASK_PLANNER_TOOL | typeof SUBMIT_MERGED_TOOL,
+  title: string,
+  result: { content?: unknown; details?: unknown },
+  options: { expanded: boolean; isPartial: boolean },
+  theme: Theme,
+  context: { isError?: boolean; args?: unknown },
+) {
+  const flags = { ...options, isError: context.isError };
+  const compact = formatMainToolResult(result, flags);
+  const full = formatMainToolResult(result, { ...flags, expanded: true });
+  const state = compact.split("\n")[0] ?? "";
+  const asked = formatMainToolCall(name, context.args, true).split("\n").slice(1).join("\n");
+  const [stateLine = "", ...rest] = compact.split("\n").filter((line) => !/ · ctrl\+o to expand$/u.test(line));
+  return toolResultView(theme, options, {
+    tone: /^(Failed|Unavailable|Invalid input)$/u.test(state)
+      ? "failed"
+      : state === "Aborted"
+        ? "stopped"
+        : state === "Working" || state === "Asking"
+          ? "running"
+          : "done",
+    title,
+    summary: [stateLine, ...rest].join(" · "),
+    body: asked ? `${asked}\n\n${full}` : full,
+  });
+}
+
 /** Compact display summaries only; execution still receives the original prose. */
 export function formatMainToolCall(
   name: typeof ASK_PLANNER_TOOL | typeof SUBMIT_MERGED_TOOL,
@@ -361,16 +405,17 @@ function compactProse(value: string): string {
 }
 
 function renderPlanMessage(
-  message: { content: unknown; details?: PlanMessageDetails },
+  message: { content: unknown; timestamp: number; details?: PlanMessageDetails },
   expanded: boolean,
   theme: Theme,
 ) {
   const details = message.details;
   const body = contentText(message.content);
-  if (details?.kind === "failure") return new Text(theme.fg("error", `✗ ${body}`), 0, 0);
+  const view = { ...message, content: body };
+  if (details?.kind === "failure") return messageView(theme, view, { expanded }, { tone: "failed", title: "Planner failed" });
   const version = details?.revision && details.revision > 1 ? ` v${details.revision}` : "";
-  const head = `▸ Plan ${details?.id ?? "?"}${version} from planner ${details?.id ?? "?"} · ${details?.model ?? ""}`;
-  return renderCollapsedMarkdown(head, body, expanded, theme, details?.lines);
+  const title = `Plan ${details?.id ?? "?"}${version} from planner ${details?.id ?? "?"}${details?.model ? ` · ${details.model}` : ""}`;
+  return messageView(theme, view, { expanded }, { tone: "incoming", title });
 }
 
 /** A bold accent head that expands (ctrl+o) into Markdown; collapsed, it shows `N lines · ctrl+o to expand`. */

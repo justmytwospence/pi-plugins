@@ -1,5 +1,6 @@
-import type { ExtensionAPI, Theme } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ExtensionContext, Theme } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
+import { registerRowRun, Row } from "./transcript-style.js";
 
 export type WorkflowKind = "work" | "chat" | "plan";
 
@@ -23,7 +24,34 @@ export function workflowBadge(theme: Pick<Theme, "fg" | "bold">, mode: WorkflowK
   return theme.bold(theme.fg(WORKFLOW_ROLES[mode], mode));
 }
 
+interface WorkflowRow {
+  previous: WorkflowKind;
+  mode: WorkflowKind;
+}
+
+const rowRuns = new WeakMap<ExtensionAPI, { append(ctx: ExtensionContext, data: WorkflowRow): void }>();
+
 export function registerWorkflowRenderer(pi: ExtensionAPI): void {
+  rowRuns.set(
+    pi,
+    registerRowRun<WorkflowRow>(pi, {
+      anchorType: "workflow:row",
+      stateType: "workflow:row-state",
+      sameRun: () => true,
+      merge: (a, b) => ({ previous: a.previous, mode: b.mode }),
+      render: ({ data, time }, theme) => {
+        if (!isWorkflowKind(data?.previous) || !isWorkflowKind(data?.mode) || data.previous === data.mode) return undefined;
+        const mode = data.mode;
+        return new Row(theme, () => ({
+          tone: "info",
+          title: mode,
+          titleColor: WORKFLOW_ROLES[mode],
+          detail: WORKFLOW_EXPLANATIONS[mode],
+          time,
+        }));
+      },
+    }),
+  );
   pi.registerMessageRenderer("workflow:transition", (message, _options, theme) => {
     const details = message.details as { version?: unknown; previous?: unknown; mode?: unknown } | undefined;
     if (
@@ -43,23 +71,32 @@ export function registerWorkflowRenderer(pi: ExtensionAPI): void {
         0,
       );
     }
-    return new Text(
-      `${workflowBadge(theme, details.mode)}${theme.fg("dim", " · ")}${theme.fg("muted", WORKFLOW_EXPLANATIONS[details.mode])}`,
-      0,
-      0,
-    );
+    const mode = details.mode;
+    return new Row(theme, () => ({
+      tone: "info",
+      title: mode,
+      titleColor: WORKFLOW_ROLES[mode],
+      detail: WORKFLOW_EXPLANATIONS[mode],
+      time: message.timestamp,
+    }));
   });
 }
 
-export function sendWorkflowTransition(pi: ExtensionAPI, previous: WorkflowKind, mode: WorkflowKind): void {
+export function sendWorkflowTransition(
+  pi: ExtensionAPI,
+  ctx: ExtensionContext,
+  previous: WorkflowKind,
+  mode: WorkflowKind,
+): void {
   if (previous === mode) return;
   pi.sendMessage(
     {
       customType: "workflow:transition",
       content: `${mode} · ${WORKFLOW_EXPLANATIONS[mode]}`,
-      display: true,
+      display: false,
       details: { version: 1, previous, mode },
     },
     { triggerTurn: false },
   );
+  rowRuns.get(pi)?.append(ctx, { previous, mode });
 }

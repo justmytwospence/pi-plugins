@@ -710,7 +710,14 @@ test("a saved review renders the saved path neutrally rather than approval or pe
     durationMs: undefined,
     outputPad: 0,
   };
-  const component = exit.renderResult?.(result as never, { expanded: false, isPartial: false }, theme, renderContext);
+  const collapsed = exit.renderResult?.(result as never, { expanded: false, isPartial: false }, theme, renderContext);
+  assert.match(collapsed?.render(160).map(stripVTControlCharacters).join("\n") ?? "", /↳ Saved for later/u);
+  const component = exit.renderResult?.(
+    result as never,
+    { expanded: true, isPartial: false },
+    theme,
+    { ...renderContext, expanded: true },
+  );
   assert.ok(component);
   const rendered = component.render(160).map(stripVTControlCharacters).join("\n");
   assert.match(rendered, /Saved document[\s\S]*Saved for later/u);
@@ -731,7 +738,7 @@ function transition(previous: string, mode: string, explanation: string) {
     message: {
       customType: "workflow:transition",
       content: `${mode} · ${explanation}`,
-      display: true,
+      display: false,
       details: { version: 1, previous, mode },
     },
     options: { triggerTurn: false },
@@ -1111,7 +1118,10 @@ for (const order of ["gate-first", "plan-first", "no-gate"] as const) {
     for (const handler of mock.events.get("session_start") ?? []) await handler({ reason: "startup" }, ctx);
     assert.equal(inline.active, true);
     assert.equal(inline.planFile, planFile);
-    assert.equal((mock.entries.at(-1)?.data as { active?: boolean } | undefined)?.active, true);
+    assert.equal(
+      (mock.entries.filter((entry) => !String(entry.customType).startsWith("workflow:row")).at(-1)?.data as { active?: boolean } | undefined)?.active,
+      true,
+    );
     assert.deepEqual(requests, order === "no-gate" ? [] : ["plan"]);
     assert.equal(mock.sentUserMessages.length, 0, "recovery never sends an implementation brief");
     const notices = mock.sentMessages.filter(

@@ -86,6 +86,8 @@ test("main-chat marks only completed planner replies, surviving serialization in
   assert.equal(annotation(merged), undefined);
 });
 
+const stubTheme = { fg: (_: string, t: string) => t, bg: (_: string, t: string) => t, bold: (t: string) => t } as never;
+
 test("main tool renderers own both display slots; a huge merged plan stays compact and expands verbatim", async () => {
   const mock = createMockPi();
   const ctx = createMockContext().ctx;
@@ -127,28 +129,34 @@ test("main tool renderers own both display slots; a huge merged plan stays compa
   });
   assert.equal(annotation(result), undefined);
   for (const width of [46, 120, 180]) {
-    const compact = merged.renderCall?.(args as never, {} as never, { expanded: false } as never).render(width) ?? [];
+    const compact = merged.renderCall?.(args as never, stubTheme, { expanded: false } as never).render(width) ?? [];
     assert.ok(compact.length <= 2);
     assert.match(compact.join("\n"), /2002 lines/u);
     assert.doesNotMatch(compact.join("\n"), /Step 1:/u);
-    const expanded = merged.renderCall?.(args as never, {} as never, { expanded: true } as never).render(width) ?? [];
+    const expanded = merged.renderCall?.(args as never, stubTheme, { expanded: true } as never).render(width) ?? [];
     assert.equal(formatMainToolCall(SUBMIT_MERGED_TOOL, args, true), `Submit merged plan · 2002 lines\n${plan}`);
-    assert.ok(
-      expanded
-        .map((line) => line.trimEnd())
-        .join("\n")
-        .includes(plan),
-    );
+    // The call is one row; the full plan is in the expanded result block.
+    assert.equal(expanded.length, 1);
     const resultLines =
       merged
         .renderResult?.(
           result as never,
           { expanded: false, isPartial: false },
-          {} as never,
-          { isError: false } as never,
+          stubTheme,
+          { isError: false, args } as never,
         )
         .render(width) ?? [];
     assert.match(resultLines.join("\n"), /Completed/u);
+    const expandedResult =
+      merged
+        .renderResult?.(
+          result as never,
+          { expanded: true, isPartial: false },
+          stubTheme,
+          { isError: false, args } as never,
+        )
+        .render(width) ?? [];
+    assert.ok(expandedResult.join("").includes("Step 1: keep prose"));
     assert.ok([...compact, ...expanded, ...resultLines].every((line) => visibleWidth(line) <= width));
   }
   assert.deepEqual(result, saved);
@@ -161,10 +169,10 @@ test("main tool renderers own both display slots; a huge merged plan stays compa
   assert.equal(formatMainToolCall(ASK_PLANNER_TOOL, question, true), `Ask planner A\n${question.message}`);
   assert.match(
     ask
-      .renderCall?.(question as never, {} as never, { expanded: false } as never)
+      .renderCall?.(question as never, stubTheme, { expanded: false } as never)
       .render(120)
       .join("\n") ?? "",
-    /Ask planner A/u,
+    /Ask planner · A: Why this cache/u,
   );
   assert.match(formatMainToolCall(ASK_PLANNER_TOOL, {}), /not specified\nPreparing question/u);
 });

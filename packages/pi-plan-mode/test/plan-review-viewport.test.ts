@@ -259,8 +259,8 @@ test.each(["long"])("actual SDK puts a %s plan at the top only after the picker 
   const layout = await h.settle();
   expect(h.scroll.scrollTop).toBe(h.top());
   expect(h.scroll.isFollowingEnd).toBe(false);
-  expect(layout.lines[1]).toContain("Plan review");
-  expect(layout.lines[2]).toContain("Beginning of plan");
+  expect(layout.lines[2]).toContain("Plan review");
+  expect(layout.lines[3]).toContain("Beginning of plan");
   expect(layout.lines.join("\n")).toContain("Implement this plan?");
   expect(h.widgets().size).toBe(1);
   h.choose();
@@ -291,8 +291,8 @@ test.each(["long", "short"])("cc-render keeps a pending %s plan visible after to
     const screen = layout.lines.map(stripTerminalSequences).join("\n");
     expect(h.chat.children).toContain(h.card);
     expect(h.chat.children.some((child) => child instanceof ToolGroupComponent)).toBe(false);
-    // Prove the styled call wrapper really ran, not just the native SDK renderer.
-    expect(stripTerminalSequences(h.card.render(64).join("\n"))).toContain("Exit plan mode present plan");
+    // The tool is renderShell "self": cc-render keeps its renderer, so the card is the tone row and block.
+    expect(stripTerminalSequences(h.card.render(64).join("\n"))).toContain("? Plan review");
     expect(screen).toContain("Beginning of plan");
     expect(screen).toContain(size === "long" ? "Step 1:" : "Do it.");
     expect(screen).toContain("Implement this plan?");
@@ -605,7 +605,7 @@ test("tool-call identity skips earlier plans and an optional top overlay leaves 
   const result = h.run();
   const layout = await h.settle();
   expect(h.scroll.scrollTop).toBe(h.top());
-  expect(layout.lines[1]).toContain("Plan review");
+  expect(layout.lines[2]).toContain("Plan review");
   overlay.hide();
   h.choose();
   await result;

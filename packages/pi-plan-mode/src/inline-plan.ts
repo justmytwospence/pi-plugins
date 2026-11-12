@@ -28,7 +28,7 @@ import {
   getMarkdownTheme,
   type Theme,
 } from "@earendil-works/pi-coding-agent";
-import { Container, Spacer, Text } from "@earendil-works/pi-tui";
+import { type Component, Container, Spacer, Text } from "@earendil-works/pi-tui";
 import { createApprovalState, pickApproval } from "./approval-picker.js";
 import { editInTerminal, externalEditorCommand } from "./external-editor.js";
 import { PLAN_STANDARD } from "./handoff.js";
@@ -55,7 +55,8 @@ import {
 import { expandHome } from "./plan-hook.js";
 import { promptPlanName } from "./plan-name-input.js";
 import { PlanReviewViewport } from "./plan-review-viewport.js";
-import { type ReviewStatus, reviewBody, reviewTitle } from "./review-card.js";
+import { type ReviewStatus, reviewBody, reviewCard } from "./review-card.js";
+import { ResultLine, toolCallRow } from "./tool-rows.js";
 import { type SettingCycleTrigger, settingsCycles } from "./settings-cycle.js";
 import {
   findBlockedCommandSegment,
@@ -222,8 +223,8 @@ export function registerInlinePlanMode(pi: ExtensionAPI, host: InlineHost): Inli
     const mode = effectiveMode();
     const previous = presentedMode;
     presentedMode = mode;
-    if (!gate && previous && previous !== mode && !settings.isCommitting("workflow"))
-      sendWorkflowTransition(pi, previous, mode);
+    if (!gate && previous && previous !== mode && !settings.isCommitting("workflow") && hostCtx)
+      sendWorkflowTransition(pi, hostCtx, previous, mode);
   };
 
   const safely = (fn: () => void) => {
@@ -509,7 +510,7 @@ export function registerInlinePlanMode(pi: ExtensionAPI, host: InlineHost): Inli
 
   pi.registerTool({
     name: EXIT_TOOL,
-    ...{ ccstyleOwnResult: true },
+    ...{ ccstyleOwnResult: true, renderShell: "self" },
     // Nested codemode calls have no transcript row to render the plan being approved.
     exposure: "model-only",
     // The plan file is read when this runs: a write or edit to it in the same message must land
@@ -533,7 +534,7 @@ export function registerInlinePlanMode(pi: ExtensionAPI, host: InlineHost): Inli
         },
       },
     } as never,
-    renderCall: (_args, theme, context) => reviewTitle(theme, context.isPartial ? "Plan review" : "Plan"),
+    renderCall: (_args, theme, context) => toolCallRow(theme, context, context.isPartial ? "Plan review" : "Plan"),
     renderResult: (result, options, theme, context) => {
       const component = renderExit(result.details as ExitDetails | undefined, options, theme);
       return options.isPartial ? reviewViewport.wrap(context.toolCallId, component) : component;
@@ -962,12 +963,17 @@ function renderExit(
               text: details?.feedback ? `Kept planning: ${details.feedback}` : "Kept planning",
             }
           : { tone: "pending", text: "Waiting for approval" };
+  // Collapsed and decided: one dim result line. Expanded or pending: the toned card.
+  if (outcome !== "pending" && !options.expanded) {
+    return new ResultLine(theme, `${status.text}${status.context ? ` · ${status.context}` : ""}`, true);
+  }
   const card = reviewBody(theme, plan, status, options, (text) => new PlanMarkdown(text, getMarkdownTheme(), theme));
   // While it waits, one more row of the card's background under the status, above the question.
   const body = new Container();
   body.addChild(card);
-  if (outcome === "pending") body.addChild(new Spacer(1));
-  if (outcome !== "pending" || !details?.previous || details.previous === plan) return body;
+  const wrap = (component: Component) =>
+    reviewCard(theme, outcome === "pending" ? "Plan review" : "Plan", component, status.tone, { expanded: options.expanded });
+  if (outcome !== "pending" || !details?.previous || details.previous === plan) return wrap(body);
   // The full current plan remains authoritative; never guess a semantic summary from a diff.
   const container = new Container();
   if (details.changes?.length) {
@@ -983,7 +989,7 @@ function renderExit(
   }
   container.addChild(new Spacer(1));
   container.addChild(body);
-  return container;
+  return wrap(container);
 }
 
 function text(value: string) {

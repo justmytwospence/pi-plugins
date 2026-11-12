@@ -744,7 +744,7 @@ describe("visible workflow transitions", () => {
     ].map(([previous, mode, explanation]) => ({
       message: {
         customType: "workflow:transition", content: `${mode} · ${explanation}`,
-        display: true, details: { version: 1, previous, mode },
+        display: false, details: { version: 1, previous, mode },
       },
       opts: { triggerTurn: false },
     })));
@@ -780,7 +780,7 @@ describe("visible workflow transitions", () => {
     ["work", "success", "edits and actions"],
     ["chat", "thinkingLow", "read-only discussion"],
     ["plan", "customMessageLabel", "research and plan only"],
-  ])("registered renderer styles %s as a bold badge with a muted explanation", (mode, role, explanation) => {
+  ])("registered renderer draws %s as an info row with a coloured mode and a muted explanation", (mode, role, explanation) => {
     const { h } = setup();
     const renderer = h.messageRenderers.get("workflow:transition");
     expect(renderer).toBeTypeOf("function");
@@ -790,9 +790,8 @@ describe("visible workflow transitions", () => {
     };
     const previous = mode === "work" ? "chat" : "work";
     const rendered = renderer!({ content: "fallback", details: { version: 1, previous, mode } }, { expanded: false }, theme);
-    expect(rendered.render(200).map((line: string) => line.trimEnd())).toEqual([`<bold><${role}>${mode}</${role}></bold><dim> · </dim><muted>${explanation}</muted>`]);
-    expect(theme.fg.mock.calls).toEqual([[role, `${mode}`], ["dim", " · "], ["muted", explanation]]);
-    expect(theme.bold.mock.calls).toEqual([[`<${role}>${mode}</${role}>`]]);
+    expect(rendered.render(200).map((line: string) => line.trimEnd())).toEqual([` <muted>○</muted> <${role}>${mode}</${role}><dim> · </dim><muted>${explanation}</muted>`]);
+    expect(theme.fg.mock.calls).toEqual([["muted", "○"], [role, `${mode}`], ["dim", " · "], ["muted", explanation]]);
   });
 
   test.each([

@@ -1,5 +1,5 @@
 import type { ToolDefinition } from "@earendil-works/pi-coding-agent";
-import { Text } from "@earendil-works/pi-tui";
+import { resultTone, toolCallRow, toolResultView } from "./tool-rows.js";
 
 export const PLAN_MODE_QUESTION_TOOL_NAME = "plan_mode_question";
 export const MAX_PLAN_MODE_RESPONSE_LENGTH = 4_000;
@@ -169,10 +169,26 @@ export function planModeQuestionCancelled(
 export const planModeQuestionRenderer = {
   ccstyleOwnCall: true,
   ccstyleOwnResult: true,
-  renderCall: (args, _theme, context) => new Text(formatPlanModeQuestionCall(args, context.expanded), 0, 0),
-  renderResult: (result, options, _theme, context) =>
-    new Text(formatPlanModeQuestionResult(result, { ...options, isError: context.isError }), 0, 0),
-} satisfies Pick<ToolDefinition, "renderCall" | "renderResult"> & { ccstyleOwnCall: true; ccstyleOwnResult: true };
+  renderShell: "self",
+  renderCall: (args, theme, context) =>
+    toolCallRow(theme, context, "Plan question", () => formatPlanModeQuestionCall(args).split("\n").slice(1).join(" · ") || undefined),
+  renderResult: (result, options, theme, context) => {
+    const text = formatPlanModeQuestionResult(result, { ...options, isError: context.isError });
+    const full = formatPlanModeQuestionResult(result, { ...options, expanded: true, isError: context.isError });
+    const asked = formatPlanModeQuestionCall(context.args, true).split("\n").slice(1).join("\n");
+    const details = result.details as { cancelled?: boolean } | undefined;
+    return toolResultView(theme, options, {
+      tone: resultTone({ ...context, isPartial: options.isPartial }, details?.cancelled === true),
+      title: "Plan question",
+      summary: text.split("\n").join(" · "),
+      body: asked ? `${asked}\n\n${full}` : full,
+    });
+  },
+} satisfies Pick<ToolDefinition, "renderCall" | "renderResult"> & {
+  ccstyleOwnCall: true;
+  ccstyleOwnResult: true;
+  renderShell: "self";
+};
 
 /** Display only: tolerate streamed arguments without normalizing or changing the tool input. */
 export function formatPlanModeQuestionCall(input: unknown, expanded = false): string {

@@ -731,13 +731,13 @@ export default function toolGate(pi: ExtensionAPI) {
   const emit = (name: string, data: unknown) => {
     try { pi.events.emit(name, data); } catch { /* A listener's failure is its own. */ }
   };
-  const broadcastWorkflow = (source: WorkflowSource, previous?: WorkflowMode, announce = true) => {
+  const broadcastWorkflow = (source: WorkflowSource, previous?: WorkflowMode, announce = true, ctx: ExtensionContext | undefined = hostCtx) => {
     const mode = effectiveWorkflow();
     emit(WORKFLOW_CHANGED, {
       mode, ...(previous ? { previous } : {}), cycle: cycle(), ...(shortcut ? { key: shortcut } : {}), source,
       ...(delegated() && mode === "plan" ? { delegated: true } : {}),
     });
-    if (announce && source === "transition" && previous && previous !== mode) sendWorkflowTransition(pi, previous, mode);
+    if (announce && source === "transition" && previous && previous !== mode && ctx) sendWorkflowTransition(pi, ctx, previous, mode);
   };
   // Query destination state directly: neither the cached branch nor lifecycle listener order is authoritative.
   pi.events.on(WORKFLOW_QUERY, (data) => {
@@ -770,7 +770,7 @@ export default function toolGate(pi: ExtensionAPI) {
     invalidate();
     persist(WORKFLOW_ENTRY, workflow);
     status(ctx);
-    broadcastWorkflow("transition", previous, announce);
+    broadcastWorkflow("transition", previous, announce, ctx);
     tellChatNow(ctx);
     return { ok: true };
   };

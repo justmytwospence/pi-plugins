@@ -82,7 +82,7 @@ export class DraftView implements Component {
     if (this.cache?.key !== key) {
       const body = reviewBody(this.theme, state.draft, status, { expanded }, (text) => new Markdown(text, 0, 0, getMarkdownTheme()));
       const title = status.tone === "pending" ? "Compaction plan review" : "Compaction plan";
-      this.cache = { key, lines: reviewCard(this.theme, title, body, status.tone).render(width) };
+      this.cache = { key, lines: reviewCard(this.theme, title, body, status.tone, { expanded }).render(width) };
     }
     return this.cache.lines;
   }

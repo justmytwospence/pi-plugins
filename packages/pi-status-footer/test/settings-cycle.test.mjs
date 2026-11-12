@@ -74,7 +74,7 @@ describe("settings cycle coordinator", () => {
     h.pi.appendEntry("settings:cycle", { version: 1, id: "legacy", phase: "applied", settings: mixed ? [workflow, auto] : [auto] });
     await h.emit("session_start");
     const component = h.renderers.get("settings:cycle")(h.entries[0], {}, { fg: (_color, text) => text });
-    expect(component.render(120)[0]).toBe(mixed ? "Settings · Workflow plan · Auto on" : "Settings · Auto on");
+    expect(component.render(120)[0]).toBe(mixed ? " ✓ Settings · Workflow plan · Auto on" : " ✓ Settings · Auto on");
     expect(h.entries).toHaveLength(1);
   });
   it("rejects retired settings even for untyped callers", async () => {
@@ -449,7 +449,7 @@ describe("settings cycle coordinator", () => {
       await vi.advanceTimersByTimeAsync(I);
       expect(await p).toBe(true);
       expect(c.value).toBe(target);
-      expect(component.render(120)[0]).toBe(`Settings · Workflow ${target}`);
+      expect(component.render(120)[0]).toBe(` ✓ Settings · Workflow ${target}`);
       expect(anchors(h)).toEqual([original]);
       await vi.advanceTimersByTimeAsync(1500);
     }
@@ -468,7 +468,7 @@ describe("settings cycle coordinator", () => {
     expect(last(h).settings).toHaveLength(1); expect(calls).toEqual(["workflow"]); expect(workflow.value).toBe("plan");
     expect(anchors(h)).toHaveLength(1);
     const component = h.renderers.get("settings:cycle")(anchors(h)[0], {}, { fg: (_color, text) => text });
-    expect(component.render(120)).toEqual(["Settings unchanged"]);
+    expect(component.render(120)).toEqual([" ✓ Settings unchanged"]);
     const next = cycles.stage(h.ctx, workflow.change);
     expect(cycles.snapshot().settings[0].baseline).toBe("plan");
     await vi.advanceTimersByTimeAsync(I); expect(await next).toBe(true);
@@ -482,7 +482,7 @@ describe("settings cycle coordinator", () => {
     await h.emit(event, { source: "interactive" });
     const next = cycles.stage(h.ctx, c.change); await vi.advanceTimersByTimeAsync(I); expect(await next).toBe(true);
     expect(anchors(h)).toHaveLength(2); expect(last(h).id).not.toBe(oldId);
-    expect(component.render(120)).toEqual(["Settings · Workflow plan"]);
+    expect(component.render(120)).toEqual([" ✓ Settings · Workflow plan"]);
   });
   it("does not apply when its native row anchor leaves the current branch", async () => {
     const h = host(), cycles = settingsCycles(h.pi), calls = [], c = control("workflow", "work", ["work", "plan"], calls);

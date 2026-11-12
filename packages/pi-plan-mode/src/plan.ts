@@ -114,6 +114,7 @@ import { judgeTaskEffort, recommendTaskEffort, type TaskEffortJudgment } from ".
 import { applyAlwaysOffer, applyJevPick, buildToolTree, leafCapabilities, type ToolNode } from "./tool-tree.js";
 import { type ToolPreselection, ToolTreeView } from "./tool-tree-view.js";
 import { transcriptCheckpoint } from "./transcript-contract.js";
+import { Block } from "./transcript-style.js";
 import { effortText } from "./ui-kit.js";
 
 const EXTENSION_ENTRY_PATH = fileURLToPath(new URL("./index.ts", import.meta.url));
@@ -216,6 +217,22 @@ type ThinkingLevel = NonNullable<ModelSpec["thinkingLevel"]>;
  * the extensions' shortcuts; the returned promise resolves once that is done.
  */
 export default async function plan(pi: ExtensionAPI, dependencies: PlanDependencies = {}): Promise<void> {
+  pi.registerMessageRenderer("plan-mode-implementation", (message, options, theme) => {
+    const content = message.content;
+    const body = (
+      typeof content === "string"
+        ? content
+        : content.map((part) => (part.type === "text" ? part.text : "")).join("\n")
+    ).trim();
+    return new Block(theme, () => ({
+      tone: "incoming",
+      title: "Implementing approved plan",
+      body,
+      fold: 8,
+      expanded: options.expanded,
+      time: message.timestamp,
+    }));
+  });
   let settings: PlanModeSettings = { thinkingLevel: "inherit" };
   let run: PlanRun | undefined;
   let app: { close(): void; render(): void; hosted: boolean } | undefined;

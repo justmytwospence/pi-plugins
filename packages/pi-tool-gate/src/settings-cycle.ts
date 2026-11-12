@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { stripVTControlCharacters } from "node:util";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { truncateToWidth } from "@earendil-works/pi-tui";
+import { rowLine, type Tone } from "./transcript-style.js";
 import {
   createSettingsCycleInput,
   type SettingCycleTrigger,
@@ -567,7 +567,7 @@ export function settingsCycles(pi: ExtensionAPI, options: SettingsCycleOptions =
           partial: "Settings partially applied",
           interrupted: "Settings interrupted",
         };
-        const parts = [prefix[s.phase]];
+        const parts: string[] = [];
         if (
           s.phase !== "unchanged" &&
           s.phase !== "interrupted" &&
@@ -578,8 +578,27 @@ export function settingsCycles(pi: ExtensionAPI, options: SettingsCycleOptions =
             if (item) parts.push(`${names[key]} ${item.label}`);
           }
         if (s.reason) parts.push(s.reason);
-        const line = stripVTControlCharacters(parts.join(" · ")).replace(/[\r\n\t]/gu, " ");
-        return [truncateToWidth(theme.fg("dim", line), Math.max(0, width))];
+        const tone: Tone =
+          s.phase === "failed" || s.phase === "partial"
+            ? "failed"
+            : s.phase === "cancelled" || s.phase === "interrupted"
+              ? "stopped"
+              : s.phase === "pending" || s.phase === "applying"
+                ? "running"
+                : "done";
+        const clean = (text: string) => stripVTControlCharacters(text).replace(/[\r\n\t]/gu, " ");
+        return [
+          rowLine(
+            theme,
+            {
+              tone,
+              title: clean(prefix[s.phase]),
+              detail: parts.length ? clean(parts.join(" · ")) : undefined,
+              time: entry.timestamp,
+            },
+            Math.max(1, width),
+          ),
+        ];
       },
     };
   });

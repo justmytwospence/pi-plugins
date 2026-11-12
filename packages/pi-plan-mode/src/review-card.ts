@@ -8,12 +8,13 @@
  * when set aside, red on failure, neutral once saved) with dim context after ` · `. Once decided,
  * a long document folds to its first lines until the transcript is expanded (ctrl+o).
  *
- * A tool's result is already drawn on a tool background by Pi; `reviewCard` adds the same shell
- * (padded box, the background for the outcome) for hosts that are not tool rows, such as a custom
- * session entry. Pi puts the blank line above both.
+ * `reviewCard` draws the title and body as a shared transcript Block whose tone follows the outcome
+ * (attention while pending, done once approved, failed on failure, info otherwise). The document is
+ * folded by `reviewBody` (so the status line stays visible), hence the Block itself never folds.
  */
 import type { Theme } from "@earendil-works/pi-coding-agent";
-import { Box, type Component, Container, Spacer, Text } from "@earendil-works/pi-tui";
+import { type Component, Container, Spacer, Text } from "@earendil-works/pi-tui";
+import { Block, expandHint, type Tone } from "./transcript-style.js";
 
 /** Lines a decided document keeps before it folds. */
 export const COLLAPSED_LINES = 12;
@@ -62,7 +63,7 @@ export function reviewBody(
   if (folded) {
     const more = lines.length - COLLAPSED_LINES;
     container.addChild(
-      new Text(theme.fg("dim", `… ${more} more line${more === 1 ? "" : "s"} (ctrl+o to expand)`), 0, 0),
+      new Text(theme.fg("dim", `… ${more} more line${more === 1 ? "" : "s"}`) + expandHint(theme), 0, 0),
     );
   }
   container.addChild(new Spacer(1));
@@ -70,12 +71,28 @@ export function reviewBody(
   return container;
 }
 
-/** Pi's tool row shell around a title and body, for a card that is not a tool result. */
-export function reviewCard(theme: Theme, title: string, body: Component, tone: ReviewTone): Component {
-  const background =
-    tone === "pending" ? "toolPendingBg" : tone === "error" ? "toolErrorBg" : ("toolSuccessBg" as const);
-  const box = new Box(1, 1, (line) => theme.bg(background, line));
-  box.addChild(reviewTitle(theme, title));
-  box.addChild(body);
-  return box;
+const BLOCK_TONE: Record<ReviewTone, Tone> = {
+  pending: "attention",
+  success: "done",
+  warning: "info",
+  error: "failed",
+  neutral: "info",
+};
+
+/** A transcript Block around a title and body, toned by the outcome. */
+export function reviewCard(
+  theme: Theme,
+  title: string,
+  body: Component,
+  tone: ReviewTone,
+  options: { expanded?: boolean; time?: number | string } = {},
+): Component {
+  return new Block(theme, () => ({
+    tone: BLOCK_TONE[tone],
+    title,
+    body,
+    fold: 0,
+    expanded: options.expanded,
+    time: options.time,
+  }));
 }

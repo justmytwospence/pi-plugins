@@ -30,7 +30,7 @@ test("collapsed long neutral body folds to the first lines and keeps its saved s
     body.render(120).map((line) => line.trimEnd()),
     [
       ...longLines.slice(0, COLLAPSED_LINES),
-      "… 3 more lines (ctrl+o to expand)",
+      "… 3 more lines · ctrl+o to expand",
       "",
       "Plan saved · /plans/calm-river.md",
     ],
