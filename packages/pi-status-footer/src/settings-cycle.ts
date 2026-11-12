@@ -1,13 +1,13 @@
 import { randomUUID } from "node:crypto";
 import { stripVTControlCharacters } from "node:util";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { rowLine, type Tone } from "./transcript-style.js";
 import {
   createSettingsCycleInput,
   type SettingCycleTrigger,
   type SettingsCycleInputPorts,
   type SettingsCycleInputStatus,
 } from "./settings-cycle-input.js";
+import { rowLine, type Tone } from "./transcript-style.js";
 
 export type { SettingCycleTrigger, SettingsCycleInputPorts, SettingsCycleInputStatus } from "./settings-cycle-input.js";
 /**
@@ -702,7 +702,7 @@ export function settingsCycles(pi: ExtensionAPI, options: SettingsCycleOptions =
       const reason = [
         previous.reason,
         "message not sent",
-        event.source === "interactive" ? "recover it from prompt history" : undefined,
+        event.source === "interactive" ? "recover from prompt history" : undefined,
       ]
         .filter(Boolean)
         .join(" · ");

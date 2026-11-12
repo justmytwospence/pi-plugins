@@ -139,22 +139,18 @@ test("main tool renderers own both display slots; a huge merged plan stays compa
     assert.equal(expanded.length, 1);
     const resultLines =
       merged
-        .renderResult?.(
-          result as never,
-          { expanded: false, isPartial: false },
-          stubTheme,
-          { isError: false, args } as never,
-        )
+        .renderResult?.(result as never, { expanded: false, isPartial: false }, stubTheme, {
+          isError: false,
+          args,
+        } as never)
         .render(width) ?? [];
     assert.match(resultLines.join("\n"), /Completed/u);
     const expandedResult =
       merged
-        .renderResult?.(
-          result as never,
-          { expanded: true, isPartial: false },
-          stubTheme,
-          { isError: false, args } as never,
-        )
+        .renderResult?.(result as never, { expanded: true, isPartial: false }, stubTheme, {
+          isError: false,
+          args,
+        } as never)
         .render(width) ?? [];
     assert.ok(expandedResult.join("").includes("Step 1: keep prose"));
     assert.ok([...compact, ...expanded, ...resultLines].every((line) => visibleWidth(line) <= width));

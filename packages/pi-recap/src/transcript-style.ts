@@ -1,19 +1,19 @@
 // Canonical: shared/transcript/transcript-style.ts. Sync: node scripts/sync-transcript-helpers.mjs
 import {
-  getMarkdownTheme,
   type ExtensionAPI,
   type ExtensionContext,
+  getMarkdownTheme,
   type Theme,
   type ThemeBg,
   type ThemeColor,
 } from "@earendil-works/pi-coding-agent";
 import {
+  type Component,
   getKeybindings,
   Markdown,
   stripTerminalSequences,
   truncateToWidth,
   visibleWidth,
-  type Component,
 } from "@earendil-works/pi-tui";
 
 export interface StyledMessage {
@@ -43,7 +43,8 @@ type Paint = Pick<Theme, "fg" | "bg">;
 
 export function glyph(theme: Pick<Theme, "fg">, tone: Tone, now = Date.now()): string {
   const t = TONES[tone];
-  const g = tone === "running" ? SPINNER_FRAMES[Math.floor(now / SPINNER_INTERVAL_MS) % SPINNER_FRAMES.length]! : t.glyph;
+  const g =
+    tone === "running" ? SPINNER_FRAMES[Math.floor(now / SPINNER_INTERVAL_MS) % SPINNER_FRAMES.length]! : t.glyph;
   return theme.fg(t.fg, g);
 }
 
@@ -89,7 +90,10 @@ export function formatClock(ts: number | string | undefined, now = Date.now()): 
   const daysAgo = Math.round((startOfToday - startOfDate) / DAY_MS);
   if (daysAgo > 0 && daysAgo <= 6) return `${date.toLocaleDateString(undefined, { weekday: "short" })} ${time}`;
   const sameYear = date.getFullYear() === today.getFullYear();
-  const day = date.toLocaleDateString(undefined, sameYear ? { month: "short", day: "numeric" } : { month: "short", day: "numeric", year: "numeric" });
+  const day = date.toLocaleDateString(
+    undefined,
+    sameYear ? { month: "short", day: "numeric" } : { month: "short", day: "numeric", year: "numeric" },
+  );
   return `${day}, ${time}`;
 }
 
@@ -231,10 +235,16 @@ export class Block implements Component {
     const bg = (text: string) => theme.bg(TONES[s.tone].bg, text);
     const inner = Math.max(1, width - 2);
     const row = (text: string) => bg(" " + truncateToWidth(text, inner, "", true) + " ");
-    const title = rowLine(theme, { tone: s.tone, title: s.title, titleColor: s.titleColor, detail: s.detail }, inner + 1).replace(/^ /, "");
+    const title = rowLine(
+      theme,
+      { tone: s.tone, title: s.title, titleColor: s.titleColor, detail: s.detail },
+      inner + 1,
+    ).replace(/^ /, "");
     const bodyComponent: Component =
       typeof s.body === "string"
-        ? new Markdown(s.body, 0, 0, getMarkdownTheme(), { color: (t: string) => theme.fg(s.bodyColor ?? "customMessageText", t) })
+        ? new Markdown(s.body, 0, 0, getMarkdownTheme(), {
+            color: (t: string) => theme.fg(s.bodyColor ?? "customMessageText", t),
+          })
         : s.body;
     let body = bodyComponent.render(inner);
     const fold = s.fold ?? 8;
@@ -329,14 +339,23 @@ export interface RowRunOptions<T> {
  * adding another: the first is an anchor entry with a renderer, later ones are renderer-less state entries that
  * update an in-memory journal, which session_start and session_tree rebuild.
  */
-export function registerRowRun<T>(pi: ExtensionAPI, options: RowRunOptions<T>): { append(ctx: ExtensionContext, data: T): void } {
+export function registerRowRun<T>(
+  pi: ExtensionAPI,
+  options: RowRunOptions<T>,
+): { append(ctx: ExtensionContext, data: T): void } {
   visibleEntryTypes().add(options.anchorType);
   const run = runsOf(options.anchorType);
   const owner = Symbol(options.anchorType);
   const rebuild = (ctx: ExtensionContext) => {
     try {
       run.journal.clear();
-      const branch = ctx.sessionManager.getBranch() as { id: string; type: string; customType?: string; data?: any; timestamp: string }[];
+      const branch = ctx.sessionManager.getBranch() as {
+        id: string;
+        type: string;
+        customType?: string;
+        data?: any;
+        timestamp: string;
+      }[];
       const ids = new Set(branch.map((e) => e.id));
       for (const e of branch) {
         if (e.type === "custom" && e.customType === options.stateType && ids.has(e.data?.anchor)) {
@@ -359,7 +378,14 @@ export function registerRowRun<T>(pi: ExtensionAPI, options: RowRunOptions<T>): 
   return {
     append(ctx, data) {
       try {
-        const branch = ctx.sessionManager.getBranch() as { id: string; type: string; customType?: string; display?: boolean; data?: any; timestamp: string }[];
+        const branch = ctx.sessionManager.getBranch() as {
+          id: string;
+          type: string;
+          customType?: string;
+          display?: boolean;
+          data?: any;
+          timestamp: string;
+        }[];
         let last: (typeof branch)[number] | undefined;
         for (let i = branch.length - 1; i >= 0; i--) {
           if (isVisibleEntry(branch[i]!)) {
@@ -391,7 +417,14 @@ export function registerReportRenderer(pi: ExtensionAPI): void {
   pi.registerEntryRenderer<{ title?: string; body?: string }>(REPORT_TYPE, (entry, o, theme) => {
     const body = entry.data?.body;
     if (!body) return undefined;
-    return new Block(theme, () => ({ tone: "info", title: entry.data?.title ?? "Report", body, fold: 20, expanded: o.expanded, time: entry.timestamp }));
+    return new Block(theme, () => ({
+      tone: "info",
+      title: entry.data?.title ?? "Report",
+      body,
+      fold: 20,
+      expanded: o.expanded,
+      time: entry.timestamp,
+    }));
   });
 }
 

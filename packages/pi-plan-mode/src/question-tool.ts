@@ -171,7 +171,12 @@ export const planModeQuestionRenderer = {
   ccstyleOwnResult: true,
   renderShell: "self",
   renderCall: (args, theme, context) =>
-    toolCallRow(theme, context, "Plan question", () => formatPlanModeQuestionCall(args).split("\n").slice(1).join(" · ") || undefined),
+    toolCallRow(
+      theme,
+      context,
+      "Plan question",
+      () => formatPlanModeQuestionCall(args).split("\n").slice(1).join(" · ") || undefined,
+    ),
   renderResult: (result, options, theme, context) => {
     const text = formatPlanModeQuestionResult(result, { ...options, isError: context.isError });
     const full = formatPlanModeQuestionResult(result, { ...options, expanded: true, isError: context.isError });

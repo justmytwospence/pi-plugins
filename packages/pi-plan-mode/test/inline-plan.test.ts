@@ -712,12 +712,10 @@ test("a saved review renders the saved path neutrally rather than approval or pe
   };
   const collapsed = exit.renderResult?.(result as never, { expanded: false, isPartial: false }, theme, renderContext);
   assert.match(collapsed?.render(160).map(stripVTControlCharacters).join("\n") ?? "", /↳ Saved for later/u);
-  const component = exit.renderResult?.(
-    result as never,
-    { expanded: true, isPartial: false },
-    theme,
-    { ...renderContext, expanded: true },
-  );
+  const component = exit.renderResult?.(result as never, { expanded: true, isPartial: false }, theme, {
+    ...renderContext,
+    expanded: true,
+  });
   assert.ok(component);
   const rendered = component.render(160).map(stripVTControlCharacters).join("\n");
   assert.match(rendered, /Saved document[\s\S]*Saved for later/u);
@@ -733,12 +731,12 @@ function workflowTransitions(mock: ReturnType<typeof createMockPi>) {
   );
 }
 
-function transition(previous: string, mode: string, explanation: string) {
+function transition(previous: string, mode: string, explanation: string, display = false) {
   return {
     message: {
       customType: "workflow:transition",
       content: `${mode} · ${explanation}`,
-      display: false,
+      display,
       details: { version: 1, previous, mode },
     },
     options: { triggerTurn: false },
@@ -982,7 +980,7 @@ test("non-TUI Plan toggles retain immediate local transitions without a journal 
       h.mock.entries.some((entry) => entry.customType === "settings:cycle"),
       false,
     );
-    assert.deepEqual(workflowTransitions(h.mock), [transition("work", "plan", "research and plan only")]);
+    assert.deepEqual(workflowTransitions(h.mock), [transition("work", "plan", "research and plan only", true)]);
   } finally {
     vi.useRealTimers();
   }
@@ -994,14 +992,14 @@ test("standalone workflow badges describe work/plan transitions once without tri
   assert.ok(h.mock.messageRenderers.has("workflow:transition"));
   await h.mock.commands.get("plan")?.handler("", h.context.ctx);
   await h.mock.commands.get("plan")?.handler("", h.context.ctx);
-  assert.deepEqual(workflowTransitions(h.mock), [transition("work", "plan", "research and plan only")]);
+  assert.deepEqual(workflowTransitions(h.mock), [transition("work", "plan", "research and plan only", true)]);
   writeFileSync(h.inline().planFile, "# Plan\n");
   await h.tool(EXIT_TOOL).execute("approve", {}, undefined, undefined, h.context.ctx);
   await h.emit("agent_before_settle", { outcome: "completed" });
   await h.emit("agent_before_settle", { outcome: "completed" });
   assert.deepEqual(workflowTransitions(h.mock), [
-    transition("work", "plan", "research and plan only"),
-    transition("plan", "work", "edits and actions"),
+    transition("work", "plan", "research and plan only", true),
+    transition("plan", "work", "edits and actions", true),
   ]);
   assert.equal(h.mock.sentUserMessages.length, 0, "badges do not send prompts");
 });
@@ -1119,7 +1117,11 @@ for (const order of ["gate-first", "plan-first", "no-gate"] as const) {
     assert.equal(inline.active, true);
     assert.equal(inline.planFile, planFile);
     assert.equal(
-      (mock.entries.filter((entry) => !String(entry.customType).startsWith("workflow:row")).at(-1)?.data as { active?: boolean } | undefined)?.active,
+      (
+        mock.entries.filter((entry) => !String(entry.customType).startsWith("workflow:row")).at(-1)?.data as
+          | { active?: boolean }
+          | undefined
+      )?.active,
       true,
     );
     assert.deepEqual(requests, order === "no-gate" ? [] : ["plan"]);

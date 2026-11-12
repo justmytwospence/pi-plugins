@@ -747,7 +747,7 @@ async function journalCheckpoint() {
     assert.equal(contexts.length, 1, 'failed input makes no additional local model request');
     assert.equal(f.runtime.session.thinkingLevel, effective);
     assert.equal(f.mode.editor.getExpandedText(), 'Newer unsent draft', 'failed flush never overwrites a newer draft');
-    assert.match(historyLines(f).at(-1), /message not sent.*recover it from prompt history/u);
+    assert.match(historyLines(f).at(-1), /message not sent.*recover from prompt history/u);
     f.mode.editor.setText('');
     f.terminal.send('\x1b[A');
     assert.equal(f.mode.editor.getExpandedText(), recoverable, 'native prompt history recovers the unsent message');

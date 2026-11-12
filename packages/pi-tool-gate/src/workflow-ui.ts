@@ -1,6 +1,6 @@
 import type { ExtensionAPI, ExtensionContext, Theme } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
-import { registerRowRun, Row } from "./transcript-style.js";
+import { Row, registerRowRun } from "./transcript-style.js";
 
 export type WorkflowKind = "work" | "chat" | "plan";
 
@@ -40,7 +40,8 @@ export function registerWorkflowRenderer(pi: ExtensionAPI): void {
       sameRun: () => true,
       merge: (a, b) => ({ previous: a.previous, mode: b.mode }),
       render: ({ data, time }, theme) => {
-        if (!isWorkflowKind(data?.previous) || !isWorkflowKind(data?.mode) || data.previous === data.mode) return undefined;
+        if (!isWorkflowKind(data?.previous) || !isWorkflowKind(data?.mode) || data.previous === data.mode)
+          return undefined;
         const mode = data.mode;
         return new Row(theme, () => ({
           tone: "info",
@@ -89,14 +90,16 @@ export function sendWorkflowTransition(
   mode: WorkflowKind,
 ): void {
   if (previous === mode) return;
+  // Only the TUI draws the coalescing row; RPC and print keep the visible message as their feedback.
+  const tui = ctx.mode === "tui" && ctx.hasUI;
   pi.sendMessage(
     {
       customType: "workflow:transition",
       content: `${mode} · ${WORKFLOW_EXPLANATIONS[mode]}`,
-      display: false,
+      display: !tui,
       details: { version: 1, previous, mode },
     },
     { triggerTurn: false },
   );
-  rowRuns.get(pi)?.append(ctx, { previous, mode });
+  if (tui) rowRuns.get(pi)?.append(ctx, { previous, mode });
 }

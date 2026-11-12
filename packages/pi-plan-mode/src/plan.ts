@@ -220,9 +220,7 @@ export default async function plan(pi: ExtensionAPI, dependencies: PlanDependenc
   pi.registerMessageRenderer("plan-mode-implementation", (message, options, theme) => {
     const content = message.content;
     const body = (
-      typeof content === "string"
-        ? content
-        : content.map((part) => (part.type === "text" ? part.text : "")).join("\n")
+      typeof content === "string" ? content : content.map((part) => (part.type === "text" ? part.text : "")).join("\n")
     ).trim();
     return new Block(theme, () => ({
       tone: "incoming",

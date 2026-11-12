@@ -199,7 +199,11 @@ test("planner question owner renderers are registered and render at narrow width
   for (const width of [46, 120, 180]) {
     for (const expanded of [false, true]) {
       const context = { expanded, isError: false, args } as never;
-      const theme = { fg: (_: string, t: string) => t, bg: (_: string, t: string) => t, bold: (t: string) => t } as never;
+      const theme = {
+        fg: (_: string, t: string) => t,
+        bg: (_: string, t: string) => t,
+        bold: (t: string) => t,
+      } as never;
       const callLines = questionTool.renderCall(args as never, theme, context).render(width);
       const resultLines = questionTool
         .renderResult(result as never, { expanded, isPartial: false }, theme, context)

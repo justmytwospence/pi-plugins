@@ -10,8 +10,6 @@ import {
   type Theme,
 } from "@earendil-works/pi-coding-agent";
 import { Markdown, Text } from "@earendil-works/pi-tui";
-import { toolCallRow, toolResultView } from "./tool-rows.js";
-import { messageView } from "./transcript-style.js";
 import { setToolsActive } from "./active-tools.js";
 import { PiChat, piChatTheme, type ToolRenderers } from "./app/pi-chat.js";
 import type { ModelSpec } from "./implementation-models.js";
@@ -19,7 +17,9 @@ import type { PlannerAgent, PlannerStats, PlannerStatus } from "./planner/agent.
 import { consultMessage, MAIN_AGENT_GUIDELINES } from "./planner/prompt.js";
 import { describeToolArgs, PlannerTrace } from "./planner-trace.js";
 import { SubagentTracker } from "./subagent-progress.js";
+import { toolCallRow, toolResultView } from "./tool-rows.js";
 import { transcriptCheckpoint } from "./transcript-contract.js";
+import { messageView } from "./transcript-style.js";
 
 export const PLAN_MESSAGE_TYPE = "plan-mode-plan";
 export const ASK_PLANNER_TOOL = "plan_ask_planner";
@@ -314,7 +314,8 @@ function mainToolCall(
 ) {
   return toolCallRow(theme, context, title, () => {
     const [head = "", ...rest] = formatMainToolCall(name, args).split("\n");
-    if (name === SUBMIT_MERGED_TOOL) return head.replace(/^Submit merged plan · /u, "").replace(/ · ctrl\+o to expand$/u, "");
+    if (name === SUBMIT_MERGED_TOOL)
+      return head.replace(/^Submit merged plan · /u, "").replace(/ · ctrl\+o to expand$/u, "");
     const planner = head.replace(/^Ask planner /u, "");
     return rest[0] ? `${planner}: ${rest[0]}` : planner;
   });
@@ -412,7 +413,8 @@ function renderPlanMessage(
   const details = message.details;
   const body = contentText(message.content);
   const view = { ...message, content: body };
-  if (details?.kind === "failure") return messageView(theme, view, { expanded }, { tone: "failed", title: "Planner failed" });
+  if (details?.kind === "failure")
+    return messageView(theme, view, { expanded }, { tone: "failed", title: "Planner failed" });
   const version = details?.revision && details.revision > 1 ? ` v${details.revision}` : "";
   const title = `Plan ${details?.id ?? "?"}${version} from planner ${details?.id ?? "?"}${details?.model ? ` · ${details.model}` : ""}`;
   return messageView(theme, view, { expanded }, { tone: "incoming", title });

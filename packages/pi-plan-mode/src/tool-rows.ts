@@ -13,7 +13,12 @@ interface ToolContext {
 }
 
 /** The call row; its tone follows the tool's lifecycle. */
-export function toolCallRow(theme: Paint, context: ToolContext, title: string, detail?: () => string | undefined): Component {
+export function toolCallRow(
+  theme: Paint,
+  context: ToolContext,
+  title: string,
+  detail?: () => string | undefined,
+): Component {
   return new Row(theme, () => ({
     tone: toneOfTool(context, context.lastComponent !== undefined),
     title,
@@ -31,7 +36,8 @@ export class ResultLine implements Component {
   invalidate(): void {}
   render(width: number): string[] {
     const first = this.line.split("\n")[0] ?? "";
-    const text = this.theme.fg("dim", `   ↳ ${first.replace(/\s+/gu, " ").trim()}`) + (this.more ? expandHint(this.theme) : "");
+    const text =
+      this.theme.fg("dim", `   ↳ ${first.replace(/\s+/gu, " ").trim()}`) + (this.more ? expandHint(this.theme) : "");
     return [truncateToWidth(text, Math.max(1, width), "…")];
   }
 }
@@ -43,7 +49,13 @@ export function toolResultView(
   view: { tone: Tone; title: string; summary: string; body: string; fold?: number },
 ): Component {
   if (options.expanded) {
-    return new Block(theme, () => ({ tone: view.tone, title: view.title, body: view.body, fold: view.fold ?? 0, expanded: true }));
+    return new Block(theme, () => ({
+      tone: view.tone,
+      title: view.title,
+      body: view.body,
+      fold: view.fold ?? 0,
+      expanded: true,
+    }));
   }
   return new ResultLine(theme, view.summary, view.body.trim() !== view.summary.trim() && view.body.includes("\n"));
 }

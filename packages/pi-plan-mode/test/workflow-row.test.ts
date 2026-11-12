@@ -22,7 +22,7 @@ function fake() {
     appendEntry: (customType: string, data: any) =>
       branch.push({ id: `wf${n++}`, type: "custom", customType, data, timestamp: new Date().toISOString() }),
   };
-  const ctx: any = { sessionManager: { getBranch: () => branch } };
+  const ctx: any = { mode: "tui", hasUI: true, sessionManager: { getBranch: () => branch } };
   return { pi, ctx, branch, sent, renderers, messageRenderers };
 }
 
@@ -31,7 +31,10 @@ test("work -> chat -> plan with nothing between shows one row reading plan", () 
   registerWorkflowRenderer(f.pi);
   sendWorkflowTransition(f.pi, f.ctx, "work", "chat");
   sendWorkflowTransition(f.pi, f.ctx, "chat", "plan");
-  assert.deepEqual(f.branch.map((e) => e.customType), ["workflow:row", "workflow:row-state"]);
+  assert.deepEqual(
+    f.branch.map((e) => e.customType),
+    ["workflow:row", "workflow:row-state"],
+  );
   assert.ok(f.sent.every((m) => m.display === false && m.customType === "workflow:transition"));
   const text = f.renderers["workflow:row"](f.branch[0], { expanded: false }, theme).render(100).join("\n");
   expect(text).toContain("plan");

@@ -56,7 +56,6 @@ import { expandHome } from "./plan-hook.js";
 import { promptPlanName } from "./plan-name-input.js";
 import { PlanReviewViewport } from "./plan-review-viewport.js";
 import { type ReviewStatus, reviewBody, reviewCard } from "./review-card.js";
-import { ResultLine, toolCallRow } from "./tool-rows.js";
 import { type SettingCycleTrigger, settingsCycles } from "./settings-cycle.js";
 import {
   findBlockedCommandSegment,
@@ -64,6 +63,7 @@ import {
   readCommand,
   type SafeSubcommands,
 } from "./tool-policy.js";
+import { ResultLine, toolCallRow } from "./tool-rows.js";
 import { transcriptCheckpoint } from "./transcript-contract.js";
 import { registerWorkflowRenderer, sendWorkflowTransition, type WorkflowKind } from "./workflow-ui.js";
 
@@ -972,7 +972,9 @@ function renderExit(
   const body = new Container();
   body.addChild(card);
   const wrap = (component: Component) =>
-    reviewCard(theme, outcome === "pending" ? "Plan review" : "Plan", component, status.tone, { expanded: options.expanded });
+    reviewCard(theme, outcome === "pending" ? "Plan review" : "Plan", component, status.tone, {
+      expanded: options.expanded,
+    });
   if (outcome !== "pending" || !details?.previous || details.previous === plan) return wrap(body);
   // The full current plan remains authoritative; never guess a semantic summary from a diff.
   const container = new Container();
