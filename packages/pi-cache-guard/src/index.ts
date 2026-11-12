@@ -125,6 +125,14 @@ interface FreshStart {
 }
 const FRESH_KEY = Symbol.for("pi-cache-guard/fresh");
 
+/** Session entry recording `/cache-guard on|off` and "Send, and stop asking" (never sent to the model). */
+export const WARNING_TYPE = "cache-guard:warning";
+/** `on`: `/cache-guard on|off`. `ask`: false after "Send, and stop asking". */
+export interface WarningState {
+  on: boolean;
+  ask: boolean;
+}
+
 export type Choice = "keep" | "jev" | "compact" | "fresh" | "send" | "mute" | "model";
 
 /** A line of the cold-cache question; `model` (`provider/id`) on a model offer's line. */
@@ -272,6 +280,15 @@ export default function cacheGuard(
   let sessionOn = true;
   // "Send, and stop asking": the warning is off for this session, the clock and herdr stay on.
   let askOn = true;
+  // Both switches live in the session (WARNING_TYPE entries), so a reload, resume or tree move
+  // restores them instead of turning the warning back on.
+  const restoreWarning = (context: ExtensionContext) => {
+    const entry = context.sessionManager.getBranch().findLast((item) => item.type === "custom" && item.customType === WARNING_TYPE);
+    const data = (entry?.type === "custom" ? entry.data : undefined) as Partial<WarningState> | undefined;
+    sessionOn = data?.on !== false;
+    askOn = sessionOn && data?.ask !== false;
+  };
+  const saveWarning = () => pi.appendEntry(WARNING_TYPE, { on: sessionOn, ask: askOn } satisfies WarningState);
   /** Session and settings switches that allow a cold interactive prompt to ask. */
   const warningOn = () => sessionOn && askOn && settings.enabled && settings.warn.enabled;
   /** The warning's state for `/cache-guard status`, naming what turned it off. */
@@ -395,8 +412,7 @@ export default function cacheGuard(
       void startFresh(pi, context, fresh);
     }
     ctx = context;
-    sessionOn = true;
-    askOn = true;
+    restoreWarning(context);
     settings = loadSettings(context.cwd);
     restoreUpdates(context);
     pendingMiss = undefined;
@@ -422,6 +438,7 @@ export default function cacheGuard(
   pi.on("model_select", (_event, context) => refresh(context, false));
   pi.on("session_tree", (_event, context) => {
     restoreUpdates(context);
+    restoreWarning(context);
     refresh(context, false);
   });
   pi.on("session_compact", (event, context) => {
@@ -541,6 +558,7 @@ export default function cacheGuard(
         return { action: "continue" };
       case "mute":
         askOn = false;
+        saveWarning();
         return { action: "continue" };
       case "fresh":
         // Replacing the session is a command's job: run ours once this input has been handled.
@@ -775,6 +793,7 @@ export default function cacheGuard(
       if (command === "on" || command === "off") {
         sessionOn = command === "on";
         askOn = sessionOn;
+        saveWarning();
         ctx = context;
         publish();
         context.ui.notify(`cache-guard ${command} for this session`, "info");

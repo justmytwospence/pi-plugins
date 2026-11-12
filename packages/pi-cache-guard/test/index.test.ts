@@ -3,7 +3,7 @@ import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import { existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import path from "node:path";
 
-import cacheGuard, { JEV_TIP, MODEL_OFFERS, type ModelOffers, OFFER_TIMEOUT_MS, OPTION_MAX, choiceMenu, cleanOffers, coldTitle, modelInfo, statusText } from "../src/index.ts";
+import cacheGuard, { JEV_TIP, WARNING_TYPE, MODEL_OFFERS, type ModelOffers, OFFER_TIMEOUT_MS, OPTION_MAX, choiceMenu, cleanOffers, coldTitle, modelInfo, statusText } from "../src/index.ts";
 import { lastRequest, view } from "../src/clock.ts";
 import { emptyState, plan } from "../src/effort-updates.ts";
 import * as config from "../src/config.ts";
@@ -889,6 +889,43 @@ describe("footer actions", () => {
     await h.emit("session_start", {});
     await action(h)!.run();
     expect(h.ui.notes.at(-1)).toContain('Warning: off ("enabled": false in settings)');
+  });
+
+  test("a mute or off survives a reload and follows the branch; on clears it", async () => {
+    const branch: any[] = [assistant(NOW - 900_000, 600_000)];
+    const h = harness(branch);
+    const save = () => {
+      for (const { customType, data } of h.appended.splice(0)) if (customType === WARNING_TYPE) branch.push({ type: "custom", customType, data });
+    };
+    await h.emit("session_start", {});
+    h.ui.answers = ["Send, and stop"];
+    await h.emit("input", input("mute"));
+    expect(h.appended).toEqual([{ customType: WARNING_TYPE, data: { on: true, ask: false } }]);
+    save();
+    await h.emit("session_start", { reason: "reload" });
+    expect(await h.emit("input", input("after reload"))).toEqual({ action: "continue" });
+    expect(h.ui.confirms).toHaveLength(1);
+    // A branch without the entry asks again; back on the muted branch it does not.
+    h.ctx.sessionManager.getBranch = () => branch.slice(0, 1);
+    await h.emit("session_tree", {});
+    h.ui.answers = ["Send anyway"];
+    await h.emit("input", input("other branch"));
+    expect(h.ui.confirms).toHaveLength(2);
+    h.ctx.sessionManager.getBranch = () => branch;
+    await h.emit("session_tree", {});
+    await h.emit("input", input("muted branch"));
+    expect(h.ui.confirms).toHaveLength(2);
+    await h.commands.get("cache-guard").handler("off", h.ctx);
+    save();
+    await h.emit("session_start", { reason: "resume" });
+    expect(h.ui.status.get("cache-guard")).toBeUndefined();
+    await h.commands.get("cache-guard").handler("on", h.ctx);
+    save();
+    await h.emit("session_start", { reason: "reload" });
+    h.ui.answers = ["Send anyway"];
+    await h.emit("input", input("asks again"));
+    expect(h.ui.confirms).toHaveLength(3);
+    await h.emit("session_shutdown", {});
   });
 
   const transitions = ["session_start", "session_tree", "session_compact", "model_select", "session_shutdown", "manager change"] as const;
