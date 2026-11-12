@@ -193,10 +193,12 @@ export function rowLine(theme: Pick<Theme, "fg">, spec: RowSpec, width: number):
 }
 
 export class Row implements Component {
-  constructor(
-    private readonly theme: Pick<Theme, "fg">,
-    private readonly spec: () => RowSpec,
-  ) {}
+  private readonly theme: Pick<Theme, "fg">;
+  private readonly spec: () => RowSpec;
+  constructor(theme: Pick<Theme, "fg">, spec: () => RowSpec) {
+    this.theme = theme;
+    this.spec = spec;
+  }
   invalidate(): void {}
   render(width: number): string[] {
     return [rowLine(this.theme, this.spec(), width)];
@@ -216,10 +218,12 @@ export interface BlockSpec {
 }
 
 export class Block implements Component {
-  constructor(
-    private readonly theme: Paint,
-    private readonly spec: () => BlockSpec,
-  ) {}
+  private readonly theme: Paint;
+  private readonly spec: () => BlockSpec;
+  constructor(theme: Paint, spec: () => BlockSpec) {
+    this.theme = theme;
+    this.spec = spec;
+  }
   invalidate(): void {}
   render(width: number): string[] {
     const s = this.spec();
