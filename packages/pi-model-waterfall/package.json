@@ -1,6 +1,6 @@
 {
   "name": "@justmytwospence/pi-model-waterfall",
-  "version": "0.1.62",
+  "version": "0.1.63",
   "description": "Starts new Pi sessions on the first subscription model under quota.",
   "type": "module",
   "private": true,
