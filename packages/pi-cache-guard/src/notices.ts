@@ -14,7 +14,7 @@ const MISS_MIN_COST = 0.1;
 
 export type Notice =
   | { kind: "miss"; missedTokens: number; missedCost: number; idleMs: number; modelChanged: boolean }
-  | { kind: "warm"; cost: number; note?: string }
+  | { kind: "warm"; cost: number; note?: string; count?: number }
   | { kind: "compaction"; tokens: number; cost: number };
 
 interface Usage {
@@ -113,24 +113,31 @@ export function formatTokens(count: number): string {
   return `${Math.round(count / 1_000_000)}M`;
 }
 
-/** The line for a notice, and Pi's color for it. */
-export function noticeLine(notice: Notice): { text: string; color: "warning" | "dim" } {
+/** The row for a notice: its tone, title and detail. */
+export function noticeLine(notice: Notice): { tone: "warning" | "info"; title: string; detail: string } {
   switch (notice.kind) {
     case "miss": {
       const cost = notice.missedCost >= 0.01 ? ` (~$${notice.missedCost.toFixed(2)})` : "";
       let label = "Cache miss";
       if (notice.modelChanged) label = "Cache miss after model switch";
       else if (notice.idleMs >= 300_000) label = `Cache miss after ${Math.round(notice.idleMs / 60_000)}m idle`;
-      return { text: `${label}: ${formatTokens(notice.missedTokens)} tokens re-billed${cost}`, color: "warning" };
+      return { tone: "warning", title: label, detail: `${formatTokens(notice.missedTokens)} tokens re-billed${cost}` };
     }
     case "warm": {
       const note = notice.note ? ` (${notice.note})` : "";
       const cost = notice.cost.toFixed(6).replace(/(\.\d{3}\d*?)0+$/, "$1");
-      return { text: `Cache warmed${note}: $${cost}`, color: "dim" };
+      const count = notice.count && notice.count > 1 ? ` ×${notice.count}` : "";
+      return { tone: "info", title: `Cache warmed${count}`, detail: `$${cost}${note}` };
     }
     case "compaction": {
       const cost = notice.cost >= 0.01 ? ` (~$${notice.cost.toFixed(2)})` : "";
-      return { text: `Compaction: ${formatTokens(notice.tokens)} tokens billed${cost}`, color: "warning" };
+      return { tone: "warning", title: "Compaction", detail: `${formatTokens(notice.tokens)} tokens billed${cost}` };
     }
   }
+}
+
+/** Two warms in a row become one with a count and the summed cost. */
+export function mergeNotices(a: Notice, b: Notice): Notice {
+  if (a.kind !== "warm" || b.kind !== "warm") return b;
+  return { kind: "warm", cost: a.cost + b.cost, note: b.note, count: (a.count ?? 1) + (b.count ?? 1) };
 }

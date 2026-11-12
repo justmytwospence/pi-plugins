@@ -99,7 +99,11 @@ function harnessWith(entries: unknown[], herdr: HerdrReporter, model: any = opus
     on: (name: string, handler: any) => { handlers.set(name, [...(handlers.get(name) ?? []), handler]); return () => undefined; },
     registerCommand: (name: string, options: any) => commands.set(name, options),
     registerEntryRenderer: (type: string, renderer: any) => renderers.set(type, renderer),
-    appendEntry: (customType: string, data: unknown) => appended.push({ customType, data }),
+    // Multi-line reports are transcript entries now; the tests read their body as before.
+    appendEntry: (customType: string, data: any) => {
+      if (customType === "transcript-style:report") ui.notes.push(data.body);
+      else appended.push({ customType, data });
+    },
     getThinkingLevel: () => "high",
     setThinkingLevel: (level: string) => sent.push({ thinking: level }),
     setModel: async (m: any) => { sent.push({ model: m.id }); return true; },
@@ -843,10 +847,12 @@ describe("footer actions", () => {
     const save = vi.spyOn(config, "saveUserSettings");
     for (const args of ["status", ""]) {
       await h.commands.get("cache-guard").handler(args, h.ctx);
-      const command = notify.mock.calls.at(-1);
+      const command = h.ui.notes.at(-1);
+      const count = h.ui.notes.length;
       await action(h)!.run();
-      expect(notify.mock.calls.at(-1)).toEqual(command);
-      expect(notify).toHaveBeenLastCalledWith(expect.any(String), "info");
+      expect(h.ui.notes.at(-1)).toEqual(command);
+      expect(h.ui.notes.length).toBe(count + 1);
+      expect(command).toEqual(expect.any(String));
     }
     expect({ entries, status: h.ui.status, states: h.states }).toEqual(before);
     expect(save).not.toHaveBeenCalled();

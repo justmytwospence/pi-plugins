@@ -12,8 +12,8 @@ import { type FSWatcher, watch } from "node:fs";
 import { basename } from "node:path";
 import { promisify } from "node:util";
 import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { Text } from "@earendil-works/pi-tui";
 import { type AckState, markReloaded, pruneAcks, writeAck } from "./acks.ts";
+import { Block, registerRowRun } from "./transcript-style.ts";
 import { Progress, PROGRESS_LIMIT_MS, type Tracked } from "./progress.ts";
 import { agentDir, FILE_NAME, isFresh, makeRequest, readRequest, remoteWriteCommand, type Request, writeRequest } from "./signal.ts";
 
@@ -63,6 +63,12 @@ export interface MachineReport {
   /** Pi panes Herdr sees there, when it could tell. */
   sessions?: number;
   error?: string;
+}
+
+interface ReportData {
+  lines: string[];
+  track?: Tracked;
+  final?: string;
 }
 
 export default function reloadAll(pi: ExtensionAPI, deps: Deps = defaultDeps): void {
@@ -129,10 +135,17 @@ export default function reloadAll(pi: ExtensionAPI, deps: Deps = defaultDeps): v
     return reasons[0];
   };
 
-  pi.registerEntryRenderer<{ lines?: string[] }>(ENTRY, (entry, _options, theme) => {
-    const lines = entry.data?.lines;
-    if (!lines?.length) return undefined;
-    return new Text(lines.map((l, i) => theme.fg(i ? "dim" : "muted", l)).join("\n"), 1, 0);
+  const rows = registerRowRun<ReportData>(pi, {
+    anchorType: ENTRY,
+    stateType: "reload-all:state",
+    sameRun: (a, b) => !!b.final && b.final === a.track?.id,
+    merge: (_a, b) => b,
+    render: ({ data, time }, theme, options) => {
+      const lines = data?.lines;
+      if (!lines?.length) return undefined;
+      const tone = !data.final ? "running" : lines.some((l) => l.includes("failed")) ? "failed" : "done";
+      return new Block(theme, () => ({ tone, title: "Reload all", body: lines.join("\n"), fold: 12, expanded: options.expanded, time }));
+    },
   });
 
   const check = () => {
@@ -233,7 +246,7 @@ export default function reloadAll(pi: ExtensionAPI, deps: Deps = defaultDeps): v
         progress = undefined;
         if (stale) return;
         try {
-          pi.appendEntry(ENTRY, { lines, final: t.id });
+          rows.append(ctx, { lines, final: t.id });
         } catch {
           // stale runtime
         }
@@ -315,7 +328,7 @@ export default function reloadAll(pi: ExtensionAPI, deps: Deps = defaultDeps): v
       sending = true;
       let sent: { lines: string[]; track: Tracked };
       try {
-        sent = await signal(args, request);
+        sent = await signal(ctx, args, request);
       } finally {
         sending = false;
       }
@@ -328,7 +341,7 @@ export default function reloadAll(pi: ExtensionAPI, deps: Deps = defaultDeps): v
   });
 
   /** Writes the request everywhere and records the report. */
-  const signal = async (args: string, request: Request): Promise<{ lines: string[]; track: Tracked }> => {
+  const signal = async (ctx: ExtensionContext, args: string, request: Request): Promise<{ lines: string[]; track: Tracked }> => {
     const local = /(^|\s)--local(\s|$)/u.test(args);
     const lines = ["/reload-all: sessions reload when their turn ends and the editor is empty"];
     let expected: number | undefined = 0;
@@ -352,7 +365,7 @@ export default function reloadAll(pi: ExtensionAPI, deps: Deps = defaultDeps): v
       }
     }
     const track: Tracked = { id: request.id, at: request.at, machines, ...(expected === undefined ? {} : { expected }) };
-    pi.appendEntry(ENTRY, { lines, track });
+    rows.append(ctx, { lines, track });
     return { lines, track };
   };
 }

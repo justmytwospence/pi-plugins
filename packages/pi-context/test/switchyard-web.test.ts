@@ -5,6 +5,7 @@ import extension from "../src/index.ts";
 function load() {
   const pi = {
     registerCommand: vi.fn(),
+    registerEntryRenderer: vi.fn(),
     getAllTools: () => [{ name: "read", description: "Read", parameters: { type: "object" } }],
     on: vi.fn(),
     events: createEventBus(),

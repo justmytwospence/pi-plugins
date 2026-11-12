@@ -50,6 +50,7 @@ describe("extension", () => {
     const commands = new Map<string, { handler: (args: string, ctx: unknown) => Promise<void> }>();
     const pi = {
       registerCommand: (name: string, command: { handler: (args: string, ctx: unknown) => Promise<void> }) => commands.set(name, command),
+      registerEntryRenderer: () => {},
       getAllTools: () => [{ name: "read", description: "Read", parameters: { type: "object" } }],
       on: vi.fn(), events: createEventBus(),
     } as unknown as ExtensionAPI;
@@ -79,6 +80,7 @@ describe("extension", () => {
     const commands = new Map<string, { handler: (args: string, ctx: unknown) => Promise<void> }>();
     const pi = {
       registerCommand: (name: string, command: { handler: (args: string, ctx: unknown) => Promise<void> }) => commands.set(name, command),
+      registerEntryRenderer: () => {},
       getAllTools: () => [{ name: "read", description: "Read", parameters: { type: "object" } }],
       on: vi.fn(), events: createEventBus(),
     } as unknown as ExtensionAPI;
@@ -154,6 +156,7 @@ async function footerFixture(start = true, bridge = true) {
       callbacks.push(handler); handlers.set(name, callbacks);
     },
     registerCommand: (name: string, command: any) => commands.set(name, command),
+    registerEntryRenderer: () => {},
     getAllTools: vi.fn(() => [
       { name: "read", description: "Read", parameters: { type: "object" } },
       { name: "inspect", description: "Inspect custom state", parameters: { type: "object" } },

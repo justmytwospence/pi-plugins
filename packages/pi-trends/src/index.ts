@@ -10,6 +10,7 @@ import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext, Theme } f
 import { Key, matchesKey, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import { formatCost, formatDuration, formatTokens, METRICS, type Metric, normalize, plot, slots, sparkline, window } from "./chart.ts";
 import { collectTurns, type TurnStat } from "./turns.ts";
+import { appendReport, registerReportRenderer } from "./transcript-style.ts";
 import { onWebCommand, section, table as webTable, text as webText } from "./switchyard-web.ts";
 
 export const DEFAULT_SHORTCUT = "alt+g";
@@ -297,6 +298,7 @@ async function showOverlay(ctx: ExtensionCommandContext, turns: TurnStat[]): Pro
 }
 
 export default function trendsExtension(pi: ExtensionAPI): void {
+  registerReportRenderer(pi);
   const config = loadConfig();
   let showWidget = config.widget === true;
   let lastCtx: ExtensionContext | undefined;
@@ -398,7 +400,10 @@ export default function trendsExtension(pi: ExtensionAPI): void {
       }
       const all = turnsFor(ctx, pi.getThinkingLevel());
       if (!ctx.hasUI || ctx.mode !== "tui" || all.length === 0) {
-        ctx.ui.notify(formatReport(all), "info");
+        const text = formatReport(all);
+        // Multi-line reports are transcript blocks where the transcript is drawn; elsewhere they stay notifications.
+        if (text.includes("\n") && ctx.hasUI && ctx.mode === "tui") appendReport(pi, "Trends", text);
+        else ctx.ui.notify(text, "info");
         return;
       }
       await showOverlay(ctx, all);

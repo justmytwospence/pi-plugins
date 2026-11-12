@@ -163,7 +163,7 @@ test('/reload-all reports first, then reloads its own session once, and nothing 
       appendEntry: () => { live('pi.appendEntry'); order.push('report'); },
       sendUserMessage: (t) => sent.push(t),
     }, { now: () => 0, sleep: async () => {}, exec: async (file, args) => { if (args[0] === 'machine') { await slow; return '[]'; } throw new Error('no'); } });
-    const ctx = { mode: 'tui', hasUI: true, ...fakeCtx([{ idle: true }]), ui: { setStatus() {}, getEditorText: () => '', notify() { live('notify'); } },
+    const ctx = { mode: 'tui', hasUI: true, sessionManager: { getBranch: () => [] }, ...fakeCtx([{ idle: true }]), ui: { setStatus() {}, getEditorText: () => '', notify() { live('notify'); } },
       reload: async () => { live('reload'); order.push('reload'); handlers.get('session_shutdown')({}, ctx); stale = true; } };
     handlers.get('session_start')({}, ctx);
     const running = commands.get('reload-all').handler('', ctx);
@@ -271,6 +271,41 @@ test('after its own reload the sender marks itself reloaded and resumes the live
     assert.equal(readAcks('req', dir)[0].state, 'reloaded');
     for (let i = 0; i < 50 && !widgets.length; i++) await new Promise((r) => setTimeout(r, 10));
     assert.equal(widgets[0][0], 'reload-all · 1/2 reloaded');
+    handlers.get('session_shutdown')({}, ctx);
+  } finally {
+    if (prev === undefined) delete process.env.PI_CODING_AGENT_DIR; else process.env.PI_CODING_AGENT_DIR = prev;
+    rmSync(dir, { recursive: true });
+  }
+});
+
+test('the final state replaces the initial block', async () => {
+  const dir = tmp();
+  const prev = process.env.PI_CODING_AGENT_DIR;
+  process.env.PI_CODING_AGENT_DIR = dir;
+  try {
+    const { writeAck } = await import('../src/acks.ts');
+    writeAck('req', { session: 'sess', name: 'pi-plugins', state: 'reloaded' }, dir);
+    const handlers = new Map();
+    const renderers = new Map();
+    const track = { id: 'req', at: Date.now(), machines: [] };
+    const branch = [{ id: 'a0', type: 'custom', customType: 'reload-all:report', data: { lines: ['/reload-all: start'], track }, timestamp: new Date().toISOString() }];
+    reloadAll({
+      on: (n, h) => handlers.set(n, h), registerCommand() {}, sendUserMessage() {}, getSessionName: () => undefined,
+      registerEntryRenderer: (t, fn) => renderers.set(t, fn),
+      appendEntry: (customType, data) => branch.push({ id: `e${branch.length}`, type: 'custom', customType, data, timestamp: new Date().toISOString() }),
+    }, { now: () => Date.now(), sleep: async () => {}, exec: async () => '' });
+    const theme = { fg: (_c, s) => s, bg: (_c, s) => s };
+    const ctx = { mode: 'tui', hasUI: true, cwd: '/x/pi-plugins',
+      sessionManager: { getSessionId: () => 'sess', getBranch: () => branch },
+      ui: { theme, setStatus() {}, setWidget() {} } };
+    const render = () => renderers.get('reload-all:report')(branch[0], { expanded: false }, theme).render(100).join('\n');
+    assert.match(render(), /start/);
+    handlers.get('session_start')({ reason: 'reload' }, ctx);
+    for (let i = 0; i < 50 && branch.length < 2; i++) await new Promise((r) => setTimeout(r, 10));
+    assert.deepEqual(branch.map((e) => e.customType), ['reload-all:report', 'reload-all:state'], 'the final state is a state entry, not a second block');
+    // The state entry updates the journal, which the anchor's renderer reads.
+    assert.match(render(), /1\/1 reloaded/);
+    assert.doesNotMatch(render(), /start/);
     handlers.get('session_shutdown')({}, ctx);
   } finally {
     if (prev === undefined) delete process.env.PI_CODING_AGENT_DIR; else process.env.PI_CODING_AGENT_DIR = prev;

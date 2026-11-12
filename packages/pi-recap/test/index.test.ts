@@ -34,7 +34,7 @@ function setup(answer = "Fixed the parser; tests pass", prompts = 3) {
     return got;
   };
   const recaps = () => h.entries.filter((e) => e.customType === ENTRY).map((e: any) => e.data.text);
-  const plainTheme = { fg: (_c: string, s: string) => s, bold: (s: string) => s, italic: (s: string) => s };
+  const plainTheme = { fg: (_c: string, s: string) => s, bg: (_c: string, s: string) => s, bold: (s: string) => s, italic: (s: string) => s };
   const render = (text: string, width = 200, theme: any = plainTheme) =>
     renderer({ customType: ENTRY, data: { text } }, { expanded: false }, theme).render(width);
   return { h, ctx, ui: ctx.ui, branch, complete, settle, ask, recaps, render };
@@ -58,16 +58,20 @@ test("the recap is written into the transcript after the idle delay, and drawn l
   expect(recaps()).toEqual(["Fixed the parser; tests pass"]);
   expect(complete).toHaveBeenCalledOnce();
   expect(ui.widgets.has(WIDGET)).toBe(false);
-  expect(render("Fixed the parser; tests pass")).toEqual([LINE("Fixed the parser; tests pass")]);
+  const block = render("Fixed the parser; tests pass").map((l: string) => l.trim());
+  expect(block).toContain("○ Recap");
+  expect(block).toContain("Fixed the parser; tests pass");
   // It stays in the transcript when the next run starts.
   await h.emit("agent_start", {}, ctx);
   expect(recaps()).toHaveLength(1);
 });
 
-test("the whole line is dim bold, the text also italic", () => {
-  const theme = { fg: (c: string, s: string) => `<${c}>${s}</${c}>`, bold: (s: string) => `<b>${s}</b>`, italic: (s: string) => `<i>${s}</i>` };
-  const lines = setup().render("done", 200, theme);
-  expect(lines).toEqual([" <dim><b>※ </b></dim><dim><b>recap: </b></dim><dim><b><i>done</i></b></dim>"]);
+test("the recap is an info block titled Recap", () => {
+  const theme = { fg: (c: string, s: string) => `<${c}>${s}</${c}>`, bg: (c: string, s: string) => `[${c}]${s}`, bold: (s: string) => s, italic: (s: string) => s };
+  const lines = setup().render("done", 80, theme);
+  expect(lines.every((l: string) => l.startsWith("[customMessageBg]"))).toBe(true);
+  expect(lines.join("\n")).toContain("Recap");
+  expect(lines.join("\n")).toContain("done");
 });
 
 test("pi-herdr's request gets the same memoized text, with one model call", async () => {
@@ -97,7 +101,8 @@ test("a long recap is whole and wrapped in the transcript, clipped only for pi-h
   const lines = render(long, 60);
   expect(lines.length).toBeGreaterThan(1);
   expect(lines.join(" ")).not.toContain("…");
-  expect(lines.map((l: string) => l.trim()).join(" ")).toBe(`${MARK}${LABEL}${long}`.trim());
+  expect(lines.map((l: string) => l.trim()).filter(Boolean).join(" ")).toContain(long.slice(0, 40));
+  expect(lines.map((l: string) => l.trim()).filter(Boolean).join(" ")).toContain("tests pass");
 });
 
 test("a new turn gets a new recap", async () => {

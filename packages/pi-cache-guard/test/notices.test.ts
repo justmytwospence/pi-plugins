@@ -1,6 +1,9 @@
 import { describe, expect, test } from "vitest";
 
-import { detectMiss, noticeLine } from "../src/notices.ts";
+import { detectMiss, mergeNotices, noticeLine, type Notice } from "../src/notices.ts";
+import { Row, registerRowRun } from "../src/transcript-style.ts";
+
+const text = (n: Notice) => { const l = noticeLine(n); return `${l.title}: ${l.detail}`; };
 
 const T = Date.parse("2026-10-07T12:00:00Z");
 const usage = (input: number, cacheRead: number, cacheWrite: number) => ({
@@ -18,7 +21,7 @@ describe("detectMiss", () => {
     const prior = [entry(msg(T - 600_000, usage(2, 600_000, 0)))];
     const miss = detectMiss(prior, msg(T, usage(2, 0, 601_000)), price);
     expect(miss).toMatchObject({ kind: "miss", missedTokens: 600_002, modelChanged: false, idleMs: 600_000 });
-    expect(noticeLine(miss!).text).toBe("Cache miss after 10m idle: 600k tokens re-billed (~$2.88)");
+    expect(text(miss!)).toBe("Cache miss after 10m idle: 600k tokens re-billed (~$2.88)");
   });
 
   test("a hit, a small miss, the first turn and after compaction are not", () => {
@@ -31,14 +34,39 @@ describe("detectMiss", () => {
 
   test("a model switch; a cache_warm refresh counts as the previous request", () => {
     const prior = [entry(msg(T - 60_000, usage(2, 600_000, 0), "claude-sonnet-5-5"))];
-    expect(noticeLine(detectMiss(prior, msg(T, usage(2, 0, 601_000)), price)!).text).toMatch(/^Cache miss after model switch: 600k/);
+    expect(text(detectMiss(prior, msg(T, usage(2, 0, 601_000)), price)!)).toMatch(/^Cache miss after model switch: 600k/);
     const warmed = [entry(msg(T - 900_000, usage(2, 600_000, 0))),
       { type: "usage", kind: "cache_warm", provider: "anthropic", model: "claude-opus-5-5", timestamp: new Date(T - 60_000).toISOString(), usage: usage(2, 600_000, 0) }];
-    expect(noticeLine(detectMiss(warmed, msg(T, usage(2, 0, 601_000)), price)!).text).toMatch(/^Cache miss: 600k/);
+    expect(text(detectMiss(warmed, msg(T, usage(2, 0, 601_000)), price)!)).toMatch(/^Cache miss: 600k/);
   });
 
   test("warm and compaction lines", () => {
-    expect(noticeLine({ kind: "warm", cost: 0.0123 }).text).toBe("Cache warmed: $0.0123");
-    expect(noticeLine({ kind: "compaction", tokens: 650_000, cost: 1.2 }).text).toBe("Compaction: 650k tokens billed (~$1.20)");
+    expect(text({ kind: "warm", cost: 0.0123 })).toBe("Cache warmed: $0.0123");
+    expect(text({ kind: "compaction", tokens: 650_000, cost: 1.2 })).toBe("Compaction: 650k tokens billed (~$1.20)");
+  });
+});
+
+describe("warm coalescing", () => {
+  test("two warms in a row become one row, Cache warmed ×2", () => {
+    const branch: any[] = [];
+    let renderer: any;
+    const pi: any = {
+      registerEntryRenderer: (_t: string, fn: unknown) => { renderer = fn; },
+      on: () => {},
+      appendEntry: (customType: string, data: unknown) => branch.push({ id: `e${branch.length}`, type: "custom", customType, data, timestamp: new Date().toISOString() }),
+    };
+    const ctx: any = { sessionManager: { getBranch: () => branch } };
+    const theme: any = { fg: (_c: string, s: string) => s, bg: (_c: string, s: string) => s };
+    const rows = registerRowRun<Notice>(pi, {
+      anchorType: "cache-guard-notice-test", stateType: "cache-guard:notice-state-test",
+      sameRun: (a, b) => a.kind === "warm" && b.kind === "warm", merge: mergeNotices,
+      render: ({ data, time }, th) => { const l = noticeLine(data); return new Row(th, () => ({ ...l, time })); },
+    });
+    rows.append(ctx, { kind: "warm", cost: 0.01 });
+    rows.append(ctx, { kind: "warm", cost: 0.02 });
+    expect(branch.filter((e) => e.customType === "cache-guard-notice-test")).toHaveLength(1);
+    const out = renderer(branch[0], { expanded: false }, theme).render(120).join("\n");
+    expect(out).toContain("Cache warmed ×2");
+    expect(out).toContain("$0.03");
   });
 });

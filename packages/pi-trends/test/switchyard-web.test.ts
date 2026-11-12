@@ -6,6 +6,7 @@ function load() {
   const pi: any = {
     on: () => {},
     registerCommand: () => {},
+    registerEntryRenderer: () => {},
     registerShortcut: () => {},
     registerFlag: () => {},
     registerMessageRenderer: () => {},

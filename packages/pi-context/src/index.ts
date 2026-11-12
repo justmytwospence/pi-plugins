@@ -22,6 +22,7 @@ import {
 } from "./breakdown.ts";
 
 import { queryContextMetadata } from "./context-metadata.ts";
+import { appendReport, registerReportRenderer } from "./transcript-style.ts";
 import { onWebCommand, section, table as webTable, text as webText } from "./switchyard-web.ts";
 import { FOOTER_ACTIONS_CHANNEL, type FooterActionsRequest } from "./footer-actions.ts";
 
@@ -285,6 +286,7 @@ type ContextInspection = {
 };
 
 export default function contextExtension(pi: ExtensionAPI): void {
+  registerReportRenderer(pi);
   let generation = 0;
   let active: { ctx: ExtensionContext; id: string; busy: boolean } | undefined;
   let unsubscribe: (() => void) | undefined;
@@ -327,7 +329,10 @@ export default function contextExtension(pi: ExtensionAPI): void {
     if (!current()) return;
 
     if (!ctx.hasUI || ctx.mode !== "tui") {
-      ctx.ui.notify(formatReport(report), "info");
+      const text = formatReport(report);
+        // Multi-line reports are transcript blocks where the transcript is drawn; elsewhere they stay notifications.
+        if (text.includes("\n") && ctx.hasUI && ctx.mode === "tui") appendReport(pi, "Context", text);
+        else ctx.ui.notify(text, "info");
       return;
     }
 

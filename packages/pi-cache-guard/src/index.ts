@@ -18,7 +18,8 @@ import { HerdrReporter, alertHeld, whileBlocked } from "./herdr.ts";
 import { JEV_LOGINS, type JevState, label } from "./jev.ts";
 import { installSystem1Notifications, readSystem1Setting, resolveSystem1Route } from "./system1.ts";
 import { JEV_KEY_URL, JEV_PITCH } from "./lean.ts";
-import { type AssistantLike, NOTICE_TYPE, type Notice, detectMiss, noticeLine } from "./notices.ts";
+import { Row, appendReport, registerReportRenderer, registerRowRun } from "./transcript-style.ts";
+import { type AssistantLike, NOTICE_TYPE, type Notice, detectMiss, mergeNotices, noticeLine } from "./notices.ts";
 import { type Wire, cachePolicy, echoedRetention, requestedTtl } from "./policy.ts";
 import { MODEL_CHOICE, MODEL_OFFERS, type ModelChoice, type ModelOffer, type ModelOffers, collectOffers, oneLine } from "./offers.ts";
 import { Text } from "@earendil-works/pi-tui";
@@ -235,8 +236,20 @@ export default function cacheGuard(
   // Keep-warm refreshes already noted (Pi has no event for them; the tick looks for new ones).
   let seenWarm = new Set<string>();
 
+  const rows = registerRowRun<Notice>(pi, {
+    anchorType: NOTICE_TYPE,
+    stateType: "cache-guard:notice-state",
+    sameRun: (a, b) => a.kind === "warm" && b.kind === "warm",
+    merge: mergeNotices,
+    render: ({ data, time }, theme) => {
+      if (!data) return undefined;
+      const { tone, title, detail } = noticeLine(data);
+      return new Row(theme, () => ({ tone, title, detail, time }));
+    },
+  });
+  registerReportRenderer(pi);
   const notify = (notice: Notice) => {
-    if (sessionOn && settings.enabled && ctx?.hasUI) pi.appendEntry<Notice>(NOTICE_TYPE, notice);
+    if (sessionOn && settings.enabled && ctx?.hasUI) rows.append(ctx, notice);
   };
   /** `cache_warm` usage entries after the last assistant message, oldest first. */
   const recentWarms = (context: ExtensionContext) => {
@@ -431,11 +444,6 @@ export default function cacheGuard(
   pi.on("turn_end", () => flushMiss());
   pi.on("agent_end", () => flushMiss());
 
-  pi.registerEntryRenderer<Notice>(NOTICE_TYPE, (entry, _options, theme) => {
-    if (!entry.data) return undefined;
-    const { text, color } = noticeLine(entry.data);
-    return new Text(theme.fg(color, text), 1, 0);
-  });
   pi.on("agent_settled", (_event, context) => {
     running = false;
     refresh(context, true);
@@ -705,7 +713,7 @@ export default function cacheGuard(
     }
     lines.push(`Warning: ${warningLine()}. Keep-warm: Pi's cacheWarming setting (/session shows its next decision).`);
     lines.push(jevLine(await lean.jev(context), settings, lean.savedChars()));
-    if (isCurrent()) context.ui.notify(lines.join("\n"), "info");
+    if (isCurrent()) appendReport(pi, "Cache guard", lines.join("\n"));
   };
 
   pi.events?.on(FOOTER_ACTIONS_CHANNEL, (data) => {

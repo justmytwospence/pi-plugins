@@ -24,6 +24,7 @@
 //                                      characters), when it is loaded and active
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Markdown, visibleWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
+import { Block, registerRowRun, rowLine } from "./transcript-style.ts";
 import { oneLine, type Recap, RECAP_MAX, type RecapRegistry, recap } from "./summary.ts";
 
 /** The custom entry type of a recap in the session, and the key of /recap's pending line. */
@@ -72,14 +73,6 @@ export function recapLines(text: string, width: number, style: RecapStyle = PLAI
   if (measure && room > measure) room = measure;
   const body = style.label(LABEL) + style.text(text);
   return wrapTextWithAnsi(body, room).map((line, i) => `${i === 0 ? ` ${style.mark(MARK)}` : " ".repeat(indent)}${line}`);
-}
-
-function themeStyle(theme: { fg(color: any, s: string): string; bold(s: string): string; italic(s: string): string }): RecapStyle {
-  return {
-    mark: (s) => theme.fg("dim", theme.bold(s)),
-    label: (s) => theme.fg("dim", theme.bold(s)),
-    text: (s) => theme.fg("dim", theme.bold(theme.italic(s))),
-  };
 }
 
 const isPrompt = (e: any) => e?.type === "message" && e.message?.role === "user";
@@ -144,10 +137,16 @@ export default function piRecap(pi: ExtensionAPI) {
     }
   };
 
-  pi.registerEntryRenderer<{ text?: string }>(ENTRY, (entry, _options, theme) => {
-    const text = entry.data?.text;
-    if (!text) return undefined;
-    return { invalidate() {}, render: (width: number) => recapLines(text, width, themeStyle(theme)) };
+  const rows = registerRowRun<{ text?: string }>(pi, {
+    anchorType: ENTRY,
+    stateType: "recap:state",
+    sameRun: () => true,
+    merge: (_a, b) => b,
+    render: ({ data, time }, theme, options) => {
+      const text = data?.text;
+      if (!text) return undefined;
+      return new Block(theme, () => ({ tone: "info", title: "Recap", body: text, fold: 0, expanded: options.expanded, time }));
+    },
   });
 
   /** /recap's placeholder above the editor while it waits for the run and the model. */
@@ -155,16 +154,16 @@ export default function piRecap(pi: ExtensionAPI) {
     try {
       ctx.ui.setWidget(
         WIDGET,
-        on ? (_tui, theme) => ({ invalidate() {}, render: (width: number) => recapLines("…", width, themeStyle(theme)) }) : undefined,
+        on ? (_tui, theme) => ({ invalidate() {}, render: (width: number) => [rowLine(theme, { tone: "running", title: "Recap" }, width)] }) : undefined,
       );
     } catch {
       // The runtime went stale.
     }
   };
 
-  const append = (text: string) => {
+  const append = (ctx: ExtensionContext, text: string) => {
     try {
-      pi.appendEntry(ENTRY, { text });
+      rows.append(ctx, { text });
     } catch {
       // The runtime went stale.
     }
@@ -249,7 +248,7 @@ export default function piRecap(pi: ExtensionAPI) {
       // A reply that is already one short line is on screen; repeating it adds nothing.
       if (r.source === "reply") return;
       const branch = branchOf(ctx);
-      if (branch && recapDue(branch)) append(r.text);
+      if (branch && recapDue(branch)) append(ctx, r.text);
     }, delayMs());
     timer.unref?.();
   });
@@ -268,7 +267,7 @@ export default function piRecap(pi: ExtensionAPI) {
         const r = await summarize(ctx);
         if (epoch !== generation) return;
         if (r) {
-          append(r.text);
+          append(ctx, r.text);
           nameSession(r.text);
         } else ctx.ui.notify("Nothing to recap yet", "warning");
       } finally {
