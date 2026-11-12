@@ -8,7 +8,7 @@ import { createDialogFixture, bounded, waitFor, observeInput, plain, KEY,
 
 const { enter: ENTER, escape: ESCAPE } = KEY;
 const marker = { select: 'Native select focus?', confirm: 'Native confirm focus?', input: 'Native input focus?',
-  editor: 'Native editor focus?', question: QUESTION.question, approval: 'Action: bash' };
+  editor: 'Native editor focus?', question: QUESTION.question, approval: 'Target: printf focus' };
 function answer(kind, result) {
   if (kind === 'select') assert.equal(result, CHOICE);
   else if (kind === 'confirm') assert.equal(result, true);
@@ -24,7 +24,7 @@ async function visibleDialog(f, kind, starts = 1) {
   const screen = plain(f.snapshot());
   assert.ok(screen.includes(marker[kind]), `visible ${kind} dialog, not a covering viewer`);
   if (kind === 'approval') {
-    assert.ok(screen.includes('Action: bash'), 'approval retains its action');
+    assert.ok(!screen.includes('Action: bash'), 'the title names the tool; the question does not repeat it');
     assert.ok(screen.includes('Target: printf focus'), 'approval retains its target');
   }
   assert.equal(f.state.footerBlocked, true);
