@@ -9,6 +9,7 @@ export const transcriptHelpers = [
   ['transcript-index.ts', consumers],
   ['transcript-viewport.ts', consumers],
   ['tui-runtime.ts', ['pi-vim', 'pi-cc-render']],
+  ['transcript-style.ts', ['pi-cc-render', 'pi-bg', 'pi-todo', 'pi-ask-user-question', 'pi-system1', 'pi-subagents', 'pi-herdr', 'pi-plan-mode', 'pi-tool-gate', 'pi-status-footer', 'pi-cache-guard', 'pi-reload-all', 'pi-recap', 'pi-sidebar', 'pi-compact-plan', 'pi-context', 'pi-trends']],
 ].map(([name, packages]) => ({ source: `shared/transcript/${name}`, copies: packages.map(pkg => `packages/${pkg}/src/${name}`) }));
 
 export function syncTranscriptHelpers(check = false) {
