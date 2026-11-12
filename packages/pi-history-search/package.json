@@ -1,6 +1,6 @@
 {
   "name": "@justmytwospence/pi-history-search",
-  "version": "0.1.64",
+  "version": "0.1.65",
   "description": "Search current-session prompts and browse history by draft prefix.",
   "type": "module",
   "license": "MIT",

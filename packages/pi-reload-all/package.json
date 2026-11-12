@@ -1,6 +1,6 @@
 {
   "name": "@justmytwospence/pi-reload-all",
-  "version": "0.1.64",
+  "version": "0.1.65",
   "description": "/reload-all reloads every interactive Pi session on this machine and on Herdr's saved machines, each once its turn ends and its editor is empty.",
   "type": "module",
   "license": "MIT",
