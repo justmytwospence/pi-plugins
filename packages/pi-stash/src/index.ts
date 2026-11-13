@@ -1,5 +1,7 @@
 // Claude Code-style prompt stashing for Pi's main editor: Ctrl+S stashes the draft and
 // clears the editor, a slash or shell command runs, and the draft comes back on its own.
+// The stash is a stack: Ctrl+S in an empty editor pops the newest draft, and pressed again
+// on it, browses the older ones.
 //
 // Origin: @saadjs/pi-stash 0.0.3 (MIT, Saad Bash). Suite changes:
 //   - Only Pi's main editor is stashed. Editors marked embedded by the suite editor
@@ -11,7 +13,7 @@
 //     live session context instead of the one captured at install time.
 //   - A second prompt-stash owner in the process is reported instead of stacked.
 import { CustomEditor, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { matchesKey, type EditorComponent, type TUI } from "@earendil-works/pi-tui";
+import { isKeyRelease, matchesKey, type EditorComponent, type TUI } from "@earendil-works/pi-tui";
 import {
   isEditorSnapshot,
   readEditorSnapshotApi,
@@ -37,7 +39,7 @@ import {
   type DraftTarget,
   type StashedPrompt,
 } from "./core.ts";
-import { readStashState, serializeStash, STASH_ENTRY_TYPE, type PersistedStashState } from "./persistence.ts";
+import { detachPrompts, readStashState, serializeStash, STASH_ENTRY_TYPE, type PersistedStashState, type StashStack } from "./persistence.ts";
 
 /** Footer status key and text; pi-status-footer absorbs exactly this pair into its stash row. */
 export const STATUS_ID = "prompt-stash";
@@ -87,12 +89,36 @@ export function adoptStash(): StashAdoption {
   const existing = globals[STASH_KEY];
   if (existing !== null && typeof existing === "object") {
     const owned = (existing as Record<symbol, unknown>)[STASH_OWNER] === OWNER;
-    return owned ? { status: "ready", stash: existing as PromptStash } : { status: "unknown" };
+    if (!owned) return { status: "unknown" };
+    if (typeof (existing as Partial<PromptStash>).load === "function") return { status: "ready", stash: existing as PromptStash };
+    // A single-slot stash from an earlier suite release, retained across /reload: carry its
+    // draft and process-only state into a stack.
+    const old = existing as { held?: boolean; awaitText?: boolean } & Record<symbol, unknown>;
+    const upgraded = createStash(globals);
+    upgraded.load(stackOf(existing).prompts, stackOf(existing).autoRestore);
+    upgraded.held = old.held === true;
+    upgraded.awaitText = old.awaitText === true;
+    if (SESSION in old) {
+      Object.defineProperty(upgraded, SESSION, { value: old[SESSION], writable: true, configurable: true, enumerable: false });
+    }
+    return { status: "ready", stash: upgraded };
   }
+  return { status: "ready", stash: createStash(globals) };
+}
+
+/** The drafts of a suite stash, current (a stack) or from a single-slot release. */
+export function stackOf(stash: unknown): StashStack {
+  const value = stash as Partial<PromptStash> | undefined;
+  if (value && Array.isArray(value.entries)) return { prompts: [...value.entries], autoRestore: value.autoRestore === true };
+  const entry = value?.entry;
+  return entry ? { prompts: [entry], autoRestore: true } : { prompts: [], autoRestore: false };
+}
+
+function createStash(globals: Record<symbol, unknown>): PromptStash {
   const created = new PromptStash();
   Object.defineProperty(created, STASH_OWNER, { value: OWNER, enumerable: false });
   globals[STASH_KEY] = created;
-  return { status: "ready", stash: created };
+  return created;
 }
 
 /**
@@ -146,8 +172,14 @@ export function createStashController(options: StashControllerOptions): StashCon
     get stashed() {
       return store.hasPrompt;
     },
+    get count() {
+      return store.count;
+    },
     handleKey(data) {
-      if (!matchesKey(data, STASH_KEY_ID)) return false;
+      if (!matchesKey(data, STASH_KEY_ID)) {
+        if (!isKeyRelease(data)) store.cycle = undefined;
+        return false;
+      }
       const editor = options.editor();
       if (!editor) return false;
       toggleDraft(store, target(editor));
@@ -189,7 +221,7 @@ export default function promptStash(pi: ExtensionAPI): void {
     try {
       // Old contexts can outlive session replacement. Never save through a changed manager.
       if (identityOf(state.ctx) !== state.identity) throw new Error("stale session");
-      const snapshot = serializeStash(stash?.entry);
+      const snapshot = serializeStash(stash?.entries ?? [], stash?.autoRestore ?? false);
       const encoded = JSON.stringify(snapshot);
       if (retry || encoded !== JSON.stringify(state.lastSaved)) {
         pi.appendEntry(STASH_ENTRY_TYPE, snapshot);
@@ -340,6 +372,8 @@ export default function promptStash(pi: ExtensionAPI): void {
         toggle(state, editor);
         return;
       }
+      // Browsing with repeated Ctrl+S ends at any other key: the next Ctrl+S stashes.
+      if (!isKeyRelease(data)) stash.cycle = undefined;
       handleInput(data);
     };
     // Pi wires onSubmit right after the factory returns; wrap it one microtask later so the
@@ -356,7 +390,8 @@ export default function promptStash(pi: ExtensionAPI): void {
       };
       editor.onSubmit = async (text: string): Promise<void> => {
         const state = session;
-        const entry = stash?.entry;
+        // Only the draft stashed last comes back on its own; shelved drafts wait for Ctrl+S.
+        const entry = stash?.autoRestore ? stash.entry : undefined;
         const main = !!state && !!entry && isMainEditor(editor, tui, state.ctx);
         const navigation = main && isNavigationAction(text);
         // A held draft (left by a navigation that loaded a message) returns after any submit.
@@ -456,7 +491,7 @@ export default function promptStash(pi: ExtensionAPI): void {
     const outgoing = globals[STASH_KEY] as BoundStash | undefined;
     const owned = outgoing && (outgoing as unknown as Record<symbol, unknown>)[STASH_OWNER] === OWNER;
     const outgoingIdentity = owned ? outgoing[SESSION] : undefined;
-    const outgoingEntry = owned ? outgoing.entry : undefined;
+    const outgoingStack = owned ? stackOf(outgoing) : { prompts: [], autoRestore: false };
     const outgoingState = session;
     const identity = identityOf(ctx);
     // A replacement can be prepared before shutdown. appendEntry now targets the destination,
@@ -485,42 +520,36 @@ export default function promptStash(pi: ExtensionAPI): void {
     globals[LEASE] = lease;
     Object.defineProperty(stash, SESSION, { value: identity, writable: true, configurable: true, enumerable: false });
     const saved = readStashState(ctx.sessionManager.getEntries());
-    if (saved.status === "valid") state.lastSaved = serializeStash(saved.entry);
+    if (saved.status === "valid") state.lastSaved = serializeStash(saved.prompts, saved.autoRestore);
 
     if (owned && outgoingIdentity === identity) {
       // A reload retains richer in-process snapshots/history, but never fills the editor.
       state.dirty = outgoingState?.dirty === true
-        || (saved.status === "valid" && JSON.stringify(serializeStash(stash.entry)) !== JSON.stringify(state.lastSaved))
+        || (saved.status === "valid" && JSON.stringify(serializeStash(stash.entries, stash.autoRestore)) !== JSON.stringify(state.lastSaved))
         || (saved.status === "missing" && stash.hasPrompt);
       stash.awaitText = false;
     } else if (outgoingIdentity !== undefined && outgoingIdentity !== identity
       && (event as { reason?: string } | undefined)?.reason === "fork") {
       // Copy the live parent, even when empty: copied ancestry may hold a consumed stash.
       // Durable fields make a detached child; opaque history stays in its original session.
-      const copied = serializeStash(outgoingEntry);
-      stash.take();
-      if (copied.prompt) stash.stash(copied.prompt);
+      stash.load(detachPrompts(outgoingStack.prompts), outgoingStack.autoRestore);
       state.lastSaved = undefined; // A child always records its initial live state once.
       persist(state);
-      if (stash.hasPrompt) {
+      if (stash.autoRestore) {
         stash.held = true;
         awaitingForkText = true; // Protect Pi's selected-message prefill after session_start.
       }
     } else if (outgoingIdentity !== undefined && outgoingIdentity !== identity
       && (event as { reason?: string } | undefined)?.reason === "new") {
       // /new and /clear carry the outgoing stash, still stashed; the outgoing session keeps its copy.
-      const carried = serializeStash(outgoingEntry).prompt;
-      stash.take();
-      if (carried) {
-        stash.stash(carried);
-        persist(state);
-      }
-    } else if (saved.status === "missing" && owned && outgoingIdentity === undefined && outgoingEntry) {
+      stash.load(detachPrompts(outgoingStack.prompts), outgoingStack.autoRestore);
+      if (stash.hasPrompt) persist(state);
+    } else if (saved.status === "missing" && owned && outgoingIdentity === undefined && outgoingStack.prompts.length > 0) {
       // One-time migration of an unbound suite stash, never an unknown upstream object.
       persist(state);
     } else {
-      stash.take();
-      if (saved.status === "valid" && saved.entry) stash.stash(saved.entry);
+      if (saved.status === "valid") stash.load(saved.prompts, saved.autoRestore);
+      else stash.load([], false);
       if (saved.status === "invalid") {
         ctx.ui.notify("pi-stash: saved stash state is unsupported or invalid; no prompt was restored.", "warning");
       }

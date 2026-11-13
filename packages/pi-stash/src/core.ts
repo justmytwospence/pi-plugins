@@ -15,8 +15,33 @@ export interface StashedPrompt {
   snapshot?: EditorSnapshot;
 }
 
+/** Most drafts kept; stashing beyond this drops the oldest. */
+export const STASH_LIMIT = 20;
+
+/** Where repeated Ctrl+S presses are while browsing the stash. */
+export interface StashCycle {
+  /** The draft Ctrl+S just put in the editor; another Ctrl+S on this exact text moves on. */
+  text: string;
+  /** 1-based position of that draft among all drafts being browsed. */
+  index: number;
+  total: number;
+}
+
+/**
+ * A stack of stashed drafts, newest on top. Ctrl+S pushes and pops; automatic restoration
+ * only ever brings back the draft stashed last, and only until something else is popped.
+ */
 export class PromptStash {
-  private prompt: StashedPrompt | undefined;
+  /** Oldest first; the top (newest) is last. */
+  private prompts: StashedPrompt[] = [];
+  /**
+   * Whether automatic restoration (after a command, a shell command, a model change) may
+   * bring back the top draft. Set when a draft is stashed, cleared when one is taken: drafts
+   * left underneath are shelved and come back only through Ctrl+S.
+   */
+  autoRestore = false;
+  /** Browsing state of repeated Ctrl+S presses; in memory only, cleared by any other key. */
+  cycle: StashCycle | undefined;
   /**
    * Held through a navigation (/tree, /fork, /clone) that may load a message into the editor:
    * the draft comes back when the editor is empty afterwards, else after the next submit.
@@ -31,30 +56,60 @@ export class PromptStash {
 
   /** The stashed text (upstream-compatible accessor; pi-status-footer reads it). */
   get value(): string | undefined {
-    return this.prompt?.text;
+    return this.entry?.text;
   }
 
-  /** The full stashed entry. */
+  /** The top (newest) stashed entry. */
   get entry(): StashedPrompt | undefined {
-    return this.prompt;
+    return this.prompts.at(-1);
+  }
+
+  /** Every stashed entry, oldest first. */
+  get entries(): readonly StashedPrompt[] {
+    return this.prompts;
+  }
+
+  /** How many drafts are stashed (pi-status-footer reads it). */
+  get count(): number {
+    return this.prompts.length;
   }
 
   get hasPrompt(): boolean {
-    return this.prompt !== undefined;
+    return this.prompts.length > 0;
   }
 
-  stash(prompt: string | StashedPrompt): void {
-    this.prompt = typeof prompt === "string" ? { text: prompt } : { ...prompt };
-    this.held = false;
-    this.awaitText = false;
+  /** Push a draft on top; returns the oldest draft when the limit dropped it. */
+  stash(prompt: string | StashedPrompt): StashedPrompt | undefined {
+    this.prompts.push(typeof prompt === "string" ? { text: prompt } : { ...prompt });
+    this.autoRestore = true;
+    this.reset();
+    return this.prompts.length > STASH_LIMIT ? this.prompts.shift() : undefined;
   }
 
+  /** Pop the top draft. The drafts underneath stay shelved. */
   take(): StashedPrompt | undefined {
-    const prompt = this.prompt;
-    this.prompt = undefined;
+    const prompt = this.prompts.pop();
+    this.autoRestore = false;
+    this.reset();
+    return prompt;
+  }
+
+  /** Put a draft at the bottom, under every other one (browsing with Ctrl+S). */
+  shelve(prompt: StashedPrompt): void {
+    this.prompts.unshift({ ...prompt });
+  }
+
+  /** Replace every draft, oldest first (loading saved or carried state). */
+  load(prompts: readonly StashedPrompt[], autoRestore: boolean): void {
+    this.prompts = prompts.slice(-STASH_LIMIT).map((prompt) => ({ ...prompt }));
+    this.autoRestore = autoRestore && this.prompts.length > 0;
+    this.reset();
+  }
+
+  private reset(): void {
     this.held = false;
     this.awaitText = false;
-    return prompt;
+    this.cycle = undefined;
   }
 }
 
@@ -72,41 +127,58 @@ export interface DraftTarget {
   changed?(): void;
 }
 
-/** Restore the stashed draft. Automatic restoration only fills an empty editor; it never overwrites a newer draft. */
+/**
+ * Restore the top stashed draft. Automatic restoration only fills an empty editor, never
+ * overwrites a newer draft, and only brings back the draft stashed last (`autoRestore`).
+ */
 export function restoreDraft(stash: PromptStash, target: DraftTarget, automatic: boolean): boolean {
   const entry = stash.entry;
   if (!entry) return false;
-  if (automatic && target.getText().length > 0) return false;
+  if (automatic && (!stash.autoRestore || target.getText().length > 0)) return false;
+  const total = stash.count;
   stash.take();
   target.apply(entry);
+  if (!automatic && total > 1) stash.cycle = { text: entry.text, index: 1, total };
   target.changed?.();
-  target.notify("Restored stashed prompt", "info");
+  target.notify(restoredMessage(total, automatic), "info");
   return true;
 }
 
-/** Ctrl+S: stash the draft, restore into an empty editor, or swap the two. */
+function restoredMessage(total: number, automatic: boolean): string {
+  if (total <= 1) return "Restored stashed prompt";
+  const left = total - 1;
+  return automatic
+    ? `Restored stashed prompt (${left} more stashed)`
+    : `Restored stashed prompt 1/${total} (ctrl+s for the next)`;
+}
+
+/**
+ * Ctrl+S: push the draft onto the stash, or pop the top into an empty editor. Pressed again
+ * on a draft it just restored, it moves that draft to the bottom and shows the next one, so
+ * repeated presses browse every stashed draft.
+ */
 export function toggleDraft(stash: PromptStash, target: DraftTarget): void {
   const current = target.getText();
-  if (!stash.hasPrompt) {
-    if (current.length === 0) {
-      target.notify("Nothing to stash", "warning");
-      return;
-    }
-    stash.stash(target.capture(current));
-    target.clear();
+  const cycle = stash.cycle;
+  if (cycle && current === cycle.text && stash.hasPrompt) {
+    const next = stash.take()!;
+    stash.shelve(target.capture(current));
+    target.apply(next);
+    const index = cycle.index % cycle.total + 1;
+    stash.cycle = { text: next.text, index, total: cycle.total };
     target.changed?.();
-    target.notify("Prompt stashed", "info");
+    target.notify(`Restored stashed prompt ${index}/${cycle.total}`, "info");
     return;
   }
   if (current.length === 0) {
-    restoreDraft(stash, target, false);
+    if (!restoreDraft(stash, target, false)) target.notify("Nothing to stash", "warning");
     return;
   }
-  const previous = stash.take()!;
-  stash.stash(target.capture(current));
-  target.apply(previous);
+  const dropped = stash.stash(target.capture(current));
+  target.clear();
   target.changed?.();
-  target.notify("Swapped current and stashed prompts", "info");
+  target.notify(stash.count > 1 ? `Prompt stashed (${stash.count} stashed)` : "Prompt stashed", "info");
+  if (dropped) target.notify(`Stash full: dropped the oldest of ${STASH_LIMIT} stashed prompts`, "warning");
 }
 
 /** A slash command: the editor is free again as soon as the command starts. */

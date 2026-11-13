@@ -95,8 +95,8 @@ export interface Snapshot {
   lean?: string; cache?: string; extraBilled?: number;
   /** pi-reload-all's pending reload; reason is why it is waiting (typing, a question, ...), empty when none is given. */
   reload?: { reason: string };
-  /** A prompt stashed by @saadjs/pi-stash; text is its content when readable. */
-  stash?: { text?: string };
+  /** Prompts stashed by pi-stash; text is the newest one's content and count how many, when readable. */
+  stash?: { text?: string; count?: number };
   /** pi-sidebar's latest waiting heads-up note (Sidebar closed); more counts the earlier ones. */
   headsUp?: { kind: string; text: string; more: number };
   /** pi-marimo's notebooks, one row each (keys `marimo`, `marimo-2`, ...). */
@@ -670,10 +670,11 @@ export function shortModel(value: string): string {
 // prompt, plus a first-line preview as in opencode's stash list. pi-stash
 // restores after a /command, !shell or model/thinking change, not after an
 // ordinary prompt, so the hint names the key rather than promising a restore.
-function stashRow(text: string | undefined, width: number, theme: Paint): string {
+function stashRow(text: string | undefined, width: number, theme: Paint, count?: number): string {
   const lines = text?.split("\n").map(clean).filter(Boolean) ?? [];
   const more = lines.length > 1 ? ` +${lines.length - 1} line${lines.length === 2 ? "" : "s"}` : "";
-  const label = theme.fg("muted", "Stashed");
+  // Several stashed drafts: the count, then the newest one's preview (what ctrl+s brings back).
+  const label = theme.fg("muted", count !== undefined && count > 1 ? `Stashed ${count}` : "Stashed");
   const hint = "ctrl+s to restore";
   // The preview gets whatever the label, line count and hint leave.
   const room = width - visibleWidth(`${label} · ""${more} · ${hint}`);
@@ -882,7 +883,7 @@ export function layoutFooter(snapshot: Snapshot, width: number, theme: Paint): F
       { text: reason ? theme.fg("muted", reason) : "", priority: 50 },
     ], w, theme)));
   }
-  if (s.stash) rows.push(row(ICONS.stash, (w) => stashRow(s.stash?.text, w, theme)));
+  if (s.stash) rows.push(row(ICONS.stash, (w) => stashRow(s.stash?.text, w, theme, s.stash?.count)));
   if (s.headsUp) {
     const h = s.headsUp, act = action("headsup.open");
     const key = act ? s.actions?.["headsup.open"]?.key : undefined;
@@ -1153,13 +1154,17 @@ export function layoutFooter(snapshot: Snapshot, width: number, theme: Paint): F
   return { lines: rows.map((row) => " ".repeat(inset) + truncateToWidth(row, width)), hits };
 }
 
-// pi-stash keeps its prompt in a process-global PromptStash under this symbol.
-// Reading it is optional: any other shape just drops the preview.
+// pi-stash keeps its prompts in a process-global PromptStash under this symbol:
+// `value` is the newest one's text, `count` how many are stashed. Reading it is
+// optional: any other shape just drops the preview and count.
 const STASH_KEY = Symbol.for("@saadjs/pi-stash/prompt");
-function stashedPrompt(): string | undefined {
+function stashedPrompt(): { text?: string; count?: number } {
   const value = (globalThis as Record<symbol, unknown>)[STASH_KEY];
-  const text = value !== null && typeof value === "object" ? (value as { value?: unknown }).value : undefined;
-  return typeof text === "string" ? text : undefined;
+  const stash = value !== null && typeof value === "object" ? value as { value?: unknown; count?: unknown } : {};
+  return {
+    ...(typeof stash.value === "string" ? { text: stash.value } : {}),
+    ...(typeof stash.count === "number" && Number.isInteger(stash.count) ? { count: stash.count } : {}),
+  };
 }
 
 export default function statusFooter(pi: ExtensionAPI): void {
@@ -1751,7 +1756,7 @@ export default function statusFooter(pi: ExtensionAPI): void {
       quotas, unavailableQuota, providerUsage: usage.rows, providerUsageMore: usage.more,
       statuses: absorbed.rest, workflow: absorbed.workflow, mode: absorbed.mode, permissionPrompts: absorbed.permissionPrompts, lean: absorbed.lean, cache: absorbed.cache, extraBilled: absorbed.extraBilled,
       reload: absorbed.reload,
-      stash: absorbed.stashed ? { text: stashedPrompt() } : undefined,
+      stash: absorbed.stashed ? stashedPrompt() : undefined,
       headsUp: absorbed.headsUp,
       marimo: absorbed.marimo, lens: absorbed.lens, bg: absorbed.bg, pressure: absorbed.pressure, borderGauge, compact: blockedHolds > 0,
       // Yield to an extension that publishes its own mcp status (pi-mcp-adapter).

@@ -4,27 +4,28 @@ Main-editor draft stashing for Pi SDK 1.1.0. Independently usable; pi-vim is opt
 
 ## Use
 
-- **Ctrl+S** stashes the main draft and clears the editor.
+- **Ctrl+S** stashes the main draft on top of the stash and clears the editor. The stash is a stack of up to 20 drafts; beyond that the oldest is dropped with a warning.
 - Run `/command`: the draft returns when the command starts or finishes and the editor is empty, but never while a selector, dialog or extension UI covers the editor. `/copy`, `/export`, `/share` and `/import` clear the editor when they finish, so restoration waits until after that. Commands that replace the session use the destination's own stash (see below).
 - Run `!command` or `!!command`: restoration waits for shell completion.
 - Run `/tree`, `/fork` or `/clone`: the draft stays stashed while the selector and its dialogs are open, so Pi can load the message you went back to. If the editor is empty afterwards (a non-message node, a clone or a cancelled `/tree`), the draft comes back. If it holds the loaded message, the draft returns after you submit that message. A cancelled `/fork` keeps the draft until Ctrl+S or the next submit, because a cancel looks the same as a fork in progress.
-- **Ctrl+S** with an empty editor restores manually; with text in both places it swaps them.
+- **Ctrl+S** with an empty editor restores the newest draft. Pressed again on the draft it just restored (no other key in between), it moves that draft to the bottom and restores the next one, so repeated presses browse every draft and wrap around. Any other key ends browsing.
+- Only the draft stashed last comes back automatically. Once a draft is restored, the drafts underneath are shelved until Ctrl+S brings them back.
 - **Ctrl+S** with an empty editor and nothing stashed stashes the [pi-next-prompt](../pi-next-prompt) suggestion on screen, if any (optional; asked synchronously over `pi.events` channel `prompt:take-next`, declared in `src/contract.ts`).
 - Model and thinking-level selection also restore into an empty editor.
 
-Automatic restoration never replaces a newly typed nonempty draft. The stash stays available for a manual restore or swap. Restoring never submits the prompt. Ctrl+S passes through in embedded editors and when the main editor does not own focus. Attachments are not stashed.
+Automatic restoration never replaces a newly typed nonempty draft. The stash stays available for a manual restore. Restoring never submits the prompt. Ctrl+S passes through in embedded editors and when the main editor does not own focus. Attachments are not stashed.
 
 The optional version-1 editor snapshot protocol restores text, cursor, modal mode, selection anchor and in-process history with pi-vim. Supported cursor/mode/anchor fields are persisted with the stashed text; opaque editor history stays in process, within the same session, and is never serialized. Unsupported or mismatched snapshots fall back to text. Without a snapshot provider, restoration uses text only. Symbols are copied structurally from `packages/pi-vim/src/contract.ts`; this package imports no sibling package.
 
 ## Saved-session stash
 
-The main editor has one slot per saved Pi session. Reopening the session, restarting Pi or reloading the extension leaves its prompt **stashed**, with the existing indicator/preview, rather than filling the editor. Press **Ctrl+S** to restore it into an empty editor or swap it with a new draft.
+The main editor has one stash per saved Pi session. Reopening the session, restarting Pi or reloading the extension leaves its drafts **stashed**, with the existing indicator/preview, rather than filling the editor. Press **Ctrl+S** to restore one into an empty editor.
 
 - `/new` (and pi-clear-screen's `/clear`) carries the stash into the fresh session, still stashed and not restored when the command starts; the cleared session keeps its own copy. If the command is cancelled, the draft returns as after any slash command. `/resume` and a session-replacing `/import` load only the destination session's stash, not the outgoing one. Sessions in the same cwd and imported copies with the same session ID but different file paths remain separate.
-- Interactive forks/clones copy the live parent's stash, including an empty slot, and then evolve independently. A CLI fork starts from the latest snapshot in its copied session entries. Restoring in the child does not consume the parent's stash; selected-message prefill remains protected.
-- The latest session-wide snapshot wins, not the active tree branch's state. Restoring or clearing the stash records an empty slot, so tree navigation or reopening cannot resurrect a consumed prompt.
+- Interactive forks/clones copy the live parent's stash, including an empty one, and then evolve independently. A CLI fork starts from the latest snapshot in its copied session entries. Restoring in the child does not consume the parent's stash; selected-message prefill remains protected.
+- The latest session-wide snapshot wins, not the active tree branch's state. Restoring a draft records the remaining stack, so tree navigation or reopening cannot resurrect a consumed prompt.
 
-Changes are saved as versioned `pi-stash.state` custom session entries. This is **plaintext session storage**, included in JSONL exports but excluded from model context. Consuming a stash does not erase earlier snapshots from the append-only session history. Only the stash is persisted—not an ordinary current editor draft or attachments. A draft-only session that has never submitted its first user message is not yet saved to disk; `--no-session` keeps the stash in memory only.
+Changes are saved as versioned `pi-stash.state` custom session entries: version 1 for an empty stash or a single draft that may still come back on its own (which earlier releases also read), version 2 for the whole stack. A `/reload` from an earlier single-slot release carries its draft into the stack. This is **plaintext session storage**, included in JSONL exports but excluded from model context. Consuming a stash does not erase earlier snapshots from the append-only session history. Only the stash is persisted—not an ordinary current editor draft or attachments. A draft-only session that has never submitted its first user message is not yet saved to disk; `--no-session` keeps the stash in memory only.
 
 If persistence fails, pi-stash warns that changes are in memory only and keeps the stash available. A subsequent stash change retries saving; normal shutdown also retries dirty state. Until a save succeeds, do not rely on recovery after a restart.
 
@@ -32,7 +33,7 @@ Session-local callbacks and timers are invalidated on shutdown; editor factory t
 
 ## Stash service for other editors
 
-Other plugins' editors can get a stash of their own over `pi.events` (channel `pi-plugins.prompt-stash.v1`, declared in `src/contract.ts`): emit `{ version: 1 }`, and an active pi-stash sets `create`. A controller from `create({ editor, notify, changed })` handles Ctrl+S (`handleKey`) with the same stash, restore and swap rules as main, and `submitted(text)` brings the draft back after a `/` command. Each controller keeps its own draft, apart from main's, in memory only; these slots are not saved with the session. pi-sidebar's composer uses it.
+Other plugins' editors can get a stash of their own over `pi.events` (channel `pi-plugins.prompt-stash.v1`, declared in `src/contract.ts`): emit `{ version: 1 }`, and an active pi-stash sets `create`. A controller from `create({ editor, notify, changed })` handles Ctrl+S (`handleKey`; pass every key so another key ends browsing) with the same stack, restore and browse rules as main, reports `count`, and `submitted(text)` brings the draft back after a `/` command. Each controller keeps its own drafts, apart from main's, in memory only; these stashes are not saved with the session. pi-sidebar's composer uses it.
 
 ## Migrating from @saadjs/pi-stash
 
@@ -60,7 +61,7 @@ npm ci
 npm run check
 ```
 
-Offline tests cover stash/swap, optional snapshots, focus, autocomplete, shell/slash restoration, new drafts, replacement sessions, retained legacy state, live legacy duplicates, suite duplicate ownership and teardown. They do not establish a full interactive TUI smoke test.
+Offline tests cover stash/browse, the stack limit, single-slot upgrades, optional snapshots, focus, autocomplete, shell/slash restoration, new drafts, replacement sessions, retained legacy state, live legacy duplicates, suite duplicate ownership and teardown. They do not establish a full interactive TUI smoke test.
 
 ## Origin
 

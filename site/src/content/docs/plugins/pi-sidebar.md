@@ -56,7 +56,7 @@ Use Pi's fullscreen mode (`"tuiMode": "fullscreen"`). In regular mode, the key a
 | Click | Clicking anywhere in a half focuses it. Clicks on dialogs and the divider do not. |
 | Drag the divider | Resizes the halves, remembered per orientation. A double-click goes back to the default. |
 | `/sidebar`, `/close` in Sidebar | Open or close Sidebar. |
-| Ctrl+S | With pi-stash enabled, stashes Sidebar's draft in a stash of its own, apart from main's: the hint row shows `stashed`. Ctrl+S in an empty composer restores it, with text in both it swaps them, and it comes back on its own after a `/` command such as `/new`. It is kept while Sidebar is closed. |
+| Ctrl+S | With pi-stash enabled, stashes Sidebar's draft in a stash of its own, apart from main's: the hint row shows `stashed` (`stashed 3` with several). Ctrl+S in an empty composer restores the newest, pressed again it steps to the older ones, and the draft stashed last comes back on its own after a `/` command such as `/new`. It is kept while Sidebar is closed. |
 | `/sidebar new`, `/new` in Sidebar | Starts a fresh thread. |
 | `/sidebar model`, `/model` in Sidebar | Picks Sidebar's model: `Same as main` (the default) or a favorite, in Sidebar while it is open. `/model sol` or `/model provider/id` switches directly, `/model same` goes back. |
 

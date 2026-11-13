@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, expect, test } from "vitest";
 import { CustomEditor } from "@earendil-works/pi-coding-agent";
 import { EDITOR_SNAPSHOT, STASH_CHANNEL, TAKE_NEXT_CHANNEL, type StashRequest, type TakeNextRequest } from "../src/contract.ts";
-import { isShellAction, isTemporaryAction, PromptStash } from "../src/core.ts";
+import { isShellAction, isTemporaryAction, PromptStash, STASH_LIMIT } from "../src/core.ts";
 import promptStash, { LEASE, OWNER, STASH_KEY, STASH_OWNER, STATUS_ID, STATUS_TEXT, WRAPPER, adoptStash, capture } from "../src/index.ts";
 import { CTRL_S, ENTER, FakeEditor, FakeSessionManager, SnapshotEditor, flush, harness, markEmbedded } from "./harness.ts";
 
@@ -42,8 +42,37 @@ test("core: PromptStash keeps text and an optional snapshot, value stays upstrea
   expect(stash.entry).toEqual({ text: "draft" });
   stash.stash({ text: "x", snapshot: { version: 1, text: "x", cursor: { line: 0, col: 1 }, mode: "normal" } });
   expect(stash.value).toBe("x");
+  expect(stash.count).toBe(2);
   expect(stash.take()?.snapshot?.mode).toBe("normal");
+  expect(stash.value).toBe("draft"); // a stack: the earlier draft is underneath
+  expect(stash.autoRestore).toBe(false); // shelved once something above it was taken
+  expect(stash.take()?.text).toBe("draft");
   expect(stash.hasPrompt).toBe(false);
+});
+
+test("a single-slot stash from an earlier release is upgraded in place, keeping its draft and binding", () => {
+  const session = Symbol.for("pi-plugins.pi-stash/session.v1");
+  const old = { prompt: { text: "kept" }, held: true, awaitText: false, get entry() { return this.prompt; }, get value() { return this.prompt.text; } };
+  Object.defineProperty(old, STASH_OWNER, { value: OWNER, enumerable: false });
+  Object.defineProperty(old, session, { value: "binding", writable: true, configurable: true, enumerable: false });
+  globals[STASH_KEY] = old;
+  const adopted = adoptStash();
+  expect(adopted.status).toBe("ready");
+  if (adopted.status !== "ready") return;
+  expect(adopted.stash).not.toBe(old);
+  expect(globals[STASH_KEY]).toBe(adopted.stash);
+  expect(adopted.stash.value).toBe("kept");
+  expect(adopted.stash.autoRestore).toBe(true);
+  expect(adopted.stash.held).toBe(true);
+  expect((adopted.stash as unknown as Record<symbol, unknown>)[session]).toBe("binding");
+});
+
+test("core: the stack keeps at most STASH_LIMIT drafts, dropping the oldest", () => {
+  const stash = new PromptStash();
+  for (let i = 0; i < STASH_LIMIT; i++) expect(stash.stash(`d${i}`)).toBeUndefined();
+  expect(stash.stash("newest")?.text).toBe("d0");
+  expect(stash.count).toBe(STASH_LIMIT);
+  expect(stash.entries[0]?.text).toBe("d1");
 });
 
 // ─── stash / restore / swap ───
@@ -62,7 +91,7 @@ test("Ctrl+S stashes the main draft, clears the editor and publishes the upstrea
   expect(s.state.main instanceof FakeEditor && s.state.main.keys).toEqual([]);
 });
 
-test("Ctrl+S on an empty editor restores; with text in both it swaps", async () => {
+test("Ctrl+S on an empty editor restores; with text it stacks; repeated presses browse", async () => {
   const { s } = await start();
   s.state.main.setText("one");
   s.state.main.handleInput(CTRL_S);
@@ -74,9 +103,45 @@ test("Ctrl+S on an empty editor restores; with text in both it swaps", async () 
   s.state.main.handleInput(CTRL_S);
   s.state.main.setText("two");
   s.state.main.handleInput(CTRL_S);
+  expect(s.state.main.getText()).toBe("");
+  expect((globals[STASH_KEY] as PromptStash).count).toBe(2);
+  expect(s.status.get(STATUS_ID)).toBe(STATUS_TEXT);
+  expect(s.notes.at(-1)?.message).toBe("Prompt stashed (2 stashed)");
+
+  s.state.main.handleInput(CTRL_S);
+  expect(s.state.main.getText()).toBe("two");
+  expect(s.notes.at(-1)?.message).toBe("Restored stashed prompt 1/2 (ctrl+s for the next)");
+  s.state.main.handleInput(CTRL_S);
   expect(s.state.main.getText()).toBe("one");
-  expect((globals[STASH_KEY] as PromptStash).value).toBe("two");
-  expect(s.notes.at(-1)?.message).toBe("Swapped current and stashed prompts");
+  expect(s.notes.at(-1)?.message).toBe("Restored stashed prompt 2/2");
+  s.state.main.handleInput(CTRL_S);
+  expect(s.state.main.getText()).toBe("two");
+  expect(s.notes.at(-1)?.message).toBe("Restored stashed prompt 1/2");
+  expect((globals[STASH_KEY] as PromptStash).value).toBe("one");
+
+  // Any other key ends browsing: the next Ctrl+S stashes the edited draft on top.
+  s.state.main.handleInput("!");
+  s.state.main.handleInput(CTRL_S);
+  expect(s.state.main.getText()).toBe("");
+  expect((globals[STASH_KEY] as PromptStash).entries.map((e) => e.text)).toEqual(["one", "two!"]);
+});
+
+test("after a command only the draft stashed last comes back; older drafts stay until Ctrl+S", async () => {
+  const { s } = await start();
+  s.state.main.setText("older");
+  s.state.main.handleInput(CTRL_S);
+  s.state.main.setText("newer");
+  s.state.main.handleInput(CTRL_S);
+  s.state.main.setText("/model");
+  s.state.main.handleInput(ENTER);
+  await flush();
+  expect(s.state.main.getText()).toBe("newer");
+  expect(s.notes.at(-1)?.message).toBe("Restored stashed prompt (1 more stashed)");
+  s.state.main.setText("/model");
+  s.state.main.handleInput(ENTER);
+  await flush();
+  expect(s.state.main.getText()).toBe("");
+  expect((globals[STASH_KEY] as PromptStash).value).toBe("older");
 });
 
 test("Ctrl+S on an empty editor with nothing stashed stashes the next-prompt suggestion", async () => {
@@ -407,7 +472,7 @@ test("a fresh extension retains a same-session cursor/mode snapshot until Ctrl+S
   expect(restored.cursor.col).toBe(4);
 });
 
-test("same-session replacement without shutdown protects a new draft until an explicit swap", async () => {
+test("same-session replacement without shutdown protects a new draft until Ctrl+S", async () => {
   const { h, s } = await start();
   s.state.main.setText("carry");
   s.state.main.handleInput(CTRL_S);
@@ -418,8 +483,8 @@ test("same-session replacement without shutdown protects a new draft until an ex
   expect(next.status.get(STATUS_ID)).toBe(STATUS_TEXT);
   expect(h.writes).toHaveLength(1);
   next.state.main.handleInput(CTRL_S);
-  expect(next.state.main.getText()).toBe("carry");
-  expect((globals[STASH_KEY] as PromptStash).value).toBe("new draft");
+  expect(next.state.main.getText()).toBe("");
+  expect((globals[STASH_KEY] as PromptStash).entries.map((e) => e.text)).toEqual(["carry", "new draft"]);
 });
 
 test("shutdown never tears down a newer editor owner", async () => {
@@ -801,16 +866,23 @@ test("service: answers only while active, and each controller keeps its own stas
   expect(globals[STASH_KEY] && (globals[STASH_KEY] as PromptStash).hasPrompt).toBe(false); // main's stash untouched
 
   editor.text = "other";
+  editor.mode = "insert";
   ctl.handleKey(CTRL_S);
-  expect(editor.text).toBe("side draft");
-  expect(editor.mode).toBe("normal");
-  expect(notes.at(-1)).toBe("Swapped current and stashed prompts");
+  expect(editor.text).toBe("");
+  expect(ctl.count).toBe(2);
+  expect(notes.at(-1)).toBe("Prompt stashed (2 stashed)");
 
   ctl.submitted("a question"); // not a / command: nothing comes back
-  editor.text = "";
-  ctl.submitted("a question");
   expect(editor.text).toBe("");
   ctl.submitted("/new");
   expect(editor.text).toBe("other");
+  expect(ctl.count).toBe(1);
+  ctl.submitted("/new"); // the shelved draft waits for Ctrl+S
+  editor.text = "";
+  ctl.submitted("/new");
+  expect(editor.text).toBe("");
+  ctl.handleKey(CTRL_S);
+  expect(editor.text).toBe("side draft");
+  expect(editor.mode).toBe("normal");
   expect(ctl.stashed).toBe(false);
 });

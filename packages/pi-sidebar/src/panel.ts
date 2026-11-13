@@ -630,7 +630,9 @@ export class SidebarPanel {
         : [raw("enter", "ask"), ...scroll, bound("app.tools.expand", "expand"), bound("app.thinking.toggle", "thinking"), raw("/new", "fresh thread"), close];
     }
     hints = hints.filter((h) => h.key);
-    const stashed = this.host.stash?.()?.stashed ? t.fg("accent", "stashed") : undefined;
+    const stash = this.host.stash?.();
+    const count = stash?.count ?? 0;
+    const stashed = stash?.stashed ? t.fg("accent", count > 1 ? `stashed ${count}` : "stashed") : undefined;
     return hintColumns(hints, width, stashed, (s) => t.fg("muted", s), (s) => t.fg("dim", s));
   }
 }

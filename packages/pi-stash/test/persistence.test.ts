@@ -6,7 +6,7 @@ import { afterEach, beforeEach, expect, test } from "vitest";
 import { EDITOR_SNAPSHOT, TAKE_NEXT_CHANNEL, type EditorSnapshot, type TakeNextRequest } from "../src/contract.ts";
 import { PromptStash, type StashedPrompt } from "../src/core.ts";
 import promptStash, { adoptStash, createStashController, LEASE, STASH_KEY, STATUS_ID, STATUS_TEXT, WRAPPER } from "../src/index.ts";
-import { readStashState, serializeStash, STASH_ENTRY_TYPE } from "../src/persistence.ts";
+import { readStashState, serializeStash, STASH_ENTRY_TYPE, type PersistedStashState } from "../src/persistence.ts";
 import { CTRL_S, ENTER, FakeEditor, FakeSessionManager, SnapshotEditor, flush, harness, type TestSessionManager } from "./harness.ts";
 
 const globals = globalThis as Record<symbol, unknown>;
@@ -20,7 +20,10 @@ afterEach(resetProcess);
 
 const stash = () => globals[STASH_KEY] as PromptStash;
 const record = (data: unknown) => ({ type: "custom", customType: STASH_ENTRY_TYPE, data });
-const saved = (text?: string) => record(serializeStash(text === undefined ? undefined : { text }));
+type Single = Extract<PersistedStashState, { version: 1 }>;
+/** A single auto-restorable draft, saved in the version-1 shape. */
+const single = (entry: StashedPrompt) => serializeStash([entry], true) as Single;
+const saved = (text?: string) => record(serializeStash(text === undefined ? [] : [{ text }], text !== undefined));
 const snapshot = (text: string): EditorSnapshot => ({
   version: 1, text, cursor: { line: 1, col: 2 }, mode: "visual", anchor: { line: 0, col: 1 },
 });
@@ -46,10 +49,10 @@ function reloadedManager(manager: TestSessionManager) {
 // Codec: all durable data is detached and whitelisted, never JSON-stringified wholesale.
 test.each(["first\nsecond\n", "日本語 🐢 café e\u0301", " \t\n  "])("codec preserves every text byte: %j", (text) => {
   const original: StashedPrompt = { text };
-  const encoded = serializeStash(original);
+  const encoded = single(original);
   expect(encoded).toEqual({ version: 1, prompt: { text } });
   expect(encoded.prompt).not.toBe(original);
-  expect(readStashState([record(JSON.parse(JSON.stringify(encoded)))])).toEqual({ status: "valid", entry: original });
+  expect(readStashState([record(JSON.parse(JSON.stringify(encoded)))])).toEqual({ status: "valid", prompts: [original], autoRestore: true });
 });
 
 test("codec copies cursor/mode/anchor, strips history and unknown properties, and isolates mutations", () => {
@@ -58,7 +61,7 @@ test("codec copies cursor/mode/anchor, strips history and unknown properties, an
   history.circular = history;
   const original = { ...snapshot(text), history, unknown: "not durable" };
   Object.assign(original.cursor, { extra: "not durable" });
-  const encoded = serializeStash({ text, snapshot: original });
+  const encoded = single({ text, snapshot: original });
   expect(() => JSON.stringify(encoded)).not.toThrow();
   expect(encoded.prompt?.snapshot).toEqual(snapshot(text));
   expect(encoded.prompt?.snapshot).not.toBe(original);
@@ -67,15 +70,15 @@ test("codec copies cursor/mode/anchor, strips history and unknown properties, an
   const result = readStashState([record(encoded)]);
   expect(result.status).toBe("valid");
   if (result.status !== "valid") throw new Error("expected valid snapshot");
-  expect(result.entry?.snapshot).toEqual(snapshot(text));
-  expect(result.entry?.snapshot).not.toBe(encoded.prompt?.snapshot);
-  result.entry!.snapshot!.cursor.col = 99;
-  result.entry!.snapshot!.anchor!.line = 99;
+  expect(result.prompts[0]?.snapshot).toEqual(snapshot(text));
+  expect(result.prompts[0]?.snapshot).not.toBe(encoded.prompt?.snapshot);
+  result.prompts[0]!.snapshot!.cursor.col = 99;
+  result.prompts[0]!.snapshot!.anchor!.line = 99;
   expect(encoded.prompt?.snapshot).toEqual(snapshot(text));
   original.cursor.col = 42;
   expect(encoded.prompt?.snapshot?.cursor.col).toBe(2);
   encoded.prompt!.text = "changed durable reference";
-  expect(result.entry?.text).toBe(text);
+  expect(result.prompts[0]?.text).toBe(text);
   expect(original.history).toBe(history);
 });
 
@@ -87,8 +90,8 @@ test.each([
   { ...snapshot("x"), anchor: { line: 0, col: -1 } },
 ])("invalid optional snapshot keeps valid text: %j", (value) => {
   expect(readStashState([record({ version: 1, prompt: { text: "x", snapshot: value } })]))
-    .toEqual({ status: "valid", entry: { text: "x" } });
-  expect(serializeStash({ text: "x", snapshot: value as EditorSnapshot })).toEqual({ version: 1, prompt: { text: "x" } });
+    .toEqual({ status: "valid", prompts: [{ text: "x" }], autoRestore: true });
+  expect(single({ text: "x", snapshot: value as EditorSnapshot })).toEqual({ version: 1, prompt: { text: "x" } });
 });
 
 test("codec scans file order, not branch ancestry, ignores other entry types and respects explicit null", () => {
@@ -100,10 +103,10 @@ test("codec scans file order, not branch ancestry, ignores other entry types and
     { ...saved(), id: "consumed", parentId: "old" },
     { type: "custom_message", customType: STASH_ENTRY_TYPE, data: { version: 1, prompt: { text: "not a snapshot" } } },
   ];
-  expect(readStashState(entries)).toEqual({ status: "valid" });
-  expect(readStashState([...entries, saved("latest")])).toEqual({ status: "valid", entry: { text: "latest" } });
-  expect(serializeStash(undefined)).toEqual({ version: 1, prompt: null });
-  expect(serializeStash(undefined)).not.toBe(serializeStash(undefined));
+  expect(readStashState(entries)).toEqual({ status: "valid", prompts: [], autoRestore: false });
+  expect(readStashState([...entries, saved("latest")])).toEqual({ status: "valid", prompts: [{ text: "latest" }], autoRestore: true });
+  expect(serializeStash([], false)).toEqual({ version: 1, prompt: null });
+  expect(serializeStash([], false)).not.toBe(serializeStash([], false));
 });
 
 test.each([
@@ -115,7 +118,7 @@ test.each([
 });
 
 // Mutation-time records, not shutdown-only saves or intermediate swap states.
-test("stash, swap, manual restore and automatic restore save their final state exactly once", async () => {
+test("push, pop, browse and automatic restore save their final state exactly once", async () => {
   const { h, s } = await boot();
   s.state.main.handleInput(CTRL_S); // nothing to stash
   s.state.main.handleInput("x"); // ordinary typing
@@ -124,27 +127,64 @@ test("stash, swap, manual restore and automatic restore save their final state e
   s.state.main.handleInput(CTRL_S);
   s.state.main.setText("two");
   s.state.main.handleInput(CTRL_S);
-  expect(s.state.main.getText()).toBe("one");
+  expect(s.state.main.getText()).toBe("");
   expect(h.writes.map((write) => write.data)).toEqual([
-    { version: 1, prompt: { text: "one" } }, { version: 1, prompt: { text: "two" } },
+    { version: 1, prompt: { text: "one" } },
+    { version: 2, prompts: [{ text: "one" }, { text: "two" }], autoRestore: true },
   ]);
-  s.state.main.setText("");
-  s.state.main.handleInput(CTRL_S);
+  s.state.main.handleInput(CTRL_S); // pop
   expect(s.state.main.getText()).toBe("two");
-  expect(h.writes.at(-1)?.data).toEqual({ version: 1, prompt: null });
+  expect(h.writes.at(-1)?.data).toEqual({ version: 2, prompts: [{ text: "one" }], autoRestore: false });
+  s.state.main.handleInput(CTRL_S); // browse: "two" goes to the bottom, "one" comes up
+  expect(s.state.main.getText()).toBe("one");
+  expect(h.writes.at(-1)?.data).toEqual({ version: 2, prompts: [{ text: "two" }], autoRestore: false });
+  s.state.main.handleInput("!"); // any other key ends browsing
   s.state.main.handleInput(CTRL_S);
+  expect(h.writes.at(-1)?.data).toEqual({ version: 2, prompts: [{ text: "two" }, { text: "one!" }], autoRestore: true });
   s.state.main.setText("/model");
   s.state.main.handleInput(ENTER);
   await flush();
-  expect(s.state.main.getText()).toBe("two");
-  expect(h.writes.map((write) => write.data)).toEqual([
-    { version: 1, prompt: { text: "one" } }, { version: 1, prompt: { text: "two" } },
-    { version: 1, prompt: null }, { version: 1, prompt: { text: "two" } }, { version: 1, prompt: null },
-  ]);
+  expect(s.state.main.getText()).toBe("one!");
+  expect(h.writes).toHaveLength(6);
+  expect(h.writes.at(-1)?.data).toEqual({ version: 2, prompts: [{ text: "two" }], autoRestore: false });
   expect(h.writes.every((write) => write.customType === STASH_ENTRY_TYPE)).toBe(true);
+  // The shelved draft does not come back on its own.
+  s.state.main.setText("/model");
+  s.state.main.handleInput(ENTER);
+  await flush();
+  expect(stash().value).toBe("two");
   await h.emit("session_start", {}, s.ctx);
   await h.emit("session_shutdown", {}, s.ctx);
-  expect(h.writes).toHaveLength(5); // no unchanged reload/shutdown duplicates
+  expect(h.writes).toHaveLength(6); // no unchanged reload/shutdown duplicates
+});
+
+test("a saved stack reloads with its order and shelved state", async () => {
+  const manager = new FakeSessionManager({ entries: [
+    record({ version: 2, prompts: [{ text: "a" }, { text: "b" }, { text: "c" }], autoRestore: false }),
+  ] });
+  const { s } = await boot(manager);
+  expect(stash().count).toBe(3);
+  expect(stash().value).toBe("c");
+  s.state.main.setText("/model");
+  s.state.main.handleInput(ENTER);
+  await flush();
+  expect(stash().count).toBe(3); // shelved: no automatic restore
+  s.state.main.setText("");
+  for (const expected of ["c", "b", "a", "c"]) {
+    s.state.main.handleInput(CTRL_S);
+    expect(s.state.main.getText()).toBe(expected);
+  }
+  expect(s.notes.at(-1)?.message).toBe("Restored stashed prompt 1/3");
+  expect(stash().count).toBe(2);
+});
+
+test("invalid version-2 envelopes are rejected", () => {
+  for (const data of [
+    { version: 2, prompts: [{ text: "" }], autoRestore: true },
+    { version: 2, prompts: "x", autoRestore: true },
+    { version: 2, prompts: [{ text: "a" }] },
+    { version: 3, prompts: [], autoRestore: false },
+  ]) expect(readStashState([saved("must not return"), record(data)])).toEqual({ status: "invalid" });
 });
 
 test("taking an optional next-prompt suggestion saves it without submission", async () => {
@@ -183,9 +223,10 @@ test.each(["", "a new current draft"])("full restart keeps a recovered stash sta
   expect(next.s.status.get(STATUS_ID)).toBe(STATUS_TEXT);
   expect(stash().value).toBe("recover me\n日本語");
   expect(next.h.writes).toEqual([]);
-  next.s.state.main.handleInput(CTRL_S);
-  expect(next.s.state.main.getText()).toBe("recover me\n日本語");
+  next.s.state.main.handleInput(CTRL_S); // restores into an empty editor, else stashes the new draft on top
+  expect(next.s.state.main.getText()).toBe(text ? "" : "recover me\n日本語");
   expect(stash().value).toBe(text || undefined);
+  expect(stash().count).toBe(text ? 2 : 0);
   await next.h.emit("session_shutdown", {}, next.s.ctx);
   resetProcess();
   const again = await boot(reloadedManager(manager));
@@ -217,7 +258,7 @@ test("session A -> fresh B -> A isolates slots even in the same cwd", async () =
   const resumedB = h.session({ manager: b.manager });
   await h.emit("session_start", { reason: "resume" }, resumedB.ctx);
   expect(stash().value).toBe("B draft");
-  expect(readStashState(a.manager.getEntries())).toEqual({ status: "valid" });
+  expect(readStashState(a.manager.getEntries())).toEqual({ status: "valid", prompts: [], autoRestore: false });
 });
 
 test.each([undefined, "imported stash"])("same-ID different-path imports load only destination state (%j)", async (destination) => {
@@ -241,7 +282,7 @@ test.each([undefined, "imported stash"])("same-ID different-path imports load on
   expect(next.state.main.getText()).toBe("");
   expect(next.writes).toEqual([]);
   expect(parent.writes).toHaveLength(1);
-  expect(readStashState(parent.getEntries())).toEqual({ status: "valid", entry: { text: "outgoing stash" } });
+  expect(readStashState(parent.getEntries())).toEqual({ status: "valid", prompts: [{ text: "outgoing stash" }], autoRestore: true });
 });
 
 test("same-session factory reload retains in-process snapshot/history without duplicate writes", async () => {
@@ -328,7 +369,7 @@ test.each([false, true])("interactive fork copies live state including empty, ov
     child.state.main.handleInput(ENTER);
     await flush();
     expect(child.state.main.getText()).toBe("parent stash");
-    expect(readStashState(childManager.getEntries())).toEqual({ status: "valid" });
+    expect(readStashState(childManager.getEntries())).toEqual({ status: "valid", prompts: [], autoRestore: false });
   }
   expect(s.manager.getEntries()).toEqual(parentRecords);
   const resumed = h.session({ manager: s.manager });
@@ -361,8 +402,8 @@ test("CLI fork uses copied entries and consumption only clears the child", async
   expect(s.state.main.getText()).toBe("");
   expect(h.writes).toEqual([]);
   s.state.main.handleInput(CTRL_S);
-  expect(readStashState(child.getEntries())).toEqual({ status: "valid" });
-  expect(readStashState(parent.getEntries())).toEqual({ status: "valid", entry: { text: "copied stash" } });
+  expect(readStashState(child.getEntries())).toEqual({ status: "valid", prompts: [], autoRestore: false });
+  expect(readStashState(parent.getEntries())).toEqual({ status: "valid", prompts: [{ text: "copied stash" }], autoRestore: true });
 });
 
 for (const command of ["/model", "!ls"]) {
@@ -380,7 +421,7 @@ for (const command of ["/model", "!ls"]) {
     expect(next.state.main.getText()).toBe("");
     expect(stash().value).toBe("destination stash");
     expect(next.writes).toEqual([]);
-    expect(readStashState(s.manager.getEntries())).toEqual({ status: "valid", entry: { text: "outgoing stash" } });
+    expect(readStashState(s.manager.getEntries())).toEqual({ status: "valid", prompts: [{ text: "outgoing stash" }], autoRestore: true });
   });
 }
 
@@ -412,9 +453,11 @@ test("write failures retain memory, omit exception/draft text and retry the fina
   expect(h.writes).toEqual([]);
   h.writeError = undefined;
   s.state.main.setText("replacement draft");
-  s.state.main.handleInput(CTRL_S); // swap retries the current, not failed old, snapshot
-  expect(s.state.main.getText()).toBe("private stashed prompt");
-  expect(h.writes).toEqual([{ customType: STASH_ENTRY_TYPE, data: { version: 1, prompt: { text: "replacement draft" } } }]);
+  s.state.main.handleInput(CTRL_S); // the next push retries the current, not failed old, snapshot
+  expect(s.state.main.getText()).toBe("");
+  expect(h.writes).toEqual([{ customType: STASH_ENTRY_TYPE, data: {
+    version: 2, prompts: [{ text: "private stashed prompt" }, { text: "replacement draft" }], autoRestore: true,
+  } }]);
   await h.emit("session_shutdown", {}, s.ctx);
   expect(h.writes).toHaveLength(1);
 });
@@ -436,13 +479,12 @@ test("a dirty state is rewritten even if it returns to the last successful snaps
   s.state.main.setText("one");
   s.state.main.handleInput(CTRL_S);
   manager.failNext = true;
-  s.state.main.setText("two");
-  s.state.main.handleInput(CTRL_S);
-  expect(readStashState(manager.getEntries())).toEqual({ status: "valid", entry: { text: "two" } });
-  s.state.main.handleInput(CTRL_S); // back to "one", but "two" may have been written
+  s.state.main.handleInput(CTRL_S); // pop
+  expect(readStashState(manager.getEntries())).toEqual({ status: "valid", prompts: [], autoRestore: false });
+  s.state.main.handleInput(CTRL_S); // back to "one", but the empty state may have been written
   expect(h.writes).toHaveLength(2);
   expect(manager.writes).toHaveLength(3);
-  expect(readStashState(manager.getEntries())).toEqual({ status: "valid", entry: { text: "one" } });
+  expect(readStashState(manager.getEntries())).toEqual({ status: "valid", prompts: [{ text: "one" }], autoRestore: true });
 });
 
 test("shutdown retries dirty state, including a failed empty-state write, without losing current text", async () => {
@@ -516,7 +558,7 @@ test("real SDK disk round trip stores the stash only as custom state, outside mo
     await next.h.emit("session_shutdown", {}, next.s.ctx);
     resetProcess();
     const consumed = SessionManager.open(file);
-    expect(readStashState(consumed.getEntries())).toEqual({ status: "valid" });
+    expect(readStashState(consumed.getEntries())).toEqual({ status: "valid", prompts: [], autoRestore: false });
     expect(consumed.getEntries().filter((entry) => entry.type === "custom")).toHaveLength(2);
     await boot(consumed);
     expect(stash().hasPrompt).toBe(false);
@@ -537,10 +579,10 @@ test("real SDK draft-only sessions buffer stash state until the first user messa
     await h.emit("session_shutdown", {}, s.ctx);
     expect(existsSync(file)).toBe(false);
     expect(readdirSync(dir)).toEqual([]);
-    expect(readStashState(manager.getEntries())).toEqual({ status: "valid", entry: { text: "buffered stash" } });
+    expect(readStashState(manager.getEntries())).toEqual({ status: "valid", prompts: [{ text: "buffered stash" }], autoRestore: true });
     manager.appendMessage({ role: "user", content: "first user prompt, no assistant reply yet", timestamp: Date.now() });
     expect(existsSync(file)).toBe(true);
-    expect(readStashState(SessionManager.open(file).getEntries())).toEqual({ status: "valid", entry: { text: "buffered stash" } });
+    expect(readStashState(SessionManager.open(file).getEntries())).toEqual({ status: "valid", prompts: [{ text: "buffered stash" }], autoRestore: true });
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -557,7 +599,7 @@ test("real SDK --no-session manager keeps state in memory without creating files
     await h.emit("session_shutdown", {}, s.ctx);
     expect(manager.getSessionFile()).toBeUndefined();
     expect(readdirSync(dir)).toEqual([]);
-    expect(readStashState(manager.getEntries())).toEqual({ status: "valid", entry: { text: "ephemeral stash" } });
+    expect(readStashState(manager.getEntries())).toEqual({ status: "valid", prompts: [{ text: "ephemeral stash" }], autoRestore: true });
     expect(readStashState(SessionManager.inMemory(dir).getEntries())).toEqual({ status: "missing" });
   } finally {
     rmSync(dir, { recursive: true, force: true });

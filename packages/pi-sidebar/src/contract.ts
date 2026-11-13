@@ -100,7 +100,9 @@ export interface StashControllerOptions {
 
 export interface StashController {
   readonly stashed: boolean;
-  /** Handle the stash key (Ctrl+S); true when consumed. */
+  /** How many drafts are stashed (absent from providers that keep only one). */
+  readonly count?: number;
+  /** Handle the stash key (Ctrl+S), or any other key to end browsing; true when consumed. */
   handleKey(data: string): boolean;
   /** After a submit: a `/` command brings the stash back into an empty editor. */
   submitted(text: string): void;

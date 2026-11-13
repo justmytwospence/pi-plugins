@@ -461,6 +461,9 @@ test("a stashed prompt gets its own row under the editor, with a preview when re
   const long = "x".repeat(100);
   assert.equal(plain(mod.renderFooter({ ...s, stash: { text: long } }, 160, theme)[0]), ` \uf187  Stashed \u00b7 "${long}" \u00b7 ctrl+s to restore`);
   for (let width = 1; width <= 160; width++) assert.ok(mod.renderFooter(s, width, theme).every((row) => visibleWidth(row) <= width));
+  // Several stashed: the count leads, the preview is the newest (what ctrl+s brings back).
+  assert.equal(plain(mod.renderFooter({ ...s, stash: { text: "newest", count: 3 } }, 120, theme)[0]), ' \uf187  Stashed 3 \u00b7 "newest" \u00b7 ctrl+s to restore');
+  assert.equal(plain(mod.renderFooter({ ...s, stash: { text: "only", count: 1 } }, 120, theme)[0]), ' \uf187  Stashed \u00b7 "only" \u00b7 ctrl+s to restore');
   // pi-stash's internals unreadable: still a row, just without the preview.
   assert.equal(plain(mod.renderFooter({ ...s, stash: {} }, 120, theme)[0]), " \uf187  Stashed \u00b7 ctrl+s to restore");
   // Unrecognized text from the stash extension stays in the status row.

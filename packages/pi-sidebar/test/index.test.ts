@@ -458,6 +458,28 @@ describe("opening and focus", () => {
     expect(created).toBe(1);
   });
 
+  it("marks the stash in the hints, with a count when several drafts are stashed", () => {
+    const { pi, controller, ctx } = setup();
+    const state = { stashed: false, count: 0 };
+    pi.events.on("pi-plugins.prompt-stash.v1", (data: any) => {
+      data.provider = "pi-stash";
+      data.create = () => ({
+        get stashed() { return state.stashed; },
+        get count() { return state.count; },
+        handleKey: () => false,
+        submitted: () => undefined,
+      });
+    });
+    controller.toggle(ctx as never);
+    const panel = panelOf(controller);
+    const hints = () => (panel.hintLines(80) as string[]).join("\n");
+    expect(hints()).not.toContain("stashed");
+    Object.assign(state, { stashed: true, count: 1 });
+    expect(hints()).toMatch(/stashed(?! \d)/);
+    Object.assign(state, { count: 3 });
+    expect(hints()).toContain("stashed 3");
+  });
+
   it("leaves Ctrl+S to the editor without pi-stash", () => {
     const { controller, ctx } = setup();
     controller.toggle(ctx as never);
