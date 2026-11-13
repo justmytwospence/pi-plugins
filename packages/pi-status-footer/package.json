@@ -1,6 +1,6 @@
 {
   "name": "@justmytwospence/pi-status-footer",
-  "version": "0.1.66",
+  "version": "0.1.67",
   "description": "Pi footer: project, branch, model, context gauge, session cost and Claude/Codex plan limits.",
   "type": "module",
   "license": "MIT",

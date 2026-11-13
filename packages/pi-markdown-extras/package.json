@@ -1,6 +1,6 @@
 {
   "name": "@justmytwospence/pi-markdown-extras",
-  "version": "0.1.66",
+  "version": "0.1.67",
   "description": "Extra Markdown rendering for pi's transcript: Mermaid dialect fences, GitHub admonitions, circled numbers and multi-line link labels.",
   "type": "module",
   "license": "MIT",

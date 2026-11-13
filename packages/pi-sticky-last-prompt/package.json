@@ -1,6 +1,6 @@
 {
   "name": "@justmytwospence/pi-sticky-last-prompt",
-  "version": "0.1.66",
+  "version": "0.1.67",
   "description": "Pins the last user prompt scrolled out of view to the top of Pi's fullscreen TUI; click the bar to jump to it.",
   "type": "module",
   "license": "MIT",
