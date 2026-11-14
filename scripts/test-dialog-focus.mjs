@@ -406,7 +406,7 @@ async function testDialogFields(sdkVersion, selectNavOrder, activity) {
       const received = observeInput(dialog), sent = [];
       const send = (...keys) => { sent.push(...keys); f.send(...keys); };
       if (draft) send(draft);
-      send(KEY.down, KEY.left);
+      send(KEY.left, '\x1b[C');
       assert.equal(f.tui.getFocusedComponent(), dialog);
       assert.equal(dialog[Symbol.for('pi-plugins.input-context.v1')](), 'editor');
       assert.ok(plain(f.snapshot()).includes(draft || marker[kind]));
@@ -416,7 +416,7 @@ async function testDialogFields(sdkVersion, selectNavOrder, activity) {
       send(ESCAPE);
       assert.equal(f.dialogs.at(-1).component, dialog, 'Escape closes only the field, not the whole dialog');
       assert.equal(dialog[Symbol.for('pi-plugins.input-context.v1')](), 'list');
-      assert.deepEqual(received, sent, 'Down/Left/Enter/Escape belong exactly once to the embedded wrapper');
+      assert.deepEqual(received, sent, 'Left/Right/Enter/Escape belong exactly once to the embedded wrapper');
       open();
       f.send('\x05', '\x15', 'Field answer', ENTER);
       if (field === 'question-note') f.send(ENTER);

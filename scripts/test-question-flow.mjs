@@ -96,10 +96,12 @@ try {
           } else terminal.send(ESC);
           assert.equal(dialog[CONTEXT](), 'list');
           assert.equal(result, undefined);
-          // Ctrl+J/Ctrl+K leave an open field for the rows, in Insert and Normal mode alike.
+          // Ctrl+J/Ctrl+K belong to an open field; Up/Down at its edges leave it, in Insert and Normal mode alike.
           terminal.send('\r');
           assert.equal(dialog[CONTEXT](), 'editor');
-          terminal.send(CTRL_J);
+          terminal.send(CTRL_K);
+          assert.equal(dialog[CONTEXT](), 'editor');
+          terminal.send('\x1b[B');
           assert.equal(dialog[CONTEXT](), 'list');
           assert.match(screen(), /→ 1\./);
           terminal.send(CTRL_K);
@@ -107,7 +109,7 @@ try {
           if (modal) {
             terminal.send('\r', ESC);
             assert.equal(editors[0][MODE]().state, 'normal');
-            terminal.send(CTRL_K);
+            terminal.send('\x1b[A', '\x1b[A');
             assert.equal(dialog[CONTEXT](), 'list');
             assert.match(screen(), /→ 2\./);
             terminal.send(CTRL_J);
@@ -157,7 +159,7 @@ try {
       terminal.send(field === 'custom' ? '3' : 'n', ...(field === 'custom' ? ['\r'] : []));
       assert.equal(dialog[CONTEXT](), 'editor');
       if (host === 'fleet') assert.equal(tasks.autoOpen(run, { onDismiss() {}, onInteraction() {} }), false, 'an open field must block automatic subagent viewing');
-      terminal.send('\x1b[B', 'x', '\x1b[B', '\r');
+      terminal.send('x', '\r');
       assert.equal(opened, 0, `${host} stole Enter from ${field}`);
       if (field === 'notes') terminal.send('\r');
       assert.equal(result?.cancelled, false, `${host} blocked ${field} submission`);

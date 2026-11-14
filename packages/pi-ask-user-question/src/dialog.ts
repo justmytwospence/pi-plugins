@@ -22,7 +22,7 @@ import {
   visibleWidth,
   wrapTextWithAnsi,
 } from "@earendil-works/pi-tui";
-import { type EditorCreator, type ProseEditor, beginComposition, editorOwnsCancel, inline } from "./editor.ts";
+import { type EditorCreator, type ProseEditor, beginComposition, compositionState, editorOwnsCancel, inline } from "./editor.ts";
 import { BOX_CHROME, box, columns, contentWidth, type Natural, SIDE_ROWS, sideBySide, split, STACKED_ROWS } from "./preview.ts";
 import { type Answer, type Choice, type DialogResult, makeAnswer, shownFor, skippedAnswer } from "./result.ts";
 import { type Question, TYPE_SOMETHING } from "./schema.ts";
@@ -149,15 +149,14 @@ export class QuestionDialog implements Component, Focusable {
     if (this.editing) {
       this.emptyAnswer = false;
       const editor = this.editor();
-      // Ctrl+J/Ctrl+K move between rows from an open field too, in any editor mode: a note is
-      // saved, an answer draft is kept on its row. Shift+Enter is the newline key.
-      const step = matchesKey(data, "ctrl+j") ? 1 : matchesKey(data, "ctrl+k") ? -1 : 0;
-      // Up from an empty field does nothing, as Pi's kill-to-end would: herdr-web-ui clears a text
-      // field with ctrl+k ctrl+u before typing an answer into it.
-      if (step === -1 && !editor?.getText()) return;
-      if (step && !this.onReview()) return this.leaveEditor(step);
-      if (editor && kb.matches(data, "tui.select.cancel") && !editorOwnsCancel(editor)) this.closeEditor();
-      else editor?.handleInput(data);
+      if (!editor) return;
+      if (kb.matches(data, "tui.select.cancel") && !editorOwnsCancel(editor)) return this.closeEditor();
+      // Up on a field's first line or Down on its last moves to the next row, as Pi's prompt
+      // moves to history: the field keeps every editing key (Ctrl+K deletes to the line end,
+      // Ctrl+J starts a line, as in Pi's prompt; herdr-web-ui clears a field with ctrl+k ctrl+u).
+      const step = kb.matches(data, "tui.editor.cursorUp") ? -1 : kb.matches(data, "tui.editor.cursorDown") ? 1 : 0;
+      if (step && !this.onReview()) return this.moveOrLeave(editor, data, step);
+      editor.handleInput(data);
       return;
     }
     const many = this.questions.length > 1;
@@ -176,7 +175,7 @@ export class QuestionDialog implements Component, Focusable {
       } else if (kb.matches(data, "tui.select.cancel")) this.finish(true);
       else if (kb.matches(data, "tui.select.up") || kb.matches(data, "tui.select.down") || matchesKey(data, "ctrl+j") || matchesKey(data, "ctrl+k") || key === "j" || key === "k") {
         this.reviewCursor = 1 - this.reviewCursor;
-      } else if (key === "n" || matchesKey(data, "ctrl+g")) this.openEditor("notes");
+      } else if (key === "n" || matchesKey(data, "ctrl+g") || matchesKey(data, "alt+n")) this.openEditor("notes");
       return;
     }
     const q = this.questions[this.tab]!;
@@ -194,10 +193,11 @@ export class QuestionDialog implements Component, Focusable {
     // belong to the answer, before n/j/k/digits can become list commands.
     if (!reserved && slot.cursor === q.options.length && (isTextInput(data) || (key === " " && (!q.multiSelect || !slot.typed)))) {
       this.openEditor("custom");
-      slot.custom.handleInput(data);
+      // Space only opens the field; it is not the answer's first character.
+      if (key !== " ") slot.custom.handleInput(data);
       return;
     }
-    if (matchesKey(data, "ctrl+g")) return this.openEditor("notes");
+    if (matchesKey(data, "ctrl+g") || matchesKey(data, "alt+n")) return this.openEditor("notes");
     if (kb.matches(data, "tui.select.up") || matchesKey(data, "ctrl+k") || key === "k") slot.cursor = (slot.cursor - 1 + rows) % rows;
     else if (kb.matches(data, "tui.select.down") || matchesKey(data, "ctrl+j") || key === "j") slot.cursor = (slot.cursor + 1) % rows;
     else if (key && /^[1-9]$/u.test(key)) {
@@ -289,6 +289,15 @@ export class QuestionDialog implements Component, Focusable {
     slot.note = raw.trim();
     slot.notes.setText(slot.note);
     this.closeEditor();
+  }
+
+  /** Up/Down in a field: the editor's move, or the next row when it moved nothing (an edge). */
+  private moveOrLeave(editor: ProseEditor, data: string, step: 1 | -1): void {
+    if (!editor.getCursor || editor.isShowingAutocomplete()) return editor.handleInput(data);
+    const at = () => JSON.stringify([editor.getText(), editor.getCursor!(), compositionState(editor)]);
+    const before = at();
+    editor.handleInput(data);
+    if (at() === before) this.leaveEditor(step);
   }
 
   private leaveEditor(step: 1 | -1): void {

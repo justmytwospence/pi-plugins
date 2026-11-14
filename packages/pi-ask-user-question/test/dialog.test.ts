@@ -94,21 +94,54 @@ describe("single question", () => {
     expect(lines.filter((l) => /^\s*─+\s*$/u.test(l))).toHaveLength(1); // only the dialog's bottom border (the top one is titled)
   });
 
-  test("Ctrl+K on an empty field stays in it (herdr-web-ui clears a field with ctrl+k ctrl+u)", () => {
-    const d = dialog([library], ["3", enter, "\x0b", "\x15", ...type("typed"), enter]);
-    expect(d.result?.answers[0]).toMatchObject({ kind: "custom", answer: "typed" });
+  test("Ctrl+K Ctrl+U clear a field with a draft, as herdr-web-ui does", () => {
+    const a = dialog([library], ["3", ...type("old"), esc, enter, "\x0b", "\x01", "\x0b", ...type("typed"), enter]);
+    expect(a.result?.answers[0]).toMatchObject({ kind: "custom", answer: "typed" });
+    const b = dialog([library], ["3", ...type("old"), esc, enter, "\x0b", "\x15", ...type("typed"), enter]);
+    expect(b.result?.answers[0]).toMatchObject({ kind: "custom", answer: "typed" });
   });
 
-  test("Ctrl+J/Ctrl+K move rows from an open field: the answer draft stays, a note is saved", () => {
-    const d = dialog([library], ["3", ...type("draft"), "\n"]);
+  test("Up and Down leave a field at its edges: the answer draft stays, a note is saved", () => {
+    const d = dialog([library], ["3", ...type("draft"), down]);
     expect(screen(d.frames.at(-1))).toMatch(/→ 1\. date-fns/u);
     expect(screen(d.frames.at(-1))).toMatch(/^ {3}3\. draft\s*$/mu);
     d.dialog.handleInput("n");
     for (const c of "small") d.dialog.handleInput(c);
-    d.dialog.handleInput("\x0b");
+    d.dialog.handleInput(up);
+    d.dialog.handleInput(up);
     const text = screen(d.dialog.render(100));
     expect(text).toMatch(/→ 3\. draft/u);
     expect(text).toMatch(/note: small/u);
+  });
+
+  test("Ctrl+K deletes to the end of the line inside a field", () => {
+    const d = dialog([library], ["3", ...type("ab"), "\x01", right, "\x0b", enter]);
+    expect(d.result?.answers[0]).toMatchObject({ answer: "a" });
+  });
+
+  test.each(["\n", "\x1b[106;5u"])("Ctrl+J starts a new line inside a field: %j", (ctrlJ) => {
+    const d = dialog([library], ["3", ...type("a"), ctrlJ, ...type("b"), enter]);
+    expect(d.result?.answers[0]).toMatchObject({ kind: "custom", answer: "a\nb" });
+  });
+
+  test("Up in a multi-line field moves the cursor before leaving", () => {
+    const d = dialog([library], ["3", ...type("a"), "\n", ...type("b"), up]);
+    expect(d.result).toBeUndefined();
+    expect(screen(d.frames.at(-1))).not.toMatch(/→ 2\./u);
+    expect(screen(d.frames.at(-1))).toMatch(/›/u);
+  });
+
+  test.each(["\x1bn", "\x1b[110;3u"])("Alt+N adds a note on the custom row: %j", (altN) => {
+    const d = dialog([library], ["3", altN, ...type("context"), enter, "n", ...type("one of these"), enter]);
+    expect(d.result?.answers[0]).toMatchObject({ kind: "custom", answer: "none of these", notes: "context" });
+  });
+
+  test("Space on the custom row opens the field without typing a space", () => {
+    const d = dialog([library], ["3", space, ...type("x")]);
+    expect(screen(d.frames.at(-1))).toMatch(/› x\s*$/mu);
+    const m = dialog([features], ["4", space, ...type("x")]);
+    expect(screen(m.frames.at(-1))).not.toMatch(/ {2}x/u);
+    expect(screen(m.frames.at(-1))).toMatch(/x/u);
   });
 
   test("a legacy Ctrl+J (LF) in the list moves down instead of choosing", () => {

@@ -6,6 +6,7 @@ const EDITOR_INSERT = Symbol.for("pi-plugins.editor-insert.v1");
 /** Optional structural protocol: no runtime import from a sibling package. */
 export type ProseEditor = Pick<Editor, "focused" | "getText" | "setText" | "onSubmit" | "render" | "handleInput" | "invalidate" | "isShowingAutocomplete"> & {
   dispose?(): void;
+  getCursor?(): { line: number; col: number };
   [EDITOR_MODE]?: () => { state: string };
   [EDITOR_INSERT]?: () => void;
 };
