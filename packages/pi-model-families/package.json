@@ -1,0 +1,45 @@
+{
+  "name": "@justmytwospence/pi-model-families",
+  "version": "0.1.71",
+  "description": "One model-family table for the suite: tiers, plan pairs and offline discovery of new families.",
+  "type": "module",
+  "license": "MIT",
+  "private": true,
+  "keywords": [
+    "pi-package",
+    "pi-extension",
+    "pi",
+    "models"
+  ],
+  "pi": {
+    "extensions": [
+      "./src/index.ts"
+    ]
+  },
+  "scripts": {
+    "test": "vitest run",
+    "check": "tsc --noEmit && vitest run"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-ai": "*",
+    "@earendil-works/pi-tui": "*"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/justmytwospence/pi-plugins",
+    "directory": "packages/pi-model-families"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-ai": "1.2.0",
+    "@earendil-works/pi-coding-agent": "1.2.0",
+    "@earendil-works/pi-tui": "1.2.0",
+    "@types/node": "^22.20.4",
+    "typescript": "^7.0.2",
+    "vitest": "^5.0.2"
+  },
+  "homepage": "https://pi-plugins.vercel.app/plugins/pi-model-families/",
+  "bugs": {
+    "url": "https://github.com/justmytwospence/pi-plugins/issues"
+  }
+}

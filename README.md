@@ -1,6 +1,6 @@
 # Pi Plugins
 
-A modular suite of 35 extensions for [Pi](https://pi.dev): background work, subagents, planning, review, context awareness and terminal ergonomics. Every component can be enabled on its own; one Git ref versions the whole suite. It is not a fork of Pi.
+A modular suite of 36 extensions for [Pi](https://pi.dev): background work, subagents, planning, review, context awareness and terminal ergonomics. Every component can be enabled on its own; one Git ref versions the whole suite. It is not a fork of Pi.
 
 **[Documentation](https://pi-plugins.vercel.app)** · **[Keymap & focus](https://pi-plugins.vercel.app/guides/keyboard/)** · **[Requirements, cost & privacy](https://pi-plugins.vercel.app/guides/requirements/)** · **[Development & testing](https://pi-plugins.vercel.app/development/)**
 
@@ -37,6 +37,7 @@ All 35 references include activation, controls, defaults, requirements, costs an
 | Plugin | Use it to… |
 | --- | --- |
 | [pi-system1](https://pi-plugins.vercel.app/plugins/pi-system1/) | Configure an ordered classifier route and request typed judgments. |
+| [pi-model-families](https://pi-plugins.vercel.app/plugins/pi-model-families/) | One model-family table; offline discovery of new families. |
 | [pi-cache-guard](https://pi-plugins.vercel.app/plugins/pi-cache-guard/) | Review cold-cache sends and optionally trim context. |
 | [pi-status-footer](https://pi-plugins.vercel.app/plugins/pi-status-footer/) | Read Git, context and provider usage at a glance. |
 | [pi-model-waterfall](https://pi-plugins.vercel.app/plugins/pi-model-waterfall/) | Optionally route verified subscription-only models, failing closed without a paid-API fallback. |

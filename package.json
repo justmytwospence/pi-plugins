@@ -20,6 +20,7 @@
       "./packages/pi-todo/index.ts",
       "./packages/pi-ask-user-question/src/index.ts",
       "./packages/pi-system1/src/index.ts",
+      "./packages/pi-model-families/src/index.ts",
       "./packages/pi-plan-mode/src/index.ts",
       "./packages/pi-model-waterfall/src/index.ts",
       "./packages/pi-status-footer/src/index.ts",

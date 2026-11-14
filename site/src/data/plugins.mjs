@@ -20,6 +20,7 @@ export const groups = [
   ] },
   { title: "Context & cost", eyebrow: "03 / Awareness", description: "See what the session is using and choose when to spend more reasoning or context.", plugins: [
     { name: "pi-system1", label: "System 1", description: "Choose the suite's classifier backend and request typed judgments." },
+    { name: "pi-model-families", label: "Model families", description: "Share one model-family table and confirm newly discovered families." },
     { name: "pi-cache-guard", label: "Cache guard", description: "Cache-expiry warnings, a cache clock and optional classifier-guided context trimming." },
     { name: "pi-status-footer", label: "Status footer", description: "Context, Git and provider-aware usage in one responsive footer." },
     { name: "pi-model-waterfall", label: "Model waterfall", description: "Optional subscription-only virtual model with fail-closed quota checks and no paid-API fallback." },
