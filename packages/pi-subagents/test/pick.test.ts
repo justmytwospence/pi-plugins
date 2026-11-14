@@ -95,10 +95,13 @@ test("numeric-aware newest and OpenAI generation siblings, premium newest regist
     .toEqual({ fast: "anthropic/claude-haiku-5", balanced: "anthropic/claude-sonnet-5-5", strong: "anthropic/claude-opus-5-5" });
 });
 
-test("Google/Muse offer only registered stable route candidates, without premium", () => {
+test("Google/Muse offer only registered stable route candidates, premium only when registered", () => {
   const google = registry("google", ["gemini-3.8-flash-lite", "gemini-3.8-flash", "gemini-4-argon", "antigravity-gemini-3.8-flash", "antigravity-gemini-4-argon", "antigravity-claude-sonnet-5-5", "antigravity-claude-opus-5-5", "gemini-4-argon-preview"]);
   expect(providerTiers("google/gemini-4-argon", {}, {}, google)).toEqual({ fast: "google/gemini-3.8-flash-lite", balanced: "google/gemini-3.8-flash", strong: "google/gemini-4-argon" });
   expect(providerTiers("google/antigravity-gemini-4-argon", {}, {}, google)).toEqual({ fast: "google/antigravity-gemini-3.8-flash", balanced: "google/antigravity-gemini-3.8-flash", strong: "google/antigravity-gemini-4-argon" });
+  const gemini4 = registry("google", ["gemini-3.8-flash-lite", "gemini-3.8-flash", "gemini-4-hydrogen", "gemini-4-argon", "gemini-4-carbon", "antigravity-gemini-3.8-flash", "antigravity-gemini-4-hydrogen", "antigravity-gemini-4-argon", "antigravity-gemini-4-carbon"]);
+  expect(providerTiers("google/gemini-4-carbon", {}, {}, gemini4)).toEqual({ fast: "google/gemini-3.8-flash-lite", balanced: "google/gemini-4-hydrogen", strong: "google/gemini-4-argon", premium: "google/gemini-4-carbon" });
+  expect(providerTiers("google/antigravity-gemini-4-argon", {}, {}, gemini4)).toEqual({ fast: "google/antigravity-gemini-4-hydrogen", balanced: "google/antigravity-gemini-4-hydrogen", strong: "google/antigravity-gemini-4-argon", premium: "google/antigravity-gemini-4-carbon" });
   expect(providerTiers("google/antigravity-claude-opus-5-5", {}, {}, google)).toEqual({ fast: "google/antigravity-claude-sonnet-5-5", balanced: "google/antigravity-claude-sonnet-5-5", strong: "google/antigravity-claude-opus-5-5" });
   expect(providerTiers("muse-code/muse-wonder-1.0", {}, {}, registry("muse-code", ["muse-spark", "muse-spark-1.3", "muse-spark-1.3-contributor", "muse-wonder-1.0", "muse-wonder-1.0-full"])))
     .toEqual({ fast: "muse-code/muse-spark-1.3", balanced: "muse-code/muse-spark-1.3", strong: "muse-code/muse-wonder-1.0" });

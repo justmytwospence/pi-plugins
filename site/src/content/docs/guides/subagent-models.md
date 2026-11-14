@@ -42,7 +42,7 @@ OpenAI gives no per-sub-task table. Its guidance is model-level: Astra when qual
 
 ### Google and Muse Code
 
-As of the same 2026-10-29 policy review, Google's [model directory](https://ai.google.dev/gemini-api/docs/models) describes Flash-Lite as the fast, lower-cost family, Flash as balancing speed and capability, and Pro as aimed at complex reasoning/coding. Its [Gemini 3.8 Flash page](https://ai.google.dev/gemini-api/docs/models/gemini-3.8-flash) positions Flash for long-horizon software engineering and agent workflows at Flash speed. These are Google claims about API models, **not** evidence that a subscription Antigravity route has the same cost or capability ordering. `Argon` and `antigravity-` are registered route/model names in the Pi setup, not Google API performance comparisons. A stable numeric ID in the registry is required for automatic Google routing; preview, experimental, media and unversioned variants are excluded by policy.
+As of the same 2026-10-29 policy review, Google's [model directory](https://ai.google.dev/gemini-api/docs/models) describes Flash-Lite as the fast, lower-cost family, Flash as balancing speed and capability, and Pro as aimed at complex reasoning/coding. Its [Gemini 3.8 Flash page](https://ai.google.dev/gemini-api/docs/models/gemini-3.8-flash) positions Flash for long-horizon software engineering and agent workflows at Flash speed. Google's [Gemini 4 Hydrogen launch](https://blog.google/innovation-and-ai/models-and-research/gemini-models/introducing-gemini-4-hydrogen/) (2026-11-12) presents Hydrogen as the successor to 3.8 Flash for fast everyday coding and agentic execution, with Gemini 4 Carbon and Argon as the frontier models for deep, long-horizon reasoning; the suite therefore routes Hydrogen ahead of Flash in the Flash tiers and Carbon as the optional premium family. These are Google claims about API models, **not** evidence that a subscription Antigravity route has the same cost or capability ordering. `Carbon`, `Argon`, `Hydrogen` and `antigravity-` are registered route/model names in the Pi setup, not Google API performance comparisons. A stable numeric ID in the registry is required for automatic Google routing; preview, experimental, media and unversioned variants are excluded by policy.
 
 Meta's [models guide](https://dev.meta.ai/docs/models) positions Wonder for complex, long-running software engineering and orchestration, and Spark for higher-volume, latency- or cost-sensitive work such as subagent tasks. Meta's [Spark page](https://dev.meta.ai/models/muse-spark) describes Spark 1.3 as optimized for agentic workflows and coding; its benchmarks are vendor-reported, not measured here. The guide distinguishes **Standard** (content not used for model training) from **Contributor** (content may be used to train Meta models for a usage/price benefit). Automatic Muse picks use versioned Standard IDs, `muse-spark-1.3` and `muse-wonder-1.0` when registered—not `-contributor` variants, unverified Wonder Full IDs or image models. The bare `muse-spark` alias follows the bridge's catalog default (currently Wonder), so it is not a safe automatic Spark pin. There is no verified registered Muse premium candidate in this setup; an explicit model override remains possible.
 
@@ -56,8 +56,8 @@ Built-in roles supply task/tool scope and **fallback** model/effort baselines wh
 |---|---|---|---|---|
 | `anthropic` | Haiku | Sonnet | Opus | Fable |
 | `openai`, `openai-codex` | Luna | Terra | Sol | Astra |
-| `google/gemini-*` (plain) | stable versioned Flash-Lite | stable versioned Flash | stable versioned Argon/Pro | — |
-| `google/antigravity-gemini-*` | stable versioned Flash | stable versioned Flash | stable versioned Argon/Pro | — |
+| `google/gemini-*` (plain) | stable versioned Flash-Lite | stable versioned Hydrogen/Flash | stable versioned Argon/Pro | stable versioned Carbon |
+| `google/antigravity-gemini-*` | stable versioned Hydrogen/Flash | stable versioned Hydrogen/Flash | stable versioned Argon/Pro | stable versioned Carbon |
 | `google/antigravity-claude-*` | Sonnet | Sonnet | Opus | — |
 | `muse-code` | versioned Standard Spark | versioned Standard Spark | versioned Standard Wonder | — |
 
@@ -65,10 +65,10 @@ These are **suite policy families**, not equivalent capability ratings between v
 
 | Role | Anthropic | OpenAI / Codex | Google Gemini | Muse Code | Unknown/local effort |
 |---|---|---|---|---|---|
-| explorer | Sonnet 5.5 / low | Luna 6 / high | Flash 3.8 / low | Spark 1.3 / low | low |
-| worker | Sonnet 5.5 / medium | Terra 6.1 / medium | Flash 3.8 / medium | Spark 1.3 / medium | medium |
-| researcher | Sonnet 5.5 / medium | Terra 6.1 / medium | Flash 3.8 / medium | Spark 1.3 / medium | medium |
-| writer | Sonnet 5.5 / medium | Terra 6.1 / medium | Flash 3.8 / medium | Spark 1.3 / medium | medium |
+| explorer | Sonnet 5.5 / low | Luna 6 / high | Hydrogen 4 / low | Spark 1.3 / low | low |
+| worker | Sonnet 5.5 / medium | Terra 6.1 / medium | Hydrogen 4 / medium | Spark 1.3 / medium | medium |
+| researcher | Sonnet 5.5 / medium | Terra 6.1 / medium | Hydrogen 4 / medium | Spark 1.3 / medium | medium |
+| writer | Sonnet 5.5 / medium | Terra 6.1 / medium | Hydrogen 4 / medium | Spark 1.3 / medium | medium |
 | reviewer | Opus 5.5 / high | Sol 6.1 / high | Argon 4 / high | Wonder 1.0 / high | high |
 | planner | Opus 5.5 / high | Sol 6.1 / high | Argon 4 / high | Wonder 1.0 / high | high |
 

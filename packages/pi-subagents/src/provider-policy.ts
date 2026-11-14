@@ -24,16 +24,18 @@ const GEMINI: ProviderPolicy = {
   profileProvider: "google", modelPrefix: "",
   tiers: {
     fast: new RegExp(`^gemini-${GEMINI_VERSION}-flash-lite$`, "u"),
-    balanced: new RegExp(`^gemini-${GEMINI_VERSION}-flash$`, "u"),
+    balanced: new RegExp(`^gemini-${GEMINI_VERSION}-(?:hydrogen|flash)$`, "u"),
     strong: new RegExp(`^gemini-${GEMINI_VERSION}-(?:argon|pro)$`, "u"),
+    premium: new RegExp(`^gemini-${GEMINI_VERSION}-carbon$`, "u"),
   },
 };
 const ANTIGRAVITY_GEMINI: ProviderPolicy = {
   profileProvider: "google", modelPrefix: "antigravity-",
   tiers: {
-    fast: new RegExp(`^antigravity-gemini-${GEMINI_VERSION}-flash$`, "u"),
-    balanced: new RegExp(`^antigravity-gemini-${GEMINI_VERSION}-flash$`, "u"),
+    fast: new RegExp(`^antigravity-gemini-${GEMINI_VERSION}-(?:hydrogen|flash)$`, "u"),
+    balanced: new RegExp(`^antigravity-gemini-${GEMINI_VERSION}-(?:hydrogen|flash)$`, "u"),
     strong: new RegExp(`^antigravity-gemini-${GEMINI_VERSION}-(?:argon|pro)$`, "u"),
+    premium: new RegExp(`^antigravity-gemini-${GEMINI_VERSION}-carbon$`, "u"),
   },
 };
 const ANTIGRAVITY_CLAUDE: ProviderPolicy = {

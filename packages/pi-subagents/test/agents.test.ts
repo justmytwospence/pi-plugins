@@ -40,11 +40,11 @@ test("ships seven roles with per-provider fallback profiles and provider-indepen
   });
   expect(profiles).toEqual({
     general: undefined,
-    explorer: { ...baseline("claude-sonnet-5-5", "gpt-6-luna", "gemini-3.8-flash", "muse-spark-1.3", "low"), openai: "openai/gpt-6-luna:high", "openai-codex": "openai-codex/gpt-6-luna:high" },
-    worker: baseline("claude-sonnet-5-5", "gpt-6.1-terra", "gemini-3.8-flash", "muse-spark-1.3", "medium"),
+    explorer: { ...baseline("claude-sonnet-5-5", "gpt-6-luna", "gemini-4-hydrogen", "muse-spark-1.3", "low"), openai: "openai/gpt-6-luna:high", "openai-codex": "openai-codex/gpt-6-luna:high" },
+    worker: baseline("claude-sonnet-5-5", "gpt-6.1-terra", "gemini-4-hydrogen", "muse-spark-1.3", "medium"),
     reviewer: baseline("claude-opus-5-5", "gpt-6.1-sol", "gemini-4-argon", "muse-wonder-1.0", "high"),
-    researcher: baseline("claude-sonnet-5-5", "gpt-6.1-terra", "gemini-3.8-flash", "muse-spark-1.3", "medium"),
-    writer: baseline("claude-sonnet-5-5", "gpt-6.1-terra", "gemini-3.8-flash", "muse-spark-1.3", "medium"),
+    researcher: baseline("claude-sonnet-5-5", "gpt-6.1-terra", "gemini-4-hydrogen", "muse-spark-1.3", "medium"),
+    writer: baseline("claude-sonnet-5-5", "gpt-6.1-terra", "gemini-4-hydrogen", "muse-spark-1.3", "medium"),
     planner: baseline("claude-opus-5-5", "gpt-6.1-sol", "gemini-4-argon", "muse-wonder-1.0", "high"),
   });
   for (const agent of agents) {

@@ -28,17 +28,18 @@ test("Anthropic and both OpenAI provider names route four capability tiers witho
 test("plain and Antigravity Gemini are distinct stable, numeric-only Google routes", () => {
   const plain = "google/gemini-4-argon";
   matches(plain, "fast", ["gemini-3.8-flash-lite", "gemini-4-flash-lite"], ["gemini-3.8-flash", "antigravity-gemini-3.8-flash-lite"]);
-  matches(plain, "balanced", ["gemini-3.8-flash"], ["gemini-3.8-flash-lite"]);
-  matches(plain, "strong", ["gemini-4-argon", "gemini-3.8-pro"], ["gemini-4-pro-image"]);
+  matches(plain, "balanced", ["gemini-4-hydrogen", "gemini-3.8-flash"], ["gemini-3.8-flash-lite", "antigravity-gemini-4-hydrogen"]);
+  matches(plain, "strong", ["gemini-4-argon", "gemini-3.8-pro"], ["gemini-4-pro-image", "gemini-4-carbon"]);
+  matches(plain, "premium", ["gemini-4-carbon"], ["gemini-4-argon", "antigravity-gemini-4-carbon"]);
   const ag = "google/antigravity-gemini-4-argon";
   expect(providerPolicy(ag)?.modelPrefix).toBe("antigravity-");
-  matches(ag, "fast", ["antigravity-gemini-3.8-flash"], ["gemini-3.8-flash", "antigravity-gemini-3.8-flash-lite"]);
-  matches(ag, "balanced", ["antigravity-gemini-3.8-flash"]);
-  matches(ag, "strong", ["antigravity-gemini-4-argon", "antigravity-gemini-3.8-pro"], ["gemini-4-argon"]);
+  matches(ag, "fast", ["antigravity-gemini-4-hydrogen", "antigravity-gemini-3.8-flash"], ["gemini-3.8-flash", "gemini-4-hydrogen", "antigravity-gemini-3.8-flash-lite"]);
+  matches(ag, "balanced", ["antigravity-gemini-4-hydrogen", "antigravity-gemini-3.8-flash"]);
+  matches(ag, "strong", ["antigravity-gemini-4-argon", "antigravity-gemini-3.8-pro"], ["gemini-4-argon", "antigravity-gemini-4-carbon"]);
+  matches(ag, "premium", ["antigravity-gemini-4-carbon"], ["gemini-4-carbon", "antigravity-gemini-4-argon"]);
   for (const parent of [plain, ag]) {
-    expect(providerPolicy(parent)?.tiers.premium).toBeUndefined();
     for (const pattern of Object.values(providerPolicy(parent)!.tiers)) {
-      for (const id of ["gemini-flash", "gemini-3x-flash", "gemini-3.8-flash-preview", "gemini-3.8-flash-exp", "gemini-3.8-flash-image", "antigravity-gemini-4-argon-preview"]) expect(pattern.test(id), id).toBe(false);
+      for (const id of ["gemini-flash", "gemini-3x-flash", "gemini-3.8-flash-preview", "gemini-3.8-flash-exp", "gemini-3.8-flash-image", "antigravity-gemini-4-argon-preview", "gemini-4-hydrogen-xhigh", "antigravity-gemini-4-carbon-preview"]) expect(pattern.test(id), id).toBe(false);
     }
   }
 });
@@ -68,11 +69,11 @@ test("only built-in profiles rebase the physical provider and route prefix, pres
   const google = worker.models!.google!;
   const anthropic = worker.models!.anthropic!;
   expect(routeBuiltinProfile(google, "google/antigravity-gemini-4-argon", providerPolicy("google/antigravity-gemini-4-argon")!))
-    .toEqual({ model: "google/antigravity-gemini-3.8-flash", thinking: "medium" });
+    .toEqual({ model: "google/antigravity-gemini-4-hydrogen", thinking: "medium" });
   expect(routeBuiltinProfile(anthropic, "google/antigravity-claude-opus-5-5", providerPolicy("google/antigravity-claude-opus-5-5")!))
     .toEqual({ model: "google/antigravity-claude-sonnet-5-5", thinking: "medium" });
   expect(routeBuiltinProfile(worker.models!.openai!, "openai-codex/gpt-6-astra", providerPolicy("openai-codex/gpt-6-astra")!))
     .toEqual({ model: "openai-codex/gpt-6.1-terra", thinking: "medium" });
-  expect(google).toEqual({ model: "google/gemini-3.8-flash", thinking: "medium" });
+  expect(google).toEqual({ model: "google/gemini-4-hydrogen", thinking: "medium" });
   expect(anthropic).toEqual({ model: "anthropic/claude-sonnet-5-5", thinking: "medium" });
 });

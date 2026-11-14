@@ -121,8 +121,8 @@ Optional `providerTiers` maps provider names to `fast`, `balanced`, `strong`, an
 |---|---|---|---|---|
 | `anthropic` | Haiku | Sonnet | Opus | Fable |
 | `openai`, `openai-codex` (retain provider ID) | Luna | Terra | Sol | Astra |
-| `google/gemini-*` | stable versioned Flash-Lite | stable versioned Flash | stable versioned Argon/Pro | — |
-| `google/antigravity-gemini-*` | stable versioned Flash | stable versioned Flash | stable versioned Argon/Pro | — |
+| `google/gemini-*` | stable versioned Flash-Lite | stable versioned Hydrogen/Flash | stable versioned Argon/Pro | stable versioned Carbon |
+| `google/antigravity-gemini-*` | stable versioned Hydrogen/Flash | stable versioned Hydrogen/Flash | stable versioned Argon/Pro | stable versioned Carbon |
 | `google/antigravity-claude-*` | Sonnet | Sonnet | Opus | — |
 | `muse-code` | versioned Standard Spark | versioned Standard Spark | versioned Standard Wonder | — |
 
