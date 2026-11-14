@@ -273,7 +273,8 @@ function validateFile(value: unknown): string | undefined {
   if (!file || typeof file !== "object" || Array.isArray(file)) return "not a JSON object";
   if (file.version !== 1) return "version must be 1";
   if (file.routes !== undefined) {
-    if (!file.routes || typeof file.routes !== "object" || Array.isArray(file.routes)) return "routes must be an object";
+    if (!file.routes || typeof file.routes !== "object" || Array.isArray(file.routes))
+      return "routes must be an object";
     for (const [route, entry] of Object.entries(file.routes as Record<string, Record<string, unknown>>)) {
       if (!entry || typeof entry !== "object") return `routes.${route} must be an object`;
       if (entry.add !== undefined && !(Array.isArray(entry.add) && entry.add.every(validFamily)))
@@ -283,9 +284,7 @@ function validateFile(value: unknown): string | undefined {
         entry.pairs !== undefined &&
         !(
           Array.isArray(entry.pairs) &&
-          entry.pairs.every(
-            (pair) => typeof pair?.planner === "string" && typeof pair?.worker === "string",
-          )
+          entry.pairs.every((pair) => typeof pair?.planner === "string" && typeof pair?.worker === "string")
         )
       )
         return `routes.${route}.pairs needs planner and worker ids`;
@@ -388,7 +387,9 @@ export function familyTable(
       members.set(parsed.family, list);
     }
     const newestOf = (family: string) =>
-      [...(members.get(family) ?? [])].sort((a, b) => compareGeneration(b.generation, a.generation) || (a.id < b.id ? -1 : 1))[0];
+      [...(members.get(family) ?? [])].sort(
+        (a, b) => compareGeneration(b.generation, a.generation) || (a.id < b.id ? -1 : 1),
+      )[0];
     const priceOf = (family: string): number | undefined => {
       const newest = newestOf(family);
       if (!newest) return undefined;
@@ -396,9 +397,7 @@ export function familyTable(
       if (own !== undefined || !route.priceFrom) return own;
       const twin = resolved.find((candidate) => candidate.id === route.priceFrom);
       if (!twin) return undefined;
-      const id = twin.format
-        .replace("{family}", family)
-        .replace("{gen}", newest.generation.join(twin.genSeparator));
+      const id = twin.format.replace("{family}", family).replace("{gen}", newest.generation.join(twin.genSeparator));
       for (const provider of twin.providers) {
         const price = priceOfInfo(byKey.get(`${provider}/${id}`));
         if (price !== undefined) return price;
@@ -411,7 +410,8 @@ export function familyTable(
     let frontier: number[] | undefined;
     for (const [family, list] of members)
       if (ranked.has(family))
-        for (const entry of list) if (!frontier || compareGeneration(entry.generation, frontier) > 0) frontier = entry.generation;
+        for (const entry of list)
+          if (!frontier || compareGeneration(entry.generation, frontier) > 0) frontier = entry.generation;
     for (const [family] of members) {
       if (ranked.has(family) || route.ignore?.includes(family)) continue;
       const newest = newestOf(family)!;
@@ -428,11 +428,15 @@ export function familyTable(
             (!base || candidate.price > base.price!)
           )
             base = candidate;
-      const tiers = base
-        ? [...new Set(base.tiers.map((tier): Tier => (tier === "premium" ? "strong" : tier)))]
-        : [];
+      const tiers = base ? [...new Set(base.tiers.map((tier): Tier => (tier === "premium" ? "strong" : tier)))] : [];
       const basis = base ? `priced like ${base.name}` : "no price";
-      const entry: ResolvedFamily = { id: family, name, tiers, source: "provisional", ...(price !== undefined ? { price } : {}) };
+      const entry: ResolvedFamily = {
+        id: family,
+        name,
+        tiers,
+        source: "provisional",
+        ...(price !== undefined ? { price } : {}),
+      };
       const index = base ? route.families.indexOf(base) : route.families.length;
       route.families.splice(index, 0, entry);
       discoveries.push({
@@ -471,11 +475,14 @@ export function tierModels(
   for (const model of available) {
     if (model.provider !== provider || routeOf(table.routes, provider, model.id)?.id !== route.id) continue;
     const parsed = parseId(route, model.id);
-    const rank = parsed ? route.families.findIndex((family) => family.id === parsed.family && family.tiers.includes(tier)) : -1;
+    const rank = parsed
+      ? route.families.findIndex((family) => family.id === parsed.family && family.tiers.includes(tier))
+      : -1;
     if (parsed && rank >= 0) candidates.push({ id: model.id, rank, generation: parsed.generation });
   }
   candidates.sort(
-    (a, b) => a.rank - b.rank || compareGeneration(b.generation, a.generation) || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0),
+    (a, b) =>
+      a.rank - b.rank || compareGeneration(b.generation, a.generation) || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0),
   );
   const parent = route.preferParentGeneration ? parseId(route, parentId) : undefined;
   const top = candidates[0];
@@ -557,7 +564,10 @@ export function ignoreFamily(file: FamiliesFile, route: string, id: string): Fam
   return { ...file, routes: { ...file.routes, [route]: { ...rest, ...(add.length ? { add } : {}), ignore } } };
 }
 
-export function markSeen(file: FamiliesFile, discoveries: readonly Pick<Discovery, "route" | "family">[]): FamiliesFile {
+export function markSeen(
+  file: FamiliesFile,
+  discoveries: readonly Pick<Discovery, "route" | "family">[],
+): FamiliesFile {
   const seen: Record<string, string[]> = { ...file.seen };
   for (const { route, family } of discoveries) seen[route] = [...new Set([...(seen[route] ?? []), family])].sort();
   return { ...file, seen };
@@ -568,7 +578,10 @@ export function describeTable(table: FamilyTable): string {
   for (const route of table.routes) {
     lines.push(route.id);
     for (const family of route.families) {
-      const basis = family.source === "provisional" ? ` (${table.discoveries.find((d) => d.route === route.id && d.family === family.id)?.basis ?? "no price"})` : "";
+      const basis =
+        family.source === "provisional"
+          ? ` (${table.discoveries.find((d) => d.route === route.id && d.family === family.id)?.basis ?? "no price"})`
+          : "";
       lines.push(`  ${family.name}  ${family.tiers.join(", ") || "unrouted"}  ${family.source}${basis}`);
     }
     if (route.ignore?.length) lines.push(`  ignored: ${route.ignore.join(", ")}`);

@@ -2,8 +2,6 @@ import assert from "node:assert/strict";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { test } from "vitest";
 import {
-  compareGeneration,
-  familyOf,
   formatModelSpec,
   parseModelSpec,
   ROLE_MODEL_CHANNEL,
@@ -67,54 +65,6 @@ test("sameModel compares provider and model ID only", () => {
   assert.equal(sameModel({ provider: "a", modelId: "b" }, { provider: "c", modelId: "b" }), false);
   assert.equal(sameModel(undefined, spec), false);
   assert.equal(sameModel(undefined, undefined), false);
-});
-
-test("familyOf reads provider-local families and numeric generations, and ignores snapshots and aliases", () => {
-  assert.deepEqual(familyOf({ provider: "openai", modelId: "gpt-6.10-sol" }), { family: "sol", generation: [6, 10] });
-  assert.deepEqual(familyOf({ provider: "openai-codex", modelId: "gpt-6.1-astra" }), {
-    family: "astra",
-    generation: [6, 1],
-  });
-  assert.deepEqual(familyOf({ provider: "anthropic", modelId: "claude-fable-5-5" }), {
-    family: "fable",
-    generation: [5, 5],
-  });
-  assert.deepEqual(familyOf({ provider: "google", modelId: "antigravity-gemini-4-argon" }), {
-    family: "argon",
-    generation: [4],
-  });
-  assert.deepEqual(familyOf({ provider: "google", modelId: "antigravity-gemini-4-carbon" }), {
-    family: "carbon",
-    generation: [4],
-  });
-  assert.deepEqual(familyOf({ provider: "google", modelId: "gemini-4-hydrogen" }), {
-    family: "hydrogen",
-    generation: [4],
-  });
-  assert.deepEqual(familyOf({ provider: "google", modelId: "gemini-3.8-flash" }), {
-    family: "flash",
-    generation: [3, 8],
-  });
-  for (const model of [
-    { provider: "google", modelId: "gemini-3.8-flash-lite" },
-    { provider: "google", modelId: "gemini-4-argon-preview" },
-    { provider: "google", modelId: "gemini-4-hydrogen-xhigh" },
-    { provider: "google", modelId: "gemini-flash-latest" },
-    { provider: "anthropic", modelId: "claude-sonnet-5-5-20261001" },
-    { provider: "anthropic", modelId: "claude-opus-latest" },
-    { provider: "openai", modelId: "gpt-6.1-astra-20261001" },
-    { provider: "openrouter", modelId: "gpt-6.1-astra" },
-    { provider: "other", modelId: "unknown" },
-  ]) {
-    assert.equal(familyOf(model), undefined, model.modelId);
-  }
-});
-
-test("compareGeneration compares numerically, padding missing parts with zero", () => {
-  assert.ok(compareGeneration([6, 10], [6, 2]) > 0);
-  assert.ok(compareGeneration([6, 1], [6, 10]) < 0);
-  assert.equal(compareGeneration([6], [6, 0]), 0);
-  assert.equal(compareGeneration([6, 1], [6, 1]), 0);
 });
 
 test("effort normalization retains supported/default levels and rounds unsupported requests down", () => {

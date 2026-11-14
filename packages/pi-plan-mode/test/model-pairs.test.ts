@@ -1,6 +1,9 @@
 import assert from "node:assert/strict";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { test } from "vitest";
-import { BUILTIN_PAIRS, pairDefinitions, pairKey, resolvePair } from "../src/model-pairs.js";
+import { builtinPairs, pairDefinitions, pairKey, resolvePair } from "../src/model-pairs.js";
 
 const catalog = (...ids: string[]) =>
   ids.map((entry) => {
@@ -16,7 +19,7 @@ const def = (key: string) => {
 
 test("the built-in pairs plan on a stronger family and build on a cheaper one", () => {
   assert.deepEqual(
-    BUILTIN_PAIRS.map((pair) => [pairKey(pair), pair.name]),
+    builtinPairs().map((pair) => [pairKey(pair), pair.name]),
     [
       ["anthropic/fableplan", "Fable plan, Opus build"],
       ["anthropic/opusplan", "Opus plan, Sonnet build"],
@@ -135,6 +138,43 @@ test("carbonplan plans on Carbon and builds on Hydrogen", () => {
   });
 });
 
+test("the worker prefers the planner's generation and a user-confirmed family joins the derived pairs", () => {
+  const dir = mkdtempSync(join(tmpdir(), "plan-families-"));
+  const previous = process.env.PI_CODING_AGENT_DIR;
+  process.env.PI_CODING_AGENT_DIR = dir;
+  try {
+    assert.deepEqual(
+      resolvePair(def("openai/solplan"), catalog("openai/gpt-6.1-sol", "openai/gpt-6-terra", "openai/gpt-6.1-terra")),
+      {
+        planner: { provider: "openai", modelId: "gpt-6.1-sol" },
+        worker: { provider: "openai", modelId: "gpt-6.1-terra" },
+      },
+    );
+    writeFileSync(
+      join(dir, "model-families.json"),
+      JSON.stringify({ version: 1, routes: { anthropic: { add: [{ id: "nova", tiers: ["premium"] }] } } }),
+    );
+    // A confirmed family is ranked after the built-ins of its tier, so it does not displace Fable.
+    assert.equal(
+      pairDefinitions(undefined).some((pair) => pair.id === "novaplan"),
+      false,
+    );
+    writeFileSync(
+      join(dir, "model-families.json"),
+      JSON.stringify({
+        version: 1,
+        routes: { anthropic: { add: [{ id: "nova", tiers: ["premium"], before: "fable" }] } },
+      }),
+    );
+    const nova = pairDefinitions(undefined).find((pair) => pair.id === "novaplan");
+    assert.equal(nova?.name, "Nova plan, Opus build");
+  } finally {
+    if (previous === undefined) delete process.env.PI_CODING_AGENT_DIR;
+    else process.env.PI_CODING_AGENT_DIR = previous;
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("a custom pair replaces a built-in key in place and a new key is appended", () => {
   const defs = pairDefinitions({
     "anthropic/opusplan": {
@@ -147,7 +187,7 @@ test("a custom pair replaces a built-in key in place and a new key is appended",
       worker: { provider: "openai", modelId: "gpt-6-terra" },
     },
   });
-  assert.equal(defs.length, BUILTIN_PAIRS.length + 1);
+  assert.equal(defs.length, builtinPairs().length + 1);
   assert.equal(defs[1] && pairKey(defs[1]), "anthropic/opusplan");
   assert.equal(defs[1]?.name, "Mine");
   const added = defs[defs.length - 1];

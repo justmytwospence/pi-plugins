@@ -1,13 +1,7 @@
-// Plan model pairs: a virtual model per planner/worker pair (Claude Code's opusplan for every family).
-import {
-  type AvailableImplementationModel,
-  compareGeneration,
-  familyOf,
-  type ModelFamily,
-  type ModelSpec,
-} from "./implementation-models.js";
+import type { AvailableImplementationModel, ModelSpec } from "./implementation-models.js";
+import { compareGeneration, derivePairs, familyName, familyOf, loadFamilyTable } from "./model-families.js";
 
-export type PairEnd = { family: ModelFamily } | { spec: ModelSpec };
+export type PairEnd = { family: string } | { spec: ModelSpec };
 
 export interface PairDefinition {
   provider: string;
@@ -15,39 +9,25 @@ export interface PairDefinition {
   name: string;
   planner: PairEnd;
   worker: PairEnd;
+  /** Built-in pairs: the family-table routes the pair resolves on, tried in order (Antigravity before the API). */
+  routes?: string[];
 }
 
-const FAMILY_NAMES: Record<ModelFamily, string> = {
-  astra: "Astra",
-  sol: "Sol",
-  terra: "Terra",
-  fable: "Fable",
-  opus: "Opus",
-  sonnet: "Sonnet",
-  carbon: "Carbon",
-  argon: "Argon",
-  hydrogen: "Hydrogen",
-  flash: "Flash",
-};
-
-const builtin = (provider: string, id: string, planner: ModelFamily, worker: ModelFamily): PairDefinition => ({
-  provider,
-  id,
-  name: `${FAMILY_NAMES[planner]} plan, ${FAMILY_NAMES[worker]} build`,
-  planner: { family: planner },
-  worker: { family: worker },
-});
-
-export const BUILTIN_PAIRS: readonly PairDefinition[] = [
-  builtin("anthropic", "fableplan", "fable", "opus"),
-  builtin("anthropic", "opusplan", "opus", "sonnet"),
-  builtin("openai-codex", "astraplan", "astra", "sol"),
-  builtin("openai-codex", "solplan", "sol", "terra"),
-  builtin("openai", "astraplan", "astra", "sol"),
-  builtin("openai", "solplan", "sol", "terra"),
-  builtin("google", "carbonplan", "carbon", "hydrogen"),
-  builtin("google", "argonplan", "argon", "hydrogen"),
-];
+/**
+ * Built-in pairs, derived from the shared family table: each route's top premium and strong family
+ * plans, the top family of the next tier down builds. Only ranked families take part, so the
+ * registry (and its provisional discoveries) is not needed here.
+ */
+export function builtinPairs(): PairDefinition[] {
+  return derivePairs(loadFamilyTable([])).map((spec) => ({
+    provider: spec.provider,
+    id: spec.id,
+    name: spec.name,
+    planner: { family: spec.planner },
+    worker: { family: spec.worker },
+    routes: spec.routes,
+  }));
+}
 
 export function pairKey(p: { provider: string; id: string }): string {
   return `${p.provider}/${p.id}`;
@@ -56,7 +36,7 @@ export function pairKey(p: { provider: string; id: string }): string {
 export type CustomPairs = Readonly<Record<string, { planner: ModelSpec; worker: ModelSpec; name?: string }>>;
 
 export function pairDefinitions(custom: CustomPairs | undefined): PairDefinition[] {
-  const defs = [...BUILTIN_PAIRS];
+  const defs = builtinPairs();
   for (const [key, value] of Object.entries(custom ?? {})) {
     const slash = key.indexOf("/");
     if (slash <= 0) continue;
@@ -79,21 +59,19 @@ export function pairDefinitions(custom: CustomPairs | undefined): PairDefinition
 const has = (available: readonly AvailableImplementationModel[], spec: { provider: string; modelId: string }) =>
   available.some((model) => model.provider === spec.provider && model.id === spec.modelId);
 
-/** Google serves one model on two lanes: Antigravity (subscription, `antigravity-` prefix) and the API. */
-export const laneOf = (modelId: string): "antigravity" | "api" =>
-  modelId.startsWith("antigravity-") ? "antigravity" : "api";
-
 function bestFamily(
   available: readonly AvailableImplementationModel[],
   provider: string,
-  family: ModelFamily,
+  family: string,
   prefer?: number[],
-  lane?: "antigravity" | "api",
+  routeId?: string,
 ): ModelSpec | undefined {
+  const table = loadFamilyTable([]);
   const siblings = available.flatMap((model) => {
-    if (model.provider !== provider || (lane && laneOf(model.id) !== lane)) return [];
-    const recognized = familyOf({ provider, modelId: model.id });
-    return recognized?.family === family ? [{ id: model.id, generation: recognized.generation }] : [];
+    if (model.provider !== provider) return [];
+    const recognized = familyOf(table, provider, model.id);
+    if (!recognized || recognized.family.id !== family || (routeId && recognized.route.id !== routeId)) return [];
+    return [{ id: model.id, generation: recognized.generation }];
   });
   siblings.sort((left, right) => {
     if (prefer) {
@@ -119,10 +97,12 @@ export function resolvePair(
       return { error: `${def.planner.spec.provider}/${def.planner.spec.modelId} is not available` };
     planner = def.planner.spec;
   } else {
-    planner =
-      bestFamily(available, def.provider, def.planner.family, undefined, "antigravity") ??
-      bestFamily(available, def.provider, def.planner.family, undefined, "api");
-    if (!planner) return { error: `no available ${FAMILY_NAMES[def.planner.family]} model on ${def.provider}` };
+    const family = def.planner.family;
+    for (const routeId of def.routes ?? [undefined]) {
+      planner = bestFamily(available, def.provider, family, undefined, routeId);
+      if (planner) break;
+    }
+    if (!planner) return { error: `no available ${familyName(family)} model on ${def.provider}` };
   }
   let worker: ModelSpec | undefined;
   if ("spec" in def.worker) {
@@ -130,14 +110,9 @@ export function resolvePair(
       return { error: `${def.worker.spec.provider}/${def.worker.spec.modelId} is not available` };
     worker = def.worker.spec;
   } else {
-    worker = bestFamily(
-      available,
-      def.provider,
-      def.worker.family,
-      familyOf(planner)?.generation,
-      laneOf(planner.modelId),
-    );
-    if (!worker) return { error: `no available ${FAMILY_NAMES[def.worker.family]} model on ${def.provider}` };
+    const planned = familyOf(loadFamilyTable([]), planner.provider, planner.modelId);
+    worker = bestFamily(available, def.provider, def.worker.family, planned?.generation, planned?.route.id);
+    if (!worker) return { error: `no available ${familyName(def.worker.family)} model on ${def.provider}` };
   }
   if (planner.provider === worker.provider && planner.modelId === worker.modelId) {
     return { error: "planner and worker are the same model" };

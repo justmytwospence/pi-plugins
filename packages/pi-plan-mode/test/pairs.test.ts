@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { test } from "vitest";
 import { bindGateShell } from "../src/gate-shell.js";
 import { EXIT_TOOL, INLINE_ENTRY } from "../src/inline-plan.js";
-import { BUILTIN_PAIRS, pairKey } from "../src/model-pairs.js";
+import { builtinPairs, pairKey } from "../src/model-pairs.js";
 import { PAIR_ENTRY, registerPairs } from "../src/pairs.js";
 import { PLAN_PAIR_CHANNEL, queryPlanPair } from "../src/plan-pair-contract.js";
 import { SHELL_READS_CHANNEL } from "../src/shell-reads.js";
@@ -51,7 +51,7 @@ function setup(options: { planning?: boolean; workflow?: string; available?: typ
       return state.level as never;
     },
   });
-  controller.define([...BUILTIN_PAIRS]);
+  controller.define(builtinPairs());
   const branch: unknown[] = [];
   const ctx = {
     cwd: "/repo",
@@ -91,7 +91,7 @@ function setup(options: { planning?: boolean; workflow?: string; available?: typ
 
 test("every built-in pair is registered as a virtual model", () => {
   const { registered } = setup();
-  assert.deepEqual([...registered.keys()], BUILTIN_PAIRS.map(pairKey));
+  assert.deepEqual([...registered.keys()], builtinPairs().map(pairKey));
 });
 
 test("route sends planning to the planner, building to the worker, consulting to the planner", async () => {
