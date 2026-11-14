@@ -1,6 +1,6 @@
 {
   "name": "@justmytwospence/pi-pressure",
-  "version": "0.1.70",
+  "version": "0.1.71",
   "description": "A footer row that appears only while the machine is under CPU or memory pressure: a braille CPU trace, memory pressure, swap-ins and the top process.",
   "type": "module",
   "license": "MIT",
