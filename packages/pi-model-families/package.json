@@ -1,6 +1,6 @@
 {
   "name": "@justmytwospence/pi-model-families",
-  "version": "0.1.71",
+  "version": "0.1.72",
   "description": "One model-family table for the suite: tiers, plan pairs and offline discovery of new families.",
   "type": "module",
   "license": "MIT",
