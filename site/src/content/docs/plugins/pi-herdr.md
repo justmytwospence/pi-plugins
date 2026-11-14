@@ -159,7 +159,7 @@ Model and thinking default to the parent's choices, and focus defaults to false.
 
 `fork: true` (with `where: "worktree"`) forks this conversation into a session file for the worktree and starts the child on it, so the child continues the conversation and `task` is the next step. Its replies arrive like any child's. This session stays in the main checkout: Herdr keeps a repository's main space as the anchor of its worktree spaces. A new branch starts from origin's default branch (after a fetch) and tracks nothing, so a bare `git push` cannot target it. The conversation must be saved first.
 
-pi-herdr never removes a checkout. Herdr's worktree-reaper plugin removes landed, clean, idle worktrees with their space and branch. While this session has an open worktree child it listens for Herdr's `worktree.removed` event; when the child's checkout is removed, the child is marked closed and a passive `herdr-worktree` note arrives with the next prompt, starting no turn.
+pi-herdr never removes a checkout. Herdr's worktree-reaper plugin removes landed, clean, idle worktrees with their space and branch; to clean one up at once, agents are told to invoke its `remove-landed` action, never `git worktree remove` (which leaves the space behind). While this session has an open worktree child it listens for Herdr's `worktree.removed` event; when the child's checkout is removed, the child is marked closed and a passive `herdr-worktree` note arrives with the next prompt, starting no turn.
 
 ## Replies and persistence
 

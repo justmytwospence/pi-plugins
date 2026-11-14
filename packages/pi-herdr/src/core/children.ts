@@ -661,7 +661,7 @@ export class Children {
     rec.awaiting = false;
     rec.closed = true;
     this.save(rec);
-    const kept = rec.where === "worktree" && rec.branch ? ` Its checkout and branch ${rec.branch} stay (git worktree remove ${rec.cwd} removes the checkout).` : "";
+    const kept = rec.where === "worktree" && rec.branch ? ` Its checkout and branch ${rec.branch} stay: herdr's worktree-reaper removes them with their space once the branch lands (\`herdr plugin action invoke worktree-reaper.remove-landed\` does it now; not \`git worktree remove\`, which leaves the space behind).` : "";
     return `Closed ${rec.name}'s pane; its ${this.deps.agent.kind} session stays${rec.session ? ` (${rec.session})` : ""}.${kept}`;
   }
 
