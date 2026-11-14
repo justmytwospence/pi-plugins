@@ -397,13 +397,13 @@ describe("extension factory", () => {
       session.modelRuntime.getModels = () => [google];
       session.modelRuntime.getAvailable = vi.fn(async () => [google]);
       attachStartupHost(mode).refresh?.();
-      await vi.waitFor(() => expect(lines()).toContain("google 1"));
+      await vi.waitFor(() => expect(lines()).toContain("gemini-4-argon"));
       expect(session.modelRuntime.getAvailable).toHaveBeenCalledWith("google");
       expect(lines()).toContain("gemini-4-argon");
       expect(lines()).not.toContain("antigravity-gemini-4-argon");
       session.modelRuntime.getAvailable.mockResolvedValueOnce([]); // OAuth access disappears
       await vi.advanceTimersByTimeAsync(16_000);
-      expect(lines()).not.toContain("google 1");
+      expect(lines()).not.toContain("gemini-4-argon");
       session.model = models[1];
       attachStartupHost(mode).refresh?.();
       expect(lines()).toContain("of 1M");

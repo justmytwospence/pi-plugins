@@ -592,17 +592,17 @@ describe("startup resources", () => {
     expect(section.groups[1]!.actions![0]).toEqual({ kind: "model", provider: "openai", id: "gpt-6.1-sol", thinkingLevel: "high" });
     expect(renderSection(section, 80, plainTheme)).toEqual([
       " Models 3",
-      "   anthropic 2               openai 1",
+      "   anthropic                 openai",
       "   ★ claude-opus-5-5 ●  1M   ★ gpt-6.1-sol:high  922K",
       "     claude-haiku-5-5   1M",
     ]);
     // Too narrow for both: providers wrap onto their own bands.
     expect(renderSection(section, 40, plainTheme)).toEqual([
       " Models 3",
-      "   anthropic 2",
+      "   anthropic",
       "   ★ claude-opus-5-5 ●  1M",
       "     claude-haiku-5-5   1M",
-      "   openai 1",
+      "   openai",
       "   ★ gpt-6.1-sol:high  922K",
     ]);
     const colored: StartupTheme = { fg: (name, text) => `\x1b[${name === "muted" ? 90 : name === "success" ? 32 : 33}m${text}\x1b[0m`, bold: (text) => text };
@@ -654,7 +654,7 @@ describe("startup resources", () => {
         },
       },
     };
-    expect(renderSection(collectModelsSection(mode)!, 80, plainTheme)).toEqual([" Models 2", "   p 2", "   alpha ●  128K", "   beta     128K"]);
+    expect(renderSection(collectModelsSection(mode)!, 80, plainTheme)).toEqual([" Models 2", "   p", "   alpha ●  128K", "   beta     128K"]);
   });
 
   test("the current generation keeps the newest of each family and drops a generation behind", async () => {
@@ -698,10 +698,10 @@ describe("startup resources", () => {
     ]);
     const { lines, hits } = layoutSection(section, 100, plainTheme);
     expect(lines).toHaveLength(8); // Section heading + two seven-row stacks, not two five-row horizontal bands.
-    expect(lines[1]).toContain("anthropic 4");
-    expect(lines[1]).toContain("mtplx 1");
-    expect(lines[6]).toContain("lmstudio 1");
-    expect(lines[3]).toContain("openai 4"); // The right stack starts openai beneath mtplx.
+    expect(lines[1]).toContain("anthropic");
+    expect(lines[1]).toContain("mtplx");
+    expect(lines[6]).toContain("lmstudio");
+    expect(lines[3]).toContain("openai"); // The right stack starts openai beneath mtplx.
     expect(lines[2]).toContain("muse-wonder-1.0-extended");
     expect(lines[7]).toContain("gpt-6.1-pro-preview");
     expect(new Set(hits.map((hit) => JSON.stringify(hit.action))).size).toBe(10);

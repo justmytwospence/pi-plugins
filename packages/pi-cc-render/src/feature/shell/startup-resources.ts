@@ -1294,6 +1294,8 @@ export function buildModelsSection(
 		const skipped = rung !== undefined && rung.state !== "available";
 		return {
 			label: index < 0 ? provider : `${index + 1} ${provider}${note ? ` · ${note}` : ""}`,
+			// A provider's model count says nothing worth the space; the section heading keeps the total.
+			uncounted: true,
 			...(skipped ? { tones: list.map(() => "dim") } : {}),
 			items: list.map((model) => {
 				const label = provider === "google" ? model.id.replace(/^antigravity-/, "") : model.id;
