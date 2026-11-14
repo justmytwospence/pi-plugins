@@ -2,10 +2,10 @@
 
 ## Unreleased
 
-### Chat on the planner, an Argon pair and the next model for the footer
+### Chat on the planner, Argon and Carbon pairs and the next model for the footer
 
 - A plan model pair now routes chat-mode requests (pi-tool-gate's chat workflow) to the planner, like plan mode and consultations; the worker serves only while an approved plan is being implemented, until that run settles (an aborted run stays on the worker), so ordinary work afterwards is back on the planner. `ask_planner` refuses when the planner already answers.
-- Added `google/argonplan` (Argon plans, Flash builds). The planner prefers the Antigravity (`antigravity-`) lane and the worker uses the planner's lane.
+- Added `google/carbonplan` (Carbon plans, Hydrogen builds) and `google/argonplan` (Argon plans, Hydrogen builds). The planner prefers the Antigravity (`antigravity-`) lane and the worker uses the planner's lane.
 - Published the selected pair's phase (plan, chat, consult or build), the model that answers next and its level on the synchronous `pi-plugins.plan-pair.v1` query, which pi-status-footer reads.
 
 ### Implement on a pair's worker from approval

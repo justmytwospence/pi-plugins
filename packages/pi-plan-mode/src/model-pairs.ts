@@ -24,7 +24,9 @@ const FAMILY_NAMES: Record<ModelFamily, string> = {
   fable: "Fable",
   opus: "Opus",
   sonnet: "Sonnet",
+  carbon: "Carbon",
   argon: "Argon",
+  hydrogen: "Hydrogen",
   flash: "Flash",
 };
 
@@ -43,7 +45,8 @@ export const BUILTIN_PAIRS: readonly PairDefinition[] = [
   builtin("openai-codex", "solplan", "sol", "terra"),
   builtin("openai", "astraplan", "astra", "sol"),
   builtin("openai", "solplan", "sol", "terra"),
-  builtin("google", "argonplan", "argon", "flash"),
+  builtin("google", "carbonplan", "carbon", "hydrogen"),
+  builtin("google", "argonplan", "argon", "hydrogen"),
 ];
 
 export function pairKey(p: { provider: string; id: string }): string {

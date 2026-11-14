@@ -14,7 +14,7 @@ const def = (key: string) => {
   return found;
 };
 
-test("the built-in pairs are the planner families one step down", () => {
+test("the built-in pairs plan on a stronger family and build on a cheaper one", () => {
   assert.deepEqual(
     BUILTIN_PAIRS.map((pair) => [pairKey(pair), pair.name]),
     [
@@ -24,7 +24,8 @@ test("the built-in pairs are the planner families one step down", () => {
       ["openai-codex/solplan", "Sol plan, Terra build"],
       ["openai/astraplan", "Astra plan, Sol build"],
       ["openai/solplan", "Sol plan, Terra build"],
-      ["google/argonplan", "Argon plan, Flash build"],
+      ["google/carbonplan", "Carbon plan, Hydrogen build"],
+      ["google/argonplan", "Argon plan, Hydrogen build"],
     ],
   );
 });
@@ -86,24 +87,52 @@ test("argonplan resolves on one Google lane, preferring Antigravity", () => {
       def("google/argonplan"),
       catalog(
         "google/antigravity-gemini-4-argon",
+        "google/antigravity-gemini-4-hydrogen",
         "google/antigravity-gemini-3.8-flash",
         "google/gemini-4-argon",
-        "google/gemini-4.1-flash",
+        "google/gemini-4.1-hydrogen",
       ),
     ),
     {
       planner: { provider: "google", modelId: "antigravity-gemini-4-argon" },
-      worker: { provider: "google", modelId: "antigravity-gemini-3.8-flash" },
+      worker: { provider: "google", modelId: "antigravity-gemini-4-hydrogen" },
     },
   );
-  assert.deepEqual(resolvePair(def("google/argonplan"), catalog("google/gemini-4-argon", "google/gemini-3.8-flash")), {
+  assert.deepEqual(resolvePair(def("google/argonplan"), catalog("google/gemini-4-argon", "google/gemini-4-hydrogen")), {
     planner: { provider: "google", modelId: "gemini-4-argon" },
-    worker: { provider: "google", modelId: "gemini-3.8-flash" },
+    worker: { provider: "google", modelId: "gemini-4-hydrogen" },
   });
   assert.deepEqual(
-    resolvePair(def("google/argonplan"), catalog("google/antigravity-gemini-4-argon", "google/gemini-3.8-flash")),
-    { error: "no available Flash model on google" },
+    resolvePair(def("google/argonplan"), catalog("google/antigravity-gemini-4-argon", "google/gemini-4-hydrogen")),
+    { error: "no available Hydrogen model on google" },
   );
+  assert.deepEqual(
+    resolvePair(
+      def("google/argonplan"),
+      catalog("google/antigravity-gemini-4-argon", "google/antigravity-gemini-3.8-flash"),
+    ),
+    { error: "no available Hydrogen model on google" },
+  );
+});
+
+test("carbonplan plans on Carbon and builds on Hydrogen", () => {
+  assert.deepEqual(
+    resolvePair(
+      def("google/carbonplan"),
+      catalog(
+        "google/antigravity-gemini-4-carbon",
+        "google/antigravity-gemini-4-argon",
+        "google/antigravity-gemini-4-hydrogen",
+      ),
+    ),
+    {
+      planner: { provider: "google", modelId: "antigravity-gemini-4-carbon" },
+      worker: { provider: "google", modelId: "antigravity-gemini-4-hydrogen" },
+    },
+  );
+  assert.deepEqual(resolvePair(def("google/carbonplan"), catalog("google/antigravity-gemini-4-argon")), {
+    error: "no available Carbon model on google",
+  });
 });
 
 test("a custom pair replaces a built-in key in place and a new key is appended", () => {

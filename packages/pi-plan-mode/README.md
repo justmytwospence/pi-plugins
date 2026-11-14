@@ -92,7 +92,8 @@ A plan model pair is a Pi virtual model: one entry in `/model` that plans on one
 | `anthropic/opusplan` | Opus | Sonnet |
 | `openai-codex/astraplan`, `openai/astraplan` | Astra | Sol |
 | `openai-codex/solplan`, `openai/solplan` | Sol | Terra |
-| `google/argonplan` | Argon | Flash |
+| `google/carbonplan` | Carbon | Hydrogen |
+| `google/argonplan` | Argon | Hydrogen |
 
 Each family resolves at request time to the highest available generation on the pair's provider (the worker prefers the planner's generation). A pair whose models are unavailable is removed from `/model` at session start, unless it is the one selected. On Google, the planner prefers the Antigravity (`antigravity-`) models and the worker uses the same lane as the planner. Define your own with `modelPairs` (see [Configuration](#configuration)).
 
