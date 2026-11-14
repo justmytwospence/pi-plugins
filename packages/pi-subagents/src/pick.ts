@@ -1,6 +1,7 @@
 import { type AgentDef, type ProfileModel, THINKING_LEVELS } from "./agents.ts";
 import { type ClassifierAnswer, type ClassifierQuestion, choice } from "./jev.ts";
-import { type Tier, providerPolicy, routeBuiltinProfile } from "./provider-policy.ts";
+import { compareGeneration, familyOf, loadFamilyTable, tierModels } from "./model-families.ts";
+import { type Tier, providerPolicy } from "./provider-policy.ts";
 import type { System1ProvenanceRecord } from "./system1.ts";
 export type { Tier } from "./provider-policy.ts";
 
@@ -25,23 +26,6 @@ export interface TierConfig {
   descriptions: Record<Tier, string>;
 }
 
-/** Numeric-aware model ordering ignores a dated suffix when comparing families. */
-const DATED = /-(\d{8})$/u;
-
-/**
- * Newest first: ids compared numerically with any 8-digit date suffix set aside, then an undated
- * alias before its dated snapshots, then the later date.
- */
-export function newestFirst(a: string, b: string): number {
-  const base = (id: string) => id.replace(DATED, "");
-  const byBase = base(b).localeCompare(base(a), "en", { numeric: true });
-  if (byBase) return byBase;
-  const dateA = a.match(DATED)?.[1];
-  const dateB = b.match(DATED)?.[1];
-  if (!dateA !== !dateB) return dateA ? 1 : -1;
-  return (dateB ?? "").localeCompare(dateA ?? "");
-}
-
 /**
  * Tier models for the parent's provider: its `providerTiers` entry, then a matching legacy `tiers`
  * entry, then the provider's preset over the registry (`available`), per tier. Only models on the
@@ -55,24 +39,13 @@ export function providerTiers(
 ): Partial<Record<Tier, string>> {
   const provider = parentModel.split("/")[0]!;
   const sameProvider = (model: string | undefined) => model?.startsWith(`${provider}/`) ? model : undefined;
-  const parentId = parentModel.slice(provider.length + 1);
-  const policy = providerPolicy(parentModel);
+  const table = loadFamilyTable(available);
   const physical = physicalChatModels(available);
   const configuredModel = (model: string | undefined) => {
     const same = sameProvider(model);
     return same && (!available.length || physical.some((item) => `${item.provider}/${item.id}` === same)) ? same : undefined;
   };
-  const suffixes = policy?.generationSuffixes;
-  const generation = suffixes ? new RegExp(`-(${Object.values(suffixes).join("|")})$`, "u") : undefined;
-  const preset = (tier: Tier) => {
-    const pattern = policy?.tiers[tier];
-    if (!pattern) return undefined;
-    const ids = physical.filter((m) => m.provider === provider && pattern.test(m.id)).map((m) => m.id).sort(newestFirst);
-    const suffix = suffixes?.[tier];
-    const sibling = suffix && generation?.test(parentId) ? parentId.replace(generation, `-${suffix}`) : undefined;
-    const id = (sibling && ids.includes(sibling) ? sibling : undefined) ?? ids[0];
-    return id ? `${provider}/${id}` : undefined;
-  };
+  const preset = (tier: Tier) => tierModels(table, parentModel, physical, tier)[0];
   const models: Partial<Record<Tier, string>> = {};
   for (const tier of TIERS) {
     const model = configuredModel(byProvider[provider]?.[tier]) ?? configuredModel(configured[tier]) ?? preset(tier);
@@ -85,6 +58,7 @@ export function providerTiers(
 export interface AvailableModel {
   provider: string;
   id: string;
+  cost?: { input?: number; output?: number };
   api?: string;
   type?: string;
   reasoning?: boolean;
@@ -129,9 +103,17 @@ export function profileModel(entry: ProfileModel | undefined, provider: string, 
   const id = entry.model.slice(provider.length + 1);
   const registered = physicalChatModels(available).filter((m) => m.provider === provider);
   if (!available.length || registered.some((m) => m.id === id)) return entry;
-  const family = Object.values(providerPolicy(entry.model)?.tiers ?? {}).find((pattern) => pattern.test(id));
-  const newest = family ? registered.map((m) => m.id).filter((m) => family.test(m)).sort(newestFirst)[0] : undefined;
-  return newest ? { ...entry, model: `${provider}/${newest}` } : undefined;
+  const table = loadFamilyTable(available);
+  const wanted = familyOf(table, provider, id);
+  const newest = wanted
+    ? registered
+        .flatMap((m) => {
+          const found = familyOf(table, provider, m.id);
+          return found && found.route.id === wanted.route.id && found.family.id === wanted.family.id ? [{ id: m.id, generation: found.generation }] : [];
+        })
+        .sort((a, b) => compareGeneration(b.generation, a.generation) || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))[0]
+    : undefined;
+  return newest ? { ...entry, model: `${provider}/${newest.id}` } : undefined;
 }
 
 /**
@@ -140,15 +122,25 @@ export function profileModel(entry: ProfileModel | undefined, provider: string, 
  */
 export function agentDefaults(agent: AgentDef, parentModel: string, available: readonly AvailableModel[] = []): { model?: string; thinking?: string } {
   const provider = parentModel.split("/")[0]!;
-  const policy = agent.source === "builtin" ? providerPolicy(parentModel) : undefined;
-  const key = policy?.profileProvider ?? provider;
-  const entry = agent.models && Object.hasOwn(agent.models, key) ? agent.models[key] : undefined;
-  const fromProfile = profileModel(entry && policy ? routeBuiltinProfile(entry, parentModel, policy) : entry, provider, available);
-  const model = fromProfile?.model ?? (agent.model?.startsWith(`${provider}/`) ? agent.model : undefined);
-  // A custom profile's authored effort remains fixed even if its model is unavailable; a
-  // malformed cross-provider profile cannot pin effort on this provider.
-  const authored = agent.source !== "builtin" && entry?.model.startsWith(`${provider}/`) ? entry.thinking : undefined;
-  const thinking = fromProfile?.thinking ?? authored ?? agent.thinking;
+  let model: string | undefined;
+  let thinking: string | undefined;
+  if (agent.source === "builtin" && agent.tiers) {
+    // A built-in role names a tier per route family; the model is that tier's best registered one.
+    const table = loadFamilyTable(available);
+    const policy = providerPolicy(parentModel, table);
+    const entry = policy ? agent.tiers[policy.profileProvider] : undefined;
+    model = entry ? tierModels(table, parentModel, physicalChatModels(available), entry.tier)[0] : undefined;
+    thinking = model ? entry!.thinking : undefined;
+  } else {
+    const entry = agent.models && Object.hasOwn(agent.models, provider) ? agent.models[provider] : undefined;
+    const fromProfile = profileModel(entry, provider, available);
+    model = fromProfile?.model;
+    // A custom profile's authored effort remains fixed even if its model is unavailable; a
+    // malformed cross-provider profile cannot pin effort on this provider.
+    thinking = fromProfile?.thinking ?? (agent.source !== "builtin" && entry?.model.startsWith(`${provider}/`) ? entry.thinking : undefined);
+  }
+  model ??= agent.model?.startsWith(`${provider}/`) ? agent.model : undefined;
+  thinking ??= agent.thinking;
   return { ...(model ? { model } : {}), ...(thinking ? { thinking } : {}) };
 }
 

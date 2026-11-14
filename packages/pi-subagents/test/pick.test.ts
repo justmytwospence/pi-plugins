@@ -1,7 +1,8 @@
+import path from "node:path";
 import { expect, test } from "vitest";
 import { theta as sharedTheta, climb as sharedClimb, DEFAULT_THRESHOLD as sharedThreshold } from "@justmytwospence/pi-subscription-usage";
 import { GENERAL, parseAgent } from "../src/agents.ts";
-import { DEFAULT_THRESHOLD, DEFAULT_TIER_DESCRIPTIONS, EFFORT_DESCRIPTIONS, TIERS, climb, newestFirst, physicalChatModels, pickQuestions, providerTiers, readPicks, resolve, theta } from "../src/pick.ts";
+import { DEFAULT_THRESHOLD, DEFAULT_TIER_DESCRIPTIONS, EFFORT_DESCRIPTIONS, TIERS, climb, physicalChatModels, pickQuestions, providerTiers, readPicks, resolve, theta } from "../src/pick.ts";
 
 const scout = parseAgent("---\nname: scout\ndescription: Fast recon\ntools: read, grep\nmodel: anthropic/claude-haiku-5\n---\nYou are a scout.", "user")!;
 const reviewer = parseAgent("---\nname: reviewer\ndescription: Code review\nthinking: high\n---\nReview carefully.", "project")!;
@@ -85,8 +86,6 @@ test("threshold and quota-pressure formula remain unchanged with four levels", (
 });
 
 test("numeric-aware newest and OpenAI generation siblings, premium newest registered, no fabricated IDs", () => {
-  expect(["claude-opus-4-1", "claude-opus-4-20250514", "claude-opus-5-5-20260101", "claude-opus-5-5", "claude-opus-5-5-20260301", "claude-opus-4-10"].sort(newestFirst))
-    .toEqual(["claude-opus-5-5", "claude-opus-5-5-20260301", "claude-opus-5-5-20260101", "claude-opus-4-10", "claude-opus-4-1", "claude-opus-4-20250514"]);
   const codex = registry("openai-codex", ["gpt-5.6-luna", "gpt-6-luna", "gpt-6-terra", "gpt-6-sol", "gpt-6.1-sol", "gpt-6.2-terra", "gpt-6.2-sol", "gpt-6-astra"]);
   expect(providerTiers("openai-codex/gpt-6-sol", {}, {}, codex)).toEqual({ fast: "openai-codex/gpt-6-luna", balanced: "openai-codex/gpt-6-terra", strong: "openai-codex/gpt-6-sol", premium: "openai-codex/gpt-6-astra" });
   expect(providerTiers("openai-codex/gpt-6.1-sol", {}, {}, codex)).toEqual({ fast: "openai-codex/gpt-6-luna", balanced: "openai-codex/gpt-6.2-terra", strong: "openai-codex/gpt-6.1-sol", premium: "openai-codex/gpt-6-astra" });
@@ -167,4 +166,26 @@ test("pressure is recorded only for a picked model or effort, never for explicit
   expect(resolve({}, agents, { tier: "fast", thinking: "low", pressure: 0.7 }, tiers, parent)).toMatchObject({ pressure: 0.7 });
   expect(resolve({ model: "x/y", thinking: "low" }, agents, { tier: "fast", thinking: "low", pressure: 0.7 }, tiers, parent)).not.toHaveProperty("pressure");
   expect(resolve({ agent: "scout" }, agents, undefined, tiers, parent)).toMatchObject({ source: { model: "profile", thinking: "default" } });
+});
+
+test("a family the table does not know is offered provisionally by price, and a user file can ignore it", async () => {
+  const { mkdtempSync, rmSync, writeFileSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const withNova = [
+    ...registry("openai", ["gpt-6-luna", "gpt-6-terra", "gpt-6.1-sol", "gpt-6-astra"]),
+    { provider: "openai", id: "gpt-6.2-nova", cost: { input: 6, output: 30 } },
+  ].map((model) => ({ cost: { input: 1, output: 5 }, ...model }));
+  const parent = "openai/gpt-6.1-sol";
+  // Priced like Sol, so provisionally strong and listed ahead of it.
+  expect(providerTiers(parent, {}, {}, withNova).strong).toBe("openai/gpt-6.2-nova");
+  const dir = mkdtempSync(path.join(tmpdir(), "families-pick-"));
+  const previous = process.env.PI_CODING_AGENT_DIR;
+  process.env.PI_CODING_AGENT_DIR = dir;
+  try {
+    writeFileSync(path.join(dir, "model-families.json"), JSON.stringify({ version: 1, routes: { openai: { ignore: ["nova"] } } }));
+    expect(providerTiers(parent, {}, {}, withNova).strong).toBe("openai/gpt-6.1-sol");
+  } finally {
+    if (previous === undefined) delete process.env.PI_CODING_AGENT_DIR; else process.env.PI_CODING_AGENT_DIR = previous;
+    rmSync(dir, { recursive: true, force: true });
+  }
 });

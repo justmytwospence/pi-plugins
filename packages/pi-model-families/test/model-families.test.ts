@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
-  BUILTIN_ROUTES, type ModelInfo, compareGeneration, confirmFamily, derivePairs, describeTable, familyOf, familyTable,
+  BUILTIN_ROUTES, type ModelInfo, parentRoute, compareGeneration, confirmFamily, derivePairs, describeTable, familyOf, familyTable,
   ignoreFamily, loadFamilyTable, markSeen, modelFamiliesPath, parseId, readFamiliesFile, routeOf, tierModels, writeFamiliesFile,
 } from "../src/model-families.ts";
 
@@ -45,6 +45,12 @@ describe("ids and routes", () => {
     expect(routeOf(BUILTIN_ROUTES, "google", "other")).toBeUndefined();
     expect(routeOf(BUILTIN_ROUTES, "openai-codex", "gpt-6-sol")?.id).toBe("openai");
     expect(routeOf(BUILTIN_ROUTES, "__proto__", "x")).toBeUndefined();
+  });
+  it("gives a parent outside the id shapes its provider's only route, never a guessed Google route", () => {
+    expect(parentRoute(BUILTIN_ROUTES, "openai", "o3")?.id).toBe("openai");
+    expect(parentRoute(BUILTIN_ROUTES, "anthropic", "claude")?.id).toBe("anthropic");
+    expect(parentRoute(BUILTIN_ROUTES, "google", "other")).toBeUndefined();
+    expect(parentRoute(BUILTIN_ROUTES, "lmstudio", "qwen")).toBeUndefined();
   });
 });
 

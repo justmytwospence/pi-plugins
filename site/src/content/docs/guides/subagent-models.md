@@ -65,14 +65,14 @@ These are **suite policy families**, not equivalent capability ratings between v
 
 | Role | Anthropic | OpenAI / Codex | Google Gemini | Muse Code | Unknown/local effort |
 |---|---|---|---|---|---|
-| explorer | Sonnet 5.5 / low | Luna 6 / high | Hydrogen 4 / low | Spark 1.3 / low | low |
-| worker | Sonnet 5.5 / medium | Terra 6.1 / medium | Hydrogen 4 / medium | Spark 1.3 / medium | medium |
-| researcher | Sonnet 5.5 / medium | Terra 6.1 / medium | Hydrogen 4 / medium | Spark 1.3 / medium | medium |
-| writer | Sonnet 5.5 / medium | Terra 6.1 / medium | Hydrogen 4 / medium | Spark 1.3 / medium | medium |
-| reviewer | Opus 5.5 / high | Sol 6.1 / high | Argon 4 / high | Wonder 1.0 / high | high |
-| planner | Opus 5.5 / high | Sol 6.1 / high | Argon 4 / high | Wonder 1.0 / high | high |
+| explorer | balanced (Sonnet) / low | fast (Luna) / high | balanced (Hydrogen) / low | fast (Spark) / low | low |
+| worker | balanced (Sonnet) / medium | balanced (Terra) / medium | balanced (Hydrogen) / medium | balanced (Spark) / medium | medium |
+| researcher | balanced (Sonnet) / medium | balanced (Terra) / medium | balanced (Hydrogen) / medium | balanced (Spark) / medium | medium |
+| writer | balanced (Sonnet) / medium | balanced (Terra) / medium | balanced (Hydrogen) / medium | balanced (Spark) / medium | medium |
+| reviewer | strong (Opus) / high | strong (Sol) / high | strong (Argon) / high | strong (Wonder) / high | high |
+| planner | strong (Opus) / high | strong (Sol) / high | strong (Argon) / high | strong (Wonder) / high | high |
 
-Antigravity Gemini uses the Google column with `antigravity-`-prefixed IDs; Antigravity Claude uses the Anthropic column under provider `google`, also prefixing IDs. `general` falls back to balanced/medium. Unavailable baseline models use a registered same-route family if possible, then balanced/medium; no model mapping keeps the parent visibly. Effort is clamped to supported levels when a registered model is chosen, except an explicit thinking argument follows Pi's usual pass-through behavior.
+Built-in roles name a **tier and an effort**, not a model: the model is the newest registered model of the best family for that tier on the parent's route, from the shared family table (see [Model families](/plugins/pi-model-families/)). A family the table does not rank yet is placed provisionally by registry price, never premium, until confirmed with `/families`. Antigravity Gemini uses the Google column with `antigravity-`-prefixed IDs; Antigravity Claude uses the Anthropic column under provider `google`, also prefixing IDs. `general` falls back to balanced/medium. Unavailable baseline models use a registered same-route family if possible, then balanced/medium; no model mapping keeps the parent visibly. Effort is clamped to supported levels when a registered model is chosen, except an explicit thinking argument follows Pi's usual pass-through behavior.
 
 The historical Jev calibration below does not establish equivalent calibration or routing results for OpenAI Decisions.
 

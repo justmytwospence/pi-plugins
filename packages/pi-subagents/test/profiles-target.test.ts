@@ -13,6 +13,7 @@ const usage = { input: 300, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens:
 function fakeJev(answer: (questions: Record<string, any>, state: Record<string, any>) => Record<string, unknown> | { stopReason: "error"; errorMessage: string }) {
   const calls: Array<{ questions: string[]; state: Record<string, any> }> = [];
   const registry = {
+    getAll: () => fixtureModels,
     findOfType: (_type: string, provider: string, id: string) => ({ provider, id }),
     classify: async (_model: unknown, context: { questions: Record<string, any>; state: Record<string, any> }) => {
       calls.push({ questions: Object.keys(context.questions), state: context.state });
@@ -23,6 +24,13 @@ function fakeJev(answer: (questions: Record<string, any>, state: Record<string, 
   };
   return { calls, registry };
 }
+// The registry the role baselines resolve against: tier profiles name no model, so replays need one.
+const fixtureModels = [
+  ...["claude-sonnet-5-5", "claude-opus-5-5", "claude-fable-5-1"].map((id) => ({ provider: "anthropic", id })),
+  ...["gpt-6-luna", "gpt-6.1-sol"].map((id) => ({ provider: "openai-codex", id })),
+  ...["antigravity-gemini-4-hydrogen", "antigravity-gemini-4-argon"].map((id) => ({ provider: "google", id })),
+  ...["muse-spark-1.3", "muse-wonder-1.0"].map((id) => ({ provider: "muse-code", id })),
+];
 const role = (name: string) => ({ role: { type: "choice", choice: name, confidence: 0.9, probabilities: { [name]: 0.9 } } });
 
 const user = (text: string): SessionEntry => ({ type: "message", message: { role: "user", content: text } });
@@ -82,12 +90,12 @@ describe("the profiles eval target", () => {
   test("implied models stay on the run's provider; estimates use the median cost per turn, else the actual cost", () => {
     const runs = collectRuns(sample.sessions);
     const explorer = BUILTIN_AGENTS.find((a) => a.name === "explorer");
-    expect(implied(explorer, runs[0]!)).toEqual({ model: "anthropic/claude-sonnet-5-5", thinking: "low", profiled: true });
-    expect(implied(explorer, runs[3]!)).toEqual({ model: "openai-codex/gpt-6-luna", thinking: "high", profiled: true });
+    expect(implied(explorer, runs[0]!, fixtureModels)).toEqual({ model: "anthropic/claude-sonnet-5-5", thinking: "low", profiled: true });
+    expect(implied(explorer, runs[3]!, fixtureModels)).toEqual({ model: "openai-codex/gpt-6-luna", thinking: "high", profiled: true });
     expect(implied(BUILTIN_AGENTS[0], runs[0]!)).toEqual({ model: "anthropic/claude-fable-5-1", thinking: "high", profiled: false });
     // The parent ID carries the Antigravity route; a provider/_ placeholder loses it.
-    expect(implied(explorer, { ...runs[0]!, model: "google/antigravity-gemini-4-argon" })).toEqual({ model: "google/antigravity-gemini-4-hydrogen", thinking: "low", profiled: true });
-    expect(implied(explorer, { ...runs[0]!, model: "muse-code/muse-wonder-1.0" })).toEqual({ model: "muse-code/muse-spark-1.3", thinking: "low", profiled: true });
+    expect(implied(explorer, { ...runs[0]!, model: "google/antigravity-gemini-4-argon" }, fixtureModels)).toEqual({ model: "google/antigravity-gemini-4-hydrogen", thinking: "low", profiled: true });
+    expect(implied(explorer, { ...runs[0]!, model: "muse-code/muse-wonder-1.0" }, fixtureModels)).toEqual({ model: "muse-code/muse-spark-1.3", thinking: "low", profiled: true });
     expect(implied(explorer, { ...runs[0]!, model: "lmstudio/qwen", thinking: "high" })).toEqual({ model: "lmstudio/qwen", thinking: "low", profiled: false });
     expect(implied(explorer, { ...runs[0]!, model: "lmstudio/qwen", thinking: "high" }, [{ provider: "lmstudio", id: "qwen", reasoning: false }]))
       .toEqual({ model: "lmstudio/qwen", thinking: "off", profiled: false });

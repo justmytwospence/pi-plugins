@@ -153,8 +153,9 @@ test("roleModel ignores requests it cannot answer", () => {
   expect(ask(null)).toBeUndefined();
 });
 
-test("omitting availability preserves unregistered profile and file defaults", () => {
-  expect(roleModel({ role: "worker", parent }, BUILTIN_AGENTS, DEFAULT_CONFIG, [], "low")).toEqual(workerReply);
+test("omitting availability keeps the parent for tier profiles and preserves file defaults", () => {
+  // A tier profile names no model, so an empty registry leaves nothing to resolve it to.
+  expect(roleModel({ role: "worker", parent }, BUILTIN_AGENTS, DEFAULT_CONFIG, [], "low")).toEqual({ model: parent, thinking: "medium", source: "default" });
   const agents = [{ ...WORKER, models: undefined, model: "p/file" }];
   expect(roleModel({ role: "worker", parent: "p/parent" }, agents, DEFAULT_CONFIG, [], "low"))
     .toEqual({ model: "p/file", thinking: "medium", source: "profile" });
@@ -246,7 +247,7 @@ test.each([
   { metadata: { reasoning: true }, thinking: "high" },
   { metadata: { reasoning: true, thinkingLevelMap: { xhigh: "xhigh" } }, thinking: "xhigh" },
 ])("profile thinking is clamped with registry metadata: $thinking", ({ metadata, thinking }) => {
-  const agents = [{ ...WORKER, models: { anthropic: { model: "anthropic/claude-sonnet-5-5", thinking: "xhigh" } } }];
+  const agents = [{ ...WORKER, tiers: undefined, models: { anthropic: { model: "anthropic/claude-sonnet-5-5", thinking: "xhigh" } } }];
   const forged = { ...sonnet, reasoning: !metadata.reasoning, thinkingLevelMap: { xhigh: metadata.thinkingLevelMap ? null : "xhigh" } };
   expect(roleModel({ role: "worker", parent, availableModels: [forged] }, agents, DEFAULT_CONFIG, [{ ...sonnet, ...metadata }], "low"))
     .toEqual({ model: "anthropic/claude-sonnet-5-5", thinking, source: "profile" });

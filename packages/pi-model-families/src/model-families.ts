@@ -238,6 +238,21 @@ export function routeOf<T extends Pick<RouteDef, "providers" | "prefix">>(
   return routes.find((route) => route.providers.includes(provider) && id.startsWith(route.prefix));
 }
 
+/**
+ * The route of a parent model: its id's route, else the provider's only route (an Anthropic or OpenAI
+ * model outside the known id shapes keeps its provider's tiers). Google has three routes, so no fallback.
+ */
+export function parentRoute<T extends Pick<RouteDef, "providers" | "prefix">>(
+  routes: readonly T[],
+  provider: string,
+  id: string,
+): T | undefined {
+  const exact = routeOf(routes, provider, id);
+  if (exact) return exact;
+  const own = routes.filter((route) => route.providers.includes(provider));
+  return own.length === 1 ? own[0] : undefined;
+}
+
 const validTiers = (value: unknown): value is Tier[] =>
   Array.isArray(value) && value.every((tier) => TIERS.includes(tier as Tier));
 const validFamily = (value: unknown): boolean => {
@@ -450,7 +465,7 @@ export function tierModels(
   if (slash <= 0) return [];
   const provider = parentModel.slice(0, slash);
   const parentId = parentModel.slice(slash + 1);
-  const route = routeOf(table.routes, provider, parentId);
+  const route = parentRoute(table.routes, provider, parentId);
   if (!route) return [];
   const candidates: { id: string; rank: number; generation: number[] }[] = [];
   for (const model of available) {

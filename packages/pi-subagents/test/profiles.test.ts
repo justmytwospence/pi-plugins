@@ -124,7 +124,7 @@ test("the final model's registered levels clamp non-explicit effort, but an expl
   expect(agentDefaults(scout, "p/c", [capped])).toEqual({ model: "p/c", thinking: "xhigh" });
   expect(resolve({ agent: "scout" }, [GENERAL, scout], undefined, { models: {}, descriptions: DEFAULT_TIER_DESCRIPTIONS }, { model: "p/c", thinking: "low" }, { available: [capped] }))
     .toMatchObject({ model: "p/c", thinking: "high", source: { thinking: "profile" } });
-  const baseline = { ...role("planner"), models: { p: { model: "p/m", thinking: "high" } }, thinking: "high" };
+  const baseline = { ...role("planner"), tiers: undefined, models: { p: { model: "p/m", thinking: "high" } }, thinking: "high" };
   const final = { provider: "p", id: "reasoning", reasoning: true };
   expect(agentDefaults(baseline, "p/m", [plain, final])).toEqual({ model: "p/m", thinking: "high" });
   expect(resolve({ agent: "planner" }, [baseline], { tier: "strong" }, { models: { strong: "p/reasoning" }, descriptions: DEFAULT_TIER_DESCRIPTIONS }, { model: "p/m", thinking: "off" }, { available: [plain, final] }))

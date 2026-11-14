@@ -80,7 +80,7 @@ test("on a Codex parent the same roles take Codex models, never Anthropic ones",
   const s = await setup({ ctx: { model: { provider: "openai-codex", id: "gpt-6.1-sol" } } });
   (s.ctx.modelRegistry as { getAll: () => unknown[] }).getAll = () => [...claude, ...codex];
   const result = await s.tool().execute("t1", { tasks: [{ task: "a", agent: "explorer" }, { task: "b", agent: "reviewer" }, { task: "c", agent: "writer" }], async: true }, undefined, undefined, s.ctx);
-  expect(result.details.runs.map((r: any) => `${r.model} ${r.thinking}`)).toEqual(["openai-codex/gpt-6-luna high", "openai-codex/gpt-6.1-sol high", "openai-codex/gpt-6.1-terra medium"]);
+  expect(result.details.runs.map((r: any) => `${r.model} ${r.thinking}`)).toEqual(["openai-codex/gpt-6.1-luna high", "openai-codex/gpt-6.1-sol high", "openai-codex/gpt-6.1-terra medium"]);
   await s.stop();
 });
 

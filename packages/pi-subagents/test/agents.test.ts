@@ -30,22 +30,17 @@ test("ships seven roles with per-provider fallback profiles and provider-indepen
   const agents = discoverAgents(project);
   expect(agents.map((agent) => agent.name)).toEqual(ROLES);
   expect(agents).toEqual(BUILTIN_AGENTS);
-  const profiles = Object.fromEntries(agents.map((a) => [a.name, a.models && Object.fromEntries(Object.entries(a.models).map(([provider, entry]) => [provider, `${entry.model}:${entry.thinking}`]))]));
-  const baseline = (anthropic: string, openai: string, google: string, muse: string, effort: string) => ({
-    anthropic: `anthropic/${anthropic}:${effort}`,
-    openai: `openai/${openai}:${effort}`,
-    "openai-codex": `openai-codex/${openai}:${effort}`,
-    google: `google/${google}:${effort}`,
-    "muse-code": `muse-code/${muse}:${effort}`,
-  });
+  const profiles = Object.fromEntries(agents.map((a) => [a.name, a.tiers && Object.fromEntries(Object.entries(a.tiers).map(([provider, entry]) => [provider, `${entry.tier}:${entry.thinking}`]))]));
+  expect(agents.every((a) => a.models === undefined)).toBe(true);
+  const baseline = (tier: string, effort: string) => ({ anthropic: `${tier}:${effort}`, openai: `${tier}:${effort}`, google: `${tier}:${effort}`, "muse-code": `${tier}:${effort}` });
   expect(profiles).toEqual({
     general: undefined,
-    explorer: { ...baseline("claude-sonnet-5-5", "gpt-6-luna", "gemini-4-hydrogen", "muse-spark-1.3", "low"), openai: "openai/gpt-6-luna:high", "openai-codex": "openai-codex/gpt-6-luna:high" },
-    worker: baseline("claude-sonnet-5-5", "gpt-6.1-terra", "gemini-4-hydrogen", "muse-spark-1.3", "medium"),
-    reviewer: baseline("claude-opus-5-5", "gpt-6.1-sol", "gemini-4-argon", "muse-wonder-1.0", "high"),
-    researcher: baseline("claude-sonnet-5-5", "gpt-6.1-terra", "gemini-4-hydrogen", "muse-spark-1.3", "medium"),
-    writer: baseline("claude-sonnet-5-5", "gpt-6.1-terra", "gemini-4-hydrogen", "muse-spark-1.3", "medium"),
-    planner: baseline("claude-opus-5-5", "gpt-6.1-sol", "gemini-4-argon", "muse-wonder-1.0", "high"),
+    explorer: { anthropic: "balanced:low", openai: "fast:high", google: "balanced:low", "muse-code": "fast:low" },
+    worker: baseline("balanced", "medium"),
+    reviewer: baseline("strong", "high"),
+    researcher: baseline("balanced", "medium"),
+    writer: baseline("balanced", "medium"),
+    planner: baseline("strong", "high"),
   });
   for (const agent of agents) {
     expect(agent.source).toBe("builtin");
