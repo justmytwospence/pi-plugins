@@ -1,3 +1,4 @@
+import { EventEmitter } from "node:events";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import piRecap, { ENTRY, LABEL, MARK, NAME_ENTRY, NAME_EVENT, WIDGET, recapDue, recapLines } from "../src/index.ts";
 import { harness } from "./harness.ts";
@@ -20,7 +21,8 @@ function setup(answer = "Fixed the parser; tests pass", prompts = 3) {
   };
   let renderer: any;
   h.pi.registerEntryRenderer = (type: string, r: any) => { if (type === ENTRY) renderer = r; };
-  piRecap(h.pi);
+  const stdin = new EventEmitter();
+  piRecap(h.pi, { stdin: stdin as any });
   const complete = vi.fn(async () => ({ stopReason: "stop", content: [{ type: "text", text: answer }] }));
   const modelRegistry = { find: (provider: string, id: string) => ({ provider, id }), hasConfiguredAuth: () => true, complete };
   const ctx = h.ctx({ sessionManager: { getBranch: () => branch, getSessionId: () => "s" }, modelRegistry, waitForIdle: async () => undefined });
@@ -33,11 +35,17 @@ function setup(answer = "Fixed the parser; tests pass", prompts = 3) {
     h.pi.events.emit("recap:summary", { reply: (p: Promise<string | undefined>) => { got = p; } });
     return got;
   };
+  const type = (data = "x") => stdin.emit("data", data);
+  const comeBack = async (afterMs = 180_000, data = "x") => {
+    await vi.advanceTimersByTimeAsync(afterMs);
+    type(data);
+    await vi.advanceTimersByTimeAsync(1_000);
+  };
   const recaps = () => h.entries.filter((e) => e.customType === ENTRY).map((e: any) => e.data.text);
   const plainTheme = { fg: (_c: string, s: string) => s, bg: (_c: string, s: string) => s, bold: (s: string) => s, italic: (s: string) => s };
   const render = (text: string, width = 200, theme: any = plainTheme) =>
     renderer({ customType: ENTRY, data: { text } }, { expanded: false }, theme).render(width);
-  return { h, ctx, ui: ctx.ui, branch, complete, settle, ask, recaps, render };
+  return { h, ctx, ui: ctx.ui, branch, complete, settle, ask, recaps, render, stdin, type, comeBack };
 }
 
 beforeEach(() => {
@@ -47,13 +55,17 @@ beforeEach(() => {
 });
 afterEach(() => vi.useRealTimers());
 
-test("the recap is written into the transcript after the idle delay, and drawn like Claude Code's", async () => {
-  const { h, ctx, ui, settle, complete, recaps, render } = setup();
+test("the recap is written when you come back after the delay, and drawn like Claude Code's", async () => {
+  const { h, ctx, ui, settle, complete, recaps, render, type } = setup();
   await h.emit("session_start", {}, ctx);
   await h.emit("agent_start", {}, ctx);
   await settle();
   await vi.advanceTimersByTimeAsync(179_000);
+  type();
+  await vi.advanceTimersByTimeAsync(1_000);
   expect(recaps()).toEqual([]);
+  await vi.advanceTimersByTimeAsync(180_000);
+  type();
   await vi.advanceTimersByTimeAsync(1_000);
   expect(recaps()).toEqual(["Fixed the parser; tests pass"]);
   expect(complete).toHaveBeenCalledOnce();
@@ -75,13 +87,13 @@ test("the recap is an info block titled Recap", () => {
 });
 
 test("pi-herdr's request gets the same memoized text, with one model call", async () => {
-  const { h, ctx, settle, complete, ask, recaps } = setup();
+  const { h, ctx, settle, complete, ask, recaps, comeBack } = setup();
   await h.emit("session_start", {}, ctx);
   const herdr = ask();
   await settle();
   expect(await herdr).toBe("Fixed the parser; tests pass");
   expect(await ask()).toBe("Fixed the parser; tests pass");
-  await vi.advanceTimersByTimeAsync(180_000);
+  await comeBack();
   expect(recaps()).toEqual(["Fixed the parser; tests pass"]);
   // The recap entry itself does not start a new turn's recap.
   expect(await ask()).toBe("Fixed the parser; tests pass");
@@ -90,13 +102,13 @@ test("pi-herdr's request gets the same memoized text, with one model call", asyn
 
 test("a long recap is whole and wrapped in the transcript, clipped only for pi-herdr's token", async () => {
   const long = `Fixed the parser to skip empty lines and reran the suite; ${"all tests pass ".repeat(4).trim()}`;
-  const { h, ctx, settle, ask, recaps, render } = setup(long);
+  const { h, ctx, settle, ask, recaps, render, comeBack } = setup(long);
   await h.emit("session_start", {}, ctx);
   await settle();
   const token = (await ask())!;
   expect(token.length).toBe(80);
   expect(token.endsWith("…")).toBe(true);
-  await vi.advanceTimersByTimeAsync(180_000);
+  await comeBack();
   expect(recaps()).toEqual([long]);
   const lines = render(long, 60);
   expect(lines.length).toBeGreaterThan(1);
@@ -121,21 +133,21 @@ test("as in Claude Code, no automatic recap before 3 prompts, nor before 2 more 
   const early = setup(undefined, 2);
   await early.h.emit("session_start", {}, early.ctx);
   await early.settle();
-  await vi.advanceTimersByTimeAsync(200_000);
+  await early.comeBack(200_000);
   expect(early.recaps()).toEqual([]);
 
-  const { h, ctx, branch, settle, recaps } = setup("first");
+  const { h, ctx, branch, settle, recaps, comeBack } = setup("first");
   await h.emit("session_start", {}, ctx);
   await settle();
-  await vi.advanceTimersByTimeAsync(200_000);
+  await comeBack(200_000);
   expect(recaps()).toEqual(["first"]);
   branch.push(user("one more"), assistant(LONG));
   await settle();
-  await vi.advanceTimersByTimeAsync(200_000);
+  await comeBack(200_000);
   expect(recaps()).toHaveLength(1);
   branch.push(user("and another"), assistant(LONG));
   await settle();
-  await vi.advanceTimersByTimeAsync(200_000);
+  await comeBack(200_000);
   expect(recaps()).toHaveLength(2);
 
   expect(recapDue([...turns(3), { type: "custom", customType: ENTRY }])).toBe(false);
@@ -145,14 +157,14 @@ test("no automatic recap after an interrupted run, a short reply already on scre
   const a = setup();
   await a.h.emit("session_start", {}, a.ctx);
   await a.settle(true);
-  await vi.advanceTimersByTimeAsync(200_000);
+  await a.comeBack(200_000);
   expect(a.recaps()).toEqual([]);
 
   const b = setup();
   b.branch.push(user("push it"), assistant("Pushed."));
   await b.h.emit("session_start", {}, b.ctx);
   await b.settle();
-  await vi.advanceTimersByTimeAsync(200_000);
+  await b.comeBack(200_000);
   expect(b.recaps()).toEqual([]);
   expect(await b.ask()).toBe("Pushed.");
 
@@ -161,34 +173,41 @@ test("no automatic recap after an interrupted run, a short reply already on scre
   await c.settle();
   await vi.advanceTimersByTimeAsync(60_000);
   await c.h.emit("agent_start", {}, c.ctx);
-  await vi.advanceTimersByTimeAsync(200_000);
+  await c.comeBack(200_000);
   expect(c.recaps()).toEqual([]);
 
   process.env.PI_RECAP = "0";
   const d = setup();
   await d.h.emit("session_start", {}, d.ctx);
   await d.settle();
-  await vi.advanceTimersByTimeAsync(200_000);
+  await d.comeBack(200_000);
   expect(d.recaps()).toEqual([]);
   expect(await d.ask()).toBe("Fixed the parser; tests pass");
 });
 
 test("PI_RECAP_DELAY_MS sets the delay", async () => {
   process.env.PI_RECAP_DELAY_MS = "10000";
-  const { h, ctx, settle, recaps } = setup();
+  const { h, ctx, settle, recaps, comeBack } = setup();
   await h.emit("session_start", {}, ctx);
   await settle();
-  await vi.advanceTimersByTimeAsync(10_000);
+  await comeBack(10_000);
   expect(recaps()).toHaveLength(1);
+  const early = setup();
+  await early.h.emit("session_start", {}, early.ctx);
+  await early.settle();
+  await early.comeBack(9_000);
+  expect(early.recaps()).toHaveLength(0);
 });
 
 test("non-interactive sessions stay dormant and answer no requests", async () => {
-  const { h, ctx, settle, ask, complete } = setup();
+  const { h, ctx, settle, ask, complete, type } = setup();
   ctx.mode = "print";
   await h.emit("session_start", {}, ctx);
   await settle();
   expect(ask()).toBeUndefined();
   await vi.advanceTimersByTimeAsync(200_000);
+  type();
+  await vi.advanceTimersByTimeAsync(2_000);
   expect(complete).not.toHaveBeenCalled();
 });
 
@@ -264,4 +283,111 @@ test("a resumed session recognizes and announces its automatic name; PI_RECAP_NA
   await settle();
   await vi.advanceTimersByTimeAsync(0);
   expect(h.pi.getSessionName()).toBe("new recap");
+});
+
+test("no recap if you never left", async () => {
+  const { h, ctx, settle, recaps, type } = setup();
+  await h.emit("session_start", {}, ctx);
+  await settle();
+  for (let i = 0; i < 10; i++) {
+    await vi.advanceTimersByTimeAsync(60_000);
+    type();
+  }
+  await vi.advanceTimersByTimeAsync(1_000);
+  expect(recaps()).toEqual([]);
+});
+
+test("focus-out then focus-in after the delay brings the recap; a quick switch does not", async () => {
+  const { h, ctx, settle, recaps, type } = setup();
+  await h.emit("session_start", {}, ctx);
+  await settle();
+  type("\x1b[O");
+  await vi.advanceTimersByTimeAsync(60_000);
+  type("\x1b[I");
+  await vi.advanceTimersByTimeAsync(1_000);
+  expect(recaps()).toEqual([]);
+  type("\x1b[O");
+  await vi.advanceTimersByTimeAsync(180_000);
+  type("\x1b[I");
+  await vi.advanceTimersByTimeAsync(1_000);
+  expect(recaps()).toHaveLength(1);
+});
+
+test("a focused but idle window waits 5x the delay", async () => {
+  const { h, ctx, settle, recaps, type, comeBack } = setup();
+  await h.emit("session_start", {}, ctx);
+  type("\x1b[I");
+  await settle();
+  await comeBack(180_000);
+  expect(recaps()).toEqual([]);
+  await comeBack(900_000);
+  expect(recaps()).toHaveLength(1);
+});
+
+test("a prompt injected while away does not count as coming back", async () => {
+  const { h, ctx, settle, recaps, type } = setup();
+  await h.emit("session_start", {}, ctx);
+  await settle();
+  await vi.advanceTimersByTimeAsync(200_000);
+  type("\x1b[200~hi\x1b[201~");
+  type("\r");
+  await h.emit("agent_start", {}, ctx);
+  await vi.advanceTimersByTimeAsync(2_000);
+  expect(recaps()).toEqual([]);
+});
+
+function withTerminal() {
+  const t = setup();
+  const writes: string[] = [];
+  const start = vi.fn();
+  const stop = vi.fn(() => { writes.push("<stop>"); });
+  const restoreOnExit = vi.fn();
+  const terminal: any = { write: (s: string) => writes.push(s), start, stop, restoreOnExit };
+  t.ui.setWidget = (_key: string, content: any) => {
+    if (typeof content === "function") content({ terminal }, { fg: (_c: string, s: string) => s, bold: (s: string) => s });
+  };
+  return { ...t, terminal, writes, originals: { start, stop, restoreOnExit } };
+}
+
+test("focus reporting is turned on with the terminal and off around handovers", async () => {
+  const { h, ctx, terminal, writes, originals } = withTerminal();
+  await h.emit("session_start", {}, ctx);
+  expect(writes).toEqual(["\x1b[?1004h"]);
+  terminal.stop();
+  expect(writes.slice(1)).toEqual(["\x1b[?1004l", "<stop>"]);
+  expect(originals.stop).toHaveBeenCalledOnce();
+  terminal.start("a", "b");
+  expect(originals.start).toHaveBeenCalledWith("a", "b");
+  expect(writes.at(-1)).toBe("\x1b[?1004h");
+  terminal.restoreOnExit("B", "A");
+  expect(originals.restoreOnExit).toHaveBeenCalledWith("B\x1b[?1004l", "A");
+  await h.emit("session_shutdown", {}, ctx);
+  expect(writes.at(-1)).toBe("\x1b[?1004l");
+  expect(terminal.start).toBe(originals.start);
+  expect(terminal.stop).toBe(originals.stop);
+  expect(terminal.restoreOnExit).toBe(originals.restoreOnExit);
+});
+
+test("PI_RECAP=0 writes no focus reporting", async () => {
+  process.env.PI_RECAP = "0";
+  const { h, ctx, writes, stdin } = withTerminal();
+  await h.emit("session_start", {}, ctx);
+  expect(writes).toEqual([]);
+  expect(stdin.listenerCount("data")).toBe(0);
+});
+
+test("focus reports never reach the editor", async () => {
+  const { h, ctx, ui } = setup();
+  await h.emit("session_start", {}, ctx);
+  expect(ui.press("\x1b[I")).toBe(true);
+  expect(ui.press("\x1b[O")).toBe(true);
+  expect(ui.editorText).toBe("");
+});
+
+test("the stdin listener is removed on shutdown", async () => {
+  const { h, ctx, stdin } = setup();
+  await h.emit("session_start", {}, ctx);
+  expect(stdin.listenerCount("data")).toBe(1);
+  await h.emit("session_shutdown", {}, ctx);
+  expect(stdin.listenerCount("data")).toBe(0);
 });
