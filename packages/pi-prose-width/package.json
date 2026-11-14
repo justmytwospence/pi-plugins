@@ -1,6 +1,6 @@
 {
   "name": "@justmytwospence/pi-prose-width",
-  "version": "0.1.68",
+  "version": "0.1.69",
   "description": "Wraps prose in pi's transcript at a readable measure while code blocks and tables keep the full width.",
   "type": "module",
   "license": "MIT",
