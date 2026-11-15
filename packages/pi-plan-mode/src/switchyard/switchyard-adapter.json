@@ -5,7 +5,7 @@
     "entrypoints": ["src/index.ts"],
     "extension": "@justmytwospence/pi-plan-mode",
     "versionRange": ">=0.1.0 <1.0.0",
-    "testedVersions": ["0.1.7", "0.1.26"]
+    "testedVersions": ["0.1.7", "0.1.26", "0.1.76", "0.1.77"]
   },
   "protocolVersion": 1,
   "server": "adapter.ts",

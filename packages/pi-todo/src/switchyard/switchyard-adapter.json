@@ -5,7 +5,7 @@
     "entrypoints": ["index.ts"],
     "extension": "@justmytwospence/pi-todo",
     "versionRange": ">=0.1.0 <1.0.0",
-    "testedVersions": ["0.1.2"]
+    "testedVersions": ["0.1.2", "0.1.76", "0.1.77"]
   },
   "protocolVersion": 1,
   "server": "adapter.ts",
