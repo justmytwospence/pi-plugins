@@ -7,6 +7,10 @@ Runtime components live under `packages/<name>/`. Public documentation lives und
 
 Keep components independently usable, and keep sibling integrations optional. For cross-extension changes, read [activity ownership and lifecycle](/architecture/activity/) alongside the relevant source and tests.
 
+## Switchyard compatibility
+
+The [Switchyard integration contract](/architecture/switchyard/) is structured and separate from Ovis and Collie's screen-reading contract. Assess both where relevant: passing one does not prove the other. Adapter and remote-UI changes need a portable fallback and cross-repository compatibility checks; report any checks not run. Dedicated adapter development tools are upcoming, not a prerequisite available today.
+
 ## Live local loading
 
 The repository commits a project `.pi/settings.json`:

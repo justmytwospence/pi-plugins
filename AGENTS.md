@@ -2,6 +2,10 @@
 
 This repository is the development source for the Pi extension suite. Add or change components under `packages/<name>/`, not in the retained standalone repositories or Pi's installed checkout. Keep plugins independently usable; optional sibling integrations must remain optional. The root `pi` manifest exposes distinct entry points for selection through `pi config`.
 
+## Switchyard integration
+
+Switchyard owns lifecycle, synchronization and security; plugins own within-session workflows, and optional package-local adapters translate their semantics into portable UI. See the [integration contract](site/src/content/docs/architecture/switchyard.md). Assess Switchyard impact alongside footer and remote-client impact. For adapter or remote-UI changes, provide a portable fallback and run the relevant cross-repository compatibility checks; report what was not verified. Plugins must remain usable without Switchyard.
+
 ## Footer integration
 
 When adding or changing functionality anywhere under `packages/`, read `packages/pi-status-footer/AGENTS.md`, assess footer impact, and update relevant state publications, controls, rendering, tests and public documentation in the same logical change. Those component-local instructions apply to integration work in sibling plugins; discovering them must not depend on editing the footer first. If there is no footer impact, explicitly state that assessment in the completion response.

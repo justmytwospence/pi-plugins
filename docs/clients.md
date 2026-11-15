@@ -4,6 +4,10 @@ Maintainer rules for keeping the suite's dialogs, footer and below-editor widget
 
 Ovis and Collie target main only. Pi Sidebar's conversation, draft and controls are not additional remote targets; its declared frame boundaries exist only to exclude it while reading main. Do not add Sidebar focus switching or a focus protocol to either client. This does not remove Ovis's own workspace/pane navigation.
 
+## Switchyard compatibility
+
+Switchyard uses a separate structured adapter and remote-UI contract, not Ovis or Collie's screen parsing. See the [integration contract](../site/src/content/docs/architecture/switchyard.md). A passing screen-reader check does not prove Switchyard compatibility, nor does a passing Switchyard check prove either screen reader works. Adapter and remote-UI changes need a portable fallback and relevant cross-repository checks.
+
 ## Startup context chart
 
 pi-cc-render's estimated-context strip sits above the chat. It is display-only, not an input frame or send target; only the real editor below the transcript accepts a draft. Fullscreen model rows can select a session model. MCP rows can open the native manager, but neither turns the chart into an editor. The native manager temporarily owns its controls and then returns to the chat.
