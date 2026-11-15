@@ -15,7 +15,7 @@ plugin: pi-model-waterfall
 
 ## How it works
 
-This [suite component](https://github.com/justmytwospence/pi-plugins/tree/main/packages/pi-model-waterfall) is not a provider or virtual model. At startup it checks the active rungs in order and switches to the first eligible model with a single session-only change. It does not switch if you changed model or sent a turn while quotas were being read. If no rung qualifies, it warns and keeps Pi's default. Resumed, forked, reloaded and headless sessions are not switched, and manual model selection remains available.
+This [suite component](https://github.com/justmytwospence/pi-plugins/tree/main/packages/pi-model-waterfall) is not a provider or virtual model. At startup it checks the active rungs in order and switches to the first eligible model with a single session-only change. It does not switch if you changed model or sent a turn while quotas were being read. Successful selection is silent: the footer shows the current model, and `/waterfall` shows the startup choice and skipped reasons on demand. If no rung qualifies, it warns and keeps Pi's default. Resumed, forked, reloaded and headless sessions are not switched, and manual model selection remains available.
 
 The default order is:
 

@@ -198,7 +198,7 @@ export default function modelWaterfall(pi: ExtensionAPI): void {
       }
       if (mine !== session) return;
       snapshot = { version: 1, physical, skipped, observedAt: Date.now() };
-      ctx.ui.notify(`Waterfall: started on ${provider}/${id}${reasons ? ` (skipped ${reasons})` : ""}.`, "info");
+      // Successful selection is silent; /waterfall and the snapshot retain the details.
     } catch {
       try { ctx.ui.notify("Waterfall: startup model check failed.", "warning"); } catch { /* UI gone. */ }
     }

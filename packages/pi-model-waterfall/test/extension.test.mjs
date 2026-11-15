@@ -64,11 +64,17 @@ describe("session-start waterfall", () => {
     assert.equal(f.pi.setModel.mock.calls.length, 0);
     assert.equal(queryWaterfall(f.pi.events).physical.provider, "anthropic");
   });
-  it("starts on OpenAI when Anthropic is over quota, naming what it skipped", async () => {
+  it("silently starts on OpenAI and keeps skipped reasons available through /waterfall", async () => {
     claude = quota("anthropic", 100);
     const f = fixture(); await settle(f);
     assert.equal(f.pi.setModel.mock.calls[0][0].id, "gpt-6.1-sol");
-    assert.match(f.output[0][0], /started on openai\/gpt-6\.1-sol \(skipped anthropic:/);
+    assert.deepEqual(f.output, []);
+    const snapshot = queryWaterfall(f.pi.events);
+    assert.equal(snapshot.physical.provider, "openai");
+    assert.equal(snapshot.skipped[0].provider, "anthropic");
+    await f.commands.get("waterfall").handler("", f.ctx);
+    assert.match(f.output[0][0], /started on openai\/gpt-6\.1-sol/);
+    assert.match(f.output[0][0], /anthropic:.*100% used/);
     assert.equal(f.output[0][1], "info");
   });
   it("skips OpenAI when both are over quota, or when Codex is blocked below 95%", async () => {
