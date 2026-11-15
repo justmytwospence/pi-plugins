@@ -95,6 +95,7 @@
     "eval:dry": "node scripts/eval-dry.mjs",
     "eval:last": "node scripts/eval-last.mjs",
     "check:clients": "node scripts/test-remote-clients.mjs",
+    "check:switchyard": "node scripts/check-switchyard.mjs",
     "postinstall": "node packages/pi-interactive-shell/scripts/prepare-pty.cjs"
   },
   "allowScripts": {

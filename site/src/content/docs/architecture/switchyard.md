@@ -9,4 +9,4 @@ For example, Pi planning and todo items remain plugin workflows, distinct from S
 
 When changing an integration, identify the authoritative state and behavior without the plugin or adapter, preserve a portable fallback, and test relevant compatibility across both repositories. Generalize a primitive only when two independent integrations need it, not a whole workflow.
 
-Switchyard's structured adapter and remote-UI contract is separate from the terminal screen-reading contract used by Ovis and Collie. Passing one does not verify the other. Custom terminal UI is not universally converted. Dedicated adapter development tools are upcoming; do not assume they are already available.
+Switchyard's structured adapter and remote-UI contract is separate from the terminal screen-reading contract used by Ovis and Collie. Passing one does not verify the other. Custom terminal UI is not universally converted. Adapter inspection, safe reload and portable preview depend on the Switchyard version: use its adapter-development capability and documented authoring tools when available, and keep legacy portable panels working when they are not.

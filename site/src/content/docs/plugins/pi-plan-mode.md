@@ -6,6 +6,14 @@ plugin: pi-plan-mode
 
 The global [System 1](/plugins/pi-system1/) configuration (`/system1`) sets an ordered chain of Jev and native OpenAI Decisions for tool preselection and effort recommendations (Jev only by default). The legacy `jevToolSelection` switch disables tool preselection only; Jev provider/model settings apply to both uses only when Jev answers. Decisions requires pi-system1 and its isolated API credential; it uses API billing, not subscription OAuth. Pi does not verify credit funding. Operational failures can advance to the next configured backend with a notification; valid judgments and safety refusals do not trigger failover. Manual tool selection remains available.
 
+## Switchyard
+
+The optional package-local adapter shows the latest reviewed plan in a **Plan** session panel: a desktop panel tab and portable phone Details content. The original plan text and supplied changes-since-last-version remain visible. A noninteractive composer pill reflects Pi's published workflow status; plan text by itself never implies approval or execution.
+
+Approval stays in the existing Pi interaction, including revision, saving for later, cancellation and acceptance. The terminal and remote dialog race uses the first answer and closes both owners on completion or failure; a failed dialog is not silently reopened. Reloading adapters restores only persisted display state, not historical approvals, notifications or tool execution. Older Switchyard hosts retain the legacy plan/status panels, without duplicate panels on newer hosts. The terminal layout and footer geometry are unchanged.
+
+See the [Switchyard integration contract](/architecture/switchyard/).
+
 ## Quick reference
 
 - **Use it for:** Research before implementation in the main conversation, or compare two constrained planners.

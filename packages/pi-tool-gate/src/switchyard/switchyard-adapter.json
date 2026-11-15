@@ -1,7 +1,8 @@
 {
   "id": "tool-gate",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "target": {
+    "entrypoints": ["src/index.ts"],
     "extension": "@justmytwospence/pi-tool-gate",
     "versionRange": ">=0.1.0 <0.2.0",
     "testedVersions": ["0.1.2"]

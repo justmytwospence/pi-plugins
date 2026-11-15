@@ -1,7 +1,8 @@
 import assert from 'node:assert/strict';
 import { readFileSync, readdirSync, existsSync } from 'node:fs';
 import { dirname, resolve, relative, sep } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
+import { spawnSync } from 'node:child_process';
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const manifest = JSON.parse(readFileSync(resolve(root, 'package.json'), 'utf8'));
 const components = manifest.pi.extensions.map(p => p.split('/')[2]);
@@ -11,6 +12,7 @@ for (const { source, copies } of transcriptHelpers) {
   for (const copy of copies) assert.equal(readFileSync(resolve(root, copy), 'utf8'), expected, `generated transcript helper drift: ${copy}`);
 }
 const identical = [
+  ['pi-ask-user-question','pi-plan-mode'].map(p => `packages/${p}/src/switchyard-remote.ts`),
   ['pi-context','pi-cc-render'].map(p => `packages/${p}/src/context-metadata.ts`),
   ['pi-plan-mode','pi-status-footer','pi-sidebar','pi-compact-plan','pi-cache-guard','pi-subagents'].map(p => `packages/${p}/src/routed-model.ts`),
   ['pi-status-footer','pi-tool-gate','pi-plan-mode','pi-context','pi-cache-guard','pi-cc-render','pi-system1','pi-sidebar'].map(p => `packages/${p}/src/footer-actions.ts`),
@@ -108,7 +110,35 @@ for (const name of components) {
     assert.equal(lock.packages?.['']?.version,manifest.version,`${name} lock root version`);
   }
 }
+// Adapters ship with the independently selectable component, not a runtime sibling or host SDK.
+for (const entry of manifest.switchyard.adapter) {
+  const dir = resolve(root,entry);
+  const componentName = relative(resolve(root,'packages'),dir).split(sep)[0];
+  assert(components.includes(componentName),`adapter belongs to a selectable component: ${entry}`);
+  const component = resolve(root,'packages',componentName);
+  assert(!relative(component,dir).startsWith('..'),`adapter must stay inside its component: ${entry}`);
+  const pkg = JSON.parse(readFileSync(resolve(component,'package.json'),'utf8'));
+  const adapter = JSON.parse(readFileSync(resolve(dir,'switchyard-adapter.json'),'utf8'));
+  assert.equal(adapter.target.extension,pkg.name,`adapter targets its own component: ${entry}`);
+  assert(adapter.target.entrypoints?.length,`adapter declares target entrypoints: ${entry}`);
+  for (const target of adapter.target.entrypoints) {
+    assert(!target.startsWith('/') && !relative(component,resolve(component,target)).startsWith('..'),`target entrypoint stays inside component: ${target}`);
+    assert(existsSync(resolve(component,target)),`target entrypoint exists: ${target}`);
+    assert(pkg.pi?.extensions ? pkg.pi.extensions.some(p => resolve(component,p) === resolve(component,target)) : target === 'index.ts',
+      `target entrypoint is independently selectable: ${entry} -> ${target}`);
+  }
+  assert(existsSync(resolve(component,'test/switchyard.test.ts')) || existsSync(resolve(dir,'switchyard.test.ts')),
+    `adapter has a package-owned test: ${entry}`);
+  const server = resolve(dir,adapter.server);
+  assert(!relative(dir,server).startsWith('..'),`adapter entry stays inside its directory: ${entry}`);
+  const code = readFileSync(server,'utf8');
+  assert(!/^\s*(?:import\b|export\s+(?:type\s+)?(?:\*|\{))|\bimport\s*\(/m.test(code),`adapter is self-contained: ${entry}`);
+  const loaded = spawnSync(process.execPath,['--experimental-strip-types','--input-type=module','-e',
+    `const m = await import(${JSON.stringify(pathToFileURL(server).href)}); if (!m.default) process.exit(1);`],
+    { cwd: component, encoding: 'utf8', timeout: 10000 });
+  assert.equal(loaded.status,0,`adapter independently loads: ${entry}\n${loaded.stderr}`);
+}
 const { plugins } = await import('../site/src/data/plugins.mjs');
 const names = plugins.map(p => p.id ?? p.name ?? p.slug);
 assert.deepEqual(new Set(names),new Set(components),'public catalog matches selectable manifest');
-console.log(`PASS ${components.length} component metadata, host peers, runtime independence, helper parity, shared eval helpers, eval target registry and public catalog`);
+console.log(`PASS ${components.length} component metadata, host peers, runtime independence, package-local adapters/entrypoints/tests, helper parity, shared eval helpers, eval target registry and public catalog`);

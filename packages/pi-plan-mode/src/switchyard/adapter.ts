@@ -15,6 +15,13 @@ export type UINode =
   | { t: "section"; title?: string; collapsible?: boolean; children: UINode[] }
   | { t: "progress"; label: string; value?: number; status?: "running" | "ok" | "error" }
   | { t: "actions"; actions: { id: string; label: string; tone?: "default" | "primary" | "danger" }[] };
+type Contribution = {
+  placement: "session.panel" | "composer.pill";
+  title: string;
+  node: UINode;
+  mobileFallback: string;
+  state?: unknown;
+};
 type PanelOptions = { title?: string; mobileFallback?: string | null; state?: unknown };
 export type AdapterContext = {
   readonly state: {
@@ -24,6 +31,7 @@ export type AdapterContext = {
     keys(): string[];
   };
   setPanel(slot: string, node: UINode | null, opts?: PanelOptions): void;
+  setContribution?(id: string, contribution: Contribution | null): void;
 };
 export type PiUiRequest =
   | { id: string; method: "select"; title: string; options: string[]; timeout?: number }
@@ -65,7 +73,67 @@ export const APPROVAL_QUESTION = "Implement this plan?";
 export const STATUS_KEYS = ["workflow-mode", "plan", "plan-exec"] as const;
 const PLAN_KEY = "plan:";
 
-type PendingPlan = { toolCallId: string; plan: string; changes?: string[]; at: number };
+type DisplayPlan = { plan: string; changes?: string[] };
+type PendingPlan = DisplayPlan & { toolCallId: string; at: number };
+
+function planNode(plan: DisplayPlan): UINode {
+  const markdown: UINode = { t: "markdown", text: plan.plan };
+  return plan.changes?.length
+    ? {
+        t: "section",
+        children: [
+          markdown,
+          {
+            t: "section",
+            title: "Changes since the last version",
+            children: [{ t: "list", items: plan.changes.map((text) => ({ t: "text", text })) }],
+          },
+        ],
+      }
+    : markdown;
+}
+
+/** Plan text is display evidence, never evidence of approval or execution. */
+export function renderPlan(ctx: AdapterContext): void {
+  const plan = ctx.state.get<DisplayPlan>("display-plan");
+  const statuses = ctx.state.get<Record<string, string>>("status") ?? {};
+  const rows = STATUS_KEYS.filter((k) => statuses[k] !== undefined).map((k) => [k, statuses[k] as string]);
+  const statusNode: UINode | null = rows.length ? { t: "table", columns: ["Key", "Status"], rows } : null;
+  if (ctx.setContribution) {
+    ctx.setPanel("plan", null);
+    ctx.setPanel("plan-status", null);
+    const children: UINode[] = [...(plan ? [planNode(plan)] : []), ...(statusNode ? [statusNode] : [])];
+    ctx.setContribution(
+      "plan",
+      children.length
+        ? {
+            placement: "session.panel",
+            title: "Plan",
+            node: children.length === 1 ? children[0]! : { t: "section", children },
+            mobileFallback: [plan?.plan, ...rows.map(([key, text]) => `${key}: ${text}`)]
+              .filter(Boolean)
+              .join("\n")
+              .slice(0, 2000),
+          }
+        : null,
+    );
+    const text = rows.map(([, value]) => value).join(" · ");
+    ctx.setContribution(
+      "plan-pill",
+      text
+        ? {
+            placement: "composer.pill",
+            title: "Plan",
+            node: { t: "text", text },
+            mobileFallback: text.slice(0, 2000),
+          }
+        : null,
+    );
+  } else {
+    ctx.setPanel("plan", plan ? planNode(plan) : null, { title: "Plan", mobileFallback: plan?.plan ?? null });
+    ctx.setPanel("plan-status", statusNode, { title: "Plan mode" });
+  }
+}
 
 function pendingPlans(ctx: AdapterContext): PendingPlan[] {
   return ctx.state
@@ -81,6 +149,8 @@ function detailsOf(value: unknown): Record<string, unknown> | undefined {
 }
 
 export default {
+  onRestore: renderPlan,
+
   onToolUpdate(e: ToolUpdate, ctx: AdapterContext): void {
     if (e.name !== EXIT_TOOL) return;
     const d = detailsOf(e.details);
@@ -92,7 +162,8 @@ export default {
       ...(changes?.length ? { changes } : {}),
       at: Date.now(),
     } satisfies PendingPlan);
-    ctx.setPanel("plan", { t: "markdown", text: d.plan }, { title: "Plan", mobileFallback: d.plan });
+    ctx.state.set("display-plan", { plan: d.plan, ...(changes?.length ? { changes } : {}) });
+    renderPlan(ctx);
   },
 
   claimInteraction(req: PiUiRequest, ctx: AdapterContext): Claim | undefined {
@@ -127,7 +198,10 @@ export default {
         ],
       },
       toPiResponse(resp: InteractionResponse): PiUiResponse {
-        if (resp.kind === "cancel") return { cancelled: true };
+        if (resp.kind === "cancel") {
+          ctx.state.delete(PLAN_KEY + pending.toolCallId);
+          return { cancelled: true };
+        }
         if (resp.kind === "action") {
           const value = options[Number(resp.actionId.replace("option-", ""))];
           if (value !== undefined) return { value };
@@ -135,6 +209,20 @@ export default {
         throw new InteractionResponseError(`unknown approval option ${JSON.stringify(resp)}`);
       },
     };
+  },
+
+  onToolEnd(e: ToolInfo, ctx: AdapterContext): void {
+    if (e.name !== EXIT_TOOL) return;
+    const pending = ctx.state.get<PendingPlan>(PLAN_KEY + e.toolCallId);
+    const d = detailsOf(e.details);
+    if (typeof d?.plan === "string") {
+      const changes = Array.isArray(d.changes)
+        ? d.changes.filter((c): c is string => typeof c === "string")
+        : pending?.changes;
+      ctx.state.set("display-plan", { plan: d.plan, ...(changes?.length ? { changes } : {}) });
+    }
+    ctx.state.delete(PLAN_KEY + e.toolCallId);
+    renderPlan(ctx);
   },
 
   toolCard(tool: ToolInfo, ctx: AdapterContext): UINode | undefined {
@@ -154,10 +242,7 @@ export default {
     if (text === undefined || text === "") delete statuses[key];
     else statuses[key] = text;
     ctx.state.set("status", statuses);
-    const rows = STATUS_KEYS.filter((k) => statuses[k] !== undefined).map((k) => [k, statuses[k] as string]);
-    ctx.setPanel("plan-status", rows.length ? { t: "table", columns: ["Key", "Status"], rows } : null, {
-      title: "Plan mode",
-    });
+    renderPlan(ctx);
     return true;
   },
 };

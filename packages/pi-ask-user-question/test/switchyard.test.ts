@@ -350,3 +350,74 @@ describe("ask-user-question switchyard adapter", () => {
     });
   });
 });
+
+
+type Ctx = Parameters<typeof adapter.onToolStart>[1];
+function makeCtx() {
+  const store = new Map<string, unknown>();
+  const warnings: string[] = [];
+  const ctx: Ctx = {
+    state: {
+      get: <T = unknown>(key: string) => store.get(key) as T | undefined,
+      set: (key, value) => void store.set(key, structuredClone(value)),
+      delete: (key) => void store.delete(key),
+      keys: () => [...store.keys()],
+    },
+    log: (_level, message) => void warnings.push(message),
+  };
+  return { ctx, warnings };
+}
+const args = { questions: [
+  { header: "Language", question: "Which language?", options: [{ label: "TS", description: "" }, { label: "JS", description: "" }] },
+  { header: "Checks", question: "Which checks?", options: [{ label: "Unit", description: "" }, { label: "Types", description: "" }], multiSelect: true },
+] };
+const request = { id: "q1", method: "select" as const, title: "[Language] Which language?", options: ["1. TS", "2. JS", "3. Type something."] };
+
+describe("question Switchyard contract", () => {
+  it("claims once, maps multi-question/select/free text, and clears ownership on tool end", () => {
+    const { ctx } = makeCtx();
+    adapter.onToolStart({ toolCallId: "t1", name: "ask_user_question", args }, ctx);
+    const claim = adapter.claimInteraction(request, ctx)!;
+    expect(claim.ownerToolCallId).toBe("t1");
+    expect(claim.presentation.fields).toHaveLength(2);
+    expect(adapter.claimInteraction({ ...request, id: "q2" }, ctx)).toBeUndefined();
+    const answer = claim.toPiResponse({ kind: "form", values: { q1: { other: "Rust" }, q2: ["Types", "Unit"] } });
+    expect(answer).toHaveProperty("sequence");
+    if (!("sequence" in answer)) throw new Error("missing sequence");
+    expect(answer.sequence).toHaveLength(3);
+    const [select, input, checks] = answer.sequence;
+    if (!select || !("response" in select) || typeof select.response !== "function") throw new Error("missing select");
+    expect(select.response(request)).toEqual({ value: "3. Type something." });
+    expect(input).toMatchObject({ response: { value: "Rust" } });
+    expect(checks).toMatchObject({ response: { value: "1,2" } });
+    expect(claim.toPiResponse({ kind: "cancel" })).toEqual({ cancelled: true });
+    adapter.onToolEnd({ toolCallId: "t1", name: "ask_user_question" }, ctx);
+    expect(ctx.state.keys()).toEqual([]);
+  });
+
+  it("leaves unsupported/failed claims generic and refuses invalid answers instead of approving", () => {
+    const { ctx, warnings } = makeCtx();
+    adapter.onToolStart({ toolCallId: "bad", name: "ask_user_question", args: {} }, ctx);
+    expect(warnings).toHaveLength(1);
+    expect(adapter.claimInteraction(request, ctx)).toBeUndefined();
+    adapter.onToolStart({ toolCallId: "t1", name: "ask_user_question", args }, ctx);
+    expect(adapter.claimInteraction({ ...request, title: "Other question" }, ctx)).toBeUndefined();
+    const claim = adapter.claimInteraction(request, ctx)!;
+    expect(() => claim.toPiResponse({ kind: "form", values: {} })).toThrow();
+    expect(() => claim.toPiResponse({ kind: "action", actionId: "approve" })).toThrow();
+    expect(ctx.state.keys()).toContain("pending:t1");
+  });
+
+  it("accepts a select answer and clears a delegated claim when its semantic details vanish", () => {
+    const { ctx } = makeCtx();
+    adapter.onToolUpdate({ toolCallId: "planner", name: "ask_planner", details: { askUserQuestion: args } }, ctx);
+    const claim = adapter.claimInteraction(request, ctx)!;
+    const answer = claim.toPiResponse({ kind: "form", values: { q1: "TS", q2: ["Unit"] } });
+    if (!("sequence" in answer)) throw new Error("missing sequence");
+    const first = answer.sequence[0];
+    if (!first || !("response" in first) || typeof first.response !== "function") throw new Error("missing response");
+    expect(first.response(request)).toEqual({ value: "1. TS" });
+    adapter.onToolUpdate({ toolCallId: "planner", name: "ask_planner" }, ctx);
+    expect(ctx.state.keys()).toEqual([]);
+  });
+});

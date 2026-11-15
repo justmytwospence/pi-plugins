@@ -10,6 +10,17 @@ export type SubagentLink = {
   status: string;
   sessionFile: string | null;
 };
+export type UINode =
+  | { t: "text"; text: string }
+  | { t: "table"; columns: string[]; rows: string[][] }
+  | { t: "section"; children: UINode[] };
+type PanelOptions = { title?: string; mobileFallback?: string | null };
+type Contribution = {
+  placement: "session.panel" | "composer.pill";
+  title: string;
+  node: UINode;
+  mobileFallback: string;
+};
 export type AdapterContext = {
   readonly state: {
     get<T = unknown>(key: string): T | undefined;
@@ -18,6 +29,8 @@ export type AdapterContext = {
     keys(): string[];
   };
   linkSubagent(link: SubagentLink): void;
+  setPanel(slot: string, node: UINode | null, opts?: PanelOptions): void;
+  setContribution?(id: string, contribution: Contribution | null): void;
 };
 export type SessionEntryInfo = { type: string; customType?: string; data?: unknown };
 export type ToolEndEvent = {
@@ -68,6 +81,34 @@ export function runLink(run: RunView): SubagentLink {
   };
 }
 
+/** Restore only portable display; links are emitted solely for new run evidence. */
+export function renderSubagents(ctx: AdapterContext): void {
+  const links = ctx.state.keys().filter((key) => key.startsWith("run:"))
+    .map((key) => ctx.state.get<SubagentLink>(key))
+    .filter((link): link is SubagentLink => !!link);
+  const node: UINode | null = links.length ? {
+    t: "section", children: [
+      { t: "table", columns: ["Subagent", "Status"], rows: links.map((link) => [link.label, link.status]) },
+      { t: "text", text: VIEW_ONLY_NOTE },
+    ],
+  } : null;
+  const summary = links.map((link) => `${link.label}: ${link.status}`).join("\n");
+  const fallback = `${summary.slice(0, 1999 - VIEW_ONLY_NOTE.length)}\n${VIEW_ONLY_NOTE}`;
+  if (ctx.setContribution) {
+    ctx.setPanel("subagents", null);
+    ctx.setContribution("subagents", node ? {
+      placement: "session.panel", title: "Subagents", node, mobileFallback: fallback,
+    } : null);
+    const count = links.filter((link) => link.status === "running").length;
+    const text = `Subagents: ${count} running`;
+    ctx.setContribution("subagents-pill", count ? {
+      placement: "composer.pill", title: "Subagents", node: { t: "text", text }, mobileFallback: text,
+    } : null);
+  } else {
+    ctx.setPanel("subagents", node, { title: "Subagents", mobileFallback: node ? fallback : null });
+  }
+}
+
 function publish(run: RunView, ctx: AdapterContext) {
   const link = runLink(run);
   const key = `run:${run.id}`;
@@ -82,9 +123,12 @@ function publish(run: RunView, ctx: AdapterContext) {
   }
   ctx.state.set(key, link);
   ctx.linkSubagent(link);
+  renderSubagents(ctx);
 }
 
 export default {
+  onRestore: renderSubagents,
+
   onEntry(entry: SessionEntryInfo, ctx: AdapterContext): void {
     if (entry.customType !== RUN_ENTRY) return;
     const run = asRun(entry.data);

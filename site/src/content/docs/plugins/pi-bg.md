@@ -4,6 +4,14 @@ description: Run shell jobs and services with lifecycle management, searchable l
 plugin: pi-bg
 ---
 
+## Switchyard
+
+The optional adapter publishes a **Background** session panel and a noninteractive composer pill from Pi's current background status. Desktop keeps the existing custom task-list renderer; phones use the portable text/list/progress content in Details. Fractions and percentages become progress values; unmeasured progress remains text, never an invented percentage.
+
+Adapter reload reconstructs only persisted status/widget display. It does not poll processes, restart jobs, infer completion when a status disappears, or manage host services. An absent status clears the pill; remaining widget lines stay visible until Pi clears them. Older hosts keep the legacy Background panel, and newer hosts remove its duplicate. Terminal activity rows and footer geometry are unchanged.
+
+See the [Switchyard integration contract](/architecture/switchyard/).
+
 ## Quick reference
 
 - **Use it for:** Run a long command while the agent continues other work; distinguish finite jobs from ready services.

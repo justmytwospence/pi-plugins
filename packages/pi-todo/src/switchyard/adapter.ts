@@ -11,6 +11,13 @@ export type UINode =
   | { t: "table"; columns: string[]; rows: string[][] }
   | { t: "section"; title?: string; collapsible?: boolean; children: UINode[] }
   | { t: "progress"; label: string; value?: number; status?: "running" | "ok" | "error" };
+type Contribution = {
+  placement: "session.panel" | "composer.pill";
+  title: string;
+  node: UINode;
+  mobileFallback: string;
+  state?: unknown;
+};
 type PanelOptions = { title?: string; mobileFallback?: string | null; state?: unknown };
 export type AdapterContext = {
   readonly state: {
@@ -20,6 +27,7 @@ export type AdapterContext = {
     keys(): string[];
   };
   setPanel(slot: string, node: UINode | null, opts?: PanelOptions): void;
+  setContribution?(id: string, contribution: Contribution | null): void;
 };
 export type ToolEndEvent = {
   toolCallId: string;
@@ -77,21 +85,39 @@ export function todoPanel(items: TodoItem[]): UINode | null {
         ? { t: "text", text, tone: "muted" }
         : { t: "text", text };
     }),
-    ordered: undefined,
   };
 }
 
+/** Display state only; Pi remains the sole owner of todo mutations. */
+export function renderTodo(ctx: AdapterContext): void {
+  const items = ctx.state.get<TodoItem[]>("items") ?? [];
+  const node = todoPanel(items);
+  const fallback = items.map((i) => `${mark(i.status)} ${i.title}`).join("\n");
+  if (ctx.setContribution) {
+    ctx.setPanel("todo", null);
+    ctx.setContribution("todo", node ? {
+      placement: "session.panel", title: "Todo", node, mobileFallback: fallback.slice(0, 2000),
+    } : null);
+    const complete = items.filter((i) => i.status === "completed" || i.status === "done").length;
+    const text = `Todo: ${complete} of ${items.length} complete`;
+    ctx.setContribution("todo-pill", node ? {
+      placement: "composer.pill", title: "Todo", node: { t: "text", text }, mobileFallback: text,
+    } : null);
+  } else {
+    ctx.setPanel("todo", node, { title: "Todo", mobileFallback: fallback || null });
+  }
+}
+
 export default {
+  onRestore: renderTodo,
+
   onToolEnd(e: ToolEndEvent, ctx: AdapterContext): void {
     if (e.name !== TOOL_NAME) return;
     const details = (e.details ?? (e.result as { details?: unknown } | null)?.details) as
       | { tasks?: unknown }
       | undefined;
     if (!Array.isArray(details?.tasks)) return;
-    const items = todoItems(details.tasks);
-    ctx.setPanel("todo", todoPanel(items), {
-      title: "Todo",
-      mobileFallback: items.map((i) => `${mark(i.status)} ${i.title}`).join("\n") || null,
-    });
+    ctx.state.set("items", todoItems(details.tasks));
+    renderTodo(ctx);
   },
 };

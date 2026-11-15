@@ -148,3 +148,30 @@ describe("tool-gate switchyard adapter", () => {
     expect(claim({ id: "x", method: "select", title: "Pick a fruit", options: ["Apple"] })).toBeUndefined();
   });
 });
+
+
+const request = {
+  id: "approval", method: "select" as const,
+  title: "Allow this call?\nAction: bash\nRule: npm test",
+  options: ["Allow once", "Block", "Block with a message"],
+};
+
+describe("gate Switchyard contract", () => {
+  it("preserves the real options and maps only an explicit answer or cancellation", () => {
+    const claim = adapter.claimInteraction(request)!;
+    expect(claim).toBeDefined();
+    expect(JSON.stringify(claim.presentation)).toContain("npm test");
+    expect(claim.toPiResponse({ kind: "action", actionId: "option:0" })).toEqual({ value: "Allow once" });
+    expect(claim.toPiResponse({ kind: "action", actionId: "option:2" })).toEqual({ value: "Block with a message" });
+    expect(claim.toPiResponse({ kind: "cancel" })).toEqual({ cancelled: true });
+  });
+
+  it("failed/unsupported claims never manufacture permission or an alternate dialog", () => {
+    expect(adapter.claimInteraction({ ...request, title: "Unrelated question" })).toBeUndefined();
+    expect(adapter.claimInteraction({ id: "input", method: "input", title: request.title })).toBeUndefined();
+    const claim = adapter.claimInteraction(request)!;
+    expect(() => claim.toPiResponse({ kind: "action", actionId: "option:99" })).toThrow();
+    expect(() => claim.toPiResponse({ kind: "form", values: {} })).toThrow();
+    expect(claim.toPiResponse({ kind: "action", actionId: "option:1" })).toEqual({ value: "Block" });
+  });
+});

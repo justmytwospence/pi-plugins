@@ -40,16 +40,25 @@ export async function raceRemote<T>(
   };
   outer?.addEventListener("abort", onOuter, { once: true });
   try {
-    const r = remote(rc.signal).then((value) => ({ value, from: "remote" as const }));
-    const t = terminal(tc.signal).then((value) => ({ value, from: "terminal" as const }));
-    const winner = await Promise.race([r, t]);
-    if (winner.from === "remote") tc.abort();
-    else rc.abort("terminal");
-    // Let the loser settle quietly.
+    // Capture synchronous throws too, without delaying remote-first registration.
+    const start = (dialog: (signal: AbortSignal) => Promise<T | undefined>, signal: AbortSignal) => {
+      try {
+        return Promise.resolve(dialog(signal));
+      } catch (error) {
+        return Promise.reject(error);
+      }
+    };
+    const r = start(remote, rc.signal).then((value) => ({ value, from: "remote" as const }));
     void r.catch(() => {});
+    const t = start(terminal, tc.signal).then((value) => ({ value, from: "terminal" as const }));
     void t.catch(() => {});
+    const winner = await Promise.race([r, t]);
+    if (winner.from === "terminal") rc.abort("terminal");
     return winner;
   } finally {
+    // Failure is not a reason to reopen an approval. Retire both dialog owners on every exit.
+    rc.abort("pi");
+    tc.abort();
     outer?.removeEventListener("abort", onOuter);
   }
 }
