@@ -78,6 +78,9 @@ try {
     });
     const dependencies = resolve(root, 'packages', plugin.name, 'node_modules');
     if (existsSync(dependencies)) symlinkSync(dependencies, resolve(isolated, 'node_modules'), 'dir');
+    // Mirror the suite's root dependency lookup, including declared file dependencies,
+    // without placing sibling source packages next to the isolated component.
+    symlinkSync(resolve(root, 'node_modules'), resolve(dirname(isolated), 'node_modules'), 'dir');
     const isolatedExtensions = await load([isolated]);
     assert.equal(isolatedExtensions.length, 1);
     assert.equal(ownsCycles(isolatedExtensions[0]), cycleParticipants.has(plugin.name), `${plugin.name} isolated coordinator ownership`);

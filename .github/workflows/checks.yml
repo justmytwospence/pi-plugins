@@ -13,7 +13,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - id: plugins
-        run: echo "names=$(node -e 'console.log(JSON.stringify(require("./source-pins.json").plugins.map(p => p.name)))')" >> "$GITHUB_OUTPUT"
+        run: echo "names=$(node -e 'console.log(JSON.stringify([...new Set(require("./package.json").pi.extensions.map(p => p.split("/")[2]))]))')" >> "$GITHUB_OUTPUT"
   loader-and-docs:
     runs-on: ubuntu-latest
     steps:
@@ -24,8 +24,11 @@ jobs:
           cache: npm
           cache-dependency-path: |
             package-lock.json
+            packages/pi-sidebar/package-lock.json
             site/package-lock.json
       - run: npm ci
+      # Root integration tests exercise the sidebar's locked Pi 1.2 and 1.4 SDKs.
+      - run: npm ci --prefix packages/pi-sidebar
       - run: npm test
       - run: npm ci
         working-directory: site
@@ -81,6 +84,9 @@ jobs:
         with:
           node-version: '24'
           cache: npm
-          cache-dependency-path: packages/${{ matrix.plugin }}/package-lock.json
+          cache-dependency-path: |
+            package-lock.json
+            packages/${{ matrix.plugin }}/package-lock.json
+      - run: npm ci
       - run: npm ci && npm run check
         working-directory: packages/${{ matrix.plugin }}
