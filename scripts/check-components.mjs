@@ -13,6 +13,7 @@ for (const plugin of plugins) {
   const env = { ...process.env, PI_CODING_AGENT_DIR: agentDir };
   delete env.PI_SUBAGENT;
   delete env.PI_SUBAGENT_DEPTH;
+  delete env.PI_SIDEBAR_FAMILY;
   // Component fixtures own approval configuration independently of the parent agent.
   for (const key of Object.keys(env)) if (key.startsWith('PI_TOOL_GATE_')) delete env[key];
   try {

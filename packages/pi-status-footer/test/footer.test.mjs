@@ -1047,7 +1047,7 @@ test("a real linked worktree with broken common metadata is unavailable, not out
   let h;
   try {
     execFileSync("git", ["init", "-b", "main", main], { stdio: "ignore" });
-    execFileSync("git", ["-c", "user.name=Footer test", "-c", "user.email=footer@example.invalid", "-c", "commit.gpgSign=false", "-c", `core.hooksPath=${os.devNull}`, "commit", "--allow-empty", "-m", "base"], { cwd: main, stdio: "ignore" });
+    execFileSync("git", ["-c", "user.name=Footer test", "-c", "user.email=footer@example.invalid", "-c", "commit.gpgSign=false", "-c", `core.hooksPath=${os.devNull}`, "commit", "--allow-empty", "-m", "test: base"], { cwd: main, stdio: "ignore" });
     execFileSync("git", ["worktree", "add", "-b", "linked", linked], { cwd: main, stdio: "ignore" });
     h = host([], linked, "tui", "fallback");
     h.ctx.model = { provider: "test", id: "test", contextWindow: 1000 };

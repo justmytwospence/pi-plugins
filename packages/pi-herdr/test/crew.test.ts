@@ -98,7 +98,7 @@ function gitRepo() {
   const root = realpathSync(mkdtempSync(join(tmpdir(), "crew-")));
   const git = (...args: string[]) => execFileSync("git", args, { cwd: root, stdio: "pipe" }).toString();
   git("init", "-q", "-b", "main");
-  git("-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "--allow-empty", "-m", "init");
+  git("-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "--allow-empty", "-m", "test: init");
   git("worktree", "add", "-q", ".worktrees/feature-a", "-b", "feature/a");
   git("worktree", "add", "-q", ".worktrees/b", "-b", "b");
   return { root, a: join(root, ".worktrees/feature-a"), b: join(root, ".worktrees/b"), cleanup: () => rmSync(root, { recursive: true, force: true }) };

@@ -20,7 +20,7 @@ describe("drift", () => {
     r.upstream("other.txt", "y\n");
     const behindOnly = (await computeDrift(realExec, r.a, "main"))!;
     expect(behindOnly).toMatchObject({ base: "main", behind: 1, overlap: [] });
-    expect(behindOnly.upstream[0]).toContain("upstream other.txt");
+    expect(behindOnly.upstream[0]).toContain("test: upstream other.txt");
     expect(driftToken(behindOnly)).toBe("↓1 main");
     expect(driftMatters(behindOnly)).toBe(false);
 

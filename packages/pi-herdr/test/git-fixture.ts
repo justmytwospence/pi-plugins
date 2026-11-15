@@ -25,7 +25,7 @@ export function remoteRepo() {
   writeFileSync(join(root, "shared.txt"), "one\ntwo\nthree\n");
   writeFileSync(join(root, "other.txt"), "x\n");
   sh(root, "add", ".");
-  sh(root, "commit", "-q", "-m", "init");
+  sh(root, "commit", "-q", "-m", "test: init");
   sh(root, "push", "-q", "origin", "main");
   sh(root, "remote", "set-head", "origin", "main");
   const a = join(root, ".worktrees/a");
@@ -37,13 +37,13 @@ export function remoteRepo() {
     const scratch = join(dir, `scratch-${Math.random().toString(36).slice(2)}`);
     execFileSync("git", ["clone", "-q", origin, scratch], { stdio: "pipe" });
     writeFileSync(join(scratch, file), text);
-    sh(scratch, "commit", "-qam", msg);
+    sh(scratch, "commit", "-qam", `test: ${msg}`);
     sh(scratch, "push", "-q", "origin", "main");
     if (fetch) sh(root, "fetch", "-q", "origin");
   };
   const commit = (cwd: string, file: string, text: string) => {
     writeFileSync(join(cwd, file), text);
-    sh(cwd, "commit", "-qam", `edit ${file}`);
+    sh(cwd, "commit", "-qam", `test: edit ${file}`);
   };
   return { dir, root, a, b, common: join(root, ".git"), upstream, commit, cleanup: () => rmSync(dir, { recursive: true, force: true }) };
 }

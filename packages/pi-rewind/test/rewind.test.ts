@@ -47,7 +47,7 @@ function repo() {
 	};
 	write("a.txt", "one\n");
 	run("add", "-A");
-	run("commit", "-qm", "init");
+	run("commit", "-qm", "test: init");
 	return { root, run, write };
 }
 

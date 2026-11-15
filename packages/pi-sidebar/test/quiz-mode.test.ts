@@ -13,7 +13,7 @@ function repo() {
   git("config", "user.name", "t");
   writeFileSync(path.join(root, "a.ts"), "export const a = 1;\n");
   git("add", ".");
-  git("commit", "-qm", "init");
+  git("commit", "-qm", "test: init");
   return { root, git };
 }
 
@@ -40,7 +40,7 @@ describe("quiz mode", () => {
     mode.sent();
 
     git("add", ".");
-    git("commit", "-qm", "main's work");
+    git("commit", "-qm", "test: main's work");
     touch(path.join(root, "a.ts"), "export const a = 3;\n", 2_000_000);
     await mode.prepare(root);
     expect(mode.status()).toContain("New since the last question: a.ts");

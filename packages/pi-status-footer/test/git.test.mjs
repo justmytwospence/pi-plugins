@@ -30,7 +30,7 @@ async function repo(run) {
   const rawStatus = () => gitRaw("status", "--porcelain=v2", "--branch", "--ahead-behind", "--untracked-files=all", "-z");
   const status = () => mod.parseGitStatus(rawStatus());
   const file = (name, content = name) => writeFile(path.join(dir, name), content);
-  const commit = (message) => { git("add", "--all"); git("commit", "-m", message); };
+  const commit = (message) => { git("add", "--all"); git("commit", "-m", `test: ${message}`); };
   try {
     git("init", "-b", "main");
     git("config", "user.name", "Footer test");
@@ -53,7 +53,7 @@ test("real paused rebase with no changed filenames marks only the actual worktre
     git("worktree", "add", "-b", "topic", linked);
     const run = (...args) => execFileSync("git", args, { cwd: linked, env: { ...process.env, GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: os.devNull } });
     // A real interactive edit stop keeps HEAD/index/worktree identical.
-    run("-c", "user.name=Footer test", "-c", "user.email=footer@example.invalid", "-c", "commit.gpgSign=false", "commit", "--allow-empty", "-m", "pause");
+    run("-c", "user.name=Footer test", "-c", "user.email=footer@example.invalid", "-c", "commit.gpgSign=false", "commit", "--allow-empty", "-m", "test: pause");
     execFileSync("git", ["rebase", "-i", "HEAD~1"], { cwd: linked,
       env: { ...process.env, GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: os.devNull,
         GIT_SEQUENCE_EDITOR: "perl -pi -e 's/^pick /edit /'" } });
