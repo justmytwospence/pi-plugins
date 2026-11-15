@@ -29,6 +29,8 @@ const env = { ...process.env, PI_CODING_AGENT_DIR: agentDir };
 // A delegated checker must exercise main-session services, not its own worker-only lifecycle.
 delete env.PI_SUBAGENT;
 delete env.PI_SUBAGENT_DEPTH;
+// Tests provide their own approval policy, not the live parent agent's workflow settings.
+for (const key of Object.keys(env)) if (key.startsWith('PI_TOOL_GATE_')) delete env[key];
 try {
   // This private dependency is not a selectable Pi extension, so the
   // component runner cannot discover its standalone quota/credential tests.

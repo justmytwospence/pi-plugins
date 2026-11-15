@@ -71,7 +71,7 @@ test("linked worktrees use active shared policy and main local policy, including
   const root = path.join(dir, "linked");
   mkdirSync(main);
   await git(main, "init");
-  await git(main, "-c", "user.name=Test", "-c", "user.email=test@example.invalid", "-c", "commit.gpgsign=false", "commit", "--allow-empty", "-m", "fixture");
+  await git(main, "-c", "user.name=Test", "-c", "user.email=test@example.invalid", "-c", "commit.gpgsign=false", "commit", "--allow-empty", "-m", "test: initialize fixture");
   await git(main, "worktree", "add", "-b", "linked", root);
   const cwd = path.join(root, "components");
   mkdirSync(cwd);
@@ -218,7 +218,7 @@ test("negative metadata scan reaches filesystem root and never selects an ancest
 });
 
 async function commit(cwd: string) {
-  await git(cwd, "-c", "user.name=Test", "-c", "user.email=test@example.invalid", "-c", "commit.gpgsign=false", "commit", "--allow-empty", "-m", "fixture");
+  await git(cwd, "-c", "user.name=Test", "-c", "user.email=test@example.invalid", "-c", "commit.gpgsign=false", "commit", "--allow-empty", "-m", "test: initialize fixture");
 }
 
 test.each([false, true])("separate-git-dir linked worktrees require a recorded main mapping (%s)", async mapped => {
@@ -566,7 +566,7 @@ test("projectContextSync finds a worktree's root and main checkout, and falls ba
     const main = path.join(base, "main");
     mkdirSync(main);
     await run("git", ["init", "-q", main]);
-    await run("git", ["-C", main, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "--allow-empty", "-m", "x"]);
+    await run("git", ["-C", main, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "--allow-empty", "-m", "test: initialize fixture"]);
     expect(projectContextSync(main)).toMatchObject({ root: main, main, isGit: true });
     const worktree = path.join(base, "wt");
     await run("git", ["-C", main, "worktree", "add", "-q", worktree, "-b", "b"]);

@@ -560,7 +560,10 @@ describe("pi-bg", () => {
     // Listed under the task, not again on its own.
     expect(list).not.toMatch(/outside work/u);
     setTimeout(() => x.pi.events.emit("bg:external", { id: "marimo:nb/fit.py", label: "fit.py", state: "done", summary: "ran 0:01" }), 300);
-    expect(x.textOf(await x.call("bg_wait", { id }))).toBe("fit.py (marimo:nb/fit.py): done · ran 0:01");
+    // Another task can finish while waiting; its measured duration depends on the real clock.
+    expect(x.textOf(await x.call("bg_wait", { id }))).toMatch(
+      /^fit\.py \(marimo:nb\/fit\.py\): done · ran 0:01(?:\n\nAlso while you waited:\n- marimo fit\.py \(\w+\) ended: signal SIGTERM after (?:\d+:\d{2}|\d+h\d{2}m)\. bg_logs \w+ for its output\.)?$/u,
+    );
     // The short form finds the nested notebook too.
     expect(x.textOf(await x.call("bg_wait", { id: "marimo:fit.py" }))).toBe("fit.py (marimo:nb/fit.py): done · ran 0:01");
     // Idle now: bg_wait on the server says so.

@@ -609,7 +609,7 @@ describe("resolved project policy integration", () => {
   test("a worktree uses only active shared policy, inherits main local saves, and saves locally to main", async () => {
     const root = realpathSync(configDir);
     git(root, "init", "-q");
-    git(root, "-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "--allow-empty", "-qm", "fixture");
+    git(root, "-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "--allow-empty", "-qm", "test: initialize fixture");
     const worktree = path.join(root, "worktree");
     git(root, "worktree", "add", "-qb", "fixture", worktree);
     writePolicy(root, { permissions: { deny: ["Bash(npm test:*)"] } });

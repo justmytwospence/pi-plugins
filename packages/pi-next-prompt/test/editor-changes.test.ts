@@ -200,7 +200,7 @@ for (const options of compositions) {
     expect(f.h.messages).toEqual([]);
   });
 
-  test(`real Ctrl+S restores snapshots, swaps drafts and reveals the retained offer (${label})`, async () => {
+  test(`real Ctrl+S restores snapshots, stacks and browses drafts and reveals the retained offer (${label})`, async () => {
     const f = await fixture(options);
     await f.h.emit("agent_start", {}, f.ctx);
     f.main.setText(DRAFT);
@@ -226,6 +226,16 @@ for (const options of compositions) {
     expect(f.frame()).toContain(PROMPT);
     const other = "second β draft  with spaces";
     f.ui.setEditorText(other);
+    expect(f.frame()).not.toContain(PROMPT);
+    // Ctrl+S stacks a nonempty draft; pop the newest, then browse to the older one.
+    f.terminal.send("\x13");
+    expect(f.ui.getEditorText()).toBe("");
+    expect(f.stash.entries.map((entry: any) => entry.text)).toEqual([DRAFT, other]);
+    await changes();
+    expect(f.frame()).toContain(PROMPT);
+    f.terminal.send("\x13");
+    expect(f.ui.getEditorText()).toBe(other);
+    expect(f.stash.entry.text).toBe(DRAFT);
     expect(f.frame()).not.toContain(PROMPT);
     f.terminal.send("\x13");
     expect(f.ui.getEditorText()).toBe(DRAFT);
