@@ -11,6 +11,8 @@ export interface PairDefinition {
   worker: PairEnd;
   /** Built-in pairs: the family-table routes the pair resolves on, tried in order (Antigravity before the API). */
   routes?: string[];
+  /** Keep serving the worker after approval, including later work and chat turns. */
+  handoff?: "persistent";
 }
 
 /**
@@ -26,6 +28,9 @@ export function builtinPairs(): PairDefinition[] {
     planner: { family: spec.planner },
     worker: { family: spec.worker },
     routes: spec.routes,
+    ...(["anthropic/fableplan", "openai/astraplan", "openai-codex/astraplan"].includes(pairKey(spec))
+      ? { handoff: "persistent" as const }
+      : {}),
   }));
 }
 
@@ -50,8 +55,10 @@ export function pairDefinitions(custom: CustomPairs | undefined): PairDefinition
       worker: { spec: value.worker },
     };
     const index = defs.findIndex((existing) => pairKey(existing) === key);
-    if (index >= 0) defs[index] = def;
-    else defs.push(def);
+    if (index >= 0) {
+      const handoff = defs[index]?.handoff;
+      defs[index] = { ...def, ...(handoff ? { handoff } : {}) };
+    } else defs.push(def);
   }
   return defs;
 }

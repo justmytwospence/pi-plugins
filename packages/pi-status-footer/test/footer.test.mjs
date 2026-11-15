@@ -907,6 +907,30 @@ test("footer reads the published plan pair and falls back to the last answer wit
     route = snapshot("build", sonnet);
     await refreshFrame(h);
     assert.match(plain(h.footer.render(160).join("\n")), /opusplan ▸ sonnet-5\.5/);
+    for (const [provider, id, planner, worker, plannerName, workerName] of [
+      ["anthropic", "fableplan", { provider: "anthropic", id: "claude-fable-5-5" }, opus, /fable-5\.5/i, /opus-5\.5/i],
+      ["openai-codex", "astraplan", { provider: "openai-codex", id: "gpt-6-astra" }, { provider: "openai-codex", id: "gpt-6-sol" }, /astra/i, /sol/i],
+      ["openai", "astraplan", { provider: "openai", id: "gpt-6-astra" }, { provider: "openai", id: "gpt-6-sol" }, /astra/i, /sol/i],
+    ]) {
+      h.ctx.model = { provider, id, api: "pi-virtual", contextWindow: 0, reasoning: true };
+      for (const [phase, next, name] of [["work", worker, workerName], ["chat", worker, workerName], ["plan", planner, plannerName], ["consult", planner, plannerName], ["work", worker, workerName], ["chat", worker, workerName]]) {
+        route = { version: 1, pair: `${provider}/${id}`, phase, next, planner, worker, thinkingLevel: "high" };
+        await refreshFrame(h);
+        for (const width of [46, 120, 180]) {
+          const rows = h.footer.render(width).map(plain);
+          assert.ok(rows.every(row => visibleWidth(row) <= width));
+          assert.match(rows.join("\n"), name, `${id} ${phase} at ${width}`);
+          h.pi.events.emit("herdr:blocked", { active: true });
+          const blocked = h.footer.render(width).map(plain);
+          assert.equal(blocked.length, 1);
+          assert.ok(visibleWidth(blocked[0]) <= width);
+          if (width >= 120) assert.match(blocked[0], name, `${id} blocked ${phase} at ${width}`);
+          h.pi.events.emit("herdr:blocked", { active: false });
+        }
+      }
+    }
+    h.ctx.model = { provider: "anthropic", id: "opusplan", api: "pi-virtual", contextWindow: 0, reasoning: true };
+    route = snapshot("build", sonnet);
     entries.push({ type: "message", message: { role: "assistant", stopReason: "stop", provider: "anthropic", model: "claude-haiku-4-5" } });
     await refreshFrame(h);
     assert.match(plain(h.footer.render(160).join("\n")), /last haiku-4\.5/);

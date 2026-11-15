@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { test } from "vitest";
 import { bindGateShell } from "../src/gate-shell.js";
 import { EXIT_TOOL, INLINE_ENTRY } from "../src/inline-plan.js";
-import { builtinPairs, pairKey } from "../src/model-pairs.js";
+import { builtinPairs, pairDefinitions, pairKey } from "../src/model-pairs.js";
 import { PAIR_ENTRY, registerPairs } from "../src/pairs.js";
 import { PLAN_PAIR_CHANNEL, queryPlanPair } from "../src/plan-pair-contract.js";
 import { SHELL_READS_CHANNEL } from "../src/shell-reads.js";
@@ -20,7 +20,30 @@ const models = [
 ];
 const virtual = { provider: "anthropic", id: "opusplan", api: "pi-virtual" };
 
-function setup(options: { planning?: boolean; workflow?: string; available?: typeof models; model?: unknown } = {}) {
+const premiumPairs = [
+  { provider: "anthropic", id: "fableplan", planner: "claude-fable-5-1", worker: "claude-opus-5-1" },
+  { provider: "openai", id: "astraplan", planner: "gpt-6-astra", worker: "gpt-6-sol" },
+  { provider: "openai-codex", id: "astraplan", planner: "gpt-6-astra", worker: "gpt-6-sol" },
+];
+const premiumModels = premiumPairs.flatMap(({ provider, planner, worker }) => [
+  { provider, id: planner, name: planner },
+  { provider, id: worker, name: worker },
+]);
+const premiumVirtual = (pair: (typeof premiumPairs)[number]) => ({
+  provider: pair.provider,
+  id: pair.id,
+  api: "pi-virtual",
+});
+
+function setup(
+  options: {
+    planning?: boolean;
+    workflow?: string;
+    available?: typeof models;
+    model?: unknown;
+    definitions?: ReturnType<typeof builtinPairs>;
+  } = {},
+) {
   const mock = createMockPi();
   const registered = new Map<string, { route(request: unknown, ctx: unknown): unknown }>();
   const unregistered: string[] = [];
@@ -51,7 +74,7 @@ function setup(options: { planning?: boolean; workflow?: string; available?: typ
       return state.level as never;
     },
   });
-  controller.define(builtinPairs());
+  controller.define(options.definitions ?? builtinPairs());
   const branch: unknown[] = [];
   const ctx = {
     cwd: "/repo",
@@ -79,15 +102,550 @@ function setup(options: { planning?: boolean; workflow?: string; available?: typ
         ctx: unknown,
       ): Promise<{ content: { text: string }[] }>;
     };
-  const route = (reason = "user", thinkingLevel = "medium") =>
-    registered.get("anthropic/opusplan")?.route({ model: virtual, thinkingLevel, reason }, ctx) as {
-      model: { id: string };
+  const route = (reason = "user", thinkingLevel = "medium") => {
+    const model = ctx.model as { provider: string; id: string };
+    return registered.get(pairKey(model))?.route({ model, thinkingLevel, reason }, ctx) as {
+      model: { provider: string; id: string };
       thinkingLevel: string;
     };
+  };
   const call = async (name: string, params: unknown) =>
     (await tool(name).execute("id", params, undefined, undefined, ctx)).content[0]?.text ?? "";
   return { mock, controller, state, ctx, fire, route, call, registered, unregistered, branch };
 }
+
+const pairEntry = (data: unknown) => ({ type: "custom", customType: PAIR_ENTRY, data });
+const modelEntry = (model: { provider: string; id: string }) => ({
+  type: "model_change",
+  provider: model.provider,
+  modelId: model.id,
+});
+
+for (const pair of premiumPairs) {
+  const key = pairKey(pair);
+  const make = (options: Parameters<typeof setup>[0] = {}) =>
+    setup({ model: premiumVirtual(pair), available: premiumModels, ...options });
+
+  test(`${key} retains the worker across settlement, follow-ups, chat and temporary planning`, async () => {
+    const t = make();
+    await t.fire("session_start");
+    const parity = (phase: string, id: string, reason = "user") => {
+      const routed = t.route(reason, t.mock.thinkingLevel);
+      const snapshot = queryPlanPair(t.mock.eventBus);
+      assert.equal(routed.model.id, id);
+      assert.equal(snapshot?.phase, phase);
+      assert.equal(snapshot?.pair, key);
+      assert.deepEqual(snapshot?.next, { provider: routed.model.provider, id: routed.model.id });
+      assert.equal(snapshot?.thinkingLevel, routed.thinkingLevel);
+    };
+    parity("work", pair.planner);
+    t.state.workflow = "chat";
+    parity("chat", pair.planner);
+    assert.match(await t.call("ask_planner", { question: "before approval" }), /planner already answers/u);
+    t.state.workflow = "work";
+    assert.match(await t.call("ask_planner", { question: "before approval" }), /No approved plan/u);
+    t.controller.approve(t.ctx as never, "/p/first.md");
+    parity("build", pair.worker);
+    assert.deepEqual(t.controller.state.workerHandoffs, {
+      [key]: { planFile: "/p/first.md", planLevel: "off" },
+    });
+    assert.equal(t.controller.state.approvalPair, key);
+    await t.fire("agent_settled", { aborted: true });
+    assert.equal(t.controller.state.implementing, true);
+    parity("build", pair.worker, "retry");
+    await t.fire("agent_settled", { aborted: false });
+    assert.equal(t.controller.state.implementing, false);
+    parity("work", pair.worker);
+    await t.fire("before_agent_start", { prompt: "an unrelated follow-up" });
+    parity("work", pair.worker, "continuation");
+    t.state.workflow = "chat";
+    parity("chat", pair.worker);
+    t.state.planning = true;
+    t.controller.phaseChanged(t.ctx as never);
+    parity("plan", pair.planner);
+    assert.match(await t.call("ask_planner", { question: "while planning" }), /You are in plan mode/u);
+    assert.deepEqual(t.controller.state.workerHandoffs?.[key], { planFile: "/p/first.md", planLevel: "off" });
+    t.state.planning = false;
+    t.controller.phaseChanged(t.ctx as never);
+    parity("chat", pair.worker);
+    t.state.workflow = "work";
+    (t.mock.rawPi as { setThinkingLevel(level: string): void }).setThinkingLevel("xhigh");
+    t.controller.approve(t.ctx as never, "/p/revised.md");
+    parity("build", pair.worker);
+    assert.deepEqual(t.controller.state.workerHandoffs?.[key], { planFile: "/p/revised.md", planLevel: "xhigh" });
+    const persisted = t.mock.entries.filter((entry) => entry.customType === PAIR_ENTRY).at(-1)?.data;
+    assert.deepEqual(persisted, t.controller.state);
+    assert.equal(t.mock.setModels.length, 0, "routing never changes the selected model");
+  });
+
+  test(`${key} planning without any approval never creates a handoff`, async () => {
+    const t = make({ planning: true });
+    t.controller.phaseChanged(t.ctx as never);
+    assert.equal(t.route().model.id, pair.planner);
+    t.state.planning = false;
+    t.controller.phaseChanged(t.ctx as never);
+    await t.fire("agent_settled", { aborted: false });
+    assert.equal(t.route().model.id, pair.planner);
+    assert.equal(t.controller.state.workerHandoffs, undefined);
+  });
+
+  test(`${key} restores new snapshots on startup and tree navigation without sibling leakage`, async () => {
+    const original = make();
+    original.controller.approve(original.ctx as never, "/p/saved.md");
+    await original.fire("agent_settled", { aborted: false });
+    const history = original.mock.entries
+      .filter((entry) => entry.customType === PAIR_ENTRY)
+      .map((entry) => pairEntry(entry.data));
+    const t = make();
+    t.branch.push(...history);
+    await t.fire("session_start");
+    const { implementing, ...saved } = original.controller.state;
+    assert.equal(implementing, false);
+    assert.deepEqual(t.controller.state, saved, "restoration may omit a false optional implementing flag");
+    assert.equal(t.route().model.id, pair.worker);
+    t.branch.splice(0);
+    await t.fire("session_tree");
+    assert.equal(t.route().model.id, pair.planner, "a branch before approval has no handoff");
+    assert.deepEqual(t.controller.state, { version: 1, consult: false });
+    t.branch.push(...history);
+    await t.fire("session_tree");
+    assert.equal(t.route().model.id, pair.worker);
+    t.state.planning = true;
+    await t.fire("session_start");
+    assert.equal(t.route().model.id, pair.planner, "restored inline planning overrides the saved handoff");
+    t.state.planning = false;
+    assert.equal(t.route().model.id, pair.worker);
+    t.branch.splice(
+      0,
+      t.branch.length,
+      pairEntry({
+        version: 1,
+        consult: false,
+        approvalPair: key,
+        workerHandoffs: {},
+      }),
+    );
+    await t.fire("session_tree");
+    assert.equal(t.route().model.id, pair.planner, "an authoritative empty snapshot clears the map");
+  });
+
+  test(`${key} migrates identified legacy approvals, retaining them after legacy settlement`, async () => {
+    const t = make();
+    t.branch.push(
+      modelEntry(pair),
+      pairEntry({ version: 1, consult: false, implementing: true, planFile: "/p/legacy.md", planLevel: "high" }),
+      pairEntry({ version: 1, consult: false, implementing: false, planFile: "/p/legacy.md", planLevel: "high" }),
+    );
+    await t.fire("session_start");
+    assert.equal(t.route().model.id, pair.worker);
+    assert.deepEqual(t.controller.state.workerHandoffs, {
+      [key]: { planFile: "/p/legacy.md", planLevel: "high" },
+    });
+    t.branch.push(pairEntry({ version: 1, consult: false, approvalPair: key }));
+    await t.fire("session_tree");
+    assert.equal(t.route().model.id, pair.planner, "new identity snapshots without maps are authoritative too");
+    assert.equal(t.controller.state.workerHandoffs, undefined);
+  });
+
+  for (const workflow of ["work", "chat"]) {
+    test(`${key} supports idle worker consultations in ${workflow} with saved metadata and guards`, async () => {
+      const t = make();
+      await t.fire("session_start");
+      (t.mock.rawPi as { setThinkingLevel(level: string): void }).setThinkingLevel("high");
+      t.controller.approve(t.ctx as never, "/p/approved.md");
+      await t.fire("agent_settled", { aborted: false });
+      t.state.workflow = workflow;
+      (t.mock.rawPi as { setThinkingLevel(level: string): void }).setThinkingLevel("low");
+      assert.match(await t.call("ask_planner", { question: "what next?" }), /The worker asks the planner/);
+      assert.equal(t.controller.state.implementing, false);
+      assert.equal(t.route("continuation", "low").model.id, pair.planner);
+      assert.equal(t.route("continuation", "low").thinkingLevel, "high");
+      const snapshot = queryPlanPair(t.mock.eventBus);
+      assert.equal(snapshot?.phase, "consult");
+      assert.deepEqual(snapshot?.next, { provider: pair.provider, id: pair.planner });
+      assert.equal(snapshot?.thinkingLevel, "high");
+      assert.equal(await t.fire("tool_call", { toolName: "edit", input: { path: "/p/approved.md" } }), undefined);
+      assert.equal(await t.fire("tool_call", { toolName: "write", input: { path: "/p/approved.md" } }), undefined);
+      for (const event of [
+        { toolName: "write", input: { path: "/p/other.md" } },
+        { toolName: "edit", input: { path: "/repo/src/a.ts" } },
+        { toolName: "bash", input: { command: "rm x" } },
+        { toolName: "bg_run", input: { command: "ls" } },
+      ])
+        assert.equal(((await t.fire("tool_call", event)) as { block: boolean }).block, true);
+      assert.equal(await t.fire("tool_call", { toolName: "bash", input: { command: "git status" } }), undefined);
+      assert.match(await t.call("ask_planner", { question: "again" }), /A consultation is already open/u);
+      assert.equal(
+        await t.call("planner_answer", { answer: "Do X.", amended: true }),
+        "Planner's answer (the plan file was amended; reread it):\n\nDo X.\n\nWorker: continue your work, following this answer.",
+      );
+      assert.equal(t.route().model.id, pair.worker);
+      assert.equal(t.route().thinkingLevel, "medium", "the route uses requested worker effort after consultation");
+      assert.equal(queryPlanPair(t.mock.eventBus)?.phase, workflow);
+      assert.deepEqual(queryPlanPair(t.mock.eventBus)?.next, { provider: pair.provider, id: pair.worker });
+      assert.equal(t.controller.state.workerHandoffs?.[key]?.planLevel, "high");
+      assert.match(await t.call("planner_answer", { answer: "again" }), /only answers an open/u);
+    });
+  }
+
+  test(`${key} closes aborted consultations at agent_settled without ending implementation`, async () => {
+    for (const implementing of [true, false]) {
+      const t = make();
+      await t.fire("session_start");
+      t.controller.approve(t.ctx as never, "/p/saved.md");
+      if (!implementing) await t.fire("agent_settled", { aborted: false });
+      await t.call("ask_planner", { question: "q" });
+      assert.equal(t.controller.state.consult, true);
+      assert.equal(t.route().model.id, pair.planner);
+      const handoffs = structuredClone(t.controller.state.workerHandoffs);
+      // Pi skips agent_before_settle when aborted: agent_settled must recover on its own.
+      assert.equal(await t.fire("agent_settled", { aborted: true }), undefined);
+      assert.equal(t.controller.state.consult, false);
+      assert.equal(t.controller.state.implementing, implementing);
+      assert.deepEqual(t.controller.state.workerHandoffs, handoffs);
+      assert.equal(t.route().model.id, pair.worker);
+      assert.equal(queryPlanPair(t.mock.eventBus)?.phase, implementing ? "build" : "work");
+      assert.deepEqual(queryPlanPair(t.mock.eventBus)?.next, { provider: pair.provider, id: pair.worker });
+      assert.equal(await t.fire("tool_call", { toolName: "write", input: { path: "/repo/src/a.ts" } }), undefined);
+      assert.equal(await t.fire("tool_call", { toolName: "bash", input: { command: "touch x" } }), undefined);
+      assert.match(await t.call("planner_answer", { answer: "late answer" }), /only answers an open/u);
+      assert.deepEqual(
+        t.mock.entries.filter((entry) => entry.customType === PAIR_ENTRY).at(-1)?.data,
+        t.controller.state,
+      );
+      const entries = t.mock.entries.length;
+      await t.fire("agent_settled", { aborted: true });
+      assert.equal(t.mock.entries.length, entries, "repeated abort recovery is a no-op");
+      await t.call("ask_planner", { question: "try again" });
+      assert.equal(t.controller.state.consult, true, "the worker may start a new consultation after abort");
+    }
+  });
+
+  test(`${key} recovers missing answers and aborted idle consultations to the worker`, async () => {
+    const t = make();
+    t.controller.approve(t.ctx as never, "/p/saved.md");
+    await t.fire("agent_settled", { aborted: false });
+    for (const outcome of ["completed", "aborted", "error"]) {
+      await t.call("ask_planner", { question: "q" });
+      const existing = { type: "message", id: "existing" };
+      const result = (await t.fire("agent_before_settle", { outcome, entries: [existing] })) as
+        | {
+            continue: boolean;
+            entries: { customType?: string; content?: string }[];
+          }
+        | undefined;
+      if (outcome === "completed") {
+        assert.equal(result?.continue, true);
+        assert.deepEqual(result?.entries[0], existing);
+        assert.equal(result?.entries.at(-1)?.customType, "plan-mode-planner-answer");
+        assert.match(
+          result?.entries.at(-1)?.content ?? "",
+          /Worker: its reply above is the answer; continue your work\./u,
+        );
+      } else assert.equal(result, undefined);
+      assert.equal(t.controller.state.consult, false);
+      assert.equal(t.route().model.id, pair.worker);
+      assert.ok(t.controller.state.workerHandoffs?.[key]);
+      assert.equal(await t.fire("agent_before_settle", { outcome: "completed", entries: [] }), undefined);
+    }
+  });
+}
+
+test("premium approvals and consultations remain isolated when switching pair identities or physical models", async () => {
+  const [fable, astra, codex] = premiumPairs;
+  assert.ok(fable && astra && codex);
+  const t = setup({ model: premiumVirtual(fable), available: [...models, ...premiumModels] });
+  await t.fire("session_start");
+  (t.mock.rawPi as { setThinkingLevel(level: string): void }).setThinkingLevel("high");
+  t.controller.approve(t.ctx as never, "/p/fable.md");
+  await t.fire("agent_settled", { aborted: false });
+  t.ctx.model = premiumVirtual(astra);
+  await t.fire("model_select");
+  assert.equal(t.route().model.id, astra.planner);
+  assert.match(await t.call("ask_planner", { question: "q" }), /No approved plan/u);
+  (t.mock.rawPi as { setThinkingLevel(level: string): void }).setThinkingLevel("low");
+  t.controller.approve(t.ctx as never, "/p/astra.md");
+  t.ctx.model = premiumVirtual(codex);
+  assert.equal(t.route().model.id, codex.planner, "an active implementation does not transfer to another provider");
+  assert.equal(queryPlanPair(t.mock.eventBus)?.phase, "work");
+  t.ctx.model = premiumVirtual(fable);
+  assert.equal(t.route().model.id, fable.worker);
+  assert.match(await t.call("ask_planner", { question: "q" }), /The worker asks the planner/u);
+  assert.equal(t.controller.state.implementing, false, "consult entry clears another pair's active implementation");
+  assert.equal(t.controller.state.approvalPair, pairKey(fable));
+  assert.equal(t.controller.state.planFile, "/p/fable.md");
+  assert.equal(t.route().thinkingLevel, "high");
+  assert.equal(
+    ((await t.fire("tool_call", { toolName: "write", input: { path: "/p/astra.md" } })) as { block: boolean }).block,
+    true,
+  );
+  assert.equal(await t.fire("tool_call", { toolName: "write", input: { path: "/p/fable.md" } }), undefined);
+  t.ctx.model = premiumVirtual(astra);
+  assert.equal(t.route().model.id, astra.worker, "a different pair does not inherit the open consultation");
+  assert.equal(queryPlanPair(t.mock.eventBus)?.phase, "work");
+  t.ctx.model = premiumVirtual(fable);
+  await t.call("planner_answer", { answer: "a" });
+  t.ctx.model = premiumVirtual(astra);
+  await t.call("ask_planner", { question: "q" });
+  assert.equal(t.controller.state.planFile, "/p/astra.md");
+  assert.equal(t.route().thinkingLevel, "low");
+  await t.call("planner_answer", { answer: "a" });
+  const physical = { provider: "anthropic", id: "claude-opus-4-5", api: "anthropic-messages" };
+  t.ctx.model = physical;
+  await t.fire("model_select");
+  assert.equal(t.controller.selected(t.ctx as never), undefined);
+  assert.equal(queryPlanPair(t.mock.eventBus), undefined);
+  assert.ok(!t.mock.rawPi.getActiveTools().includes("ask_planner"));
+  assert.match(await t.call("ask_planner", { question: "q" }), /works only with a plan model pair/u);
+  assert.equal(t.ctx.model, physical);
+  assert.equal(t.mock.setModels.length, 0);
+  t.ctx.model = premiumVirtual(fable);
+  await t.fire("model_select");
+  assert.equal(t.route().model.id, fable.worker);
+  assert.ok(t.mock.rawPi.getActiveTools().includes("ask_planner"));
+  assert.deepEqual(t.controller.state.workerHandoffs, {
+    [pairKey(fable)]: { planFile: "/p/fable.md", planLevel: "high" },
+    [pairKey(astra)]: { planFile: "/p/astra.md", planLevel: "low" },
+  });
+});
+
+test("model selection cancels a consultation only when leaving its pair and releases its guards", async () => {
+  const [fable, astra] = premiumPairs;
+  assert.ok(fable && astra);
+  const physical = { provider: "anthropic", id: "claude-opus-4-5", api: "anthropic-messages" };
+  for (const target of [physical, premiumVirtual(astra), virtual]) {
+    for (const implementing of [true, false]) {
+      const t = setup({ model: premiumVirtual(fable), available: [...models, ...premiumModels] });
+      await t.fire("session_start");
+      t.controller.approve(t.ctx as never, "/p/fable.md");
+      if (!implementing) await t.fire("agent_settled", { aborted: false });
+      await t.call("ask_planner", { question: "q" });
+      await t.fire("model_select");
+      assert.equal(t.controller.state.consult, true, "reselecting the same pair keeps the consultation");
+      const handoffs = structuredClone(t.controller.state.workerHandoffs);
+      t.ctx.model = target;
+      await t.fire("model_select");
+      assert.equal(t.controller.state.consult, false, pairKey(target));
+      assert.equal(t.controller.state.implementing, implementing, "selection does not end an active implementation");
+      assert.equal(t.controller.state.approvalPair, pairKey(fable));
+      assert.deepEqual(t.controller.state.workerHandoffs, handoffs);
+      assert.equal(await t.fire("tool_call", { toolName: "write", input: { path: "/repo/src/a.ts" } }), undefined);
+      assert.equal(await t.fire("tool_call", { toolName: "bash", input: { command: "touch x" } }), undefined);
+      assert.match(await t.call("planner_answer", { answer: "late answer" }), /only answers an open/u);
+      assert.deepEqual(
+        t.mock.entries.filter((entry) => entry.customType === PAIR_ENTRY).at(-1)?.data,
+        t.controller.state,
+      );
+      if (target.api === "pi-virtual") {
+        assert.equal(queryPlanPair(t.mock.eventBus)?.phase, "work", "the previous pair's build does not transfer");
+        assert.equal(t.route().model.id, target.id === "astraplan" ? astra.planner : fable.worker);
+        assert.ok(t.mock.rawPi.getActiveTools().includes("ask_planner"));
+      } else {
+        assert.equal(queryPlanPair(t.mock.eventBus), undefined);
+        assert.ok(!t.mock.rawPi.getActiveTools().includes("ask_planner"));
+      }
+      t.ctx.model = premiumVirtual(fable);
+      await t.fire("model_select");
+      assert.equal(t.route().model.id, fable.worker, "returning restores the worker, not the cancelled consult");
+      assert.equal(queryPlanPair(t.mock.eventBus)?.phase, implementing ? "build" : "work");
+      await t.call("ask_planner", { question: "new question" });
+      assert.equal(t.controller.state.consult, true);
+    }
+  }
+});
+
+test("restore rejects malformed snapshots and handoffs without inventing legacy identity", async () => {
+  const pair = premiumPairs[0];
+  assert.ok(pair);
+  const key = pairKey(pair);
+  const make = () => setup({ model: premiumVirtual(pair), available: premiumModels });
+  const legacy = { version: 1, consult: false, implementing: true, planFile: "/p/legacy.md", planLevel: "high" };
+  for (const selection of [undefined, { provider: "unknown", id: "pair" }, virtual]) {
+    const t = make();
+    if (selection) t.branch.push(modelEntry(selection));
+    t.branch.push(pairEntry(legacy), pairEntry({ ...legacy, implementing: false }));
+    await t.fire("session_start");
+    assert.equal(t.controller.state.workerHandoffs, undefined);
+    assert.equal(t.route().model.id, pair.planner);
+  }
+  for (const value of [
+    null,
+    [],
+    "bad",
+    {},
+    { planFile: "" },
+    { planFile: "  " },
+    { planFile: 42 },
+    { planFile: "/p/a.md", planLevel: "invalid" },
+    { planFile: "/p/a.md", planLevel: null },
+  ]) {
+    const t = make();
+    t.branch.push(modelEntry(pair), pairEntry(legacy));
+    // Validate the map value independently of otherwise valid active metadata.
+    t.branch.push(pairEntry({ version: 1, consult: false, workerHandoffs: { [key]: value } }));
+    await t.fire("session_start");
+    assert.equal(t.controller.state.workerHandoffs, undefined, JSON.stringify(value));
+    assert.equal(t.route().model.id, pair.planner);
+  }
+  for (const malformed of [null, [], { version: 2, consult: false }, { version: 1, consult: "yes" }]) {
+    const t = make();
+    t.branch.push(pairEntry(malformed));
+    await t.fire("session_start");
+    assert.deepEqual(t.controller.state, { version: 1, consult: false });
+  }
+  for (const planFile of [undefined, 42, "", " "]) {
+    const t = make();
+    t.branch.push(modelEntry(pair), pairEntry({ ...legacy, planFile }), pairEntry({ version: 1, consult: false }));
+    await t.fire("session_start");
+    assert.equal(t.controller.state.workerHandoffs, undefined);
+  }
+  const t = make();
+  t.branch.push(
+    pairEntry({
+      version: 1,
+      consult: false,
+      workerHandoffs: {
+        [key]: { planFile: "/p/valid.md" },
+        "anthropic/opusplan": { planFile: "/p/unchanged.md" },
+        "x/unknown": { planFile: "/p/unknown.md" },
+        "openai/astraplan": { planFile: "/p/bad.md", planLevel: "invalid" },
+      },
+    }),
+  );
+  await t.fire("session_start");
+  assert.deepEqual(t.controller.state.workerHandoffs, { [key]: { planFile: "/p/valid.md" } });
+  assert.equal(t.route().model.id, pair.worker);
+});
+
+test("consulting a restored handoff without saved effort cannot inherit another pair's effort", async () => {
+  const [fable, astra] = premiumPairs;
+  assert.ok(fable && astra);
+  const t = setup({ model: premiumVirtual(fable), available: premiumModels });
+  t.branch.push(
+    pairEntry({
+      version: 1,
+      consult: false,
+      approvalPair: pairKey(astra),
+      planFile: "/p/astra.md",
+      planLevel: "xhigh",
+      workerHandoffs: {
+        [pairKey(fable)]: { planFile: "/p/fable.md" },
+        [pairKey(astra)]: { planFile: "/p/astra.md", planLevel: "xhigh" },
+      },
+    }),
+  );
+  await t.fire("session_start");
+  await t.call("ask_planner", { question: "q" });
+  assert.equal(t.controller.state.planFile, "/p/fable.md");
+  assert.equal(t.controller.state.planLevel, undefined, "missing saved effort is not another pair's saved effort");
+  assert.equal(t.route("continuation", "low").thinkingLevel, "low");
+});
+
+test("consult snapshots retain all handoffs through restore, answer and settlement", async () => {
+  const [fable, astra] = premiumPairs;
+  assert.ok(fable && astra);
+  const t = setup({ model: premiumVirtual(fable), available: premiumModels });
+  t.controller.approve(t.ctx as never, "/p/fable.md");
+  await t.fire("agent_settled", { aborted: false });
+  t.ctx.model = premiumVirtual(astra);
+  t.controller.approve(t.ctx as never, "/p/astra.md");
+  await t.fire("agent_settled", { aborted: false });
+  await t.call("ask_planner", { question: "q" });
+  const handoffs = structuredClone(t.controller.state.workerHandoffs);
+  const restored = setup({ model: premiumVirtual(astra), available: premiumModels });
+  restored.branch.push(pairEntry(structuredClone(t.controller.state)));
+  await restored.fire("session_tree");
+  assert.equal(restored.route().model.id, astra.planner);
+  assert.equal(queryPlanPair(restored.mock.eventBus)?.phase, "consult");
+  await restored.call("planner_answer", { answer: "a" });
+  await restored.fire("agent_settled", { aborted: false });
+  assert.equal(restored.route().model.id, astra.worker);
+  assert.deepEqual(restored.controller.state.workerHandoffs, handoffs);
+  restored.ctx.model = premiumVirtual(fable);
+  assert.equal(restored.route().model.id, fable.worker);
+  for (const entry of restored.mock.entries.filter((entry) => entry.customType === PAIR_ENTRY)) {
+    assert.deepEqual((entry.data as { workerHandoffs?: unknown }).workerHandoffs, handoffs);
+  }
+});
+
+test("legacy migration follows each recorded selection rather than the currently selected pair", async () => {
+  const [fable, astra] = premiumPairs;
+  assert.ok(fable && astra);
+  const t = setup({ model: premiumVirtual(fable), available: premiumModels });
+  t.branch.push(
+    modelEntry(fable),
+    pairEntry({ version: 1, consult: false, implementing: true, planFile: "/p/fable.md", planLevel: "high" }),
+    modelEntry(astra),
+    pairEntry({ version: 1, consult: false, implementing: true, planFile: "/p/astra.md", planLevel: "low" }),
+    pairEntry({ version: 1, consult: false, implementing: false }),
+  );
+  await t.fire("session_start");
+  assert.deepEqual(t.controller.state.workerHandoffs, {
+    [pairKey(fable)]: { planFile: "/p/fable.md", planLevel: "high" },
+    [pairKey(astra)]: { planFile: "/p/astra.md", planLevel: "low" },
+  });
+  assert.equal(t.route().model.id, fable.worker);
+  t.ctx.model = premiumVirtual(astra);
+  assert.equal(t.route().model.id, astra.worker);
+});
+
+test("unchanged built-ins and newly named custom pairs still return to their planner after settlement", async () => {
+  const definitions = pairDefinitions({
+    "custom/premium": {
+      planner: { provider: "openai", modelId: "gpt-6-astra" },
+      worker: { provider: "openai", modelId: "gpt-6-sol" },
+    },
+  });
+  const available = [
+    ...models,
+    ...premiumModels,
+    { provider: "openai", id: "gpt-6-terra", name: "Terra" },
+    { provider: "openai-codex", id: "gpt-6-terra", name: "Terra" },
+    { provider: "google", id: "gemini-4-carbon", name: "Carbon" },
+    { provider: "google", id: "gemini-4-argon", name: "Argon" },
+    { provider: "google", id: "gemini-4-hydrogen", name: "Hydrogen" },
+  ];
+  for (const def of definitions.filter((def) => !def.handoff)) {
+    const t = setup({ definitions, available, model: { provider: def.provider, id: def.id, api: "pi-virtual" } });
+    const pair = t.controller.selected(t.ctx as never);
+    assert.ok(pair, pairKey(def));
+    t.controller.approve(t.ctx as never, "/p/plan.md");
+    assert.equal(t.route().model.id, pair.worker.modelId, pairKey(def));
+    assert.equal(t.controller.state.workerHandoffs, undefined);
+    t.state.workflow = "chat";
+    assert.equal(t.route().model.id, pair.planner.modelId);
+    t.state.workflow = "work";
+    await t.fire("agent_settled", { aborted: false });
+    assert.equal(t.route().model.id, pair.planner.modelId);
+  }
+});
+
+test("idle premium follow-up edits skip stale plan nudges, but active builds still receive them", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "premium-pair-notes-"));
+  try {
+    const plan = join(dir, "plan.md");
+    writeFileSync(plan, "## Changes\n\n- \x60src/a.ts\x60: change\n");
+    for (const pair of premiumPairs) {
+      const t = setup({ model: premiumVirtual(pair), available: premiumModels });
+      t.controller.approve(t.ctx as never, plan);
+      const event = {
+        toolName: "write",
+        isError: false,
+        input: { path: "/repo/src/b.ts" },
+        content: [{ type: "text", text: "ok" }],
+      };
+      const note = (await t.fire("tool_result", event)) as { content: { text: string }[] };
+      assert.match(note.content.at(-1)?.text ?? "", /not one of the files the plan changes/u);
+      await t.fire("agent_settled", { aborted: false });
+      assert.equal(await t.fire("tool_result", { ...event, input: { path: "/repo/src/unrelated.ts" } }), undefined);
+      t.controller.approve(t.ctx as never, plan);
+      const next = (await t.fire("tool_result", event)) as { content: { text: string }[] };
+      assert.match(next.content.at(-1)?.text ?? "", /call ask_planner/u, "reapproval resets note deduplication");
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
 
 test("every built-in pair is registered as a virtual model", () => {
   const { registered } = setup();

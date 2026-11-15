@@ -33,6 +33,40 @@ test("the built-in pairs plan on a stronger family and build on a cheaper one", 
   );
 });
 
+test("only the three premium built-in identities retain their approved worker", () => {
+  const persistent = ["anthropic/fableplan", "openai-codex/astraplan", "openai/astraplan"];
+  assert.deepEqual(
+    builtinPairs()
+      .filter((pair) => pair.handoff === "persistent")
+      .map(pairKey),
+    persistent,
+  );
+  for (const pair of builtinPairs()) {
+    assert.equal(pair.handoff, persistent.includes(pairKey(pair)) ? "persistent" : undefined, pairKey(pair));
+  }
+});
+
+test("custom replacements inherit identity policy, but newly named pairs do not", () => {
+  const replacement = {
+    planner: { provider: "x", modelId: "planner" },
+    worker: { provider: "x", modelId: "worker" },
+    name: "Replacement",
+  };
+  const originals = builtinPairs();
+  const defs = pairDefinitions(
+    Object.fromEntries([...originals.map(pairKey), "x/new"].map((key) => [key, replacement])),
+  );
+  for (const original of originals) {
+    const pair = defs.find((candidate) => pairKey(candidate) === pairKey(original));
+    assert.ok(pair);
+    assert.equal(pair.handoff, original.handoff, pairKey(original));
+    assert.equal(pair.name, "Replacement");
+    assert.deepEqual(pair.planner, { spec: replacement.planner });
+    assert.deepEqual(pair.worker, { spec: replacement.worker });
+  }
+  assert.equal(defs.find((pair) => pairKey(pair) === "x/new")?.handoff, undefined);
+});
+
 test("opusplan resolves to the highest generation of each family", () => {
   const resolved = resolvePair(
     def("anthropic/opusplan"),
@@ -168,6 +202,7 @@ test("the worker prefers the planner's generation and a user-confirmed family jo
     );
     const nova = pairDefinitions(undefined).find((pair) => pair.id === "novaplan");
     assert.equal(nova?.name, "Nova plan, Opus build");
+    assert.equal(nova?.handoff, undefined, "newly derived premium identities do not acquire handoff policy");
   } finally {
     if (previous === undefined) delete process.env.PI_CODING_AGENT_DIR;
     else process.env.PI_CODING_AGENT_DIR = previous;

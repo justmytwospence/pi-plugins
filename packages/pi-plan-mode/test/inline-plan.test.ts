@@ -31,6 +31,8 @@ import { createCustomSelectorHarness, createMockContext, createMockPi } from "./
 
 const opus = { provider: "anthropic", id: "claude-opus-5-5", name: "Claude Opus 5.5", reasoning: true };
 const sonnet = { provider: "anthropic", id: "claude-sonnet-5-5", name: "Claude Sonnet 5.5", reasoning: true };
+const fable = { provider: "anthropic", id: "claude-fable-5-1", name: "Claude Fable 5.1", reasoning: true };
+const fableplan = { provider: "anthropic", id: "fableplan", api: "pi-virtual", name: "Fableplan", reasoning: true };
 
 type Tool = {
   exposure?: string;
@@ -48,12 +50,25 @@ async function setup(
     cwd?: string;
     /** Give the session a model (opus) and a registry with opus and sonnet. */
     models?: boolean;
+    pair?: { virtual: typeof fableplan; catalog: (typeof opus)[] };
     approval?: string;
     toggleShortcut?: "alt+p";
     pickImplementationEffort?: typeof pickImplementationEffort;
   } = {},
 ) {
   const mock = createMockPi();
+  const routes = new Map<string, { route(request: unknown, ctx: unknown): { model: { id: string } } }>();
+  if (options.pair) {
+    const raw = mock.rawPi as unknown as Record<string, unknown>;
+    raw.registerVirtualModel = (model: {
+      provider: string;
+      id: string;
+      route(request: unknown, ctx: unknown): { model: { id: string } };
+    }) => {
+      routes.set(`${model.provider}/${model.id}`, model);
+    };
+    raw.unregisterVirtualModel = (provider: string, id: string) => routes.delete(`${provider}/${id}`);
+  }
   const plansDirectory = options.plansDirectory ?? mkdtempSync(join(tmpdir(), "plans-"));
   await planMode(mock.pi, {
     pickImplementationEffort:
@@ -77,14 +92,15 @@ async function setup(
       return title === "Implementation effort" && answers.length === 0 ? "high" : answers.shift();
     },
     input: async () => options.input,
-    ...(options.models
+    ...(options.models || options.pair
       ? {
-          model: opus,
+          model: options.pair?.virtual ?? opus,
           modelRegistry: {
             getApiKeyAndHeaders: async () => ({ ok: false, error: "missing" }),
-            getAvailable: () => [opus, sonnet],
-            getAll: () => [opus, sonnet],
-            find: (provider: string, id: string) => [opus, sonnet].find((m) => m.provider === provider && m.id === id),
+            getAvailable: () => options.pair?.catalog ?? [opus, sonnet],
+            getAll: () => options.pair?.catalog ?? [opus, sonnet],
+            find: (provider: string, id: string) =>
+              (options.pair?.catalog ?? [opus, sonnet]).find((m) => m.provider === provider && m.id === id),
             isUsingOAuth: () => false,
           },
         }
@@ -139,7 +155,27 @@ async function setup(
     return result as any;
   };
   const inline = () => mock.entries.filter((entry) => entry.customType === INLINE_ENTRY).at(-1)?.data as any;
-  return { mock, context, selects, tool, emit, inline, gateEvents, plansDirectory, getLeafId, newSession, projection };
+  const route = (reason = "user") => {
+    assert.ok(options.pair);
+    const { virtual } = options.pair;
+    const registration = routes.get(`${virtual.provider}/${virtual.id}`);
+    assert.ok(registration, "selected virtual pair is registered");
+    return registration.route({ model: virtual, thinkingLevel: "high", reason }, context.ctx).model.id;
+  };
+  return {
+    mock,
+    context,
+    selects,
+    tool,
+    emit,
+    inline,
+    gateEvents,
+    plansDirectory,
+    getLeafId,
+    newSession,
+    projection,
+    route,
+  };
 }
 
 const recommendedEffort = {
@@ -1273,6 +1309,83 @@ test("exit_plan_mode needs a written plan, shows it, and implements it here once
   // The result told your agent: no separate notice.
   assert.equal(await emit("before_agent_start", { prompt: "go" }), undefined);
   assert.equal(await emit("tool_call", { toolName: "edit", input: { path: "src/a.ts" } }), undefined);
+});
+
+const premiumPair = { virtual: fableplan, catalog: [fable, opus] };
+
+test("premium pair follows real inline approval, settlement, review and workflow exit", async () => {
+  const h = await setup({
+    pair: premiumPair,
+    gate: true,
+    select: ["Yes, implement here", "high", "No, keep planning"],
+  });
+  const ctx = h.context.ctx;
+  assert.equal(h.route(), fable.id);
+  await h.mock.commands.get("plan")?.handler("", ctx);
+  assert.equal(h.route(), fable.id);
+  writeFileSync(h.inline().planFile, "# First plan\n");
+  const approved = await h.tool(EXIT_TOOL).execute("approve-pair", {}, undefined, undefined, ctx);
+  assert.equal(approved.details.outcome, "approved");
+  assert.equal(h.inline().active, false);
+  assert.equal(h.route(), opus.id);
+  await h.emit("agent_before_settle", { outcome: "completed" });
+  await h.emit("agent_settled", { aborted: false });
+  assert.equal(h.route("user"), opus.id, "follow-up turns remain on the worker");
+  await h.mock.commands.get("plan")?.handler("", ctx);
+  assert.equal(h.route(), fable.id, "explicit replanning uses the planner");
+  writeFileSync(h.inline().planFile, "# Revised plan\n");
+  const declined = await h.tool(EXIT_TOOL).execute("decline-pair", {}, undefined, undefined, ctx);
+  assert.equal(declined.details.outcome, "kept");
+  assert.equal(h.inline().active, true);
+  assert.equal(h.route(), fable.id, "declining review stays on the planner");
+  h.mock.eventBus.emit(MODE_CHANGED, { mode: "work", source: "transition" });
+  assert.equal(h.inline().active, false);
+  assert.equal(h.route(), opus.id, "leaving planning reveals the prior handoff");
+});
+
+test("premium pair saving a later plan restores its previously approved worker", async () => {
+  const h = await setup({
+    pair: premiumPair,
+    select: ["Yes, implement here", "high", "Save for later", "Enter different name"],
+    input: "deferred",
+  });
+  const ctx = h.context.ctx;
+  await h.mock.commands.get("plan")?.handler("", ctx);
+  writeFileSync(h.inline().planFile, "# First plan\n");
+  await h.tool(EXIT_TOOL).execute("approve-pair", {}, undefined, undefined, ctx);
+  await h.emit("agent_settled", { aborted: false });
+  assert.equal(h.route(), opus.id);
+  await h.mock.commands.get("plan")?.handler("", ctx);
+  assert.equal(h.route(), fable.id);
+  writeFileSync(h.inline().planFile, "# Deferred plan\n");
+  await h.tool(EXIT_TOOL).execute("save-pair", {}, undefined, undefined, ctx);
+  assert.equal(h.inline().active, false);
+  assert.equal(h.route(), opus.id);
+});
+
+test("premium pair cancellation before its first approval retains the planner", async () => {
+  const h = await setup({ pair: premiumPair, gate: true });
+  await h.mock.commands.get("plan")?.handler("", h.context.ctx);
+  assert.equal(h.route(), fable.id);
+  h.mock.eventBus.emit(MODE_CHANGED, { mode: "work", source: "transition" });
+  assert.equal(h.inline().active, false);
+  assert.equal(h.route(), fable.id);
+});
+
+test("failed compact approval re-enters planning without losing the premium handoff", async () => {
+  const h = await setup({ pair: premiumPair, gate: true, select: ["Yes, compact plan and implement here", "high"] });
+  const ctx = h.context.ctx;
+  await h.mock.commands.get("plan")?.handler("", ctx);
+  writeFileSync(h.inline().planFile, "# Compact plan\n");
+  const approved = await h.tool(EXIT_TOOL).execute("compact-pair", {}, undefined, undefined, ctx);
+  assert.equal(approved.details.outcome, "approved");
+  assert.equal(h.route(), opus.id);
+  assert.equal(await h.emit("agent_before_settle", { outcome: "aborted" }), undefined);
+  assert.equal(h.inline().active, true);
+  assert.equal(h.route(), fable.id, "failed compaction returns to planning");
+  h.mock.eventBus.emit(MODE_CHANGED, { mode: "work", source: "transition" });
+  assert.equal(h.inline().active, false);
+  assert.equal(h.route(), opus.id, "the approval's saved handoff survives re-entry");
 });
 
 for (const compact of [false, true]) {

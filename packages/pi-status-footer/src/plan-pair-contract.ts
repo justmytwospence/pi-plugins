@@ -1,6 +1,6 @@
 // Package-local contract; optional consumers copy this file, never import a sibling runtime.
 export const PLAN_PAIR_CHANNEL = "pi-plugins.plan-pair.v1";
-/** plan: plan mode; chat: chat workflow; consult: an ask_planner question is open; build: an approved plan is being implemented (the worker); work: ordinary work on the planner. */
+/** plan: plan mode; chat: chat workflow; consult: an ask_planner question is open; build: an approved plan is being implemented; work: ordinary work. Chat and work may route to a persistent pair's worker after approval. */
 export type PlanPairPhase = "plan" | "chat" | "consult" | "build" | "work";
 export interface PlanPairModel {
   provider: string;
@@ -11,7 +11,7 @@ export interface PlanPairSnapshot {
   /** The selected pair, `provider/id` (for example `anthropic/opusplan`). */
   pair: string;
   phase: PlanPairPhase;
-  /** The physical model the next request routes to: the planner, or the worker in build. */
+  /** The physical model the next request routes to; persistent pairs may use the worker in work or chat after approval. */
   next: PlanPairModel;
   planner: PlanPairModel;
   worker: PlanPairModel;

@@ -1,6 +1,6 @@
-// Plan model pairs at run time: virtual models that route each request to the worker only while an approved
-// plan is being implemented, and to the planner otherwise (planning, chatting, consulting, ordinary work), plus ask_planner / planner_answer for in-transcript
-// consultation. Nothing here changes the selected model.
+// Plan model pairs route approved implementation to the worker; premium pairs retain that handoff
+// for later work and chat. Explicit planning and consultations use the planner.
+// Nothing here changes the selected model.
 import { relative, resolve } from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { setToolsActive } from "./active-tools.js";
@@ -22,6 +22,11 @@ export const PAIR_ENTRY = "plan-mode:pair";
 export const PAIR_TOOLS = ["ask_planner", "planner_answer"] as const;
 const ANSWER_TYPE = "plan-mode-planner-answer";
 
+interface WorkerHandoff {
+  planFile: string;
+  planLevel?: ModelSpecThinkingLevel;
+}
+
 export interface PairState {
   version: 1;
   consult: boolean;
@@ -29,6 +34,8 @@ export interface PairState {
   implementing?: boolean;
   planFile?: string;
   planLevel?: ModelSpecThinkingLevel;
+  approvalPair?: string;
+  workerHandoffs?: Record<string, WorkerHandoff>;
 }
 
 export interface PairHost {
@@ -58,6 +65,23 @@ export interface PairController {
   readonly state: PairState;
 }
 
+const record = (value: unknown): value is Record<string, unknown> =>
+  typeof value === "object" && value !== null && !Array.isArray(value);
+
+function readHandoff(value: unknown): WorkerHandoff | undefined {
+  if (!record(value) || typeof value.planFile !== "string" || !value.planFile.trim()) return undefined;
+  if (
+    value.planLevel !== undefined &&
+    (typeof value.planLevel !== "string" ||
+      !(MODEL_SPEC_THINKING_LEVELS as readonly string[]).includes(value.planLevel))
+  )
+    return undefined;
+  return {
+    planFile: value.planFile,
+    ...(typeof value.planLevel === "string" ? { planLevel: value.planLevel as ModelSpecThinkingLevel } : {}),
+  };
+}
+
 const text = (value: string, details?: unknown) => ({
   content: [{ type: "text" as const, text: value }],
   details: details ?? {},
@@ -71,16 +95,20 @@ export function registerPairs(pi: ExtensionAPI, host: PairHost): PairController 
   let planEffortPending = false;
   let manualSincePlanEntry = false;
   let wasPlanning = false;
-  const phaseOf = (): PlanPairPhase =>
-    state.consult
-      ? "consult"
-      : host.planning()
-        ? "plan"
-        : host.workflow() === "chat"
-          ? "chat"
-          : state.implementing
-            ? "build"
-            : "work";
+  const belongsTo = (def: PairDefinition) => !state.approvalPair || state.approvalPair === pairKey(def);
+  const handoffFor = (def: PairDefinition) =>
+    def.handoff === "persistent" ? state.workerHandoffs?.[pairKey(def)] : undefined;
+  const routeFor = (
+    def: PairDefinition,
+    models: { planner: ModelSpec; worker: ModelSpec },
+  ): { phase: PlanPairPhase; target: ModelSpec } => {
+    if (state.consult && belongsTo(def)) return { phase: "consult", target: models.planner };
+    if (host.planning()) return { phase: "plan", target: models.planner };
+    const implementing = state.implementing && belongsTo(def);
+    const phase = host.workflow() === "chat" ? "chat" : implementing ? "build" : "work";
+    const worker = !!handoffFor(def) || (phase === "build" && implementing);
+    return { phase, target: worker ? models.worker : models.planner };
+  };
   let latest: ExtensionContext | undefined;
   const virtualApi = typeof (pi as { registerVirtualModel?: unknown }).registerVirtualModel === "function";
 
@@ -141,8 +169,7 @@ export function registerPairs(pi: ExtensionAPI, host: PairHost): PairController 
         const current = defs.find((candidate) => pairKey(candidate) === pairKey(request.model)) ?? def;
         const resolved = resolvePair(current, available(ctx));
         if ("error" in resolved) throw new Error(`${current.name}: ${resolved.error}`);
-        const phase = phaseOf();
-        const target = phase === "build" ? resolved.worker : resolved.planner;
+        const { phase, target } = routeFor(current, resolved);
         const model = ctx.modelRegistry.find(target.provider, target.modelId);
         if (!model) throw new Error(`${current.name}: ${target.provider}/${target.modelId} is not available`);
         const thinkingLevel = phase === "consult" ? (state.planLevel ?? request.thinkingLevel) : request.thinkingLevel;
@@ -177,23 +204,53 @@ export function registerPairs(pi: ExtensionAPI, host: PairHost): PairController 
   const restore = (ctx: ExtensionContext) => {
     state = { version: 1, consult: false };
     try {
+      let selection: string | undefined;
+      let workerHandoffs: Record<string, WorkerHandoff> = {};
       for (const entry of ctx.sessionManager.getBranch() as readonly {
         type?: string;
         customType?: string;
+        provider?: string;
+        modelId?: string;
         data?: unknown;
       }[]) {
+        if (entry.type === "model_change") {
+          selection =
+            typeof entry.provider === "string" && typeof entry.modelId === "string"
+              ? pairKey({ provider: entry.provider, id: entry.modelId })
+              : undefined;
+          continue;
+        }
         if (entry.type !== "custom" || entry.customType !== PAIR_ENTRY) continue;
-        const data = entry.data as Partial<PairState> | undefined;
-        if (data?.version !== 1 || typeof data.consult !== "boolean") continue;
+        const data = entry.data;
+        if (!record(data) || data.version !== 1 || typeof data.consult !== "boolean") continue;
+        const approvalPair = typeof data.approvalPair === "string" ? data.approvalPair : selection;
+        if (Object.hasOwn(data, "workerHandoffs") || typeof data.approvalPair === "string") {
+          // New snapshots are authoritative, including an absent/empty map.
+          workerHandoffs = {};
+          if (record(data.workerHandoffs)) {
+            for (const [key, value] of Object.entries(data.workerHandoffs)) {
+              const handoff = readHandoff(value);
+              if (handoff && defs.some((def) => pairKey(def) === key && def.handoff === "persistent"))
+                workerHandoffs[key] = handoff;
+            }
+          }
+        } else if (data.implementing === true && approvalPair) {
+          // Old snapshots have no pair identity: only a recorded selection can establish one.
+          const handoff = readHandoff(data);
+          if (handoff && defs.some((def) => pairKey(def) === approvalPair && def.handoff === "persistent"))
+            workerHandoffs[approvalPair] = handoff;
+        }
         state = {
           version: 1,
           consult: data.consult,
           ...(data.implementing === true ? { implementing: true } : {}),
+          ...(approvalPair ? { approvalPair } : {}),
           ...(typeof data.planFile === "string" ? { planFile: data.planFile } : {}),
           ...(typeof data.planLevel === "string" &&
           (MODEL_SPEC_THINKING_LEVELS as readonly string[]).includes(data.planLevel)
             ? { planLevel: data.planLevel as ModelSpecThinkingLevel }
             : {}),
+          ...(Object.keys(workerHandoffs).length ? { workerHandoffs: { ...workerHandoffs } } : {}),
         };
       }
     } catch {
@@ -229,8 +286,7 @@ export function registerPairs(pi: ExtensionAPI, host: PairHost): PairController 
   const snapshot = (ctx: ExtensionContext): PlanPairSnapshot | undefined => {
     const pair = selected(ctx);
     if (!pair) return undefined;
-    const phase = phaseOf();
-    const target = phase === "build" ? pair.worker : pair.planner;
+    const { phase, target } = routeFor(pair.def, pair);
     const level = pi.getThinkingLevel() as string;
     return {
       version: 1,
@@ -256,7 +312,15 @@ export function registerPairs(pi: ExtensionAPI, host: PairHost): PairController 
   });
   // The implementation is over once the run settles (an aborted run stays on the worker, to continue).
   pi.on("agent_settled", (event) => {
-    if (!state.implementing || (event as { aborted?: boolean }).aborted) return;
+    if ((event as { aborted?: boolean }).aborted) {
+      // An abort skips agent_before_settle: close the consult without ending implementation.
+      if (state.consult) {
+        state = { ...state, consult: false };
+        persist();
+      }
+      return;
+    }
+    if (!state.implementing) return;
     state = { ...state, implementing: false };
     persist();
   });
@@ -276,6 +340,11 @@ export function registerPairs(pi: ExtensionAPI, host: PairHost): PairController 
   });
   pi.on("model_select", (_event, ctx) => {
     latest = ctx;
+    const pair = selected(ctx);
+    if (state.consult && (!pair || !belongsTo(pair.def))) {
+      state = { ...state, consult: false };
+      persist();
+    }
     syncTools(ctx);
   });
 
@@ -302,8 +371,9 @@ export function registerPairs(pi: ExtensionAPI, host: PairHost): PairController 
     name: "ask_planner",
     label: "Ask the planner",
     description:
-      "Hands this conversation to the planning model of your model pair (it planned; you implement). Use it when the approved plan does not fit what you find (a step cannot be done as written, a fact it states is wrong, an unlisted change is needed, or it leaves a choice open), or for a hard design decision. The planner reads this whole conversation, including your changes, answers, and may amend the plan file; then you continue. Do not use it for questions only the user can answer.",
-    promptSnippet: "Ask the planning model of your plan model pair about the plan or a decision during implementation",
+      "Hands this conversation from your model pair's worker to its planner, during implementation or later worker follow-ups. Use it when the approved plan does not fit what you find (a step cannot be done as written, a fact it states is wrong, an unlisted change is needed, or it leaves a choice open), or for a hard design decision. The planner reads this whole conversation, including your changes, answers, and may amend the plan file; then you continue. Do not use it for questions only the user can answer.",
+    promptSnippet:
+      "Ask the planning model of your plan model pair about the plan or a hard decision while on its worker",
     executionMode: "sequential",
     parameters: {
       type: "object",
@@ -317,18 +387,27 @@ export function registerPairs(pi: ExtensionAPI, host: PairHost): PairController 
       if (!pair)
         return text("ask_planner works only with a plan model pair selected, such as anthropic/opusplan.") as never;
       if (host.planning()) return text("You are in plan mode: you are the planner. Keep planning.") as never;
-      if (host.workflow() === "chat")
-        return text("You are in chat mode: the planner already answers. Answer directly.") as never;
-      if (!state.implementing)
+      if (state.consult && belongsTo(pair.def))
+        return text("A consultation is already open: answer it with planner_answer.") as never;
+      if (routeFor(pair.def, pair).target !== pair.worker) {
+        if (host.workflow() === "chat")
+          return text("You are in chat mode: the planner already answers. Answer directly.") as never;
         return text(
           "No approved plan is being implemented: the planner already answers here. Answer directly.",
         ) as never;
-      if (state.consult) return text("A consultation is already open: answer it with planner_answer.") as never;
-      state = { ...state, consult: true };
+      }
+      const handoff = handoffFor(pair.def);
+      state = {
+        ...state,
+        implementing: !!state.implementing && belongsTo(pair.def),
+        consult: true,
+        approvalPair: pairKey(pair.def),
+        ...(handoff ? { planFile: handoff.planFile, planLevel: handoff.planLevel } : {}),
+      };
       persist();
       const file = state.planFile ? ` (${state.planFile})` : "";
       return text(
-        `The implementer asks the planner (${pair.plannerName}):\n\n${question}\n\nPlanner: you are answering now, not implementing. This conversation shows the implementer's changes so far. Investigate with read-only tools as needed. Change nothing except the plan file${file}: if your answer changes the plan, edit it and add a dated line under a "## Amendments" heading at its end. If the decision belongs to the user (a product choice, a permission, a check only a human can do), ask them with ask_user_question. Then call planner_answer with your answer; the implementer continues from it.`,
+        `The ${state.implementing ? "implementer" : "worker"} asks the planner (${pair.plannerName}):\n\n${question}\n\nPlanner: you are answering now, not implementing. This conversation shows the implementer's changes so far. Investigate with read-only tools as needed. Change nothing except the plan file${file}: if your answer changes the plan, edit it and add a dated line under a "## Amendments" heading at its end. If the decision belongs to the user (a product choice, a permission, a check only a human can do), ask them with ask_user_question. Then call planner_answer with your answer; the ${state.implementing ? "implementer" : "worker"} continues from it.`,
         { question, planner: pair.plannerName },
       ) as never;
     },
@@ -352,7 +431,7 @@ export function registerPairs(pi: ExtensionAPI, host: PairHost): PairController 
       state = { ...state, consult: false };
       persist();
       return text(
-        `Planner's answer${amended ? " (the plan file was amended; reread it)" : ""}:\n\n${answer}\n\nImplementer: continue implementing, following this answer.`,
+        `Planner's answer${amended ? " (the plan file was amended; reread it)" : ""}:\n\n${answer}\n\n${state.implementing ? "Implementer: continue implementing" : "Worker: continue your work"}, following this answer.`,
       ) as never;
     },
   });
@@ -393,8 +472,9 @@ export function registerPairs(pi: ExtensionAPI, host: PairHost): PairController 
         {
           type: "custom_message" as const,
           customType: ANSWER_TYPE,
-          content:
-            "The planner finished without calling planner_answer. Implementer: its reply above is the answer; continue implementing.",
+          content: state.implementing
+            ? "The planner finished without calling planner_answer. Implementer: its reply above is the answer; continue implementing."
+            : "The planner finished without calling planner_answer. Worker: its reply above is the answer; continue your work.",
           display: false,
         },
       ],
@@ -403,7 +483,9 @@ export function registerPairs(pi: ExtensionAPI, host: PairHost): PairController 
   });
 
   pi.on("tool_result", (event, ctx) => {
-    if (event.isError || state.consult || host.planning() || !state.planFile || !selected(ctx)) return undefined;
+    const pair = selected(ctx);
+    if (event.isError || state.consult || host.planning() || !state.planFile || !pair) return undefined;
+    if (handoffFor(pair.def) && (!state.implementing || !belongsTo(pair.def))) return undefined;
     if (event.toolName !== "edit" && event.toolName !== "write") return undefined;
     const file = resolve(ctx.cwd, expandHome(String((event.input as { path?: unknown })?.path ?? "")));
     if (isPlanFile(file, ctx.cwd, state.planFile) || noted.has(file)) return undefined;
@@ -426,13 +508,22 @@ export function registerPairs(pi: ExtensionAPI, host: PairHost): PairController 
     selected,
     pairFor,
     approve(ctx, planFile) {
-      if (!selected(ctx)) return;
+      const pair = selected(ctx);
+      if (!pair) return;
+      const approvalPair = pairKey(pair.def);
+      const planLevel = pi.getThinkingLevel() as ModelSpecThinkingLevel;
+      const workerHandoffs = {
+        ...state.workerHandoffs,
+        ...(pair.def.handoff === "persistent" ? { [approvalPair]: { planFile, planLevel } } : {}),
+      };
       state = {
         version: 1,
         consult: false,
         implementing: true,
+        approvalPair,
         planFile,
-        planLevel: pi.getThinkingLevel() as ModelSpecThinkingLevel,
+        planLevel,
+        ...(Object.keys(workerHandoffs).length ? { workerHandoffs } : {}),
       };
       noted.clear();
       persist();

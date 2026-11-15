@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Fixed
+
+- Fableplan and both Astraplan identities retain their worker after approval for later work and chat, with branch-local persisted handoffs and temporary planner consultations.
+
 ### Chat on the planner, Argon and Carbon pairs and the next model for the footer
 
 - A plan model pair now routes chat-mode requests (pi-tool-gate's chat workflow) to the planner, like plan mode and consultations; the worker serves only while an approved plan is being implemented, until that run settles (an aborted run stays on the worker), so ordinary work afterwards is back on the planner. `ask_planner` refuses when the planner already answers.

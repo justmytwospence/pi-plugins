@@ -61,7 +61,7 @@ Built-in plan model pairs (`anthropic/fableplan`, `anthropic/opusplan`, `openai-
 }
 ```
 
-A key equal to a built-in pair replaces it in place; other keys are added after the built-ins. `name` defaults to `<planner id> plan, <worker id> build`. The whole file is invalid (defaults apply, and it is never overwritten) when:
+A key equal to a built-in pair replaces it in place; other keys are added after the built-ins. `anthropic/fableplan`, `openai/astraplan` and `openai-codex/astraplan` retain their persistent worker handoff after approval, including when replaced; newly named pairs do not. No setting is needed for this policy. `name` defaults to `<planner id> plan, <worker id> build`. The whole file is invalid (defaults apply, and it is never overwritten) when:
 
 - a key is not a `provider/modelId` or has an effort suffix;
 - `planner` or `worker` is missing, not a `provider/modelId`, or has an effort suffix;

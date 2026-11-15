@@ -97,15 +97,25 @@ A plan model pair is a Pi virtual model: one entry in `/model` that plans on one
 
 Built-in pairs are derived from the suite's shared model-family table (the same one pi-subagents uses, plus an optional `~/.pi/agent/model-families.json`): each route's top premium and strong family plans and the top family of the next tier down builds, with Google's `carbonplan` building on Hydrogen. Provisional (newly discovered) families never become planners or workers until confirmed with `/families`. Each family resolves at request time to the highest available generation on the pair's provider (the worker prefers the planner's generation). A pair whose models are unavailable is removed from `/model` at session start, unless it is the one selected. On Google, the planner prefers the Antigravity (`antigravity-`) models and the worker uses the same lane as the planner. Define your own with `modelPairs` (see [Configuration](#configuration)).
 
-Routing is per request: the worker serves requests only while an approved plan is being implemented (until that run settles; an aborted run stays on the worker so you can continue), and the planner serves everything else: plan mode, chat mode (with pi-tool-gate), consultations and ordinary work afterwards. `ask_planner` is refused when the planner already answers. Approving a plan therefore continues the same agent loop on the worker, with no turn end, model switch or brief message. The selection stays the pair throughout; with pi-status-footer the model row shows the pair and the model that will answer next. A phase switch re-reads the conversation on the other model without its prompt cache.
+For `anthropic/fableplan`, `openai/astraplan` and `openai-codex/astraplan`, routing follows this lifecycle independently per pair and branch:
+
+| State | Next model |
+| --- | --- |
+| Before approval; explicit plan mode | Planner |
+| Approved implementation and later work or chat | Worker |
+| Planner consultation | Planner, then worker |
+
+Approval persists the handoff for later turns, including chat. Enter plan mode to return temporarily to the planner in the same session; approval hands back to the worker. Leaving plan mode without approval, including **Save for later**, restores the prior route; declining review keeps plan mode and the planner active. Use `/model` to select a physical model explicitly. A replacement definition for one of these identities retains its handoff policy.
+
+Other built-in pairs and newly named custom pairs retain planner-first routing: the worker serves an approved implementation until it settles (an aborted run stays on the worker), and the planner serves ordinary work and chat afterward. `ask_planner` is refused when the planner already answers. Approval continues the same agent loop on the worker; the pair remains selected. With pi-status-footer, the model row shows the next physical model. A phase switch re-reads the conversation on the other model without its prompt cache.
 
 **Effort.** On entering plan mode, System 1 judges effort once for the planner and applies it with your next message, unless you changed the level since entering plan mode. At approval, the picker's effort row targets the worker. Consultations use the level recorded at approval.
 
-**`ask_planner` and `planner_answer`.** While a pair is selected, your implementing agent has `ask_planner`: when the approved plan does not fit what it finds, it hands the next requests of the same conversation to the planner. The planner reads the whole conversation, including the implementer's changes, may amend the plan file (adding a dated line under `## Amendments`), asks you with `ask_user_question` when the decision is yours, and ends the consultation with `planner_answer`. If the planner finishes without calling it, its reply is taken as the answer and the implementer continues. Both tools refuse outside their phase.
+**`ask_planner` and `planner_answer`.** While a pair is selected, your implementing agent (or a premium pair's worker on follow-up work) has `ask_planner`: when the approved plan does not fit what it finds, it hands the next requests of the same conversation to the planner. The planner reads the whole conversation, including the implementer's changes, may amend the plan file (adding a dated line under `## Amendments`), asks you with `ask_user_question` when the decision is yours, and ends the consultation with `planner_answer`. If the planner finishes without calling it, its reply is taken as the answer and the implementer continues. Both tools refuse outside their phase.
 
 **Consult guard.** While the planner answers, `edit` and `write` are blocked except for the plan file, `bash` is limited to read-only commands (pi-tool-gate's read-only analysis when it is loaded; otherwise this package's policy and `safeSubcommands`), and `bg_run` is blocked.
 
-**Unplanned files.** The first edit or write of each file the plan does not list (paths in backticks in its Changes) gets a note appended to the tool result, telling the implementer to call `ask_planner` if the change departs from the plan. Nothing is blocked, and a plan that names no paths gets no notes.
+**Unplanned files.** The first edit or write of each file the plan does not list (paths in backticks in its Changes) gets a note appended to the tool result, telling the implementer to call `ask_planner` if the change departs from the plan. Nothing is blocked, and a plan that names no paths gets no notes. Idle follow-up work on a handed-off premium pair does not get these notes.
 
 Exec mode, `finish_plan`, completion review, model handoffs and fresh-child handoffs were removed. A session saved with an unfinished exec implementation continues as ordinary work, with a one-time notice.
 
@@ -299,7 +309,7 @@ Planner sessions are stored under `~/.pi/agent/plan-mode/planners/`; runs are sa
 - Pi 0.99 or newer and its interactive terminal UI.
 - Planners, their subagents and M make ordinary model requests on the models you pick, through your session's providers, billed as those providers bill them. Each planner and each subagent is a separate session, so two planners with subagents can use several times the tokens of one agent. The planning screen shows tokens and cost per planner.
 - Classifier tool selection makes an optional classifier request through Pi's classifier models (default `typesafe/jev-latest`, which needs Pi's credentials for it, such as `TYPESAFE_API_KEY`); it can be billed. Without a classifier the Tools step uses its fallback preselection.
-- Your agent plans on your session's model. With a plan model pair, planning, chat and ordinary work run on the planner and only the implementation of an approved plan on the worker, each billed as its provider bills; a phase switch re-reads the conversation on the other model without its prompt cache.
+- Your agent plans on your session's model. With a plan model pair, routing follows the lifecycle above, each model billed as its provider bills; a phase switch re-reads the conversation on the other model without its prompt cache.
 - On disk: it reads and writes `~/.pi/agent/pi-plan-mode.json`, writes plan mode's plan files under `~/.pi/agent/plans/` (or `plansDirectory`), appends plan-mode state entries and hidden notices to your session, stores planner sessions under `~/.pi/agent/plan-mode/planners/`, appends run entries and plan messages to your session, writes exported plans where you choose, and writes a temporary plan file for `planCompleteCommand`.
 
 ## Optional integrations
