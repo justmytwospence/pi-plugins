@@ -24,7 +24,7 @@ test("/diff web view returns the patch as a diff node with scope actions", async
   const repo = gitRepo();
   repo.write("file.txt", "before\n");
   repo.run("add", "-A");
-  repo.run("commit", "-qm", "fixture");
+  repo.run("commit", "-qm", "test: initialize fixture");
   repo.write("file.txt", "after\n");
   const { pi, handlers } = load();
   const ctx = { cwd: repo.root, mode: "rpc", hasUI: true, sessionManager: { getBranch: () => [] }, ui: { notify() {} } };

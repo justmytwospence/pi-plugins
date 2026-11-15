@@ -437,16 +437,29 @@ async function readLinesIfExists(path: string): Promise<string[]> {
 }
 
 async function waitForLineCount(path: string, count: number): Promise<void> {
-  await withTimeout(
-    (async () => {
-      while ((await readLinesIfExists(path)).length < count) {
-        await delay(10);
-      }
-    })(),
-    1_000,
-    `timed out waiting for ${path} to contain ${count} lines`,
-  );
+  const deadline = performance.now() + 1_000;
+  while (true) {
+    const lines = await readLinesIfExists(path);
+    const remaining = deadline - performance.now();
+    if (remaining <= 0) {
+      throw new Error(`timed out waiting for ${path} to contain ${count} lines`);
+    }
+    if (lines.length >= count) return;
+    await delay(Math.min(10, remaining));
+  }
 }
+
+it("times out waiting for lines in a missing file without leaking a poller", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "pi-vim-missing-lines-"));
+  const path = join(dir, "missing.log");
+  try {
+    await assert.rejects(waitForLineCount(path, 1), {
+      message: `timed out waiting for ${path} to contain 1 lines`,
+    });
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
 
 function shellQuote(value: string): string {
   return `'${value.replaceAll("'", "'\\''")}'`;

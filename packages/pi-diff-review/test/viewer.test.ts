@@ -15,7 +15,7 @@ async function setup() {
 	repo.write("src/app.ts", "export function add(a: number, b: number) {\n\treturn a + b;\n}\n\nexport const x = 1;\n");
 	repo.write("README.md", "# Demo\n");
 	repo.run("add", "-A");
-	repo.run("commit", "-qm", "init");
+	repo.run("commit", "-qm", "test: initialize fixture");
 	const t0 = (await snapshot(repo.root)) as string;
 	repo.write("src/app.ts", "export function add(a: number, b: number): number {\n\treturn a + b;\n}\n\nexport const x = 2;\nexport const y = 3;\n");
 	repo.write("notes/new.txt", "untracked file\n");

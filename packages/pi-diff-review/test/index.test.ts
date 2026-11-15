@@ -12,7 +12,7 @@ test("index persists the displayed mark before custom UI closes; close never add
 	const repo = gitRepo();
 	repo.write("file.txt", "before\n");
 	repo.run("add", "-A");
-	repo.run("commit", "-qm", "fixture");
+	repo.run("commit", "-qm", "test: initialize fixture");
 	repo.write("file.txt", "displayed\n");
 	const displayed = await snapshot(repo.root);
 	const entries: Entry[] = [];
