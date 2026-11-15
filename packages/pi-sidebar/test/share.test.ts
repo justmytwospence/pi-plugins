@@ -2,7 +2,7 @@ import { existsSync, mkdtempSync, readdirSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { visibleWidth } from "@earendil-works/pi-tui";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { MainState } from "../src/main-state.ts";
 import { HeadsUp, type HeadsUpHost } from "../src/headsup/headsup.ts";
 import { NoteState } from "../src/headsup/note.ts";
@@ -560,6 +560,9 @@ describe("HeadsUp with sharing", () => {
     expect(JSON.stringify(draftPayload)).toContain("the strongest objection");
     expect(JSON.stringify(draftPayload)).toContain("sidebar-share-idea");
     expect(sent[1].options.maxTokens).toBe(3000);
+    // File creation precedes the asynchronous save notification; a fixed 10 ms sleep
+    // cannot establish completion on a loaded runner. Wait for the actual success event.
+    await vi.waitFor(() => expect(notes.at(-1)?.message).toMatch(/^Blog outline saved: .*splice-your-cache-outline\.md$/));
     const files = readdirSync(path.join(dir, "drafts"));
     expect(files).toEqual(["1970-01-01-splice-your-cache-outline.md"]);
     expect(notes.at(-1)?.message).toMatch(/^Blog outline saved: .*splice-your-cache-outline\.md$/);

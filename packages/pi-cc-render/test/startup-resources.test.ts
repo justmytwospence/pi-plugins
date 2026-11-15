@@ -1000,20 +1000,30 @@ describe("startup resources", () => {
     expect(renderSection(impossible, 46, plainTheme)).toEqual([" Extensions 29 · +29 hidden"]);
   });
 
-  test("column row counts match the rendered layout, and many model providers plan quickly", () => {
+  function manyProviderModels(): ResourceSection {
     const sizes = [3, 40, 12, 25, 8, 30, 5, 18, 22, 9, 14, 6, 9];
-    const models: ResourceSection = { title: "Models", count: sizes.reduce((sum, size) => sum + size, 0), layout: "columns",
+    return { title: "Models", count: sizes.reduce((sum, size) => sum + size, 0), layout: "columns",
       notes: [{ text: "note", color: "dim" }],
       groups: sizes.map((size, group) => ({ label: `provider-${group}`, items: Array.from({ length: size }, (_, index) => `model-${group}-${index}${"x".repeat(index % 7)}`) })) };
+  }
+
+  test("many model providers plan quickly", () => {
+    const models = manyProviderModels();
     const started = performance.now();
     const candidates = splashSectionCandidates("Models", models, 158, plainTheme);
     planSplashSections({ Models: models }, 158, plainTheme, 20);
     expect(performance.now() - started).toBeLessThan(2000);
-    for (const width of [1, 2, 6, 30, 46, 80, 158, 220]) {
-      expect(sectionRows(models, width, plainTheme)).toBe(renderSection(models, width, plainTheme).length);
-      for (const candidate of width === 158 ? candidates : splashSectionCandidates("Models", models, width, plainTheme).slice(0, 40)) {
-        expect(candidate.rows).toBe(renderSection(candidate.section, width, plainTheme).length);
-      }
+    expect(candidates.length).toBeGreaterThan(0);
+  });
+
+  // Preserve every width/candidate assertion without charging all independent rendering
+  // sweeps to one test's wall-clock budget on a shared CI runner.
+  test.each([1, 2, 6, 30, 46, 80, 158, 220])("column row counts match the rendered layout at %i columns", (width) => {
+    const models = manyProviderModels();
+    const candidates = splashSectionCandidates("Models", models, width, plainTheme);
+    expect(sectionRows(models, width, plainTheme)).toBe(renderSection(models, width, plainTheme).length);
+    for (const candidate of width === 158 ? candidates : candidates.slice(0, 40)) {
+      expect(candidate.rows).toBe(renderSection(candidate.section, width, plainTheme).length);
     }
   });
 
