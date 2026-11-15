@@ -1022,8 +1022,19 @@ describe("startup resources", () => {
     const models = manyProviderModels();
     const candidates = splashSectionCandidates("Models", models, width, plainTheme);
     expect(sectionRows(models, width, plainTheme)).toBe(renderSection(models, width, plainTheme).length);
-    for (const candidate of width === 158 ? candidates : candidates.slice(0, 40)) {
+    // The exhaustive 158-column sweep is partitioned below; all other widths retain
+    // the original first-40 candidate coverage.
+    if (width !== 158) for (const candidate of candidates.slice(0, 40)) {
       expect(candidate.rows).toBe(renderSection(candidate.section, width, plainTheme).length);
+    }
+  });
+
+  test.each(Array.from({ length: 16 }, (_, i) => i))("all 158-column candidates match their rendered rows (batch %i)", (batch) => {
+    const candidates = splashSectionCandidates("Models", manyProviderModels(), 158, plainTheme);
+    expect(candidates.length).toBeGreaterThan(0);
+    // Residue classes partition the entire candidate set; no layout assertion is sampled out.
+    for (const [index, candidate] of candidates.entries()) if (index % 16 === batch) {
+      expect(candidate.rows).toBe(renderSection(candidate.section, 158, plainTheme).length);
     }
   });
 
