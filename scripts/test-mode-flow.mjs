@@ -88,10 +88,10 @@ try {
   }
   syncBuiltinESMExports();
   const sdk = await import(sdkUrl.href);
-  const { createAssistantMessageEventStream } = await import(aiUrl.href);
+  const { createAssistantMessageEventStream, getCurrentSystemMessage, getSystemMessageText, toToolDeclaration } = await import(aiUrl.href);
   const { Text } = await import(tuiUrl.href);
   const { AgentSession, ModelRuntime, SessionManager, SettingsManager, createAgentSessionServices,
-    createAgentSessionFromServices, createAgentSessionRuntime, initTheme } = sdk;
+    createAgentSessionFromServices, createAgentSessionRuntime, createCodingTools, initTheme } = sdk;
   // Exercise bare imports through the actual selected SDK loader, not just our path resolver.
   const identityFixture = resolve(temp, 'host-identity.ts');
   writeFileSync(identityFixture, `
@@ -177,6 +177,15 @@ export default function (pi) {
       let selectedEffort;
       const requestedModels = [];
       const requests = [];
+      const hasGate = names.includes('tool-gate');
+      const hasPlan = names.includes('plan-mode');
+      const guidanceType = 'tool-gate:mode-guidance';
+      const settingsNoticeType = 'tool-gate:mode-settings-notice';
+      const settingsNoticeText = 'Tool-gate settings changed. Apply the current workflow and approval guidance on your next response.';
+      const messageText = message => typeof message.content === 'string' ? message.content
+        : (message.content ?? []).filter(block => block.type === 'text').map(block => block.text).join('\n');
+      let expectedPrompts = 'on';
+      let expectedSystems;
       const services = await createAgentSessionServices({ cwd: dir, agentDir: temp, modelRuntime: models,
         settingsManager: SettingsManager.inMemory({ cacheWarming: 'off', compaction: { enabled: false } }),
         resourceLoaderOptions: { noExtensions: true, noSkills: true, noPromptTemplates: true, noThemes: true, noContextFiles: true,
@@ -192,6 +201,11 @@ export default function (pi) {
       assert.deepEqual(services.resourceLoader.getExtensions().errors, [], label);
       const manager = SessionManager.inMemory(dir);
       if (inlineActive) {
+        // A resumed conversation already has a saved system baseline. Without one,
+        // the pre-prompt plan→work transition becomes the transcript's first message,
+        // an invalid synthetic history once the SDK refreshes context from the manager.
+        manager.appendMessage({ role: 'system', content: 'Local integration restored-plan session.',
+          toolsAdded: createCodingTools(dir).map(toToolDeclaration), timestamp: Date.now() });
         const planFile = resolve(dir, 'standalone-plan.md');
         writeFileSync(planFile, '# Existing standalone plan\n\nContinue the plan.\n');
         manager.appendCustomEntry('tool-gate:approvals', { version: 1, mode: 'bypassPermissions' });
@@ -202,6 +216,27 @@ export default function (pi) {
       const script = [];
       session.agent.streamFunction = (model, context) => {
         requests.push({ model: model.id, messages: structuredClone(context.messages) });
+        const systems = context.messages.filter(message => message.role === 'system');
+        assert.equal(context.messages[0]?.role, 'system', `${label}: preserve the leading system prompt (request ${requests.length}; persisted roles: ${manager.buildSessionContext().messages.map(message => message.role).join(',')})`);
+        const currentSystem = getCurrentSystemMessage(context.messages);
+        assert(getSystemMessageText(currentSystem).trim(), `${label}: current system instructions reach the transport`);
+        assert(currentSystem.toolsAdded?.some(tool => tool.name === 'read'), `${label}: current read declaration reaches the transport`);
+        assert(session.agent.state.tools.some(tool => tool.name === 'read' && typeof tool.execute === 'function'),
+          `${label}: the declared read tool remains executable`);
+        if (expectedSystems) assert.deepEqual(systems, expectedSystems, `${label}: preserve every system message and patch in order`);
+        if (hasGate) {
+          const guidance = context.messages.filter(message => messageText(message).includes('Current tool-gate settings:'));
+          assert.equal(guidance.length, 1, `${label}: exactly one request-local current settings block`);
+          assert.equal(guidance[0].role, 'user', 'the hidden custom snapshot is provider user content, not a system override');
+          const mode = /workflow: (\w+)/.exec(statuses.get('workflow-mode') ?? '')?.[1];
+          const approval = approvalEvents.at(-1)?.mode === 'bypassPermissions' ? 'yolo' : 'auto';
+          assert(messageText(guidance[0]).includes(`Current tool-gate settings: workflow **${mode}**; approvals **${approval}**; permission prompts **${expectedPrompts}**`),
+            `${label}: request uses live workflow, approval and prompting state`);
+          assert(!context.messages.some(message => messageText(message).includes(settingsNoticeText)),
+            `${label}: stale busy notice is replaced, not delivered alongside the snapshot`);
+          assert.equal(manager.getEntries().some(entry => (entry.type === 'message' ? entry.message : entry).customType === guidanceType), false,
+            `${label}: request snapshots never become session entries`);
+        }
         const stream = createAssistantMessageEventStream();
         requestedModels.push(model.id);
         const next = script.shift();
@@ -210,7 +245,20 @@ export default function (pi) {
         const reason = next && !next.text ? 'toolUse' : 'stop';
         const message = { role: 'assistant', content, api: model.api, provider: model.provider, model: model.id,
           usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } }, stopReason: reason, timestamp: Date.now() };
-        queueMicrotask(() => { stream.push({ type: 'done', reason, message }); stream.end(message); });
+        const finish = () => { stream.push({ type: 'done', reason, message }); stream.end(message); };
+        queueMicrotask(() => {
+          if (next?.hold) {
+            const partial = { ...message, content: [{ type: 'text', text: '' }] };
+            stream.push({ type: 'start', partial });
+            stream.push({ type: 'text_start', contentIndex: 0, partial });
+            partial.content[0].text = next.text;
+            stream.push({ type: 'text_delta', contentIndex: 0, delta: next.text, partial });
+            next.release = () => {
+              stream.push({ type: 'text_end', contentIndex: 0, content: next.text, partial: message });
+              finish();
+            };
+          } else finish();
+        });
         return stream;
       };
       // RPC approval still runs the real ApprovalPicker choice/effort logic, without a terminal.
@@ -242,8 +290,6 @@ export default function (pi) {
         await run();
         assert.deepEqual(effortState(), before, `${label}: ${why} does not classify or write effort`);
       };
-      const hasGate = names.includes('tool-gate');
-      const hasPlan = names.includes('plan-mode');
       const branchData = type => manager.getBranch().filter(entry => entry.type === 'custom' && entry.customType === type).at(-1)?.data;
       const workflow = () => /workflow: (\w+)/.exec(statuses.get('workflow-mode') ?? '')?.[1];
       const transitions = () => manager.getEntries().filter(entry => entry.type === 'custom_message'
@@ -252,10 +298,12 @@ export default function (pi) {
       let checkedTransitions = 0;
       let restoring = false;
       const reload = async () => {
+        const requestCount = requests.length;
         const before = structuredClone(transitions());
         const calls = effortCalls.length;
         const thinking = session.thinkingLevel;
         await session.reload();
+        assert.equal(requests.length, requestCount, `${label}: restoration does not launch a model request`);
         assert.equal(effortCalls.length, calls, `${label}: reload never judges effort`);
         assert.equal(session.thinkingLevel, thinking, `${label}: reload retains native saved effort`);
         assert.deepEqual(transitions(), before, `${label}: reload must not append visible transitions`);
@@ -277,7 +325,7 @@ export default function (pi) {
         }
         for (const entry of manager.getEntries()) {
           const message = entry.type === 'message' ? entry.message : entry;
-          if (['plan-mode-notice', 'tool-gate:chat-notice'].includes(message.customType)) {
+          if (entry.type !== 'custom' && ['plan-mode-notice', 'tool-gate:chat-notice'].includes(message.customType)) {
             assert.equal(message.display, false, 'agent workflow reminders stay hidden independently of visible transitions');
           }
         }
@@ -293,7 +341,17 @@ export default function (pi) {
       const call = async (name, args = {}) => {
         const id = `local-${++callCount}`;
         script.push({ id, name, args });
+        const before = requests.length;
         await session.prompt(`Local integration: ${name}`);
+        if (name === 'read') {
+          // Plan approval may intentionally compact away its own call/result pair.
+          assert.equal(requests.length, before + 2, `${label}: tool call has a fresh continuation request: ${session.state.messages.at(-1)?.errorMessage ?? ''}`);
+          const continuation = requests.at(-1).messages;
+          assert(continuation.some(message => message.role === 'assistant' && message.content.some(block => block.type === 'toolCall' && block.id === id)),
+            `${label}: preserve the assistant tool call in continuation context`);
+          assert(continuation.some(message => message.role === 'toolResult' && message.toolCallId === id),
+            `${label}: preserve the paired tool result in continuation context`);
+        }
         // Locate the actual tool result persisted by AgentSession.
         const result = manager.getEntries().filter(entry => entry.type === 'message').map(entry => entry.message)
           .filter(message => message.role === 'toolResult' && message.toolCallId === id).at(-1);
@@ -304,10 +362,12 @@ export default function (pi) {
       const restoreRecords = () => manager.getEntries().filter(entry => entry.type === 'custom'
         && ['tool-gate:workflow', 'plan-mode:inline'].includes(entry.customType)).map(entry => entry.id);
       const go = async target => {
+        const requestCount = requests.length;
         const visibleBefore = structuredClone(transitions());
         const before = restoreRecords();
         const calls = effortCalls.length;
         assert.equal((await session.navigateTree(target.id, { summarize: false })).cancelled, false);
+        assert.equal(requests.length, requestCount, `${label}: branch restoration does not launch a model request`);
         assert.equal(effortCalls.length, calls, `${label}: branch restoration never reclassifies effort`);
         assert.deepEqual(restoreRecords(), before, `${label}: restoration must not append workflow or inline records`);
         assert.deepEqual(transitions(), visibleBefore, `${label}: tree navigation must not append visible transitions`);
@@ -325,13 +385,71 @@ export default function (pi) {
         await emitWorkflow(api, 'workflow-mode:set', { mode: 'work' });
         api.events.emit('permission-mode:set', { mode: 'auto' });
       }
+      const settingsNotices = () => manager.getEntries().map(entry => entry.type === 'message' ? entry.message : entry)
+        .filter(message => message.customType === settingsNoticeType);
+      const requestSnapshot = async why => {
+        const before = requests.length;
+        await session.prompt(`Local integration snapshot: ${why}.`);
+        assert.equal(requests.length, before + 1, `${label}: ${why} makes exactly one local request`);
+      };
       check('work', 'auto');
       await unchangedEffort('ordinary prompts, tool errors and turn ends', async () => {
-        await session.prompt('Investigate a difficult parser bug and design a fix.');
+        await requestSnapshot('initial prompt');
+        // Seed a real transcript patch, not a request-hook fixture. A context handler that
+        // folds Pi's system history into one new head must fail this ordered comparison.
+        const patch = { role: 'system', content: 'Local integration: preserve this mid-conversation system patch.', timestamp: Date.now() };
+        manager.appendMessage(patch);
+        session.agent.state.messages = [...session.agent.state.messages, patch];
+        expectedSystems = structuredClone(session.state.messages.filter(message => message.role === 'system'));
+        assert(expectedSystems.length >= 2, 'fixture contains a leading prompt and a mid-conversation system patch');
         const result = await call('read', { path: resolve(dir, 'missing-effort-regression.txt') });
         assert.equal(result.isError, true, 'exercise a real failed tool result');
-        await session.prompt('Retry the investigation after the failed read.');
+        await requestSnapshot('repeated prompt after the failed read');
+        expectedSystems = undefined;
       });
+      if (hasGate) {
+        const noticesBefore = settingsNotices().length;
+        api.events.emit('permission-mode:set', { mode: 'bypassPermissions' });
+        await requestSnapshot('idle approval change to yolo');
+        api.events.emit('permission-mode:set', { mode: 'auto' });
+        await session.prompt('/gate prompts off');
+        expectedPrompts = 'off';
+        await requestSnapshot('idle prompting policy change');
+        await session.prompt('/gate prompts on');
+        expectedPrompts = 'on';
+        await requestSnapshot('idle approval and prompting reset');
+        assert.equal(settingsNotices().length, noticesBefore, 'idle settings changes do not queue busy notices');
+        const busyChange = async modes => {
+          const held = { text: 'Local tool-free streaming response.', hold: true };
+          const before = requests.length;
+          const noticeCount = settingsNotices().length;
+          script.push(held);
+          const running = session.prompt('Local integration: change approvals while this response streams.');
+          try {
+            await boundedUntil(() => held.release, `${label}: controlled local stream starts`);
+            assert.equal(session.isStreaming, true, 'change committed settings during an actual SDK stream');
+            for (const mode of modes) api.events.emit('permission-mode:set', { mode });
+            assert.equal(requests.length, before + 1, 'settings do not interrupt the current streaming request');
+          } finally {
+            held.release?.();
+            await withDeadline(running, `${label}: tool-free busy settings continuation`);
+          }
+          assert.equal(requests.length, before + 2, 'a busy settings steer causes exactly one tool-free continuation');
+          assert.equal(requests.at(-1).messages.some(message => message.role === 'toolResult'
+            && !requests[before].messages.some(previous => previous.role === 'toolResult' && previous.toolCallId === message.toolCallId)), false,
+          'the continuation is driven by the settings steer, not a newly executed tool');
+          const notices = settingsNotices();
+          assert.equal(notices.length, noticeCount + 1, 'rapid committed approval changes coalesce to one persisted busy notice');
+          assert.equal(notices.at(-1).display, false, 'busy settings notices remain hidden');
+          assert.equal(messageText(notices.at(-1)), settingsNoticeText);
+        };
+        await unchangedEffort('busy approval changes and tool-free continuation', async () => {
+          await busyChange(['bypassPermissions', 'auto', 'bypassPermissions', 'bypassPermissions']);
+          // The first continuation must clear the coalescing flag for the next batch.
+          await busyChange(['auto']);
+        });
+        check('work', 'auto');
+      }
       for (const type of ['input', 'before_agent_start', 'turn_end']) assert(activity.some(event => event.type === type));
       assert(activity.some(event => event.type === 'tool_result' && event.isError));
       await emitWorkflow(api, 'workflow-mode:set', { mode: 'work' });
@@ -359,8 +477,10 @@ export default function (pi) {
         check('work');
         await go(chatLeaf);
         check('chat');
+        await requestSnapshot('restored chat branch');
         await reload();
         check('chat');
+        await requestSnapshot('reloaded chat branch with existing told marker');
         assert.deepEqual(workflowEvents.at(-1)?.cycle, ['work', 'chat']);
       } else {
         // Inline-only histories also arise when plan-mode previously ran without the gate.
@@ -395,8 +515,10 @@ export default function (pi) {
         check('work');
         await go(planLeaf);
         check('plan');
+        await requestSnapshot('restored plan branch');
         await reload();
         check('plan');
+        await requestSnapshot('reloaded plan branch');
         if (hasGate) {
           assert.deepEqual(workflowEvents.at(-1)?.cycle, ['work', 'chat', 'plan']);
           const before = manager.getBranch().length;
@@ -467,7 +589,18 @@ export default function (pi) {
         check('plan');
         await go(workLeaf);
         check('work');
+        await requestSnapshot('restored work branch after plan approval');
         assert.equal(approvalCount, 2, 'one approval dialog per submission');
+      }
+      if (hasGate) {
+        for (const entry of manager.getEntries()) {
+          const message = entry.type === 'message' ? entry.message : entry;
+          assert.notEqual(message.customType, guidanceType, `${label}: snapshots never persist under their custom type`);
+          assert(!messageText(message).includes('Current tool-gate settings:'),
+            `${label}: snapshot text never persists as an ordinary message either`);
+        }
+        assert(!session.state.messages.some(message => messageText(message).includes('Current tool-gate settings:')),
+          `${label}: snapshots never become sticky agent context`);
       }
       assert.deepEqual(errors, [], label);
       await session.dispose();

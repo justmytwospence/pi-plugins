@@ -121,6 +121,7 @@ import {
   modeStatus,
   PLAN_PROVIDER,
 } from "./modes.ts";
+import { MODE_GUIDANCE_TYPE, MODE_SETTINGS_NOTICE_TYPE, modeGuidanceText } from "./mode-guidance.ts";
 import { answerSubagentEnv, inheritedModes, SUBAGENT_ENV_CHANNEL, subagentEnv, subagentEnvHonored } from "./subagent-env.ts";
 import { effectiveDenyInsteadOfPrompting, PROMPTING_CONTINUE, PROMPTING_DISABLED, PROMPTING_ENTRY, PROMPTING_STATUS_KEY, promptingDenied, restorePromptingOverride, type PromptingOverride } from "./prompting.ts";
 import { loadRules } from "./rules.ts";
@@ -518,6 +519,8 @@ export default function toolGate(pi: ExtensionAPI) {
   const promptingState = () => `Permission prompts: ${denyInsteadOfPrompting() ? "off" : "on"} (source: ${promptingOverride !== undefined ? "session" : inheritedModes().denyInsteadOfPrompting !== undefined ? "inherited" : "config"}).`;
   let revision = 0;
   const effectiveWorkflow = (): WorkflowMode => workflow;
+  const currentModeGuidance = () => modeGuidanceText({ workflow: effectiveWorkflow(), approval, denyInsteadOfPrompting: denyInsteadOfPrompting() });
+  let modeSettingsNoticePending = false;
   // Mode and classifier changes cancel decisions, not usage of tools already running on this branch.
   const invalidate = () => { revision++; pushedBackThisTurn.clear(); classifierFailures.clear(); };
   const staleResult = () => ({ block: true, reason: "tool-gate blocked this call: modes changed or System 1 changed; the call must be reevaluated." });
@@ -785,15 +788,18 @@ export default function toolGate(pi: ExtensionAPI) {
     persist(APPROVAL_ENTRY, approval);
     status(ctx);
     broadcastApproval(previous);
+    tellModeSettingsNow(ctx);
   };
 
   const setPromptingOverride = (next: PromptingOverride, ctx: ExtensionContext) => {
     if (promptingOverride === next) return;
     settings.cancel("Permission prompting selected explicitly.");
+    const previous = denyInsteadOfPrompting();
     promptingOverride = next;
     pi.appendEntry(PROMPTING_ENTRY, { version: 1, denyInsteadOfPrompting: next ?? null });
     invalidate();
     status(ctx);
+    if (denyInsteadOfPrompting() !== previous) tellModeSettingsNow(ctx);
   };
 
   const chatNotice = () => (effectiveWorkflow() === "chat" ? chatEnterText(shortcut) : chatExitText(effectiveWorkflow()));
@@ -812,6 +818,18 @@ export default function toolGate(pi: ExtensionAPI) {
       );
     } catch { return; }
     markChatTold();
+  };
+  /** Ensure busy setting changes reach another request, coalesced until its current-state snapshot. */
+  const tellModeSettingsNow = (ctx: ExtensionContext | undefined): void => {
+    if (!ctx || typeof ctx.isIdle !== "function" || modeSettingsNoticePending) return;
+    try {
+      if (ctx.isIdle()) return;
+      pi.sendMessage(
+        { customType: MODE_SETTINGS_NOTICE_TYPE, display: false, content: "Tool-gate settings changed. Apply the current workflow and approval guidance on your next response." },
+        { deliverAs: "steer" },
+      );
+      modeSettingsNoticePending = true;
+    } catch { /* A stale context must not fail the committed setting change. */ }
   };
   const workflowOwner = {};
   const approvalOwner = {};
@@ -1328,6 +1346,7 @@ export default function toolGate(pi: ExtensionAPI) {
   const restore = async (ctx: ExtensionContext, newSession: boolean) => {
     const generation = ++sessionGeneration;
     sessionReady = false;
+    modeSettingsNoticePending = false;
     invalidate();
     pendingUsage.clear();
     hostCtx = ctx;
@@ -1375,9 +1394,21 @@ export default function toolGate(pi: ExtensionAPI) {
   pi.on("session_shutdown", async () => {
     sessionGeneration++;
     sessionReady = false;
+    modeSettingsNoticePending = false;
     invalidate();
     pendingUsage.clear();
     hostCtx = undefined;
+  });
+
+  pi.on("context_with_system", (event) => {
+    modeSettingsNoticePending = false;
+    return {
+      messages: [
+        ...event.messages.filter(message => message.role !== "custom" ||
+          (message.customType !== MODE_GUIDANCE_TYPE && message.customType !== MODE_SETTINGS_NOTICE_TYPE)),
+        { role: "custom", customType: MODE_GUIDANCE_TYPE, content: currentModeGuidance(), display: false, timestamp: Date.now() },
+      ],
+    };
   });
 
   pi.on("before_agent_start", async (_event, ctx) => {

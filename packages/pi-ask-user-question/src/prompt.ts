@@ -8,6 +8,9 @@ export const DESCRIPTION = `Use this tool when you need to ask the user question
 3. Get decisions on implementation choices as you work
 4. Offer choices to the user about what direction to take.
 
+Ask for missing requirements and consequential user preferences, not permission to perform an already requested task or routine steps within its scope. Choose reasonable implementation details without asking. Do not use this tool as a substitute approval gate; follow the active workflow and approval policy, and leave tool permission decisions to the host. A genuine unresolved requirement may still need clarification in yolo mode.
+Ask only when a decision is the user's to make and guessing would be costly; do not ask about things you can find out yourself.
+
 Usage notes:
 - Users will always be able to pick "${TYPE_SOMETHING}" to answer in their own words; it is added to every question automatically, so do not author an "Other" or "${TYPE_SOMETHING}" option.
 - Use multiSelect: true to allow multiple answers to be selected for a question.
@@ -28,6 +31,7 @@ export const PROMPT_SNIPPET = `Ask the user up to ${MAX_QUESTIONS} multiple-choi
 
 export const PROMPT_GUIDELINES = [
   `Use ${TOOL_NAME} when the request leaves a decision open that is the user's to make (preferences, trade-offs, scope) and guessing would be costly; do not ask about things you can find out yourself.`,
+  "Ask for missing requirements and consequential user preferences, not permission to perform an already requested task or routine steps within its scope. Choose reasonable implementation details without asking. Do not use this tool as a substitute approval gate; follow the active workflow and approval policy, and leave tool permission decisions to the host. A genuine unresolved requirement may still need clarification in yolo mode.",
   `Group every open question into one ${TOOL_NAME} call (up to ${MAX_QUESTIONS}) instead of several back-to-back calls; when a question only matters for some answers to another, make it a showIf follow-up in the same call rather than asking it afterwards.`,
   `In ${TOOL_NAME}, give each option a short label and a description of what it means or costs, put a recommended option first with "(Recommended)" at the end of its label, and never author "Other" or "${TYPE_SOMETHING}" options.`,
 ];

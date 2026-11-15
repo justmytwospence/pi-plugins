@@ -4,6 +4,7 @@ import path from "node:path";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import { isAcceptEditsBash } from "../src/bash.ts";
 import toolGate from "../src/index.ts";
+import { MODE_GUIDANCE_TYPE, MODE_SETTINGS_NOTICE_TYPE, modeGuidanceText, type ModeGuidanceState } from "../src/mode-guidance.ts";
 import {
   APPROVAL_ENTRY, MODE_CHANGED, MODE_CYCLE, MODE_ENTRY, MODE_SET, MODE_STATUS_KEY,
   nextApproval, nextWorkflow, parseApproval, parseLegacyCombinedMode, parseWorkflow, PLAN_PROVIDER,
@@ -901,6 +902,241 @@ describe("workflow notices are independent of approvals", () => {
     expect(reminders).toHaveLength(1);
     expect(reminders[0]).toMatchObject({ opts: { deliverAs: "steer" }, message: { display: false, content: expect.stringMatching(/Chat mode is active/u) } });
     expect(await h.emit("before_agent_start", { prompt: "x" }, ctx)).toBeUndefined();
+  });
+});
+
+describe("request-local mode guidance", () => {
+  const snapshot = async (s: ReturnType<typeof setup>, messages: any[] = []): Promise<any[]> => {
+    const result: any = await s.h.emit("context_with_system", { type: "context_with_system", messages }, s.ctx);
+    return result.messages;
+  };
+  const expectState = (messages: any[], state: ModeGuidanceState) => {
+    const guidance = messages.filter(message => message.role === "custom" && message.customType === MODE_GUIDANCE_TYPE);
+    expect(guidance).toHaveLength(1);
+    expect(guidance[0]).toEqual({
+      role: "custom", customType: MODE_GUIDANCE_TYPE, content: modeGuidanceText(state), display: false, timestamp: expect.any(Number),
+    });
+    expect(messages.at(-1)).toBe(guidance[0]);
+  };
+  const notices = (s: ReturnType<typeof setup>) => s.h.messages.filter(({ message }) => message.customType === MODE_SETTINGS_NOTICE_TYPE);
+
+  test("first and repeated/tool-continuation requests replace only gate snapshots and settings notices, without persistence", async () => {
+    const s = await start(setup());
+    expect(s.h.handlers.get("context_with_system")).toHaveLength(1);
+    const head = Object.freeze({ role: "system", content: "host prompt", sections: { preamble: "Host rules" }, toolsAdded: [{ name: "read", parameters: {} }], timestamp: 1 });
+    const user = Object.freeze({ role: "user", content: "Implement the requested fix", customType: MODE_GUIDANCE_TYPE, timestamp: 2 });
+    const patch = Object.freeze({ role: "system", content: "", sections: { guidance: "Keep this patch" }, toolsAdded: [{ name: "write", parameters: {} }], toolsRemoved: [], timestamp: 3 });
+    const assistant = Object.freeze({ role: "assistant", content: [{ type: "toolCall", id: "read-1", name: "read", arguments: { path: "a.ts" } }], timestamp: 4 });
+    const result = Object.freeze({ role: "toolResult", toolCallId: "read-1", toolName: "read", content: [{ type: "text", text: "file" }], timestamp: 5 });
+    const others = ["tool-gate:chat-notice", "tool-gate:delegated-plan-notice", "workflow:transition", "plan-mode:notice", `${MODE_GUIDANCE_TYPE}:other`]
+      .map(customType => Object.freeze({ role: "custom", customType, content: customType, display: false, timestamp: 6 }));
+    const stale = [MODE_GUIDANCE_TYPE, MODE_SETTINGS_NOTICE_TYPE].map(customType =>
+      Object.freeze({ role: "custom", customType, content: "Old settings", display: false, timestamp: 7 }));
+    const preserved = [head, user, patch, assistant, result, ...others];
+    const incoming = Object.freeze([head, stale[0], user, patch, assistant, result, stale[1], ...others]);
+    const before = [...incoming];
+    const entries = [...s.h.entries];
+    const messages = [...s.h.messages];
+    const first = await snapshot(s, incoming as any);
+    expect(first).not.toBe(incoming);
+    expect(first.slice(0, -1)).toEqual(preserved);
+    first.slice(0, -1).forEach((message, index) => expect(message).toBe(preserved[index]));
+    expect(incoming).toEqual(before);
+    expectState(first, { workflow: "work", approval: "auto", denyInsteadOfPrompting: false });
+    for (const request of [first, [...first, assistant, result]]) {
+      const next = await snapshot(s, request);
+      expectState(next, { workflow: "work", approval: "auto", denyInsteadOfPrompting: false });
+      expect(next.slice(0, -1)).toEqual(request.filter(message => message.customType !== MODE_GUIDANCE_TYPE || message.role !== "custom"));
+    }
+    expect(s.h.entries).toEqual(entries);
+    expect(s.h.messages).toEqual(messages);
+  });
+
+  test("idle approval and prompting changes are silent and the next request reads live state", async () => {
+    const s = await start(setup());
+    s.ctx.isIdle = () => true;
+    await s.h.commands.get("approvals").handler("yolo", s.ctx);
+    await s.h.commands.get("gate").handler("prompts off", s.ctx);
+    expect(notices(s)).toEqual([]);
+    expectState(await snapshot(s), { workflow: "work", approval: "bypassPermissions", denyInsteadOfPrompting: true });
+    expect(s.h.entries).toContainEqual({ customType: APPROVAL_ENTRY, data: { version: 1, mode: "bypassPermissions" } });
+  });
+
+  test("busy committed changes coalesce, steer hidden, and refresh to the final settings on the next request", async () => {
+    const s = await start(setup());
+    s.ctx.isIdle = () => false;
+    const old = await snapshot(s);
+    s.h.pi.events.emit(MODE_SET, { mode: "yolo" });
+    await s.h.commands.get("gate").handler("prompts off", s.ctx);
+    await s.h.commands.get("approvals").handler("manual", s.ctx);
+    expect(notices(s)).toEqual([{
+      message: { customType: MODE_SETTINGS_NOTICE_TYPE, display: false, content: "Tool-gate settings changed. Apply the current workflow and approval guidance on your next response." },
+      opts: { deliverAs: "steer" },
+    }]);
+    const next = await snapshot(s, [...old, { role: "custom", ...notices(s)[0].message, timestamp: 1 }]);
+    expectState(next, { workflow: "work", approval: "default", denyInsteadOfPrompting: true });
+    expect(next.some(message => message.customType === MODE_SETTINGS_NOTICE_TYPE)).toBe(false);
+    await s.h.commands.get("gate").handler("prompts on", s.ctx);
+    expect(notices(s)).toHaveLength(2);
+    expectState(await snapshot(s), { workflow: "work", approval: "default", denyInsteadOfPrompting: false });
+  });
+
+  test.each([false, true])("identical approvals and override changes with the same effective policy (config denied=%s) do not steer", async denied => {
+    configure({ denyInsteadOfPrompting: denied });
+    const s = await start(setup());
+    s.ctx.isIdle = () => false;
+    s.h.pi.events.emit(MODE_SET, { mode: "auto" });
+    await s.h.commands.get("approvals").handler("auto", s.ctx);
+    await s.h.commands.get("gate").handler(`prompts ${denied ? "off" : "on"}`, s.ctx);
+    await s.h.commands.get("gate").handler("prompts default", s.ctx);
+    expect(notices(s)).toEqual([]);
+    expect(s.h.entries.filter(e => e.customType === PROMPTING_ENTRY).map(e => e.data)).toEqual([
+      { version: 1, denyInsteadOfPrompting: denied }, { version: 1, denyInsteadOfPrompting: null },
+    ]);
+    expectState(await snapshot(s), { workflow: "work", approval: "auto", denyInsteadOfPrompting: denied });
+  });
+
+  test.each(["shortcut", "event"])("%s approval cycles notify only after commitment, never for previews", async source => {
+    vi.useFakeTimers();
+    try {
+      const s = await start(setup());
+      s.ctx.isIdle = () => false;
+      const cycle = async () => {
+        if (source === "shortcut") await s.h.shortcuts.get("alt+a").handler(s.ctx);
+        else s.h.pi.events.emit(MODE_CYCLE, {});
+      };
+      await cycle();
+      expect(notices(s)).toEqual([]);
+      expectState(await snapshot(s), { workflow: "work", approval: "auto", denyInsteadOfPrompting: false });
+      await settingsCycles(s.h.pi).flush();
+      expect(notices(s)).toHaveLength(1);
+      expectState(await snapshot(s), { workflow: "work", approval: "bypassPermissions", denyInsteadOfPrompting: false });
+      await cycle();
+      await cycle();
+      expect(notices(s)).toHaveLength(1);
+      await settingsCycles(s.h.pi).flush();
+      expect(notices(s)).toHaveLength(1);
+      expect(settingsCycles(s.h.pi).snapshot()?.phase).toBe("unchanged");
+    } finally { vi.useRealTimers(); }
+  });
+
+  test("footer approval picker steers only for a committed selection", async () => {
+    const s = await start(setup());
+    s.ctx.isIdle = () => false;
+    await queryFooterActions(s.h.pi.events)["approvals.open"]!.run(); // Dismissed picker.
+    expect(notices(s)).toEqual([]);
+    s.ctx.ui.selectAnswers.push("Yolo");
+    await queryFooterActions(s.h.pi.events)["approvals.open"]!.run();
+    expect(notices(s)).toHaveLength(1);
+    expectState(await snapshot(s), { workflow: "work", approval: "bypassPermissions", denyInsteadOfPrompting: false });
+  });
+
+  test.each(["session_start", "session_tree"])("%s silently clears pending notices and restores the destination state", async hook => {
+    const s = await start(setup());
+    s.ctx.isIdle = () => false;
+    s.h.pi.events.emit(MODE_SET, { mode: "yolo" });
+    expect(notices(s)).toHaveLength(1);
+    s.branch.splice(0, s.branch.length,
+      entry(WORKFLOW_ENTRY, { version: 1, mode: "chat" }),
+      entry(APPROVAL_ENTRY, { version: 1, mode: "default" }),
+      entry(PROMPTING_ENTRY, { version: 1, denyInsteadOfPrompting: true }),
+      entry("tool-gate:chat-notice", { told: true }));
+    const entries = [...s.h.entries];
+    const messages = [...s.h.messages];
+    await s.h.emit(hook, {}, s.ctx);
+    expect(s.h.messages).toEqual(messages);
+    expect(s.h.entries).toEqual(entries);
+    // No snapshot between restore and this change: restore itself must clear coalescing.
+    s.h.pi.events.emit(MODE_SET, { mode: "acceptEdits" });
+    expect(notices(s)).toHaveLength(2);
+    expect(await s.h.emit("before_agent_start", { prompt: "x" }, s.ctx)).toBeUndefined();
+    expectState(await snapshot(s), { workflow: "chat", approval: "acceptEdits", denyInsteadOfPrompting: true });
+  });
+
+  test("shutdown clears pending notices and detaches the event context without sending anything", async () => {
+    const s = await start(setup());
+    s.ctx.isIdle = () => false;
+    s.h.pi.events.emit(MODE_SET, { mode: "yolo" });
+    const entries = [...s.h.entries];
+    const messages = [...s.h.messages];
+    await s.h.emit("session_shutdown", {}, s.ctx);
+    expect(s.h.messages).toEqual(messages);
+    expect(s.h.entries).toEqual(entries);
+    s.h.pi.events.emit(MODE_SET, { mode: "manual" });
+    expect(notices(s)).toHaveLength(1); // No host context after shutdown.
+    // Supply an explicit context to exercise cleared bookkeeping without a restoring hook.
+    await s.h.commands.get("approvals").handler("auto", s.ctx);
+    expect(notices(s)).toHaveLength(2);
+  });
+
+  test("missing and stale contexts do not fail setting changes or mark an unqueued notice pending", async () => {
+    const s = setup();
+    s.h.pi.events.emit(MODE_SET, { mode: "manual" }); // Before any host context exists.
+    expect(notices(s)).toEqual([]);
+    await start(s);
+    await s.h.commands.get("approvals").handler("manual", s.ctx); // isIdle unavailable.
+    expect(notices(s)).toEqual([]);
+    s.ctx.isIdle = () => { throw new Error("stale context"); };
+    s.h.pi.events.emit(MODE_SET, { mode: "auto" });
+    expect(notices(s)).toEqual([]);
+    s.ctx.isIdle = () => false;
+    const send = s.h.pi.sendMessage;
+    s.h.pi.sendMessage = () => { throw new Error("stale session"); };
+    s.h.pi.events.emit(MODE_SET, { mode: "yolo" });
+    expectState(await snapshot(s), { workflow: "work", approval: "bypassPermissions", denyInsteadOfPrompting: false });
+    // A second failed send followed by a successful change, without a snapshot in between.
+    await s.h.commands.get("gate").handler("prompts off", s.ctx);
+    s.h.pi.sendMessage = send;
+    s.h.pi.events.emit(MODE_SET, { mode: "manual" });
+    expect(notices(s)).toHaveLength(1);
+  });
+
+  test.each([false, true])("work/chat snapshots do not require a plan provider (present=%s), including headless", async provider => {
+    const s = await start(setup());
+    s.ctx.hasUI = false;
+    s.ctx.mode = "print";
+    s.ctx.isIdle = () => true;
+    if (provider) s.h.pi.events.emit(PLAN_PROVIDER, { planFile: "/tmp/plan.md" });
+    for (const workflow of ["work", "chat"] as const) {
+      await s.h.commands.get("mode").handler(workflow, s.ctx);
+      await s.h.emit("before_agent_start", { prompt: "x" }, s.ctx);
+      const messages = await snapshot(s);
+      expectState(messages, { workflow, approval: "auto", denyInsteadOfPrompting: false });
+      expect(messages.at(-1).content).not.toContain("pi-plan-mode");
+    }
+    expect(notices(s)).toEqual([]);
+  });
+
+  test.each([false, true])("restored plan snapshots reflect the actual workflow after provider fallback (present=%s)", async provider => {
+    const s = await start(setup([entry(WORKFLOW_ENTRY, { version: 1, mode: "plan" })]));
+    if (provider) s.h.pi.events.emit(PLAN_PROVIDER, { planFile: "/tmp/plan.md" });
+    expectState(await snapshot(s), { workflow: "plan", approval: "auto", denyInsteadOfPrompting: false });
+    await s.h.emit("before_agent_start", { prompt: "x" }, s.ctx);
+    expectState(await snapshot(s), { workflow: provider ? "plan" : "work", approval: "auto", denyInsteadOfPrompting: false });
+  });
+
+  test("delegated plan gets fresh guidance even with old told markers and no model-visible notice", async () => {
+    vi.stubEnv("PI_SUBAGENT", "1");
+    vi.stubEnv("PI_TOOL_GATE_WORKFLOW", "plan");
+    vi.stubEnv("PI_TOOL_GATE_APPROVAL", "bypassPermissions");
+    const s = await start(setup([entry("tool-gate:delegated-plan-notice", { told: true })]));
+    s.ctx.hasUI = false;
+    s.ctx.mode = "print";
+    const entries = [...s.h.entries];
+    expect(await s.h.emit("before_agent_start", { prompt: "x" }, s.ctx)).toBeUndefined();
+    expectState(await snapshot(s), { workflow: "plan", approval: "bypassPermissions", denyInsteadOfPrompting: false });
+    expect(s.h.entries).toEqual(entries);
+    expect(s.h.messages).toEqual([]);
+  });
+
+  test("model selection between Anthropic and Astra never changes the shared guidance", async () => {
+    const s = await start(setup());
+    s.ctx.model = { provider: "anthropic", id: "claude-sonnet-4-6" };
+    const first = await snapshot(s);
+    s.ctx.model = { provider: "openai-codex", id: "gpt-6-astra" };
+    await s.h.emit("model_select", { model: s.ctx.model }, s.ctx);
+    const next = await snapshot(s);
+    expect(next.at(-1).content).toBe(first.at(-1).content);
   });
 });
 

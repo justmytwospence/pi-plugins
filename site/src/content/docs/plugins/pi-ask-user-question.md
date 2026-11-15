@@ -15,6 +15,8 @@ plugin: pi-ask-user-question
 
 pi-ask-user-question adds the `ask_user_question` tool for decisions the user should make. It is useful when proceeding would commit to a preference, scope, or trade-off that cannot be discovered from project files. The questionnaire supports both suggested choices and the user's own wording; selecting an offered answer is never mandatory.
 
+Use questions for missing requirements or consequential user preferences that cannot be discovered or reasonably inferred, not permission to perform an already requested task. The model is told to choose reasonable implementation details and leave tool permission decisions to the host. For example, inspecting project files or running checks within the permitted workflow should proceed without a questionnaire; an unspecified, consequential deployment target may need clarification. Genuine clarification remains available in yolo mode, but questions must not recreate an approval gate or bypass a refusal. This guidance does not itself enforce model compliance.
+
 ## Enable, requirements, and costs
 
 Choose `packages/pi-ask-user-question/src/index.ts` through the [suite installation guide](/guides/install/). Every suite entry loads by default; selected suite entries share one Git pin.

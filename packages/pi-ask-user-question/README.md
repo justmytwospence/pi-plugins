@@ -2,6 +2,8 @@
 
 A Pi extension that gives the model an `ask_user_question` tool: up to four multiple-choice questions (plus follow-ups shown only for certain answers), answered in a Claude Code-style dialog at the bottom of the terminal, with the answers sent back in Claude Code's words. The parameters follow Claude Code's `AskUserQuestion` schema, with Claude Code's "Other" replaced by a `Type something.` row on every question.
 
+Use questions for missing requirements or consequential user preferences that cannot be discovered or reasonably inferred, not permission to perform an already requested task. The model is told to choose reasonable implementation details and leave tool permission decisions to the host. For example, inspecting project files or running checks within the permitted workflow should proceed without a questionnaire; an unspecified, consequential deployment target may need clarification. Genuine clarification remains available in yolo mode, but questions must not recreate an approval gate or bypass a refusal. This guidance does not itself enforce model compliance.
+
 The tool acts only when the model calls it. While the user is being asked, it holds `herdr:blocked` so Herdr shows the pane as blocked. Without a UI the tool is withdrawn from the model.
 
 Part of [Pi Plugins](https://github.com/justmytwospence/pi-plugins). Reference: <https://pi-plugins.vercel.app/plugins/pi-ask-user-question/>.

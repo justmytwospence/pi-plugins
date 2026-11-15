@@ -26,6 +26,15 @@ test("registers ask_user_question with Claude Code's schema and pi's prompt hook
   expect(h.tool.description).toMatch(/Preview feature:/u);
   expect(h.tool.promptSnippet).toMatch(/up to 4/u);
   expect(h.tool.promptGuidelines.join("\n")).toMatch(/\(Recommended\)/u);
+  for (const guidance of [h.tool.description, h.tool.promptGuidelines.join("\n")]) {
+    expect(guidance).toContain("missing requirements and consequential user preferences, not permission to perform an already requested task or routine steps within its scope");
+    expect(guidance).toContain("Choose reasonable implementation details without asking.");
+    expect(guidance).toContain("Do not use this tool as a substitute approval gate");
+    expect(guidance).toContain("follow the active workflow and approval policy, and leave tool permission decisions to the host");
+    expect(guidance).toContain("A genuine unresolved requirement may still need clarification in yolo mode.");
+    expect(guidance).toContain("guessing would be costly");
+    expect(guidance).toContain("do not ask about things you can find out yourself");
+  }
   const question = h.tool.parameters.properties.questions.items.properties;
   expect(Object.keys(question)).toEqual(["question", "header", "options", "multiSelect", "showIf"]);
 });
