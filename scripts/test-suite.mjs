@@ -18,6 +18,7 @@ const scripts = [
   ['scripts/test-lifecycle.mjs'],
   ['scripts/test-family-sidebar.mjs'],
   ['scripts/test-mode-flow.mjs'],
+  ['scripts/test-cache-prefix.mjs'],
   ['scripts/test-plan-pair.mjs'],
   ['scripts/test-footer-controls.mjs'],
   ['scripts/test-transcript-navigation.mjs'],
