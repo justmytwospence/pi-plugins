@@ -1,6 +1,6 @@
 import { type AgentDef, type ProfileModel, THINKING_LEVELS } from "./agents.ts";
 import { type ClassifierAnswer, type ClassifierQuestion, choice } from "./jev.ts";
-import { compareGeneration, familyOf, loadFamilyTable, tierModels } from "./model-families.ts";
+import { compareGeneration, familyOf, latestInFamily, loadFamilyTable, tierModels } from "./model-families.ts";
 import { type Tier, providerPolicy } from "./provider-policy.ts";
 import type { System1ProvenanceRecord } from "./system1.ts";
 export type { Tier } from "./provider-policy.ts";
@@ -41,8 +41,10 @@ export function providerTiers(
   const sameProvider = (model: string | undefined) => model?.startsWith(`${provider}/`) ? model : undefined;
   const table = loadFamilyTable(available);
   const physical = physicalChatModels(available);
+  // A configured tier model names its family: it follows that family's newest registered generation.
   const configuredModel = (model: string | undefined) => {
-    const same = sameProvider(model);
+    const named = sameProvider(model);
+    const same = named && latestInFamily(table, named, physical);
     return same && (!available.length || physical.some((item) => `${item.provider}/${item.id}` === same)) ? same : undefined;
   };
   const preset = (tier: Tier) => tierModels(table, parentModel, physical, tier)[0];
@@ -95,15 +97,18 @@ export function clampThinking(level: string, model: AvailableModel | undefined):
 
 /**
  * A profile model must be a registered physical chat model when the registry has entries. With
- * an entirely unknown legacy registry it is used as written; otherwise a stale family profile
- * resolves to its newest registered peer, or yields no model.
+ * an entirely unknown legacy registry it is used as written; otherwise a model of a known family
+ * names that family and resolves to its newest registered generation (an older peer when the named
+ * one is gone), or yields no model.
  */
 export function profileModel(entry: ProfileModel | undefined, provider: string, available: readonly AvailableModel[] = []): ProfileModel | undefined {
   if (!entry || !entry.model.startsWith(`${provider}/`)) return undefined;
   const id = entry.model.slice(provider.length + 1);
   const registered = physicalChatModels(available).filter((m) => m.provider === provider);
-  if (!available.length || registered.some((m) => m.id === id)) return entry;
+  if (!available.length) return entry;
   const table = loadFamilyTable(available);
+  const latest = latestInFamily(table, entry.model, registered);
+  if (registered.some((m) => `${provider}/${m.id}` === latest)) return latest === entry.model ? entry : { ...entry, model: latest };
   const wanted = familyOf(table, provider, id);
   const newest = wanted
     ? registered
@@ -139,7 +144,10 @@ export function agentDefaults(agent: AgentDef, parentModel: string, available: r
     // malformed cross-provider profile cannot pin effort on this provider.
     thinking = fromProfile?.thinking ?? (agent.source !== "builtin" && entry?.model.startsWith(`${provider}/`) ? entry.thinking : undefined);
   }
-  model ??= agent.model?.startsWith(`${provider}/`) ? agent.model : undefined;
+  // An agent file's model names its family too: the newest registered generation runs.
+  model ??= agent.model?.startsWith(`${provider}/`)
+    ? latestInFamily(loadFamilyTable(available), agent.model, physicalChatModels(available))
+    : undefined;
   thinking ??= agent.thinking;
   return { ...(model ? { model } : {}), ...(thinking ? { thinking } : {}) };
 }

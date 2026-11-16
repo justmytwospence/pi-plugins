@@ -4,7 +4,7 @@ One model-family table for the suite, and offline discovery of families it does 
 
 ## What the table knows
 
-Per route (a provider plus an id shape; Google has three: plain Gemini, Antigravity Gemini and Antigravity Claude), the families in preference order and the tiers each fills (`fast`, `balanced`, `strong`, `premium`). A new generation of a known family (Gemini 5 Argon, Claude Opus 6) needs nothing: the newest registered model of the best family for a tier wins. Plan model pairs are derived from the same table.
+Per route (a provider plus an id shape; Google has three: plain Gemini, Antigravity Gemini and Antigravity Claude), the families in preference order and the tiers each fills (`fast`, `balanced`, `strong`, `premium`). A new generation of a known family (Gemini 5 Argon, Claude Opus 6) needs nothing: the newest registered model of the best family for a tier wins. Plan model pairs are derived from the same table. A model named in settings (pi-subagents tiers and agent files, pi-plan-mode planners, scouts and custom pairs) names its family the same way: it follows that family's newest registered generation.
 
 ## Discovering new families
 

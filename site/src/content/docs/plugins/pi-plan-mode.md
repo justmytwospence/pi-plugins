@@ -149,7 +149,7 @@ Settings normally live at `~/.pi/agent/pi-plan-mode.json`. Common options are ed
 }
 ```
 
-Choose available models in the UI, or configure `planners`, `scoutModelMap` and `modelPairs` using `provider/modelId` specifications with optional effort suffixes.
+Choose available models in the UI, or configure `planners`, `scoutModelMap` and `modelPairs` using `provider/modelId` specifications with optional effort suffixes. A configured model of a known family (`claude-fable-5-1`, `gpt-6-sol`) names that family, not a release: it resolves to the family's newest registered generation on the same provider and route, so a new release needs no settings change.
 
 `modelPairs` defines custom plan model pairs, keyed by the `provider/id` each registers under in `/model`. A key equal to a built-in pair replaces it; other keys are added. `planner` and `worker` are `provider/modelId` specs (no effort suffix, not the same model), and `name` is optional (non-empty, at most 80 characters; default `<planner id> plan, <worker id> build`). An invalid entry or extra key invalidates the whole file. Model IDs are illustrative:
 

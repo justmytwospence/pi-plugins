@@ -189,3 +189,16 @@ test("a family the table does not know is offered provisionally by price, and a 
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test("a configured tier model names its family and follows its newest registered generation", () => {
+  const anthropic = registry("anthropic", ["claude-fable-5", "claude-fable-5-1", "claude-fable-5-2", "claude-opus-5-5", "claude-sonnet-5-5", "claude-custom"]);
+  expect(providerTiers("anthropic/claude-opus-5-5", {}, { anthropic: { premium: "anthropic/claude-fable-5-1", strong: "anthropic/claude-opus-5" } }, anthropic))
+    .toMatchObject({ premium: "anthropic/claude-fable-5-2", strong: "anthropic/claude-opus-5-5" });
+  expect(providerTiers("anthropic/claude-opus-5-5", { premium: "anthropic/claude-custom" }, {}, anthropic)).toMatchObject({ premium: "anthropic/claude-custom" });
+});
+
+test("an agent file's model follows its family's newest registered generation", () => {
+  const anthropic = registry("anthropic", ["claude-haiku-5", "claude-haiku-5-5", "claude-sonnet-5-5"]);
+  const resolved = resolve({ agent: "scout" }, agents, undefined, tiers, parent, { available: anthropic });
+  expect("error" in resolved ? undefined : resolved.model).toBe("anthropic/claude-haiku-5-5");
+});

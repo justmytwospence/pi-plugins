@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "vitest";
-import { builtinPairs, pairDefinitions, pairKey, resolvePair } from "../src/model-pairs.js";
+import { builtinPairs, latestSpec, pairDefinitions, pairKey, resolvePair } from "../src/model-pairs.js";
 
 const catalog = (...ids: string[]) =>
   ids.map((entry) => {
@@ -246,5 +246,41 @@ test("identical planner and worker is an error", () => {
   });
   assert.deepEqual(resolvePair(defs[defs.length - 1] as never, catalog("x/m")), {
     error: "planner and worker are the same model",
+  });
+});
+
+test("a configured model names its family and follows its newest available generation", () => {
+  const available = catalog(
+    "anthropic/claude-fable-5-1",
+    "anthropic/claude-fable-5-2",
+    "anthropic/claude-sonnet-5-5",
+    "openai/gpt-6.1-sol",
+  ).map((model) => ({ provider: model.provider, modelId: model.id }));
+  assert.deepEqual(
+    latestSpec({ provider: "anthropic", modelId: "claude-fable-5-1", thinkingLevel: "xhigh" }, available),
+    {
+      provider: "anthropic",
+      modelId: "claude-fable-5-2",
+      thinkingLevel: "xhigh",
+    },
+  );
+  assert.deepEqual(latestSpec({ provider: "openai", modelId: "gpt-6-sol" }, available), {
+    provider: "openai",
+    modelId: "gpt-6.1-sol",
+  });
+  assert.deepEqual(latestSpec({ provider: "anthropic", modelId: "claude-custom" }, available), {
+    provider: "anthropic",
+    modelId: "claude-custom",
+  });
+  const custom = pairDefinitions({
+    "anthropic/mine": {
+      planner: { provider: "anthropic", modelId: "claude-fable-5" },
+      worker: { provider: "anthropic", modelId: "claude-sonnet-5" },
+    },
+  }).find((candidate) => pairKey(candidate) === "anthropic/mine");
+  assert.ok(custom);
+  assert.deepEqual(resolvePair(custom, catalog("anthropic/claude-fable-5-2", "anthropic/claude-sonnet-5-5")), {
+    planner: { provider: "anthropic", modelId: "claude-fable-5-2" },
+    worker: { provider: "anthropic", modelId: "claude-sonnet-5-5" },
   });
 });

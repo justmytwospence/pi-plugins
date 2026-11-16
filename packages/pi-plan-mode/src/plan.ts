@@ -71,6 +71,7 @@ import {
 } from "./main-chat.js";
 import { buildMcpCatalog, readConfiguredMcpServers } from "./mcp-tools.js";
 import { modelCatalog, normalizeEffort } from "./model-catalog.js";
+import { latestSpec } from "./model-pairs.js";
 import { pairNote, registerPairs } from "./pairs.js";
 import { exportPlanToFile } from "./plan-export.js";
 import { plansDirectoryPath, planTitle, readPlan, writePlanFile } from "./plan-file.js";
@@ -1579,7 +1580,8 @@ export default async function plan(pi: ExtensionAPI, dependencies: PlanDependenc
             : levels[levels.length - 1];
         return { provider: spec.provider, modelId: spec.modelId, ...(chosen ? { thinkingLevel: chosen } : {}) };
       };
-      const configured = configuredPlanners(settings);
+      // Configured planners and scouts name their families: each follows its family's newest available model.
+      const configured = configuredPlanners(settings).map((spec) => latestSpec(spec, models));
       // Under a plan model pair the planners start on the model behind it, never on the virtual one.
       const sessionModel = routedModel(ctx) ?? ctx.model;
       const sessionSpec: ModelSpec | undefined = sessionModel
@@ -1598,10 +1600,15 @@ export default async function plan(pi: ExtensionAPI, dependencies: PlanDependenc
           withEffort(configured[1] ?? models.find((model) => !sameModel(model, firstPlanner)) ?? firstPlanner),
         ],
         scouts: Object.fromEntries(
-          Object.entries(settings.scoutModelMap ?? {}).map(([key, spec]) => [
-            key,
-            withEffort(spec, spec.thinkingLevel ?? SUBAGENT_EFFORT),
-          ]),
+          Object.entries(settings.scoutModelMap ?? {})
+            .map(([key, spec]) => {
+              const planner = parseModelSpec(key);
+              const latestKey = planner ? formatModelKey(latestSpec(planner, models)) : key;
+              return { latestKey, exact: latestKey === key, spec: latestSpec(spec, models) };
+            })
+            // An entry written for the newest model wins over one carried up from an older generation.
+            .sort((left, right) => Number(left.exact) - Number(right.exact))
+            .map(({ latestKey, spec }) => [latestKey, withEffort(spec, spec.thinkingLevel ?? SUBAGENT_EFFORT)]),
         ),
         timeLimit: Math.round(configuredPlannerTimeoutSeconds(settings) / 60),
       };

@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Configured models follow their family's newest release
+
+- `planners`, both sides of `scoutModelMap` and custom `modelPairs` resolve each model to its family's newest available generation, so `anthropic/claude-fable-5-1` plans on Claude Fable 5.2 once that is available.
+
 ### Approval rows name the pair's models
 
 - With a plan model pair selected, the first two approval rows read **Yes, implement with <worker>** and **Yes, compact and implement with <worker>**, and the compact row is the default, since the worker re-reads the conversation without a prompt cache.

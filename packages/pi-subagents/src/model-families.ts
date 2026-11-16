@@ -509,6 +509,32 @@ export function familyOf(
   return route && parsed && family ? { route, family, generation: parsed.generation } : undefined;
 }
 
+/**
+ * A configured `provider/id` moved to the newest generation of its family among `available` on the same
+ * provider and route: a configured model names its family, not a pinned release. Ids outside a known
+ * family, or with no newer sibling available, come back unchanged.
+ */
+export function latestInFamily(
+  table: FamilyTable,
+  model: string,
+  available: readonly { provider: string; id: string }[],
+): string {
+  const slash = model.indexOf("/");
+  if (slash <= 0) return model;
+  const provider = model.slice(0, slash);
+  const own = familyOf(table, provider, model.slice(slash + 1));
+  if (!own) return model;
+  let best = { id: model.slice(slash + 1), generation: own.generation };
+  for (const candidate of available) {
+    if (candidate.provider !== provider) continue;
+    const sibling = familyOf(table, provider, candidate.id);
+    if (!sibling || sibling.route.id !== own.route.id || sibling.family.id !== own.family.id) continue;
+    if (compareGeneration(sibling.generation, best.generation) > 0)
+      best = { id: candidate.id, generation: sibling.generation };
+  }
+  return `${provider}/${best.id}`;
+}
+
 /** Plan model pairs for every route that derives them: the top premium and strong families, each over the next tier down. */
 export function derivePairs(table: FamilyTable): PairSpec[] {
   const specs = new Map<string, PairSpec>();

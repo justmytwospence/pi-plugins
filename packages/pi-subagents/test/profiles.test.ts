@@ -86,6 +86,7 @@ test("stale profiles use newest physical model of the exact routed family; missi
   expect(profileModel({ model: "anthropic/claude-sonnet-5-5" }, "anthropic", registry("anthropic", ["claude-opus-6"]))).toBeUndefined();
   expect(profileModel({ model: "anthropic/claude-custom" }, "anthropic", newer)).toBeUndefined();
   expect(profileModel({ model: "anthropic/claude-sonnet-5-5" }, "anthropic", [])).toEqual({ model: "anthropic/claude-sonnet-5-5" });
+  expect(profileModel({ model: "anthropic/claude-sonnet-5-5" }, "anthropic", registry("anthropic", ["claude-sonnet-5-5", "claude-sonnet-6"]))).toEqual({ model: "anthropic/claude-sonnet-6" });
   const ag = "google/antigravity-gemini-4-argon";
   expect(agentDefaults(role("worker"), ag, registry("google", ["gemini-3.8-flash", "antigravity-gemini-4.1-flash"])))
     .toEqual({ model: "google/antigravity-gemini-4.1-flash", thinking: "medium" });

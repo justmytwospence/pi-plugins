@@ -1,5 +1,12 @@
 import type { AvailableImplementationModel, ModelSpec } from "./implementation-models.js";
-import { compareGeneration, derivePairs, familyName, familyOf, loadFamilyTable } from "./model-families.js";
+import {
+  compareGeneration,
+  derivePairs,
+  familyName,
+  familyOf,
+  latestInFamily,
+  loadFamilyTable,
+} from "./model-families.js";
 
 export type PairEnd = { family: string } | { spec: ModelSpec };
 
@@ -99,10 +106,12 @@ export function resolvePair(
   available: readonly AvailableImplementationModel[],
 ): { planner: ModelSpec; worker: ModelSpec } | { error: string } {
   let planner: ModelSpec | undefined;
+  const asSpecs = available.map((model) => ({ provider: model.provider, modelId: model.id }));
   if ("spec" in def.planner) {
-    if (!has(available, def.planner.spec))
-      return { error: `${def.planner.spec.provider}/${def.planner.spec.modelId} is not available` };
-    planner = def.planner.spec;
+    // A custom pair's model names its family too.
+    const spec = latestSpec(def.planner.spec, asSpecs);
+    if (!has(available, spec)) return { error: `${spec.provider}/${spec.modelId} is not available` };
+    planner = spec;
   } else {
     const family = def.planner.family;
     for (const routeId of def.routes ?? [undefined]) {
@@ -113,9 +122,9 @@ export function resolvePair(
   }
   let worker: ModelSpec | undefined;
   if ("spec" in def.worker) {
-    if (!has(available, def.worker.spec))
-      return { error: `${def.worker.spec.provider}/${def.worker.spec.modelId} is not available` };
-    worker = def.worker.spec;
+    const spec = latestSpec(def.worker.spec, asSpecs);
+    if (!has(available, spec)) return { error: `${spec.provider}/${spec.modelId} is not available` };
+    worker = spec;
   } else {
     const planned = familyOf(loadFamilyTable([]), planner.provider, planner.modelId);
     worker = bestFamily(available, def.provider, def.worker.family, planned?.generation, planned?.route.id);
@@ -128,4 +137,21 @@ export function resolvePair(
     planner: { provider: planner.provider, modelId: planner.modelId },
     worker: { provider: worker.provider, modelId: worker.modelId },
   };
+}
+
+/**
+ * A configured model names its family, not a pinned release: `spec` moved to the newest generation of
+ * its family in `available` (same provider and route), effort kept. Other models come back unchanged.
+ */
+export function latestSpec<T extends { provider: string; modelId: string }>(
+  spec: T,
+  available: readonly { provider: string; modelId: string }[],
+): T {
+  const latest = latestInFamily(
+    loadFamilyTable([]),
+    `${spec.provider}/${spec.modelId}`,
+    available.map((model) => ({ provider: model.provider, id: model.modelId })),
+  );
+  const modelId = latest.slice(spec.provider.length + 1);
+  return modelId === spec.modelId ? spec : { ...spec, modelId };
 }

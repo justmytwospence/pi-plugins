@@ -292,6 +292,7 @@ Planner sessions are stored under `~/.pi/agent/plan-mode/planners/`; runs are sa
 - Model specs are `provider/modelId`, optionally with `:off|minimal|low|medium|high|xhigh|max`.
 - `planners`: planner A and (optionally) B, preselected on the Settings step.
 - `scoutModelMap`: planner model to the model its subagents run on.
+- Models in `planners`, `scoutModelMap` and `modelPairs` name their family, not a release: `claude-fable-5-1` resolves to the family's newest available generation on the same provider and route, so a new release needs no settings change.
 - `plannerTimeoutSeconds`: the per-turn time limit (default 2700, 45 minutes).
 - `modelPairs`: custom [plan model pairs](#plan-model-pairs), keyed by the `provider/id` they appear under in `/model`. Each has a `planner` and a `worker` (`provider/modelId`, no effort suffix, and not the same model) and an optional `name` (non-empty, at most 80 characters; default `<planner id> plan, <worker id> build`). A key equal to a built-in pair replaces it; other keys add pairs. Any other key, or an invalid entry, invalidates the whole file. See the [settings reference](./docs/settings.md#plan-model-pairs).
 - `defaultImplementationContext` (`keep` or `clear`): the Implement step's context default.
