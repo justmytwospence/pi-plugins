@@ -95,8 +95,8 @@ export interface Approval {
   edited: boolean;
   thinkingLevel?: ModelSpecThinkingLevel;
   effortSource?: EffortSource;
-  /** Implemented on the offered plan model pair's worker (the session switched to the pair). */
-  withPair?: true;
+  /** Implemented on the offered pair's worker (the session switched to the pair) or on the selected pair's planner. */
+  alternate?: "pair-worker" | "planner";
 }
 
 export interface InlineHost {
@@ -115,8 +115,10 @@ export interface InlineHost {
         planningName: string;
         /** A sentence for the approval question, e.g. who implements and who answers its questions. */
         note?: string;
-        /** A plan model pair's worker to offer as well (no pair selected, the session model plans one). */
-        alternate?: { model: ModelSpec; name: string };
+        /** Names the implementer of the first two rows (a selected pair's worker). */
+        implementerName?: string;
+        /** Another model to offer: an offered pair's worker (no pair selected, the session model plans one) or a selected pair's planner. */
+        alternate?: { kind: "pair-worker" | "planner"; model: ModelSpec; name: string };
       }
     | undefined;
   /** Switch the session to the offered pair before implementing on its worker; false when it could not. */
@@ -580,7 +582,7 @@ export function registerInlinePlanMode(pi: ExtensionAPI, host: InlineHost): Inli
       const current = () => sameDestination() && revision === approvalRevision && state.active;
       let edited = false;
       const models = host.implementationChoices(ctx, { plan, planFile });
-      const pickerState = createApprovalState();
+      const pickerState = createApprovalState(models?.implementerName ? "compact-here" : "here");
       let effortRequest: ImplementationEffortRequest | undefined;
       const catalog = modelCatalog(ctx, "available");
       const reasoning = (spec: ModelSpec | undefined) =>
@@ -636,7 +638,8 @@ export function registerInlinePlanMode(pi: ExtensionAPI, host: InlineHost): Inli
             {
               ...(models?.planning ? { planning: models.planning } : {}),
               ...(models?.note ? { note: models.note } : {}),
-              ...(alternate && host.selectPair ? { alternate } : {}),
+              ...(models?.implementerName ? { implementerName: models.implementerName } : {}),
+              ...(alternate && (alternate.kind === "planner" || host.selectPair) ? { alternate } : {}),
               ...(request ? { effortDefaultKey: request.key } : {}),
               recommendations,
             },
@@ -773,11 +776,11 @@ export function registerInlinePlanMode(pi: ExtensionAPI, host: InlineHost): Inli
             edited,
             thinkingLevel: picked?.thinkingLevel,
             effortSource: picked?.effortSource ?? "fallback",
-            ...(choice.withPair ? { withPair: true as const } : {}),
+            ...(choice.alternate && alternate ? { alternate: alternate.kind } : {}),
           };
           const mode = "work";
           // Switching to the pair while still planning routes nothing yet: the pair plans on this same model.
-          if (choice.withPair) {
+          if (choice.alternate && alternate?.kind === "pair-worker") {
             const switched = (await host.selectPair?.(ctx)) === true;
             if (!sameDestination()) return text("Plan review expired because the workflow or branch changed.");
             if (!switched)

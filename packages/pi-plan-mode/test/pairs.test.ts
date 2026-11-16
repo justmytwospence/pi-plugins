@@ -6,7 +6,7 @@ import { test } from "vitest";
 import { bindGateShell } from "../src/gate-shell.js";
 import { EXIT_TOOL, INLINE_ENTRY } from "../src/inline-plan.js";
 import { builtinPairs, pairDefinitions, pairKey } from "../src/model-pairs.js";
-import { PAIR_ENTRY, registerPairs } from "../src/pairs.js";
+import { PAIR_ENTRY, pairNote, registerPairs } from "../src/pairs.js";
 import { PLAN_PAIR_CHANNEL, queryPlanPair } from "../src/plan-pair-contract.js";
 import { SHELL_READS_CHANNEL } from "../src/shell-reads.js";
 import { createMockContext } from "./shared/support.js";
@@ -1026,11 +1026,13 @@ test("approving with the offered worker switches a plain Opus session to opuspla
     return true;
   };
   const offered: string[][] = [];
+  const titles: string[] = [];
   const context = createMockContext({
     mode: "rpc",
     hasUI: true,
     select: async (title: string, choices: string[]) => {
       if (!title.startsWith("Implement this plan?")) return undefined;
+      titles.push(title);
       offered.push(choices);
       return "Yes, implement with Sonnet 4.5";
     },
@@ -1059,6 +1061,11 @@ test("approving with the offered worker switches a plain Opus session to opuspla
     writeFileSync(state.planFile, "# Offer plan\n\nDo it.\n");
     const result = await tool(EXIT_TOOL).execute("exit", {}, undefined, undefined, context.ctx);
     assert.ok(offered[0]?.includes("Yes, compact and implement with Sonnet 4.5"));
+    assert.ok(
+      titles[0]?.includes(
+        "With Sonnet 4.5, Opus 4.5 answers its questions and takes over again when the implementation is done.",
+      ),
+    );
     assert.equal(result.details?.outcome, "approved");
     assert.deepEqual(mock.setModels, [opusplan]);
     const pair = mock.entries.filter((entry) => entry.customType === PAIR_ENTRY).at(-1)?.data as {
@@ -1069,4 +1076,33 @@ test("approving with the offered worker switches a plain Opus session to opuspla
   } finally {
     rmSync(plansDirectory, { recursive: true, force: true });
   }
+});
+
+test("approving on the planner keeps the pair on the planner and ends its persistent handoff", async () => {
+  const [fable] = premiumPairs;
+  assert.ok(fable);
+  const t = setup({ model: premiumVirtual(fable), available: [...models, ...premiumModels] });
+  await t.fire("session_start");
+  t.controller.approve(t.ctx as never, "/p/fable.md");
+  await t.fire("agent_settled", { aborted: false });
+  assert.equal(t.route().model.id, fable.worker);
+  t.controller.approve(t.ctx as never, "/p/fable-2.md", "planner");
+  assert.equal(t.controller.state.implementing, undefined);
+  assert.equal(t.controller.state.planFile, undefined);
+  assert.equal(t.controller.state.workerHandoffs, undefined);
+  assert.equal(t.route().model.id, fable.planner);
+  assert.equal(queryPlanPair(t.mock.eventBus)?.phase, "work");
+  assert.match(await t.call("ask_planner", { question: "q" }), /No approved plan/u);
+  assert.equal(await t.fire("tool_result", { toolName: "edit", input: { path: "/repo/src/x.ts" } }), undefined);
+});
+
+test("pairNote states whether the worker stays on", () => {
+  assert.equal(
+    pairNote({ def: { handoff: "persistent" } as never, workerName: "Claude Opus 5.5", plannerName: "Claude Fable 5" }),
+    "With Opus 5.5, Fable 5 answers its questions and Opus 5.5 stays on for later work.",
+  );
+  assert.equal(
+    pairNote({ def: {} as never, workerName: "Sonnet 4.5", plannerName: "Opus 4.5" }),
+    "With Sonnet 4.5, Opus 4.5 answers its questions and takes over again when the implementation is done.",
+  );
 });

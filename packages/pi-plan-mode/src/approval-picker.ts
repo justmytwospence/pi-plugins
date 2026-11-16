@@ -30,16 +30,21 @@ function clean(text: string): string {
   return stripVTControlCharacters(text).replace(/[\p{Cc}\p{Zl}\p{Zp}]/gu, " ");
 }
 
-/** The label of the row that implements on a plan model pair's worker, e.g. `Yes, implement with Sonnet 5.5`. */
-export function pairLabel(workerName: string, compact = false): string {
-  return `Yes, ${compact ? "compact and " : ""}implement with ${clean(workerName)
+/** A model's display name without control characters or the `Claude ` prefix. */
+export function shortModelName(name: string): string {
+  return clean(name)
     .trim()
-    .replace(/^Claude /u, "")}`;
+    .replace(/^Claude /u, "");
+}
+
+/** The label of a row that implements on a named model, e.g. `Yes, implement with Sonnet 5.5`. */
+export function pairLabel(workerName: string, compact = false): string {
+  return `Yes, ${compact ? "compact and " : ""}implement with ${shortModelName(workerName)}`;
 }
 
 export type ApprovalChoice =
-  | { kind: "here"; withPair?: true }
-  | { kind: "compact-here"; withPair?: true }
+  | { kind: "here"; alternate?: true }
+  | { kind: "compact-here"; alternate?: true }
   | { kind: "edit" }
   | { kind: "save" }
   | { kind: "keep" };
@@ -52,7 +57,9 @@ export interface ApprovalInput {
   effortDefaultKey?: string;
   /** A sentence after the question, e.g. who implements and who answers its questions. */
   note?: string;
-  /** A plan model pair's worker to offer: its rows switch the session to the pair, then implement. */
+  /** Names the implementer of the first two rows (a selected pair's worker); without it they say `here`. */
+  implementerName?: string;
+  /** Another model to offer: an offered pair's worker, or a selected pair's planner. */
   alternate?: { model: ModelSpec; name: string };
 }
 
@@ -71,9 +78,9 @@ export interface ApprovalState {
   effortDefaultKey?: string;
 }
 
-export function createApprovalState(): ApprovalState {
+export function createApprovalState(selectedId: "here" | "compact-here" = "here"): ApprovalState {
   return {
-    selectedId: "here",
+    selectedId,
     efforts: new Map(),
     manuallyAdjusted: new Set(),
     sources: new Map(),
@@ -113,23 +120,33 @@ export class ApprovalPicker implements Component {
     this.question = `${APPROVAL_QUESTION}${input.note ? ` ${clean(input.note)}` : ""}`;
     const alternate = input.alternate;
     this.rows = [
-      { id: "here", choice: { kind: "here" }, label: HERE, model: input.planning },
+      {
+        id: "here",
+        choice: { kind: "here" },
+        label: input.implementerName ? pairLabel(input.implementerName) : HERE,
+        model: input.planning,
+      },
       ...(alternate
         ? [
             {
               id: "pair",
-              choice: { kind: "here", withPair: true } as const,
+              choice: { kind: "here", alternate: true } as const,
               label: pairLabel(alternate.name),
               model: alternate.model,
             },
           ]
         : []),
-      { id: "compact-here", choice: { kind: "compact-here" }, label: COMPACT_HERE, model: input.planning },
+      {
+        id: "compact-here",
+        choice: { kind: "compact-here" },
+        label: input.implementerName ? pairLabel(input.implementerName, true) : COMPACT_HERE,
+        model: input.planning,
+      },
       ...(alternate
         ? [
             {
               id: "compact-pair",
-              choice: { kind: "compact-here", withPair: true } as const,
+              choice: { kind: "compact-here", alternate: true } as const,
               label: pairLabel(alternate.name, true),
               model: alternate.model,
             },

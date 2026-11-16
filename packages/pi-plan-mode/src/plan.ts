@@ -71,7 +71,7 @@ import {
 } from "./main-chat.js";
 import { buildMcpCatalog, readConfiguredMcpServers } from "./mcp-tools.js";
 import { modelCatalog, normalizeEffort } from "./model-catalog.js";
-import { registerPairs } from "./pairs.js";
+import { pairNote, registerPairs } from "./pairs.js";
 import { exportPlanToFile } from "./plan-export.js";
 import { plansDirectoryPath, planTitle, readPlan, writePlanFile } from "./plan-file.js";
 import { expandHome, runPlanCompleteHook } from "./plan-hook.js";
@@ -961,19 +961,28 @@ export default async function plan(pi: ExtensionAPI, dependencies: PlanDependenc
       const catalog = modelCatalog(ctx, "available");
       const pair = pairs.selected(ctx);
       if (pair) {
+        const level = pi.getThinkingLevel() as ThinkingLevel;
         return {
-          planning: { ...pair.worker, thinkingLevel: pi.getThinkingLevel() as ThinkingLevel },
+          planning: { ...pair.worker, thinkingLevel: level },
           planningName: pair.workerName,
-          note: `${pair.workerName} implements; ${pair.plannerName} answers its questions.`,
+          implementerName: pair.workerName,
+          note: pairNote(pair),
+          alternate: {
+            kind: "planner" as const,
+            model: { ...pair.planner, thinkingLevel: level },
+            name: pair.plannerName,
+          },
         };
       }
       const offer = pairs.pairFor(ctx);
       return {
         planning,
         planningName: catalog.name(planning),
+        ...(offer ? { note: pairNote(offer) } : {}),
         ...(offer
           ? {
               alternate: {
+                kind: "pair-worker" as const,
                 model: {
                   ...offer.worker,
                   ...(planning.thinkingLevel ? { thinkingLevel: planning.thinkingLevel } : {}),
@@ -999,7 +1008,7 @@ export default async function plan(pi: ExtensionAPI, dependencies: PlanDependenc
       return true;
     },
     compactHere: (approval, ctx) => {
-      pairs.approve(ctx, approval.planFile);
+      pairs.approve(ctx, approval.planFile, approval.alternate === "planner" ? "planner" : "worker");
       pendingOperation = {
         kind: "compact-here",
         approval,
@@ -1008,8 +1017,9 @@ export default async function plan(pi: ExtensionAPI, dependencies: PlanDependenc
       };
     },
     implementHere: (ctx, approval) => {
-      const pair = pairs.selected(ctx);
-      pairs.approve(ctx, approval.planFile);
+      const onPlanner = approval.alternate === "planner";
+      const pair = onPlanner ? undefined : pairs.selected(ctx);
+      pairs.approve(ctx, approval.planFile, onPlanner ? "planner" : "worker");
       applyDirectEffort(ctx, approval.thinkingLevel);
       return directImplementationBrief(approval) + (pair ? askPlannerNote(pair.plannerName) : "");
     },
@@ -1039,7 +1049,7 @@ export default async function plan(pi: ExtensionAPI, dependencies: PlanDependenc
       return undefined;
     }
     const { approval } = operation;
-    const pair = pairs.selected(ctx);
+    const pair = approval.alternate === "planner" ? undefined : pairs.selected(ctx);
     applyDirectEffort(ctx, approval.thinkingLevel);
     return {
       entries: [

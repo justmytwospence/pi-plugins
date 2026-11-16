@@ -69,8 +69,10 @@ try {
     async select(title, options) {
       if (title === 'Implementation effort') return options[0];
       assert.equal(title.startsWith('Implement this plan?'), true, title);
-      assert.match(title, /implements; .* answers its questions/u, 'the approval names who implements and who answers');
-      return options.find(option => option === 'Yes, implement here');
+      assert.match(title, /With .*Sonnet.*, .*Opus.* answers its questions and takes over again when the implementation is done\./u, 'the approval says the planner takes over again');
+      assert(options.some(option => option.startsWith('Yes, implement with') && /Opus/u.test(option)), `the planner row is offered: ${options}`);
+      assert.match(options[0], /^Yes, compact and implement with .*Sonnet/u, 'the compact worker row is the default');
+      return options.find(option => option.startsWith('Yes, implement with') && /Sonnet/u.test(option));
     },
   }, { get(target, key) { return key in target ? target[key] : () => {}; } });
   await session.bindExtensions({ mode: 'rpc', uiContext: ui, onError: error => errors.push(error) });

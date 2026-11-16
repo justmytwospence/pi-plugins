@@ -4,6 +4,7 @@
 import { relative, resolve } from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { setToolsActive } from "./active-tools.js";
+import { shortModelName } from "./approval-picker.js";
 import { effortOrigin, withEffortOrigin } from "./effort-origin.js";
 import { gateShellReads } from "./gate-shell.js";
 import { MODEL_SPEC_THINKING_LEVELS, type ModelSpec, type ModelSpecThinkingLevel } from "./implementation-models.js";
@@ -60,7 +61,8 @@ export interface PairController {
   selected(ctx: ExtensionContext): SelectedPair | undefined;
   /** A registered pair whose planner is the current (physical) session model, to offer its worker at approval. */
   pairFor(ctx: ExtensionContext): SelectedPair | undefined;
-  approve(ctx: ExtensionContext, planFile: string): void;
+  /** `implementer: "planner"` keeps the pair selected and leaves the planner serving, ending any worker handoff. */
+  approve(ctx: ExtensionContext, planFile: string, implementer?: "worker" | "planner"): void;
   phaseChanged(ctx: ExtensionContext): void;
   readonly state: PairState;
 }
@@ -81,6 +83,15 @@ function readHandoff(value: unknown): WorkerHandoff | undefined {
     ...(typeof value.planLevel === "string" ? { planLevel: value.planLevel as ModelSpecThinkingLevel } : {}),
   };
 }
+
+/** What the approval's worker rows do after the build: the worker stays on, or the planner takes over again. */
+export const pairNote = (pair: Pick<SelectedPair, "def" | "workerName" | "plannerName">) => {
+  const w = shortModelName(pair.workerName);
+  const p = shortModelName(pair.plannerName);
+  return pair.def.handoff === "persistent"
+    ? `With ${w}, ${p} answers its questions and ${w} stays on for later work.`
+    : `With ${w}, ${p} answers its questions and takes over again when the implementation is done.`;
+};
 
 const text = (value: string, details?: unknown) => ({
   content: [{ type: "text" as const, text: value }],
@@ -507,10 +518,22 @@ export function registerPairs(pi: ExtensionAPI, host: PairHost): PairController 
     define,
     selected,
     pairFor,
-    approve(ctx, planFile) {
+    approve(ctx, planFile, implementer = "worker") {
       const pair = selected(ctx);
       if (!pair) return;
       const approvalPair = pairKey(pair.def);
+      if (implementer === "planner") {
+        const { [approvalPair]: _dropped, ...rest } = state.workerHandoffs ?? {};
+        state = {
+          version: 1,
+          consult: false,
+          approvalPair,
+          ...(Object.keys(rest).length ? { workerHandoffs: rest } : {}),
+        };
+        noted.clear();
+        persist();
+        return;
+      }
       const planLevel = pi.getThinkingLevel() as ModelSpecThinkingLevel;
       const workerHandoffs = {
         ...state.workerHandoffs,

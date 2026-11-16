@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+### Approval rows name the pair's models
+
+- With a plan model pair selected, the first two approval rows read **Yes, implement with <worker>** and **Yes, compact and implement with <worker>**, and the compact row is the default, since the worker re-reads the conversation without a prompt cache.
+- The approval note now says what happens after the build: the worker stays on (Fableplan, Astraplan) or the planner takes over again (other pairs). It also names the worker when a pair is only offered.
+- With a pair selected, **Yes, implement with <planner>** and **Yes, compact and implement with <planner>** let the planner build the plan itself. The pair stays selected and its persistent worker handoff ends.
+
 ### Fixed
 
 - Fableplan and both Astraplan identities retain their worker after approval for later work and chat, with branch-local persisted handoffs and temporary planner consultations.

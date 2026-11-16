@@ -17,6 +17,7 @@ import {
   pairLabel,
   pickApproval,
   SAVE,
+  shortModelName,
 } from "../src/approval-picker.js";
 import type { ModelSpec, ModelSpecThinkingLevel } from "../src/implementation-models.js";
 
@@ -134,7 +135,7 @@ test("an offered pair worker adds its own rows with independent, recommended eff
   component.handleInput(down);
   component.handleInput("\r");
   assert.deepEqual(done.mock.calls, [
-    [{ effortSource: "manual", choice: { kind: "here", withPair: true }, thinkingLevel: "medium" }],
+    [{ effortSource: "manual", choice: { kind: "here", alternate: true }, thinkingLevel: "medium" }],
   ]);
   assert.equal(state.sources.get(JSON.stringify(["test", "planner"])), "fallback");
 });
@@ -142,6 +143,42 @@ test("an offered pair worker adds its own rows with independent, recommended eff
 test("pairLabel drops the Claude prefix and sanitizes the name", () => {
   assert.equal(pairLabel("Claude Sonnet 5.5"), "Yes, implement with Sonnet 5.5");
   assert.equal(pairLabel("GPT-5.5 Sol\n", true), "Yes, compact and implement with GPT-5.5 Sol");
+});
+
+test("a named implementer replaces here and a selected pair's planner gets its own rows", () => {
+  const worker: ModelSpec = { provider: "test", modelId: "worker", thinkingLevel: "high" };
+  const { component, done } = fixture({
+    input: {
+      planning: worker,
+      implementerName: "Claude Sonnet 5.5",
+      alternate: { model: planner, name: "Claude Opus 5.5" },
+    },
+    state: createApprovalState("compact-here"),
+  });
+  const labels = component
+    .render(120)
+    .map(stripVTControlCharacters)
+    .filter((line) => /^ [→ ] \S/u.test(line))
+    .map((line) => line.trim().replace(/^→ /u, ""));
+  assert.deepEqual(labels, [
+    "Yes, implement with Sonnet 5.5",
+    "Yes, implement with Opus 5.5",
+    "Yes, compact and implement with Sonnet 5.5",
+    "Yes, compact and implement with Opus 5.5",
+    EDIT,
+    SAVE,
+    KEEP,
+  ]);
+  for (const label of labels) assert.ok(label.length <= 42, label);
+  assert.ok(
+    component
+      .render(120)
+      .map((line) => stripVTControlCharacters(line).trimEnd())
+      .includes(" → Yes, compact and implement with Sonnet 5.5"),
+  );
+  component.handleInput("\r");
+  assert.equal(done.mock.calls[0]?.[0].choice.kind, "compact-here");
+  assert.equal(shortModelName("Claude Opus 5.5\n"), "Opus 5.5");
 });
 
 test("the optional note follows the question, sanitized, and is absent without it", () => {

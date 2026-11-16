@@ -1317,7 +1317,7 @@ test("premium pair follows real inline approval, settlement, review and workflow
   const h = await setup({
     pair: premiumPair,
     gate: true,
-    select: ["Yes, implement here", "high", "No, keep planning"],
+    select: ["Yes, implement with Opus 5.5", "high", "No, keep planning"],
   });
   const ctx = h.context.ctx;
   assert.equal(h.route(), fable.id);
@@ -1346,7 +1346,7 @@ test("premium pair follows real inline approval, settlement, review and workflow
 test("premium pair saving a later plan restores its previously approved worker", async () => {
   const h = await setup({
     pair: premiumPair,
-    select: ["Yes, implement here", "high", "Save for later", "Enter different name"],
+    select: ["Yes, implement with Opus 5.5", "high", "Save for later", "Enter different name"],
     input: "deferred",
   });
   const ctx = h.context.ctx;
@@ -1373,7 +1373,11 @@ test("premium pair cancellation before its first approval retains the planner", 
 });
 
 test("failed compact approval re-enters planning without losing the premium handoff", async () => {
-  const h = await setup({ pair: premiumPair, gate: true, select: ["Yes, compact plan and implement here", "high"] });
+  const h = await setup({
+    pair: premiumPair,
+    gate: true,
+    select: ["Yes, compact and implement with Opus 5.5", "high"],
+  });
   const ctx = h.context.ctx;
   await h.mock.commands.get("plan")?.handler("", ctx);
   writeFileSync(h.inline().planFile, "# Compact plan\n");
@@ -2088,8 +2092,8 @@ test("implementing with an offered pair worker switches to the pair first; a fai
       order.push("select");
       return switched;
     });
-    const implementHere = vi.fn((_ctx: ExtensionContext, approval: { withPair?: true }) => {
-      order.push(`implement:${approval.withPair === true}`);
+    const implementHere = vi.fn((_ctx: ExtensionContext, approval: { alternate?: string }) => {
+      order.push(`implement:${approval.alternate === "pair-worker"}`);
       return "implemented";
     });
     const inline = registerInlinePlanMode(mock.pi, {
@@ -2099,7 +2103,11 @@ test("implementing with an offered pair worker switches to the pair first; a fai
       implementationChoices: () => ({
         planning: { provider: "anthropic", modelId: "claude-opus-5-5" },
         planningName: "Claude Opus 5.5",
-        alternate: { model: { provider: "anthropic", modelId: "claude-sonnet-5-5" }, name: "Claude Sonnet 5.5" },
+        alternate: {
+          kind: "pair-worker" as const,
+          model: { provider: "anthropic", modelId: "claude-sonnet-5-5" },
+          name: "Claude Sonnet 5.5",
+        },
       }),
       selectPair,
       approved: vi.fn(),
@@ -2128,4 +2136,49 @@ test("implementing with an offered pair worker switches to the pair first; a fai
       assert.equal(inline.active, true);
     }
   }
+});
+
+test("with a pair selected the default is the compact worker row and the planner row never switches models", async () => {
+  const mock = createMockPi();
+  const context = createMockContext({ hasUI: true, mode: "rpc" });
+  const ctx = context.ctx as ExtensionContext;
+  Object.assign(ctx.sessionManager, { getLeafId: () => null });
+  const plansDirectory = mkdtempSync(join(tmpdir(), "pair-planner-"));
+  onTestFinished(() => rmSync(plansDirectory, { recursive: true, force: true }));
+  const selectPair = vi.fn(async () => true);
+  const implementHere = vi.fn((_ctx: ExtensionContext, _approval: { alternate?: string }) => "implemented");
+  const inline = registerInlinePlanMode(mock.pi, {
+    plansDirectory: () => plansDirectory,
+    safeSubcommands: () => undefined,
+    toggleKey: () => undefined,
+    implementationChoices: () => ({
+      planning: { provider: "anthropic", modelId: "claude-sonnet-5-5" },
+      planningName: "Claude Sonnet 5.5",
+      implementerName: "Claude Sonnet 5.5",
+      alternate: {
+        kind: "planner" as const,
+        model: { provider: "anthropic", modelId: "claude-opus-5-5" },
+        name: "Claude Opus 5.5",
+      },
+    }),
+    selectPair,
+    approved: vi.fn(),
+    compactHere: vi.fn(),
+    implementHere,
+  });
+  const offered: string[][] = [];
+  ctx.ui.select = async (title, choices) => {
+    if (!title.startsWith("Implement this plan?")) return undefined;
+    offered.push(choices);
+    return "Yes, implement with Opus 5.5";
+  };
+  for (const handler of mock.events.get("session_start") ?? []) await handler({ reason: "startup" }, ctx);
+  await inline.enter(ctx);
+  writeFileSync(inline.planFile as string, "# Planner plan\n");
+  const exit = mock.tools.find((candidate) => candidate.name === EXIT_TOOL) as unknown as Tool;
+  const result = await exit.execute("planner", {}, undefined, undefined, ctx);
+  assert.equal(offered[0]?.[0], "Yes, compact and implement with Sonnet 5.5");
+  assert.equal(result.details.outcome, "approved");
+  assert.equal(selectPair.mock.calls.length, 0);
+  assert.equal(implementHere.mock.calls[0]?.[1].alternate, "planner");
 });
