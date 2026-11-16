@@ -43,7 +43,7 @@ The child view composes with Sidebar rather than replacing it. Human steering an
 `action: "run"` (the default) takes one of:
 
 - `task` (with optional `label`, `agent`, `model`, `thinking`): a single task;
-- `tasks: [{ label?, agent?, task, cwd?, model?, thinking? }]`: parallel tasks, at most `maxParallel` (8) per call, `concurrency` (4) at a time, regardless of quota pressure;
+- `tasks: [{ label?, agent?, task, cwd?, model?, thinking? }]`: parallel tasks, at most `maxParallel` (8) per call, `concurrency` (4) at a time;
 - `chain: [...]`: steps in order; `{previous}` in a step's task is replaced by the previous step's output, and the chain stops at the first step that does not succeed.
 
 Options:
@@ -63,7 +63,7 @@ Options:
 
 **Labels.** `label` is a short task name, not an agent role (for example `"Audit cache invalidation"` with `agent: "reviewer"`). Lists and headings show the task label first and the role second. Labels are whitespace-normalized and stripped of terminal control characters, without a fixed length cap. A missing or blank label uses the task's first nonempty line (without a Markdown heading or list prefix), with no model call. Each chain step gets its label before `{previous}` is expanded. The full task is still sent to the child and saved in run records.
 
-**Results.** A foreground call returns each child's final reply, cut to 2,000 lines or 50 KB, with the full text in `~/.pi/agent/subagents/<id>/output.md`; each finished message of the child's conversation is appended to `messages.jsonl` beside it. A foreground result also reports the children's combined token usage and cost. The tool row shows each run's task label, agent role, model and thinking level (each marked `(auto)` where it was chosen automatically, or `(auto, p=0.5)` for a model or effort picked under quota pressure, and the Haiku guard's reason when it applied), status, time, turns, cost and current activity. A run that ends on the account's rate limit (`rate_limit_error` or HTTP 429, after Pi's own retries) is `failed` with the error `account rate limit reached; resume it after the window resets`, and its result names the `resume` action; nothing retries it automatically. Run records are saved as `subagents:run` session entries.
+**Results.** A foreground call returns each child's final reply, cut to 2,000 lines or 50 KB, with the full text in `~/.pi/agent/subagents/<id>/output.md`; each finished message of the child's conversation is appended to `messages.jsonl` beside it. A foreground result also reports the children's combined token usage and cost. The tool row shows each run's task label, agent role, model and thinking level (with the Haiku guard's reason when it applied), status, time, turns, cost and current activity. A run that ends on the account's rate limit (`rate_limit_error` or HTTP 429, after Pi's own retries) is `failed` with the error `account rate limit reached; resume it after the window resets`, and its result names the `resume` action; nothing retries it automatically. Run records are saved as `subagents:run` session entries.
 
 **Delivery.** Ending the turn with an async call still running keeps the turn open (Herdr, tmux and Pi keep showing it working, with a `Waiting on …` message, a `herdr:waiting` hold and the `$wait` pane token); typing, a queued message or Esc ends the wait, and the result then arrives as a message. The wait has no timeout and applies in the TUI only. A result already due when the turn ends goes into the same run. With pi-bg loaded, pi-bg's single turn-end wait does this instead. Otherwise an unread async result that comes due while the agent is working waits for the turn to settle before it is sent; several go out as one message. Reading a completed run with `subagent result` or `bg_wait subagent:<id>` consumes that result and suppresses its pending announcement. Running snapshots do not consume future results. Partially read batches announce only unread members. A run that ends after its session is gone calls nothing in Pi.
 
@@ -129,7 +129,7 @@ A run that has ended has no editor: a line says how it ended (`✗ failed: …`)
 
 ### Widget
 
-An optional widget above the editor, off by default (`"widget": "background"` for async runs, or `"all"`): one row per running subagent with a spinner, task label and role, model and thinking level (automatic picks marked `(auto)`), turns, tokens, cost and elapsed time, with its current tool or text beneath; queued tasks; a successful run for 8 seconds, and the latest failed or stopped run until your next message (several share one row). Double-clicking a row opens that run's session when Pi passes mouse events to widgets.
+An optional widget above the editor, off by default (`"widget": "background"` for async runs, or `"all"`): one row per running subagent with a spinner, task label and role, model and thinking level, turns, tokens, cost and elapsed time, with its current tool or text beneath; queued tasks; a successful run for 8 seconds, and the latest failed or stopped run until your next message (several share one row). Double-clicking a row opens that run's session when Pi passes mouse events to widgets.
 
 ### `/subagents`
 
@@ -185,8 +185,7 @@ For model and thinking **independently**: explicit call argument > user/project 
 
 - **Provider.** Implicit model choices always stay on the parent's provider: a profile, agent-file model or tier model from another provider is ignored, so a Codex parent never gets an Anthropic child unless you pass `model`.
 - **Haiku guard.** Haiku's price steps up past 100,000 prompt tokens. When the classifier's tier for a run is `fast` on Haiku and the run forks the parent's context, or the parent's context is already past 100,000 tokens, the pick becomes `balanced`; the row says why (`not Haiku: forked context`).
-- **The classifier's picks.** The classifier picks the agent when its confidence is at least 0.5. It answers an available model tier (`fast`, `balanced`, `strong`, `premium`; asked only when more than one usable candidate exists, configured or from the registered presets below) and a thinking level (`low`, `medium`, `high`, `xhigh`) as probabilities over the options, and both are read by one rule: the highest option whose probability of being needed, counting it and every stronger option, reaches the bar theta, else the lowest option. theta = `relaxed + (tight - relaxed) * p` (`jev.threshold`, default 0.5 and 0.85), where p is the selection snapshot's quota pressure (below). The relaxed default, 0.5, picks the median of the classifier's distribution over the options; a lower bar biases picks upward. Without the classifier, or when its request fails, role baselines then balanced/medium apply; unknown/local providers with no mapping retain the parent model with a visible notice. Neither zero-price routes nor prices supply a capability ranking.
-- **Quota pressure.** At selection, the shared quota reader captures the execution target's account-scoped pressure; automatic tier selection uses shared windows and fixed-model effort uses matching target windows. Unavailable, disabled and unsupported quota use neutral pressure, not a healthy reading. Higher pressure raises the bar for automatic choices, without changing concurrency. See [Choosing effort](https://pi-plugins.vercel.app/guides/effort/).
+- **The classifier's picks.** The classifier picks the agent when its confidence is at least 0.5. It answers an available model tier (`fast`, `balanced`, `strong`, `premium`; asked only when more than one usable candidate exists, configured or from the registered presets below) and a thinking level (`low`, `medium`, `high`, `xhigh`) as probabilities over the options, and both are read by one rule: the highest option whose probability of being needed, counting it and every stronger option, reaches `jev.threshold` (default 0.5), else the lowest option. The default, 0.5, picks the median of the classifier's distribution over the options; a lower bar biases picks upward. Without the classifier, or when its request fails, role baselines then balanced/medium apply; unknown/local providers with no mapping retain the parent model with a visible notice. Neither zero-price routes nor prices supply a capability ranking.
 - **Thinking.** Children receive their selected `--thinking` level; queued launches, resumes and steering retain the selected tuple.
 
 ## Configuration
@@ -200,7 +199,7 @@ For model and thinking **independently**: explicit call argument > user/project 
     "balanced": "anthropic/claude-sonnet-5-5",
     "strong": "anthropic/claude-opus-5-5"
   },
-  "jev": { "enabled": true, "provider": "typesafe", "model": "jev-latest", "timeoutMs": 3000, "threshold": { "relaxed": 0.5, "tight": 0.85 } },
+  "jev": { "enabled": true, "provider": "typesafe", "model": "jev-latest", "timeoutMs": 3000, "threshold": 0.5 },
   "delegation": "economical",
   "maxParallel": 8,
   "concurrency": 4,
@@ -216,7 +215,7 @@ For model and thinking **independently**: explicit call argument > user/project 
 | `tiers` | `{}` | legacy `fast`/`balanced`/`strong`/`premium` tier models; only entries on the parent's provider apply |
 | `providerTiers` | `{}` | tier models per provider (below), including optional `premium`; take precedence over matching `tiers` |
 | `tierDescriptions` | built in (below) | what the classifier reads for each tier |
-| `jev` | as above | `enabled`, classifier `provider` and `model`, `timeoutMs`; `threshold`: the bar for a stronger tier or effort, `relaxed` without quota pressure, `tight` at full pressure (each 0 to 1) |
+| `jev` | as above | `enabled`, classifier `provider` and `model`, `timeoutMs`; `threshold`: the bar (0 to 1) for a stronger tier or effort, default 0.5 |
 | `delegation` | `"economical"` | the tool's first prompt guideline: `"economical"` delegates parallel, larger-than-one-context and routine long-tail work; `"conservative"` delegates only clear wins (see [The `subagent` tool](#the-subagent-tool)) |
 | `maxParallel` | 8 | most parallel tasks per call |
 | `concurrency` | 4 | parallel tasks running at once |
@@ -273,7 +272,6 @@ Each works alone; with a sibling loaded they work together through Pi's event bu
   Subagent sessions use Sidebar's primary-pane view host when available, so one Sidebar conversation, draft and model remain beside the viewed child. Switching children changes the subject, not the main/implementer anchor or family conversation; a submitted question retains its captured subject. Returning to main preserves Sidebar's requested-open state. Views use their allocated height without changing terminal dimensions; steering, stopping and per-run drafts stay in the primary view. Without the service, the existing fullscreen overlay and standalone delegation behavior remain available.
 
   Sidebar family history survives `/tree` and explicit implementation handoff; unrelated `/new`, resume/fork/clone sessions are separate families. Observation of pre-existing or disconnected children can be partial or unavailable. Sidebar's `/agents`, `/transcript [agent-id]` and `/context [agent-id]` inspect only enrolled members (omitted ID means the viewed agent); `/context` also works without codemode. Transcript pages are capped at 64 KiB, automatic reads at 32 KiB per question; clipped content is marked and image payloads/provider signatures are omitted. This integration adds no Sidebar control authority over workers.
-- **Quota snapshots.** Selection reads quota directly when an automatic tier or effort needs it; no separate extension or pressure event is required.
 - **[pi-herdr](https://pi-plugins.vercel.app/plugins/pi-herdr/).** Async (or backgrounded) calls hold `herdr:background` while they run, which pi-herdr shows in the pane's `$bg` token.
 - **[pi-plan-mode](https://pi-plugins.vercel.app/plugins/pi-plan-mode/).** It asks which model and effort a role gets by emitting `subagents:role-model` with `{ role, parent, thinking? }` (`parent` is `provider/id`). Without a delegated task, pi-subagents answers synchronously in `reply: { model, thinking, source }`, with no classifier call: the role baseline, else balanced/medium, else the parent's model with fallback provenance. Plan mode uses it to pick the `explorer` model for planner scouts when no `scoutModelMap` entry applies; there is no reply before a session starts or for an unknown role.
 

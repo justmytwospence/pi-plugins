@@ -33,7 +33,7 @@ test("import and idle/message/turn activity schedule no quota work or side effec
     cp.spawn = forbidden("spawn");
     syncBuiltinESMExports();
     const usage = await import(${JSON.stringify(new URL("../src/index.ts", import.meta.url).href)});
-    assert.equal(typeof usage.readSelectionPressure, "function");
+    assert.equal(typeof usage.readPiAnthropicUsage, "function");
     assert.equal(usage.default, undefined); // library, not an event-registering extension
     const host = new EventTarget();
     for (const type of ["input", "before_agent_start", "message", "turn_start", "turn_end", "model_select", "tool_result"])

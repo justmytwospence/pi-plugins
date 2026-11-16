@@ -102,7 +102,7 @@ test.each([46, 120, 180])("fallback and deliberate premium Fleet rows preserve s
   expect(lines[2]).toContain("↓ 0 tokens");
   if (width >= 120) {
     expect(lines[1]).toContain("gpt-6-astra (parent) · medium");
-    expect(lines[2]).toContain("gpt-6-astra (auto) · xhigh (auto)");
+    expect(lines[2]).toContain("gpt-6-astra · xhigh");
     expect(lines[2]).not.toContain("(parent)");
   }
   const active = renderFleet({ roster, selected: 1, active: true, now: 10_000, width, theme: plain });

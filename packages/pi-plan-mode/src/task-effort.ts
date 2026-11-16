@@ -1,11 +1,5 @@
 import { basename } from "node:path";
-import {
-  climb,
-  DEFAULT_THRESHOLD,
-  type SelectionPressure,
-  type Threshold,
-  theta,
-} from "@justmytwospence/pi-subscription-usage";
+import { climb, DEFAULT_THRESHOLD } from "@justmytwospence/pi-subscription-usage";
 import {
   askSystem1,
   type ClassifierRegistry,
@@ -118,12 +112,7 @@ export async function judgeTaskEffort(input: TaskEffortInput): Promise<TaskEffor
   }
 }
 
-export function recommendTaskEffort(
-  judgment: TaskEffortJudgment,
-  pressure: SelectionPressure,
-  threshold: Threshold = DEFAULT_THRESHOLD,
-) {
+export function recommendTaskEffort(judgment: TaskEffortJudgment, threshold: number = DEFAULT_THRESHOLD) {
   if (judgment.kind === "fallback") return judgment;
-  const bar = theta(pressure.p, threshold);
-  return { ...judgment, thinkingLevel: climb(LEVELS, judgment, bar), theta: bar, pressure: { ...pressure } };
+  return { ...judgment, thinkingLevel: climb(LEVELS, judgment, threshold) };
 }

@@ -12,7 +12,7 @@ import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import { describeActivity } from "../conversation.ts";
 import type { Run } from "../run.ts";
 import { runLabel } from "../label.ts";
-import { type Theme, SPINNER, dimAll, jev, modelAndEffort, runStats, statusIcon, taskLine, taskRows } from "./format.ts";
+import { type Theme, SPINNER, dimAll, modelAndEffort, runStats, statusIcon, taskLine, taskRows } from "./format.ts";
 
 export type WidgetMode = "background" | "all" | "off";
 export const WIDGET_MODES: readonly WidgetMode[] = ["background", "all", "off"];
@@ -73,7 +73,7 @@ export function renderSection({ runs, queued, now, frame, width, theme, maxLines
   const identityRows = (prefix: string, identity: string, metadata: string) =>
     visibleWidth(prefix + identity) <= width ? [cut(`${prefix}${identity} ${metadata}`)] : taskRows(prefix, identity, metadata, width);
   const runningRows = running.map((r) => [
-    ...identityRows(`${theme.fg("dim", "├─")} ${theme.fg("accent", spinner)} `, `${theme.bold(runLabel(r))}  ${theme.fg("muted", r.agent)}${jev(r.byJev.agent, theme)}`, `${theme.fg("dim", "·")} ${dimAll(`${modelAndEffort(r, theme)} · ${runStats(r, now)}`, theme)}`),
+    ...identityRows(`${theme.fg("dim", "├─")} ${theme.fg("accent", spinner)} `, `${theme.bold(runLabel(r))}  ${theme.fg("muted", r.agent)}`, `${theme.fg("dim", "·")} ${dimAll(`${modelAndEffort(r, theme)} · ${runStats(r, now)}`, theme)}`),
     cut(theme.fg("dim", `│    ⎿  ${describeActivity(r.conversation)}`)),
   ]);
   const finishedRows = finished.map((r) => {

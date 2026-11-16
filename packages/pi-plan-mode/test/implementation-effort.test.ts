@@ -93,21 +93,14 @@ for (const level of ["low", "medium", "high", "xhigh"]) {
   });
 }
 
-test("cumulative recommendations are monotone under pressure and preserve unavailable quota", async () => {
+test("recommendations take the highest level whose cumulative probability reaches 0.5", async () => {
   const { registry } = fakeRegistry(() => result(answer("xhigh")));
   const judgment = await pickImplementationEffort({ ...base, registry });
-  const picks = [0, 0.5, 1].map((p) => recommendTaskEffort(judgment, { state: "ready", tier: "none", p }));
-  assert.deepEqual(
-    picks.map((pick) => pick.kind === "system1" && pick.thinkingLevel),
-    ["high", "high", "medium"],
-  );
-  const pressure = { state: "unavailable" as const, tier: "none" as const, p: 0, reason: "unknown" };
-  const pick = recommendTaskEffort(judgment, pressure);
+  const pick = recommendTaskEffort(judgment);
   assert.equal(pick.kind, "system1");
   if (pick.kind === "system1") {
-    assert.deepEqual(pick.pressure, pressure);
+    assert.equal(pick.thinkingLevel, "high");
     assert.deepEqual(pick.probabilities, probabilities);
-    assert.equal(pick.theta, 0.5);
   }
 });
 
@@ -134,7 +127,7 @@ test("in-flight cancellation falls back without a reusable result", async () => 
   controller.abort();
   const judgment = await pending;
   assert.equal(judgment.kind, "fallback");
-  assert.deepEqual(recommendTaskEffort(judgment, { state: "unavailable", tier: "none", p: 0 }), judgment);
+  assert.deepEqual(recommendTaskEffort(judgment), judgment);
   assert.equal(calls.length, 1);
 });
 

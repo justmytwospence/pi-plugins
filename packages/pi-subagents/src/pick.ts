@@ -17,8 +17,8 @@ export const EFFORT_DESCRIPTIONS: Record<(typeof EFFORTS)[number], string> = {
   xhigh: "Genuinely difficult unresolved reasoning requiring sustained analysis within this task; not just many files, a long specification, or an important surrounding project.",
 };
 
-import { climb, theta, type Threshold } from "@justmytwospence/pi-subscription-usage";
-export { climb, theta, DEFAULT_THRESHOLD, type Threshold } from "@justmytwospence/pi-subscription-usage";
+import { climb, DEFAULT_THRESHOLD } from "@justmytwospence/pi-subscription-usage";
+export { climb, DEFAULT_THRESHOLD } from "@justmytwospence/pi-subscription-usage";
 
 export interface TierConfig {
   /** `provider/model` per tier; a missing tier uses the parent's model. */
@@ -229,19 +229,15 @@ export interface Picks {
   agent?: string;
   tier?: Tier;
   thinking?: string;
-  /** The quota pressure the tier and effort were picked under, when above 0. */
-  pressure?: number;
 }
 
 /**
  * Read Jev's answers: a role at confidence >= 0.5; a tier and an effort by one rule, the highest
- * option whose P(it or stronger) reaches theta(pressure), else the lowest. Quota pressure on the
- * parent's provider (0..1) raises the bar, so picks move toward cheaper tiers and lower efforts.
+ * option whose P(it or stronger) reaches the threshold (default 0.5), else the lowest.
  */
-export function readPicks(answers: Record<string, ClassifierAnswer>, options: { pressure?: number; threshold?: Threshold; tiers?: readonly Tier[] } = {}): Picks {
+export function readPicks(answers: Record<string, ClassifierAnswer>, options: { threshold?: number; tiers?: readonly Tier[] } = {}): Picks {
   const picks: Picks = {};
-  const pressure = Number.isFinite(options.pressure) ? Math.min(1, Math.max(0, options.pressure!)) : 0;
-  const bar = theta(pressure, options.threshold);
+  const bar = typeof options.threshold === "number" && Number.isFinite(options.threshold) ? Math.min(1, Math.max(0, options.threshold)) : DEFAULT_THRESHOLD;
   const role = choice(answers, "role");
   if (role && role.confidence >= 0.5) picks.agent = role.choice;
   const tiers = options.tiers ?? TIERS;
@@ -251,7 +247,6 @@ export function readPicks(answers: Record<string, ClassifierAnswer>, options: { 
   if (tiers.length && valid(tiers, tier)) picks.tier = climb(tiers, tier!, bar);
   const effort = choice(answers, "effort");
   if (valid(EFFORTS, effort)) picks.thinking = climb(EFFORTS, effort!, bar);
-  if (pressure > 0 && (picks.tier || picks.thinking)) picks.pressure = pressure;
   return picks;
 }
 
@@ -274,8 +269,6 @@ export interface Resolved {
   tier?: Tier;
   /** Where each choice came from. */
   source: ChoiceSource;
-  /** The quota pressure Jev's model or effort pick was made under, when above 0. */
-  pressure?: number;
   /** Why a selected tier changed or why the parent's model was used, for display. */
   note?: string;
 }
@@ -359,6 +352,5 @@ export function resolve(
   if (!thinking && defaults.thinking) { thinking = defaults.thinking; source.thinking = "profile"; }
   thinking ??= "medium";
   if (!given.thinking) thinking = clampThinking(thinking, physicalChatModels(options.available ?? []).find((m) => `${m.provider}/${m.id}` === model));
-  const pressure = picks?.pressure && (byJev.model || byJev.thinking) ? picks.pressure : undefined;
-  return { agent, model, thinking, byJev, source, ...(tier ? { tier } : {}), ...(pressure ? { pressure } : {}), ...(note ? { note } : {}) };
+  return { agent, model, thinking, byJev, source, ...(tier ? { tier } : {}), ...(note ? { note } : {}) };
 }

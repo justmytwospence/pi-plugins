@@ -1,8 +1,8 @@
 import path from "node:path";
 import { expect, test } from "vitest";
-import { theta as sharedTheta, climb as sharedClimb, DEFAULT_THRESHOLD as sharedThreshold } from "@justmytwospence/pi-subscription-usage";
+import { climb as sharedClimb, DEFAULT_THRESHOLD as sharedThreshold } from "@justmytwospence/pi-subscription-usage";
 import { GENERAL, parseAgent } from "../src/agents.ts";
-import { DEFAULT_THRESHOLD, DEFAULT_TIER_DESCRIPTIONS, EFFORT_DESCRIPTIONS, TIERS, climb, physicalChatModels, pickQuestions, providerTiers, readPicks, resolve, theta } from "../src/pick.ts";
+import { DEFAULT_THRESHOLD, DEFAULT_TIER_DESCRIPTIONS, EFFORT_DESCRIPTIONS, TIERS, climb, physicalChatModels, pickQuestions, providerTiers, readPicks, resolve } from "../src/pick.ts";
 
 const scout = parseAgent("---\nname: scout\ndescription: Fast recon\ntools: read, grep\nmodel: anthropic/claude-haiku-5\n---\nYou are a scout.", "user")!;
 const reviewer = parseAgent("---\nname: reviewer\ndescription: Code review\nthinking: high\n---\nReview carefully.", "project")!;
@@ -14,7 +14,6 @@ const registry = (provider: string, ids: string[]) => ids.map((id) => ({ provide
 const answer = (choice: string, probabilities: Record<string, number> = {}, confidence = 1) => ({ type: "choice" as const, choice, probabilities, confidence });
 
 test("selection helpers are the shared policy exports", () => {
-  expect(theta).toBe(sharedTheta);
   expect(climb).toBe(sharedClimb);
   expect(DEFAULT_THRESHOLD).toBe(sharedThreshold);
 });
@@ -70,18 +69,12 @@ test("readPicks climbs only offered tiers; unsupported answers and zero candidat
   expect(readPicks({ effort: answer("high", {}, 0.6) })).toEqual({ thinking: "high" });
 });
 
-test("threshold and quota-pressure formula remain unchanged with four levels", () => {
-  expect(DEFAULT_THRESHOLD).toEqual({ relaxed: 0.5, tight: 0.85 });
-  expect(theta(0)).toBeCloseTo(0.5);
-  expect(theta(1)).toBeCloseTo(0.85);
-  expect(theta(0.5)).toBeCloseTo(0.675);
-  expect(theta(2)).toBeCloseTo(0.85);
-  expect(theta(0.5, { relaxed: 0.2, tight: 0.6 })).toBeCloseTo(0.4);
+test("one threshold rule picks the highest option reaching the bar", () => {
+  expect(DEFAULT_THRESHOLD).toBe(0.5);
   const answers = { tier: answer("premium", { fast: 0.1, balanced: 0.2, strong: 0.2, premium: 0.5 }), effort: answer("xhigh", { low: 0.05, medium: 0.25, high: 0.5, xhigh: 0.2 }) };
   expect(readPicks(answers)).toEqual({ tier: "premium", thinking: "high" });
-  expect(readPicks(answers, { pressure: 0.5 })).toEqual({ tier: "strong", thinking: "high", pressure: 0.5 });
-  expect(readPicks(answers, { pressure: 1 })).toEqual({ tier: "balanced", thinking: "medium", pressure: 1 });
-  expect(readPicks(answers, { pressure: 0, threshold: { relaxed: 0.1, tight: 0.9 } })).toEqual({ tier: "premium", thinking: "xhigh" });
+  expect(readPicks(answers, { threshold: 0.1 })).toEqual({ tier: "premium", thinking: "xhigh" });
+  expect(readPicks(answers, { threshold: 0.85 })).toEqual({ tier: "balanced", thinking: "medium" });
   expect(readPicks({ tier: answer("strong", { fast: 0.2, balanced: 0.3, strong: 0.5 }) }, { tiers: ["fast", "balanced", "strong"] })).toEqual({ tier: "strong" });
 });
 
@@ -154,18 +147,13 @@ test("unoffered classifier picks cannot escape provider or route; parent fallbac
     .toMatchObject({ model: "openai/gpt-6-astra", thinking: "medium", note: "parent fallback: no usable role or tier mapping for openai" });
   const explicit = resolve({ model: "anthropic/claude-opus-5-5" }, agents, undefined, tiers, { model: "openai/gpt-6-astra", thinking: "xhigh" });
   expect(explicit).toMatchObject({ model: "anthropic/claude-opus-5-5", source: { model: "explicit" } });
+  expect(resolve({ agent: "scout" }, agents, undefined, tiers, parent)).toMatchObject({ source: { model: "profile", thinking: "default" } });
 });
 
 test("Haiku guard joins its reason to parent fallback if balanced and role mappings are absent", () => {
   const fastOnly = { models: { fast: "anthropic/claude-haiku-5" }, descriptions: DEFAULT_TIER_DESCRIPTIONS };
   expect(resolve({}, [GENERAL], { tier: "fast" }, fastOnly, { model: "anthropic/claude-opus-5-5", thinking: "high" }, { context: { fork: true } }))
     .toMatchObject({ model: "anthropic/claude-opus-5-5", note: "not Haiku: forked context; parent fallback: no usable role or tier mapping for anthropic", source: { model: "default" } });
-});
-
-test("pressure is recorded only for a picked model or effort, never for explicit-only choices", () => {
-  expect(resolve({}, agents, { tier: "fast", thinking: "low", pressure: 0.7 }, tiers, parent)).toMatchObject({ pressure: 0.7 });
-  expect(resolve({ model: "x/y", thinking: "low" }, agents, { tier: "fast", thinking: "low", pressure: 0.7 }, tiers, parent)).not.toHaveProperty("pressure");
-  expect(resolve({ agent: "scout" }, agents, undefined, tiers, parent)).toMatchObject({ source: { model: "profile", thinking: "default" } });
 });
 
 test("a family the table does not know is offered provisionally by price, and a user file can ignore it", async () => {

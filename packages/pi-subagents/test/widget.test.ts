@@ -30,16 +30,10 @@ test("a running row: spinner, agent, Jev marks, model, effort, stats; activity b
   const lines = renderWidget({ runs: [r], queued: 0, now: 14_200, frame: 1, width: 200, theme: plain });
   expect(lines).toEqual([
     "● Subagents  1 running",
-    "└─ ⠙ Find where the config is loaded  scout (auto) · claude-haiku-5 · low (auto) · ↻3 · 12.3k tokens · $0.012 · 14s",
+    "└─ ⠙ Find where the config is loaded  scout · claude-haiku-5 · low · ↻3 · 12.3k tokens · $0.012 · 14s",
     "     ⎿  bash: npm test",
     "",
   ]);
-});
-
-test("picks made under quota pressure show p beside the model and effort marks", () => {
-  const r = fakeRun({ byJev: { agent: true, model: true, thinking: true }, pressure: 0.46, state: { turns: 3, usage: usage(), startedAt: 0 } });
-  const lines = renderWidget({ runs: [r], queued: 0, now: 14_200, frame: 1, width: 200, theme: plain });
-  expect(lines[1]).toContain("scout (auto) · claude-haiku-5 (auto, p=0.5) · low (auto, p=0.5)");
 });
 
 test("finished rows show a status icon; the queue gets a row; nothing to show is empty", () => {
@@ -70,7 +64,7 @@ test.each([46, 120, 180])("fallback and legitimate premium widget rows fit the s
   expect(lines[3]).toContain("scout");
   if (width >= 120) {
     expect(lines[1]).toContain("gpt-6-astra (parent) · medium");
-    expect(lines[3]).toContain("gpt-6-astra (auto) · xhigh (auto)");
+    expect(lines[3]).toContain("gpt-6-astra · xhigh");
     expect(lines[3]).not.toContain("(parent)");
   }
   expect(lines.some((line) => line.includes("select") || line.includes("stop"))).toBe(false);

@@ -1,4 +1,4 @@
-// Roles, the Haiku guard, quota and the rate limit through the `subagent` tool, against fake Pi children.
+// Roles, the Haiku guard and the rate limit through the `subagent` tool, against fake Pi children.
 import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -8,18 +8,11 @@ import subagents, { promptGuidelines, recordedRun, resumable, subagentCallReadOn
 import { fakeJev, harness } from "./harness.ts";
 import { fakeUI, plain } from "./ui-helpers.ts";
 
-const pressureReader = vi.hoisted(() => vi.fn(async () => ({ state: "unavailable", tier: "none", p: 0 })));
-vi.mock("@justmytwospence/pi-subscription-usage", async (importOriginal) => ({
-  ...await importOriginal<object>(),
-  readSelectionPressure: pressureReader,
-}));
-
 const fixture = (name: string) => ({ command: process.execPath, args: [path.join(import.meta.dirname, "fixtures", name)] });
 const claude = ["claude-haiku-5", "claude-sonnet-5-5", "claude-opus-5-5"].map((id) => ({ provider: "anthropic", id }));
 const choice = (best: string) => ({ type: "choice", choice: best, confidence: 0.9, probabilities: { [best]: 0.9 } });
 
 beforeEach(() => {
-  pressureReader.mockReset().mockResolvedValue({ state: "unavailable", tier: "none", p: 0 });
   // Keep agent discovery to the built-ins.
   vi.stubEnv("PI_CODING_AGENT_DIR", mkdtempSync(path.join(tmpdir(), "subagents-roles-agent-")));
 });
@@ -171,12 +164,11 @@ test.each([
   const s = await setup({ ctx: extra, answer: () => ({ tier: choice("fast"), effort: choice("low") }) });
   const result = await s.tool().execute("t1", { task: "grep for TODOs", agent: "general", context, async: true }, undefined, undefined, s.ctx);
   expect(result.details.runs[0]).toMatchObject({ model: "anthropic/claude-sonnet-5-5", note });
-  expect(s.tool().renderResult(result, { expanded: false }, plain).render(200).join("\n")).toContain(`sonnet-5-5 (auto) (${note})`);
+  expect(s.tool().renderResult(result, { expanded: false }, plain).render(200).join("\n")).toContain(`sonnet-5-5 (${note})`);
   await s.stop();
 });
 
-test.each([1, 2, 4])("critical quota pressure preserves configured parallel concurrency %i without a serialization notice", async (concurrency) => {
-  pressureReader.mockResolvedValue({ state: "ready", tier: "critical", p: 1 });
+test.each([1, 2, 4])("configured parallel concurrency %i is preserved without a serialization notice", async (concurrency) => {
   const s = await setup({ concurrency });
   const tasks = ["a", "b", "c", "d", "e"].map((task) => ({ task, agent: "explorer" }));
   for (const index of [0, 1, 2]) {

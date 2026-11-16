@@ -17,7 +17,6 @@ import path from "node:path";
 import { type AgentBeforeSettleEvent, type BoundaryResult, type ExtensionAPI, type ExtensionContext, getMarkdownTheme } from "@earendil-works/pi-coding-agent";
 import { type Component, Markdown, Text, truncateToWidth, visibleWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
-import { readSelectionPressure } from "@justmytwospence/pi-subscription-usage";
 import { ACTIVITY_CHANGED, ACTIVITY_GONE, ACTIVITY_HOST, ACTIVITY_SECTION, type ActivityEntry, type ActivitySection, FLEET_HOST_PRIORITY, hostOutranks, readHost } from "./activity.ts";
 import { type AgentDef, discoverAgents } from "./agents.ts";
 import { MENTION_TYPE, mentionGuidance, subagentAutocomplete } from "./mentions.ts";
@@ -29,7 +28,7 @@ import { discoverFamily } from "./family-contract.ts";
 import { type JevConfig, askJev } from "./jev.ts";
 import { SYSTEM1_CHANGED, installSystem1Notifications, notifySystem1Notice, provenanceOf, resolveSystem1Target } from "./system1.ts";
 import { runLabel, taskLabel } from "./label.ts";
-import { type AvailableModel, type ChoiceSource, DEFAULT_THRESHOLD, DEFAULT_TIER_DESCRIPTIONS, type Given, type Resolved, type Threshold, type Tier, fixedAgentDefaults, pickQuestions, providerTiers, readPicks, resolve } from "./pick.ts";
+import { type AvailableModel, type ChoiceSource, DEFAULT_THRESHOLD, DEFAULT_TIER_DESCRIPTIONS, type Given, type Resolved, type Tier, fixedAgentDefaults, pickQuestions, providerTiers, readPicks, resolve } from "./pick.ts";
 import { REFERENCE_TYPE, type RunRef, compactTranscript, referenceContext, runAutocomplete } from "./references.ts";
 import { type Run, type RunLink, displayTokens, relaySystem1Notice, transcriptPath } from "./run.ts";
 import { computeStats, formatStats, latestPerRun, readAllRuns, runRecords } from "./stats.ts";
@@ -53,8 +52,8 @@ export type Delegation = "conservative" | "economical";
 export const DELEGATIONS: readonly Delegation[] = ["conservative", "economical"];
 
 export interface SubagentsConfig extends Record<string, unknown> {
-  /** `threshold`: how sure Jev must be to climb to a stronger tier or effort, from no quota pressure (`relaxed`) to full (`tight`). */
-  jev: JevConfig & { threshold: Threshold };
+  /** `threshold`: how sure Jev must be (0 to 1) to climb to a stronger tier or effort; default 0.5. */
+  jev: JevConfig & { threshold: number };
   /** The tool's first prompt guideline: hand settled implementation to cheaper tiers (`economical`, default) or delegate only clear wins (`conservative`). */
   delegation: Delegation;
   /** Legacy tier defaults; only entries matching the parent's provider apply. */
@@ -75,7 +74,7 @@ export interface SubagentsConfig extends Record<string, unknown> {
 }
 
 export const DEFAULT_CONFIG: SubagentsConfig = {
-  jev: { enabled: true, provider: "typesafe", model: "jev-latest", timeoutMs: 3_000, threshold: { ...DEFAULT_THRESHOLD } },
+  jev: { enabled: true, provider: "typesafe", model: "jev-latest", timeoutMs: 3_000, threshold: DEFAULT_THRESHOLD },
   delegation: "economical",
   tiers: {},
   providerTiers: {},
@@ -171,12 +170,6 @@ export function roleModel(
   return { model: resolved.model, thinking: resolved.thinking, source: resolved.source.model, ...(fixed.thinking ? { thinkingPinned: true as const } : {}) };
 }
 
-/** ` (auto)`, or ` (auto, p=0.5)` for a pick made under quota pressure. */
-export function jevMark(on: boolean, pressure?: number): string {
-  if (!on) return "";
-  return pressure && pressure > 0 ? ` (auto, p=${pressure.toFixed(1)})` : " (auto)";
-}
-
 const MAX_LINES = 2_000;
 const MAX_BYTES = 50 * 1024;
 const RUN_ENTRY = "subagents:run";
@@ -227,8 +220,6 @@ export interface RunView {
   classifier?: Resolved["classifier"];
   /** Where the model and thinking came from; absent on records from before it was kept. */
   source?: ChoiceSource;
-  /** The quota pressure Jev's model or effort pick was made under, when above 0. */
-  pressure?: number;
   /** Why a tier changed or the parent model was inherited. */
   note?: string;
   status: ChildState["status"];
@@ -288,7 +279,6 @@ function view(run: Run, withOutput = false): RunView {
     byJev: run.byJev,
     ...(run.classifier ? { classifier: run.classifier } : {}),
     ...(run.source ? { source: run.source } : {}),
-    ...(run.pressure ? { pressure: run.pressure } : {}),
     ...(run.note ? { note: run.note } : {}),
     status: s.status,
     ...(s.sessionFile ? { sessionFile: s.sessionFile } : {}),
@@ -340,7 +330,6 @@ export function recordedRun(v: RecordedRun): Run {
     byJev: v.byJev ?? { agent: false, model: false, thinking: false },
     ...(v.classifier ? { classifier: v.classifier } : {}),
     ...(v.source ? { source: v.source } : {}),
-    ...(typeof v.pressure === "number" && v.pressure > 0 ? { pressure: v.pressure } : {}),
     ...(typeof v.note === "string" && v.note ? { note: v.note } : {}),
     cwd: v.cwd ?? "",
     async: Boolean(v.async),
@@ -997,7 +986,7 @@ export default function subagents(pi: ExtensionAPI) {
 
   /** Jev's picks for the gaps in each item, one request per item, in parallel. */
   const plan = async (ctx: ExtensionContext, items: Item[], agents: AgentDef[], signal: AbortSignal | undefined, fork: boolean) => {
-    // A plan model pair is virtual: tiers, profiles and pressure belong to the model behind it.
+    // A plan model pair is virtual: tiers and profiles belong to the model behind it.
     const parentModel = routedModel(ctx as never) ?? ctx.model;
     const parent = { model: parentModel ? `${parentModel.provider}/${parentModel.id}` : "", thinking: pi.getThinkingLevel() };
     const available = (ctx.modelRegistry?.getAll?.() ?? []) as AvailableModel[];
@@ -1014,7 +1003,6 @@ export default function subagents(pi: ExtensionAPI) {
     const context = { fork, ...(parentTokens ? { parentTokens } : {}) };
     const askTier = Object.values(tiers.models).some(Boolean);
     const parentRequest = clip(recentTexts(ctx.sessionManager.getBranch()).user, 2_000);
-    const pressures = new Map<string, ReturnType<typeof readSelectionPressure>>();
     return Promise.all(
       items.map(async (item) => {
         const given: Given = { ...(item.agent ? { agent: item.agent } : {}), ...(item.model ? { model: item.model } : {}), ...(item.thinking ? { thinking: item.thinking } : {}) };
@@ -1033,35 +1021,8 @@ export default function subagents(pi: ExtensionAPI) {
             const pickSignal = signal ? AbortSignal.any([signal, controller.signal]) : controller.signal;
             const outcome = await askJev(ctx.modelRegistry, config.jev, { task: clip(item.task, 6_000), parent_request: parentRequest || "(none)", role: given.agent ?? "auto" }, questions, pickSignal);
             if (outcome.ok && currentSelection() === key && generation === selectionGeneration && outcome.selectionKey === key && !pickSignal.aborted) {
-              // Role choice is independent of pressure. A selected authored profile may pin either
-              // dimension, so determine the actual execution target before asking for quota.
-              const pickedRole = readPicks(outcome.answers).agent;
-              const role = pickedRole && agents.some((agent) => agent.name === pickedRole) ? pickedRole : undefined;
-              const effectiveAgent = agents.find((agent) => agent.name === (given.agent ?? role ?? "general"));
-              const effectiveFixed = fixedAgentDefaults(effectiveAgent, parent.model, available);
-              const autoTier = Boolean(questions.tier && !given.model && !effectiveFixed.model);
-              const autoEffort = Boolean(questions.effort && !given.thinking && !effectiveFixed.thinking);
-              let pressure = 0;
-              if (autoTier || autoEffort) {
-                const baseline = resolve({ ...given, agent: given.agent ?? role }, agents, undefined, tiers, parent, { available, context });
-                const targetModel = autoTier ? parent.model : ("error" in baseline ? "" : baseline.model);
-                const slash = targetModel.indexOf("/");
-                if (slash > 0 && slash < targetModel.length - 1) {
-                  const target = { provider: targetModel.slice(0, slash), id: targetModel.slice(slash + 1) };
-                  const scope = autoTier ? "shared" : "target";
-                  const pressureKey = JSON.stringify([scope, target.provider, target.id]);
-                  let snapshot = pressures.get(pressureKey);
-                  if (!snapshot) {
-                    snapshot = readSelectionPressure(ctx, target, { cwd: ctx.cwd, scope, signal: pickSignal });
-                    pressures.set(pressureKey, snapshot);
-                  }
-                  pressure = (await snapshot).p;
-                }
-              }
-              if (currentSelection() === key && generation === selectionGeneration && outcome.selectionKey === key && !pickSignal.aborted) {
-                picks = readPicks(outcome.answers, { pressure, threshold: config.jev.threshold, tiers: Object.keys(questions.tier?.criteria ?? {}) as Tier[] });
-                classifier = provenanceOf(outcome);
-              }
+              picks = readPicks(outcome.answers, { threshold: config.jev.threshold, tiers: Object.keys(questions.tier?.criteria ?? {}) as Tier[] });
+              classifier = provenanceOf(outcome);
             }
           } finally {
             pendingPicks.delete(controller);
@@ -1181,7 +1142,6 @@ export default function subagents(pi: ExtensionAPI) {
       byJev: resolved.byJev,
       ...(resolved.classifier ? { classifier: resolved.classifier } : {}),
       source: resolved.source,
-      ...(resolved.pressure ? { pressure: resolved.pressure } : {}),
       ...(resolved.tier ? { tier: resolved.tier } : {}),
       ...(resolved.note ? { note: resolved.note } : {}),
       ...(resolved.agent.maxTurns ? { maxTurns: resolved.agent.maxTurns } : {}),
@@ -1839,7 +1799,6 @@ export default function subagents(pi: ExtensionAPI) {
           return new Text(first?.type === "text" ? first.text : "", 0, 0);
         }
         const icon = (s: RunView["status"]) => glyph(theme, runTone(s));
-        const jev = (on: boolean, pressure?: number) => (on ? theme.fg("dim", jevMark(on, pressure)) : "");
         const sep = theme.fg("muted", " · ");
         const flat = (text: string) => text.replace(/\s+/gu, " ").trim();
         // Every run is exactly two clipped rows, so the block never changes height or reflows
@@ -1848,7 +1807,7 @@ export default function subagents(pi: ExtensionAPI) {
         const rows: Row[] = [];
         for (const r of d.runs) {
           rows.push({
-            left: `${icon(r.status)} ${theme.fg("accent", runLabel(r))}${sep}${r.agent}${jev(r.byJev.agent)}${sep}${shortModel(r.model)}${jev(r.byJev.model, r.pressure)}${modelSourceMark(r.source, theme)}${r.note ? theme.fg("dim", ` (${r.note})`) : ""}${sep}${r.thinking}${jev(r.byJev.thinking, r.pressure)}`,
+            left: `${icon(r.status)} ${theme.fg("accent", runLabel(r))}${sep}${r.agent}${sep}${shortModel(r.model)}${modelSourceMark(r.source, theme)}${r.note ? theme.fg("dim", ` (${r.note})`) : ""}${sep}${r.thinking}`,
             right: [formatElapsed(r.seconds * 1000), `${r.turns} turns`, ...(r.cost ? [`$${r.cost.toFixed(3)}`] : []), r.id],
           });
           const detail = r.error

@@ -3,8 +3,7 @@ import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "no
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { type ExtensionContext, initTheme } from "@earendil-works/pi-coding-agent";
-import * as usage from "@justmytwospence/pi-subscription-usage";
-import { onTestFinished, test, vi } from "vitest";
+import { onTestFinished, test } from "vitest";
 import { withEffortOrigin } from "../src/effort-origin.js";
 import { directImplementationBrief } from "../src/handoff.js";
 import type { pickImplementationEffort } from "../src/implementation-effort.js";
@@ -444,37 +443,6 @@ function deferredEffort() {
   }> = [];
   const pick: typeof pickImplementationEffort = (input) => new Promise((finish) => calls.push({ input, finish }));
   return { calls, pick };
-}
-
-for (const invalidation of ["manual", "dispose"] as const) {
-  test(`/planners cancels a pending quota wait without trusting its late answer: ${invalidation}`, async () => {
-    const reads: Array<{
-      target: { provider: string; id: string };
-      signal?: AbortSignal;
-      finish: (pressure: usage.SelectionPressure) => void;
-    }> = [];
-    const pressure = vi
-      .spyOn(usage, "readSelectionPressure")
-      .mockImplementation(
-        (_ctx, target, options) => new Promise((finish) => reads.push({ target, signal: options?.signal, finish })),
-      );
-    onTestFinished(() => pressure.mockRestore());
-    const pick = vi.fn<typeof pickImplementationEffort>().mockResolvedValue(effortPick("low"));
-    const state = await implementationScreen({ pickImplementationEffort: pick });
-    await flush();
-    assert.equal(reads.length, 1);
-    if (invalidation === "manual") {
-      for (const handler of state.mock.events.get("thinking_level_select") ?? []) await handler({}, state.context.ctx);
-    } else state.app.handleInput("\u001b");
-    assert.equal(reads[0]?.signal?.aborted, true);
-    reads[0]?.finish({ state: "ready", tier: "critical", p: 1 });
-    await flush();
-    assert.doesNotMatch(state.app.render().join("\n"), /Effort\s+low/u);
-    if (invalidation !== "dispose") state.app.handleInput("\u001b");
-    for (const handler of state.mock.events.get("session_shutdown") ?? []) await handler({}, state.context.ctx);
-    await state.opened;
-    assert.deepEqual(state.mock.thinkingLevels, []);
-  });
 }
 
 for (const change of [

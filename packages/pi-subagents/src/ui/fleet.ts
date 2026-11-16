@@ -16,7 +16,7 @@ import { type ActivityEntry, type ActivityPill, type ActivitySection, captureMai
 import type { Run } from "../run.ts";
 import { runLabel } from "../label.ts";
 import { displayTokens } from "../run.ts";
-import { type Theme, dimAll, elapsedMs, formatCost, formatCount, formatElapsed, jev, modelAndEffort, rightAlign, statusIcon } from "./format.ts";
+import { type Theme, dimAll, elapsedMs, formatCost, formatCount, formatElapsed, modelAndEffort, rightAlign, statusIcon } from "./format.ts";
 import { type SessionSource, type ViewerActions, type ViewerUI, openViewer } from "./viewer.ts";
 import { ViewerPromptState } from "./viewer-overlay.ts";
 
@@ -149,7 +149,7 @@ export function renderFleetRows({ roster, selected, current, active, stopArmed, 
       if (!run) continue;
       const on = (active && i + 1 === sel) || i + 1 === current;
       const prefix = ` ${bullet(i + 1)} `;
-      const identity = `${on ? theme.bold(theme.fg("text", runLabel(run))) : theme.fg("muted", runLabel(run))}  ${theme.fg("dim", run.agent)}${jev(run.byJev.agent, theme)}  ${dimAll(modelAndEffort(run, theme), theme)}`;
+      const identity = `${on ? theme.bold(theme.fg("text", runLabel(run))) : theme.fg("muted", runLabel(run))}  ${theme.fg("dim", run.agent)}  ${dimAll(modelAndEffort(run, theme), theme)}`;
       const cost = formatCost(run.state.usage.cost.total);
       const stats = `${formatElapsed(elapsedMs(run, now))} · ↓ ${formatCount(displayTokens(run.state.usage))} tokens${cost ? ` · ${cost}` : ""}`;
       const done = run.state.status === "running" ? "" : `${statusIcon(run.state.status, theme)} `;

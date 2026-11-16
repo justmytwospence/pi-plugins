@@ -18,7 +18,6 @@ import {
   SettingsManager,
 } from "@earendil-works/pi-coding-agent";
 import type { Component, EditorTheme, TUI } from "@earendil-works/pi-tui";
-import { readSelectionPressure } from "@justmytwospence/pi-subscription-usage";
 import { ACTIVITY_CHANGED, ACTIVITY_GONE, ACTIVITY_HOST, ACTIVITY_SECTION } from "./activity.js";
 import { openPlanningView } from "./app/frame.js";
 import { type LaneAction, type LaneInput, type LaneInputHooks, LanesPage } from "./app/lanes-page.js";
@@ -809,12 +808,7 @@ export default async function plan(pi: ExtensionAPI, dependencies: PlanDependenc
             const result = await wait(pendingJudgment, signal);
             if (!result || signal.aborted || !request.isCurrent()) return cancelled();
             if (result.kind === "fallback") return result;
-            const pressure = await wait(
-              readSelectionPressure(ctx, { provider: target.provider, id: target.modelId }, { cwd: ctx.cwd, signal }),
-              signal,
-            );
-            if (!pressure || signal.aborted || !request.isCurrent()) return cancelled();
-            return recommendTaskEffort(result, pressure);
+            return recommendTaskEffort(result);
           } catch {
             return { kind: "fallback", reason: "implementation effort is unavailable" };
           }
@@ -920,12 +914,7 @@ export default async function plan(pi: ExtensionAPI, dependencies: PlanDependenc
         model: settings.jevModel?.trim() || DEFAULT_JEV_MODEL,
       });
       if (judgment.kind !== "system1") return undefined;
-      const pressure = await readSelectionPressure(
-        ctx,
-        { provider: pair.planner.provider, id: pair.planner.modelId },
-        { cwd: ctx.cwd },
-      );
-      const recommended = recommendTaskEffort(judgment, pressure);
+      const recommended = recommendTaskEffort(judgment);
       if (recommended.kind !== "system1") return undefined;
       return normalizedSpec(ctx, pair.planner, recommended.thinkingLevel).thinkingLevel;
     } catch {
