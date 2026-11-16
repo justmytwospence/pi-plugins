@@ -11,7 +11,8 @@ import { embeddedEditorFactory } from "./editor.ts";
 import { whileBlocked } from "./herdr.ts";
 import { DESCRIPTION, PROMPT_GUIDELINES, PROMPT_SNIPPET } from "./prompt.ts";
 import { reconcile } from "./reconcile.ts";
-import { type Answer, type DialogResult, type Details, errorResult, toolResult, userWords } from "./result.ts";
+import { imageBlocks } from "./images.ts";
+import { type Answer, type DialogResult, type Details, errorResult, shortenImagePaths, toolResult, userWords } from "./result.ts";
 import { askWithDialogs } from "./rpc.ts";
 import { NO_UI_MESSAGE, normalize, type Params, ParamsSchema, type Question, TOOL_NAME, validate } from "./schema.ts";
 import { offerUserWords } from "./user-words.ts";
@@ -66,7 +67,7 @@ export default function askUserQuestion(pi: ExtensionAPI) {
       if (invalid) return errorResult(questions, invalid.error, invalid.message);
       if (signal?.aborted) return toolResult({ questions, answers: [], cancelled: true });
       const result = await whileBlocked(pi.events, blockedLabel(questions), () => ask(pi, ctx, questions, signal));
-      return toolResult({ questions, ...result });
+      return toolResult({ questions, ...result }, await imageBlocks(result.images ?? [], ctx.model));
     },
 
     renderCall(args, theme, context) {
@@ -107,7 +108,7 @@ function resultSummary(details: Details, content: readonly { type: string; text?
   if (details.cancelled) return "Declined";
   const parts = details.answers
     .filter((a) => a.kind !== "skipped")
-    .map((a) => `${a.header || a.question}: ${a.kind === "unanswered" ? "Unanswered" : (a.answer ?? "").replace(/\s*\n\s*/gu, " ")}`);
+    .map((a) => `${a.header || a.question}: ${a.kind === "unanswered" ? "Unanswered" : shortenImagePaths(a.answer ?? "", details.images).replace(/\s*\n\s*/gu, " ")}`);
   return parts.join(" · ") || "no answers";
 }
 
@@ -144,16 +145,16 @@ export function resultLines(details: Details, content: readonly { type: string; 
     return [theme.fg("error", first?.type === "text" ? (first.text ?? details.error) : details.error)];
   }
   if (details.cancelled) return [theme.fg("warning", "Declined")];
-  const lines = details.answers.filter((a) => a.kind !== "skipped").map((a) => answerLine(a, theme));
-  if (details.note) lines.push(theme.fg("dim", `note: ${details.note.replace(/\s+/gu, " ")}`));
+  const lines = details.answers.filter((a) => a.kind !== "skipped").map((a) => answerLine(a, theme, details.images));
+  if (details.note) lines.push(theme.fg("dim", `note: ${shortenImagePaths(details.note, details.images).replace(/\s+/gu, " ")}`));
   return lines;
 }
 
-function answerLine(a: Answer, theme: Theme): string {
+function answerLine(a: Answer, theme: Theme, images?: readonly string[]): string {
   const header = theme.fg("accent", a.header || a.question);
-  const note = a.notes ? theme.fg("dim", ` · note: ${a.notes.replace(/\s+/gu, " ")}`) : "";
+  const note = a.notes ? theme.fg("dim", ` · note: ${shortenImagePaths(a.notes, images).replace(/\s+/gu, " ")}`) : "";
   if (a.kind === "unanswered") return `${theme.fg("warning", "- ")}${header}: ${theme.fg("warning", "Unanswered")}${note}`;
-  const value = (a.answer ?? "").replace(/\s*\n\s*/gu, " ");
+  const value = shortenImagePaths(a.answer ?? "", images).replace(/\s*\n\s*/gu, " ");
   const wrote = a.kind === "custom" ? theme.fg("muted", "(wrote) ") : "";
   return `${glyph(theme, "done")} ${header}: ${wrote}${value}${note}`;
 }

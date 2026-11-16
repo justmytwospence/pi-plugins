@@ -32,7 +32,11 @@ export interface Details {
   error?: ErrorCode;
   /** A note on the answers as a whole, added on Review. */
   note?: string;
+  /** Paths of images pasted into the answers, in paste order. */
+  images?: string[];
 }
+
+export type ImageBlock = { type: "image"; data: string; mimeType: string };
 
 /** What a dialog returns: one answer per question when submitted, the answered ones when cancelled. */
 export interface DialogResult {
@@ -40,6 +44,17 @@ export interface DialogResult {
   answers: Answer[];
   /** A note on the answers as a whole, added on Review. */
   note?: string;
+  /** Paths of images pasted into the answers, in paste order. */
+  images?: string[];
+}
+
+/** Pasted image paths shown as `[image N]`. */
+export function shortenImagePaths(text: string, images: readonly string[] | undefined): string {
+  let out = text;
+  images?.forEach((path, i) => {
+    out = out.split(path).join(`[image ${i + 1}]`);
+  });
+  return out;
 }
 
 export const DECLINED = "User declined to answer questions";
@@ -82,15 +97,30 @@ function segment(a: Answer): string {
   return `${parts.join(". ")}.`;
 }
 
-export function envelope(details: Details): string {
+export function envelope(details: Details, attached: readonly string[] = []): string {
   if (details.cancelled) return DECLINED;
   const note = details.note ? ` User notes on all answers: ${details.note}.` : "";
   const answers = details.answers.filter((a) => a.kind !== "skipped");
-  return `${PREFIX} ${answers.map(segment).join(" ")}${note} ${SUFFIX}`;
+  let pasted = "";
+  if (details.images?.length) {
+    pasted = " The user pasted images, referenced by path in the answers.";
+    if (attached.length) pasted += ` Attached below in this order: ${attached.join(", ")}.`;
+    const rest = details.images.filter((p) => !attached.includes(p));
+    if (rest.length) pasted += ` Not attached (view them with the read tool): ${rest.join(", ")}.`;
+  }
+  return `${PREFIX} ${answers.map(segment).join(" ")}${note}${pasted} ${SUFFIX}`;
 }
 
-export function toolResult(details: Details) {
-  return { content: [{ type: "text" as const, text: envelope(details) }], details };
+export function toolResult(details: Details): { content: [{ type: "text"; text: string }]; details: Details };
+export function toolResult(
+  details: Details,
+  images: ReadonlyArray<{ path: string; block: ImageBlock }>,
+): { content: Array<{ type: "text"; text: string } | ImageBlock>; details: Details };
+export function toolResult(details: Details, images: ReadonlyArray<{ path: string; block: ImageBlock }> = []) {
+  return {
+    content: [{ type: "text" as const, text: envelope(details, images.map((i) => i.path)) }, ...images.map((i) => i.block)],
+    details,
+  };
 }
 
 /** What the user told the agent, for pi-sticky-last-prompt's bar: the answers and notes, or undefined when declined. */
@@ -100,7 +130,7 @@ export function userWords(details: Details | undefined): string | undefined {
     .filter((a) => a.kind !== "skipped" && a.kind !== "unanswered" && a.answer)
     .map((a) => (a.notes ? `${a.answer} (${a.notes})` : String(a.answer)));
   if (details.note) parts.push(details.note);
-  return parts.length ? parts.join(" · ") : undefined;
+  return parts.length ? shortenImagePaths(parts.join(" · "), details.images) : undefined;
 }
 
 export function errorResult(questions: Question[], error: ErrorCode, message: string) {

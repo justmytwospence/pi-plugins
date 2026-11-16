@@ -62,7 +62,7 @@ format(d, 'yyyy')
 ```. user notes: only if it stays small. You can now continue with the user's answers in mind.
 ```
 
-Multi-select answers are the selected labels joined by `, ` (typed text counts as one more item). A question left blank on the Review tab reads `"…"="Unanswered"`. A follow-up that was never shown is left out of the text. Declining gives `User declined to answer questions`. The tool result's `details` carry the questions and one structured answer per question (`kind`: `option`, `custom`, `multi`, `unanswered`, or `skipped` for a follow-up that was never shown, plus `selected`, `notes` and `preview`). The transcript shows one line per answer, or `Declined`.
+Multi-select answers are the selected labels joined by `, ` (typed text counts as one more item). A question left blank on the Review tab reads `"…"="Unanswered"`. A follow-up that was never shown is left out of the text. Images pasted with Ctrl+V and still in the submitted text are attached to the tool result as image blocks when the model accepts images (resized like the `read` tool's); the text names them, and the transcript shows them as `[image N]`. `details.images` lists their paths. Declining gives `User declined to answer questions`. The tool result's `details` carry the questions and one structured answer per question (`kind`: `option`, `custom`, `multi`, `unanswered`, or `skipped` for a follow-up that was never shown, plus `selected`, `notes` and `preview`). The transcript shows one line per answer, or `Declined`.
 
 ## The dialog
 
@@ -76,6 +76,7 @@ It takes the place of the editor, like Claude Code's: the transcript stays visib
 | Enter (`tui.select.confirm`) | choose the highlighted option; on `Type something.` open the editor; in multi-select, finish the question (with nothing checked, the highlighted option alone) |
 | Space | check or uncheck an option (multi-select); on `Type something.` open the editor if nothing is typed yet |
 | Typing or paste on `Type something.` | open the answer field and retain the first character, including `n`, `j`, `k`, or digits |
+| Ctrl+V (`app.clipboard.pasteImage`) | paste from the clipboard into the open field, or into the answer field (the Review note on Review): copied files as paths, an image as a temporary `pi-clipboard-*` file path, otherwise text |
 | `n` on an offered option, or Alt+N or Ctrl+G on any row | add a note to the question's answer (fullscreen's scroll-to-bottom takes Ctrl+G when bound there) |
 | Tab, Shift+Tab, Right, Left | next or previous question or Review (several questions only) |
 | Esc (`tui.select.cancel`) | in an editor, leave it keeping the draft; otherwise decline the questionnaire |
@@ -108,6 +109,7 @@ Nothing external: no network access, no model calls, no files read or written.
 
 - Only one extension can own the `ask_user_question` name; see [Install](#install).
 - Notes and Markdown previews in a side box need the terminal UI.
+- Pasting images needs a native clipboard (macOS, Windows, Linux X11); RPC and Switchyard dialogs answer in text only.
 
 ## Development
 

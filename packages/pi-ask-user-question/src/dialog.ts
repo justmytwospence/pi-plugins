@@ -22,6 +22,7 @@ import {
   visibleWidth,
   wrapTextWithAnsi,
 } from "@earendil-works/pi-tui";
+import { type ClipboardReader, readClipboard, saveClipboardImage } from "./clipboard.ts";
 import { type EditorCreator, type ProseEditor, beginComposition, compositionState, editorOwnsCancel, inline } from "./editor.ts";
 import { BOX_CHROME, box, columns, contentWidth, type Natural, SIDE_ROWS, sideBySide, split, STACKED_ROWS } from "./preview.ts";
 import { type Answer, type Choice, type DialogResult, makeAnswer, shownFor, skippedAnswer } from "./result.ts";
@@ -76,6 +77,10 @@ export class QuestionDialog implements Component, Focusable {
   private reviewNote = "";
   private editing: Editing | undefined;
   private emptyAnswer = false;
+  /** Paths of clipboard images pasted into any field. */
+  private readonly pasted: string[] = [];
+  private notice: string | undefined;
+  private readonly readClipboard: ClipboardReader;
   private finished = false;
   private hasFocus = false;
   private cache: { width: number; lines: string[] } | undefined;
@@ -92,7 +97,9 @@ export class QuestionDialog implements Component, Focusable {
     done: (result: DialogResult) => void,
     signal?: AbortSignal,
     createEditor?: EditorCreator,
+    readClipboardFn: ClipboardReader = readClipboard,
   ) {
+    this.readClipboard = readClipboardFn;
     this.tui = tui;
     this.theme = theme;
     this.keybindings = keybindings;
@@ -146,6 +153,8 @@ export class QuestionDialog implements Component, Focusable {
 
   private input(data: string): void {
     const kb = this.keybindings;
+    this.notice = undefined;
+    if (kb.matches(data, "app.clipboard.pasteImage" as never)) return this.paste();
     if (this.editing) {
       this.emptyAnswer = false;
       const editor = this.editor();
@@ -221,6 +230,36 @@ export class QuestionDialog implements Component, Focusable {
       else if (slot.choice) this.advance();
     }
     else if (key === "n") this.openEditor("notes");
+  }
+
+  /** The paste key: clipboard files, image or text into the open field (opening the answer field, or Review's note, first). */
+  private paste(): void {
+    if (!this.editing) this.openEditor(this.onReview() ? "notes" : "custom");
+    const target = this.editor();
+    if (target) void this.pasteInto(target);
+  }
+
+  private async pasteInto(editor: ProseEditor): Promise<void> {
+    let content: Awaited<ReturnType<ClipboardReader>> | Error;
+    try {
+      content = await this.readClipboard();
+    } catch (e) {
+      content = e instanceof Error ? e : new Error(String(e));
+    }
+    // The dialog closed or moved to another field while the clipboard was read.
+    if (this.finished || this.editor() !== editor) return;
+    if (content instanceof Error) this.notice = `Paste failed: ${content.message}`;
+    else if (!content) this.notice = "Nothing to paste";
+    else if (content.kind === "files") insertSpaced(editor, content.paths.join(" "));
+    else if (content.kind === "image") {
+      const saved = saveClipboardImage(content.bytes);
+      if (!saved) this.notice = "Clipboard image format is not supported";
+      else {
+        this.pasted.push(saved.path);
+        insertSpaced(editor, saved.path);
+      }
+    } else insertRaw(editor, content.text);
+    this.refresh();
   }
 
   private confirm(q: Question, slot: Slot): void {
@@ -406,7 +445,9 @@ export class QuestionDialog implements Component, Focusable {
       if (cancelled && (!slot.choice || !shown[i])) return;
       answers.push(shown[i] ? makeAnswer(this.questions, i, slot.choice, slot.note) : skippedAnswer(this.questions, i));
     });
-    this.done({ cancelled, answers, ...(!cancelled && this.reviewNote ? { note: this.reviewNote } : {}) });
+    const texts = [...answers.flatMap((a) => [a.answer ?? "", a.notes ?? ""]), this.reviewNote];
+    const images = cancelled ? [] : [...new Set(this.pasted)].filter((p) => texts.some((t) => t.includes(p)));
+    this.done({ cancelled, answers, ...(!cancelled && this.reviewNote ? { note: this.reviewNote } : {}), ...(images.length ? { images } : {}) });
   }
 
   private refresh(): void {
@@ -502,7 +543,9 @@ export class QuestionDialog implements Component, Focusable {
 
     if (this.editing) {
       const title =
-        this.editing === "notes"
+        this.notice
+          ? t.fg("warning", this.notice)
+          : this.editing === "notes"
           ? t.fg("accent", t.bold("Note"))
           : this.emptyAnswer
             ? t.fg("warning", "Write an answer before continuing.")
@@ -616,7 +659,7 @@ export class QuestionDialog implements Component, Focusable {
     if (this.reviewNote && this.editing !== "notes") out.push("", ...hang(" ", t.fg("dim", `note: ${oneLine(this.reviewNote)}`), width));
     if (!this.editing && draft !== this.reviewNote) out.push(...hang(" ", t.fg("warning", `unsaved note: ${oneLine(draft) || "(cleared)"}`), width));
     if (this.editing) {
-      out.push("", ...hang(" ", t.fg("accent", t.bold("Note")), width), "", ...inline(` ${t.fg("accent", "›")} `, "", this.reviewNotes, width, t), "");
+      out.push("", ...hang(" ", this.notice ? t.fg("warning", this.notice) : t.fg("accent", t.bold("Note")), width), "", ...inline(` ${t.fg("accent", "›")} `, "", this.reviewNotes, width, t), "");
       out.push(...hintLines(`${keyHint("tui.select.confirm", "submit")}  ${keyHint("tui.select.cancel", "cancel")}`, width));
       return out;
     }
@@ -638,6 +681,20 @@ export class QuestionDialog implements Component, Focusable {
 function concealed(label: string): string {
   const [first = " ", ...rest] = [...label];
   return `\x1b[7;8m${first}\x1b[27m${rest.join("")}\x1b[28m`;
+}
+
+function insertRaw(editor: ProseEditor, text: string): void {
+  if (editor.insertTextAtCursor) editor.insertTextAtCursor(text);
+  else editor.handleInput(`\x1b[200~${text}\x1b[201~`);
+}
+
+/** Inserts `text` set apart from adjoining non-space characters, as Pi's prompt does for pasted paths. */
+function insertSpaced(editor: ProseEditor, text: string): void {
+  const cursor = editor.getCursor?.();
+  const line = cursor ? (editor.getText().split("\n")[cursor.line] ?? "") : "";
+  const before = cursor && cursor.col > 0 ? line[cursor.col - 1] : "";
+  const after = cursor ? line[cursor.col] : "";
+  insertRaw(editor, `${before && !/\s/u.test(before) ? " " : ""}${text}${after && !/\s/u.test(after) ? " " : ""}`);
 }
 
 /** Text input, not control keys: preserve the original bytes for the editor. */

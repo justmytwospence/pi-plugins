@@ -72,6 +72,7 @@ The questionnaire replaces the editor while leaving the transcript above it. Mul
 | Up/Down | Move through rows, wrapping at either end. |
 | `j`/`k` or `1`–`9` on offered options | Navigate or highlight a row without submitting it. |
 | Typing or paste on `Type something.` | Start an answer immediately; `n`, `j`, `k`, and digits are text here. |
+| Ctrl+V (`app.clipboard.pasteImage`) | Paste from the clipboard into the open field (the Review note on Review): copied files as paths, an image as a temporary file path, otherwise text. |
 | Enter | Choose a single answer, open free-text entry, or finish a multi-select question. |
 | Space | Toggle a checkbox in multi-select. |
 | `n` on an offered option, or Alt+N or Ctrl+G on any row | Add a note, distinct from the free-text answer. |
@@ -90,7 +91,7 @@ For our terminal setup, text owns its keys, highlights do not submit, batches re
 
 ## Results and host differences
 
-The model receives readable answer text beginning `User has answered your questions`, with question-to-answer pairs, selected previews when applicable, and notes. Multi-select labels are joined by commas. Structured result `details` also contain one answer per question, with kinds `option`, `custom`, `multi`, `unanswered`, or `skipped` (a follow-up never shown, which the answer text leaves out), plus selections, notes, and previews.
+The model receives readable answer text beginning `User has answered your questions`, with question-to-answer pairs, selected previews when applicable, and notes. Multi-select labels are joined by commas. Images pasted with Ctrl+V and still in the submitted text are attached as image blocks when the model accepts images, shown as `[image N]` in the transcript and listed in `details.images`; this needs a native clipboard (macOS, Windows, Linux X11). Structured result `details` also contain one answer per question, with kinds `option`, `custom`, `multi`, `unanswered`, or `skipped` (a follow-up never shown, which the answer text leaves out), plus selections, notes, and previews.
 
 Declining produces `User declined to answer questions`. It is not a tool failure requiring another questionnaire. Blank questions submitted from Review produce `Unanswered`, which is distinct from declining the whole call.
 

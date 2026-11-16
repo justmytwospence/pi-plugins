@@ -1,5 +1,5 @@
 import { expect, test } from "vitest";
-import { DECLINED, envelope, makeAnswer, skippedAnswer, toolResult, userWords } from "../src/result.ts";
+import { DECLINED, envelope, makeAnswer, shortenImagePaths, skippedAnswer, toolResult, userWords } from "../src/result.ts";
 import { q } from "./harness.ts";
 
 const questions = [
@@ -59,4 +59,22 @@ test("userWords: the answers and notes the user gave, nothing when declined", ()
   expect(userWords({ questions, answers, cancelled: true })).toBeUndefined();
   expect(userWords({ questions, answers: [makeAnswer(questions, 3, undefined)], cancelled: false })).toBeUndefined();
   expect(userWords(undefined)).toBeUndefined();
+});
+
+test("pasted images: attached ones are named in order, the rest point to the read tool", () => {
+  const answers = [makeAnswer(questions, 0, { kind: "custom", text: "see /t/p1.png and /t/p2.png" })];
+  const details = { questions, answers, cancelled: false, images: ["/t/p1.png", "/t/p2.png"] };
+  const result = toolResult(details, [{ path: "/t/p1.png", block: { type: "image", data: "QQ==", mimeType: "image/png" } }]);
+  expect(result.content).toHaveLength(2);
+  expect(result.content[1]).toEqual({ type: "image", data: "QQ==", mimeType: "image/png" });
+  const text = (result.content[0] as { text: string }).text;
+  expect(text).toContain("Attached below in this order: /t/p1.png.");
+  expect(text).toContain("Not attached (view them with the read tool): /t/p2.png.");
+  expect(envelope({ questions, answers, cancelled: false })).not.toContain("pasted");
+});
+
+test("image paths shorten to [image N]", () => {
+  expect(shortenImagePaths("a p1 b", ["p1"])).toBe("a [image 1] b");
+  const answers = [makeAnswer(questions, 0, { kind: "custom", text: "look /t/p1.png" })];
+  expect(userWords({ questions, answers, cancelled: false, images: ["/t/p1.png"] })).toBe("look [image 1]");
 });

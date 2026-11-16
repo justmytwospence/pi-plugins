@@ -2,6 +2,7 @@
 // bus events and dialog calls, and drives the question dialog with keys.
 import { initTheme } from "@earendil-works/pi-coding-agent";
 import { getKeybindings, stripTerminalSequences } from "@earendil-works/pi-tui";
+import type { ClipboardReader } from "../src/clipboard.ts";
 import { QuestionDialog } from "../src/dialog.ts";
 import type { DialogResult } from "../src/result.ts";
 import type { Question } from "../src/schema.ts";
@@ -101,6 +102,14 @@ export function tuiContext(keys: string[], options: { columns?: number; frames?:
   return { mode: "tui", hasUI: true, ui, frames };
 }
 
+/** pi-tui's keybindings know no `app.*` ids; Pi's own manager binds paste-image to Ctrl+V. */
+export function appKeybindings() {
+  const base = getKeybindings();
+  return Object.assign(Object.create(base), {
+    matches: (data: string, id: string) => (id === "app.clipboard.pasteImage" ? data === "\x16" : (base as any).matches(data, id)),
+  });
+}
+
 export function fakeTui(columns = 100) {
   return { requestRender: () => undefined, terminal: { columns, rows: 40 } } as any;
 }
@@ -119,9 +128,9 @@ export function plain(lines: string[]): string[] {
 }
 
 /** Open a dialog directly and press `keys`; resolves with the result (or undefined if still open). */
-export function dialog(questions: Question[], keys: string[], options: { columns?: number; signal?: AbortSignal } = {}) {
+export function dialog(questions: Question[], keys: string[], options: { columns?: number; signal?: AbortSignal; readClipboard?: ClipboardReader } = {}) {
   let result: DialogResult | undefined;
-  const d = new QuestionDialog(fakeTui(options.columns), plainTheme, getKeybindings() as any, questions, (r) => (result = r), options.signal);
+  const d = new QuestionDialog(fakeTui(options.columns), plainTheme, appKeybindings() as any, questions, (r) => (result = r), options.signal, undefined, options.readClipboard);
   d.focused = true;
   const frames = drive(d, keys, [], options.columns);
   return { dialog: d, frames, get result() {
@@ -138,3 +147,6 @@ export function q(question: string, header: string, labels: string[], extra: Par
     ...extra,
   };
 }
+
+/** Enough of a PNG for its signature to be recognized. */
+export const PNG = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 13, 0x49, 0x48, 0x44, 0x52]);

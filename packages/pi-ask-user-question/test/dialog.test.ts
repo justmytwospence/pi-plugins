@@ -1,7 +1,9 @@
 import { visibleWidth } from "@earendil-works/pi-tui";
-import { describe, expect, test } from "vitest";
+import { existsSync, rmSync } from "node:fs";
+import { afterEach, describe, expect, test, vi } from "vitest";
 import { split } from "../src/preview.ts";
-import { dialog, KEYS, q } from "./harness.ts";
+import type { ClipboardContent } from "../src/clipboard.ts";
+import { dialog, KEYS, PNG, q } from "./harness.ts";
 
 const { up, down, right, left, enter, esc, tab, shiftTab, space } = KEYS;
 const type = (text: string) => [...text];
@@ -431,4 +433,95 @@ test("no rendered line is wider than the terminal", () => {
       for (const line of d.dialog.render(columns)) expect(visibleWidth(line), `${columns}: ${line}`).toBeLessThanOrEqual(columns);
     }
   }
+});
+
+describe("clipboard paste", () => {
+  const CTRL_V = "\x16";
+  const made: string[] = [];
+  afterEach(() => {
+    for (const p of made.splice(0)) rmSync(p, { force: true });
+  });
+  const reader = (c: ClipboardContent | Error) => async () => {
+    if (c instanceof Error) throw c;
+    return c;
+  };
+  const image = reader({ kind: "image", bytes: PNG });
+  const track = (text: string) => {
+    const m = /\S*pi-clipboard-[\w-]+\.png/u.exec(text);
+    if (m) made.push(m[0]);
+    return m?.[0];
+  };
+  const answerOf = (d: ReturnType<typeof dialog>, i = 0) => d.result?.answers[i]?.answer ?? "";
+
+  test("Ctrl+V pastes an image as a temp path and attaches it on submit", async () => {
+    const d = dialog([library], [CTRL_V], { readClipboard: image });
+    await vi.waitFor(() => expect(screen(d.dialog.render(100).slice())).toMatch(/pi-clipboard-/u));
+    d.dialog.handleInput(enter);
+    const path = track(answerOf(d))!;
+    expect(path).toMatch(/\/pi-clipboard-[\w-]+\.png$/u);
+    expect(existsSync(path)).toBe(true);
+    expect(d.result?.images).toEqual([path]);
+  });
+
+  test("a space is put between typed text and the path", async () => {
+    const d = dialog([library], [down, down, ..."see", CTRL_V], { readClipboard: image });
+    await vi.waitFor(() => expect(screen(d.dialog.render(100))).toMatch(/pi-clipboard-/u));
+    d.dialog.handleInput(enter);
+    expect(answerOf(d)).toMatch(/^see \S+pi-clipboard-[\w-]+\.png$/u);
+    track(answerOf(d));
+  });
+
+  test("copied files paste as paths and are not attached", async () => {
+    const d = dialog([library], [CTRL_V], { readClipboard: reader({ kind: "files", paths: ["/x/a.png", "/x/b.txt"] }) });
+    await vi.waitFor(() => expect(screen(d.dialog.render(100))).toContain("/x/a.png /x/b.txt"));
+    d.dialog.handleInput(enter);
+    expect(answerOf(d)).toBe("/x/a.png /x/b.txt");
+    expect(d.result?.images).toBeUndefined();
+  });
+
+  test("clipboard text is inserted as text", async () => {
+    const d = dialog([library], [CTRL_V], { readClipboard: reader({ kind: "text", text: "hello there" }) });
+    await vi.waitFor(() => expect(screen(d.dialog.render(100))).toContain("hello there"));
+  });
+
+  test("a pasted image removed from the text is not attached", async () => {
+    const d = dialog([library], [CTRL_V], { readClipboard: image });
+    await vi.waitFor(() => expect(screen(d.dialog.render(100))).toMatch(/pi-clipboard-/u));
+    track(screen(d.dialog.render(100)));
+    d.dialog.handleInput("\x15"); // ctrl+u clears to the line start
+    for (const k of "plain") d.dialog.handleInput(k);
+    d.dialog.handleInput(enter);
+    expect(answerOf(d)).toBe("plain");
+    expect(d.result?.images).toBeUndefined();
+  });
+
+  test("an empty clipboard and a failed read show a notice that the next key clears", async () => {
+    const empty = dialog([library], [CTRL_V], { readClipboard: reader(undefined) });
+    await vi.waitFor(() => expect(screen(empty.dialog.render(100))).toContain("Nothing to paste"));
+    empty.dialog.handleInput("x");
+    expect(screen(empty.dialog.render(100))).not.toContain("Nothing to paste");
+    const failed = dialog([library], [CTRL_V], { readClipboard: reader(new Error("boom")) });
+    await vi.waitFor(() => expect(screen(failed.dialog.render(100))).toContain("Paste failed: boom"));
+  });
+
+  test("on Review, Ctrl+V pastes into the note", async () => {
+    const two = [library, features];
+    const d = dialog(two, [enter, space, enter, CTRL_V], { readClipboard: image });
+    await vi.waitFor(() => expect(screen(d.dialog.render(100))).toMatch(/pi-clipboard-/u));
+    track(screen(d.dialog.render(100)));
+    d.dialog.handleInput(enter); // saves the note
+    d.dialog.handleInput(enter); // Submit
+    expect(d.result?.note).toMatch(/pi-clipboard-/u);
+    expect(d.result?.images).toHaveLength(1);
+  });
+
+  test("a read that finishes after the dialog was declined changes nothing", async () => {
+    let release!: () => void;
+    const slow = () => new Promise<ClipboardContent>((resolve) => (release = () => resolve({ kind: "image", bytes: PNG })));
+    const d = dialog([library], [CTRL_V, esc, esc], { readClipboard: slow });
+    expect(d.result?.cancelled).toBe(true);
+    release();
+    await new Promise((r) => setTimeout(r, 10));
+    expect(d.result?.images).toBeUndefined();
+  });
 });
