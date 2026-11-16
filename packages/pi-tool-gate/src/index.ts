@@ -1400,13 +1400,20 @@ export default function toolGate(pi: ExtensionAPI) {
     hostCtx = undefined;
   });
 
+  // The snapshot sits at a fixed position right after the leading system prompt, so the request
+  // prefix stays byte-identical until settings change. Appending it at the tail and removing the
+  // previous copy rewrote history on every request and defeated provider prompt caching.
+  // Filtering busy settings notices is deterministic, so it keeps the prefix stable too.
   pi.on("context_with_system", (event) => {
     modeSettingsNoticePending = false;
+    const rest = event.messages.filter(message => message.role !== "custom" ||
+      (message.customType !== MODE_GUIDANCE_TYPE && message.customType !== MODE_SETTINGS_NOTICE_TYPE));
+    const head = rest[0]?.role === "system" ? 1 : 0;
     return {
       messages: [
-        ...event.messages.filter(message => message.role !== "custom" ||
-          (message.customType !== MODE_GUIDANCE_TYPE && message.customType !== MODE_SETTINGS_NOTICE_TYPE)),
-        { role: "custom", customType: MODE_GUIDANCE_TYPE, content: currentModeGuidance(), display: false, timestamp: Date.now() },
+        ...rest.slice(0, head),
+        { role: "custom", customType: MODE_GUIDANCE_TYPE, content: currentModeGuidance(), display: false, timestamp: 0 },
+        ...rest.slice(head),
       ],
     };
   });

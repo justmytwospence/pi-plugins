@@ -916,8 +916,10 @@ describe("request-local mode guidance", () => {
     expect(guidance[0]).toEqual({
       role: "custom", customType: MODE_GUIDANCE_TYPE, content: modeGuidanceText(state), display: false, timestamp: expect.any(Number),
     });
-    expect(messages.at(-1)).toBe(guidance[0]);
+    // Fixed position after the leading system prompt keeps the cached request prefix stable.
+    expect(messages[messages[0]?.role === "system" ? 1 : 0]).toBe(guidance[0]);
   };
+  const withoutGuidance = (messages: any[]) => messages.filter(message => message.role !== "custom" || message.customType !== MODE_GUIDANCE_TYPE);
   const notices = (s: ReturnType<typeof setup>) => s.h.messages.filter(({ message }) => message.customType === MODE_SETTINGS_NOTICE_TYPE);
 
   test("first and repeated/tool-continuation requests replace only gate snapshots and settings notices, without persistence", async () => {
@@ -939,14 +941,16 @@ describe("request-local mode guidance", () => {
     const messages = [...s.h.messages];
     const first = await snapshot(s, incoming as any);
     expect(first).not.toBe(incoming);
-    expect(first.slice(0, -1)).toEqual(preserved);
-    first.slice(0, -1).forEach((message, index) => expect(message).toBe(preserved[index]));
+    expect(withoutGuidance(first)).toEqual(preserved);
+    withoutGuidance(first).forEach((message, index) => expect(message).toBe(preserved[index]));
     expect(incoming).toEqual(before);
     expectState(first, { workflow: "work", approval: "auto", denyInsteadOfPrompting: false });
     for (const request of [first, [...first, assistant, result]]) {
       const next = await snapshot(s, request);
       expectState(next, { workflow: "work", approval: "auto", denyInsteadOfPrompting: false });
-      expect(next.slice(0, -1)).toEqual(request.filter(message => message.customType !== MODE_GUIDANCE_TYPE || message.role !== "custom"));
+      expect(withoutGuidance(next)).toEqual(withoutGuidance(request));
+      // Unchanged settings: the earlier request is a byte-identical prefix of the next one.
+      expect(JSON.stringify(next.slice(0, first.length))).toBe(JSON.stringify(first));
     }
     expect(s.h.entries).toEqual(entries);
     expect(s.h.messages).toEqual(messages);
@@ -1102,7 +1106,7 @@ describe("request-local mode guidance", () => {
       await s.h.emit("before_agent_start", { prompt: "x" }, s.ctx);
       const messages = await snapshot(s);
       expectState(messages, { workflow, approval: "auto", denyInsteadOfPrompting: false });
-      expect(messages.at(-1).content).not.toContain("pi-plan-mode");
+      expect(messages.find(message => message.customType === MODE_GUIDANCE_TYPE).content).not.toContain("pi-plan-mode");
     }
     expect(notices(s)).toEqual([]);
   });
