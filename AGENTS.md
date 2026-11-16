@@ -10,6 +10,10 @@ Switchyard owns lifecycle, synchronization and security; plugins own within-sess
 
 When adding or changing functionality anywhere under `packages/`, read `packages/pi-status-footer/AGENTS.md`, assess footer impact, and update relevant state publications, controls, rendering, tests and public documentation in the same logical change. Those component-local instructions apply to integration work in sibling plugins; discovering them must not depend on editing the footer first. If there is no footer impact, explicitly state that assessment in the completion response.
 
+## Prompt-cache integration
+
+A provider caches each request's prefix, so anything that changes earlier parts of a request re-bills the whole conversation on every call. That happened twice (plan-mode exec guidance, tool-gate mode guidance) and burned several days of quota. Handlers of `context`, `context_with_system` and `before_provider_request`, `before_agent_start` results that return `systemPrompt`, and per-request `setActiveTools` changes must keep requests append-only. Never move, remove or re-stamp a message after it was sent; put request-local text at the tail once and re-insert it there (see `packages/pi-tool-gate/src/guidance-anchors.ts`). State the cache impact of such a change in its completion response. `scripts/test-cache-prefix.mjs` (in `npm test`) checks the whole suite's real Anthropic payload, and pi-cache-guard's alarm catches what tests miss; never add an extension that shapes requests to that test's skip list.
+
 ## Checks
 
 - Root: `npm ci`, then `npm test` for actual Pi loader selection/registration tests.
