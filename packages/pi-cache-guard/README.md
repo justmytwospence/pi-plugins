@@ -99,7 +99,11 @@ Never held: commands (`/...`), shell input (`!...`), steering and follow-ups whi
 
 ## Status clock
 
-The `cache-guard` status reads `cache 4:12` (time left), `cache ~4:12` (estimated time left, without a guaranteed minimum), `cache cold`, `cache cold (model)` or `cache cold?` (probably cold: a typical lifetime passed, or a long idle without one). It updates every second. pi-status-footer folds it into its context row.
+The `cache-guard` status reads `cache 4:12` (time left), `cache ~4:12` (estimated time left, without a guaranteed minimum), `cache cold`, `cache cold (model)` or `cache cold?` (probably cold: a typical lifetime passed, or a long idle without one). `cache broken` means the [alarm](#broken-cache-alarm) is up. It updates every second. pi-status-footer folds it into its context row.
+
+## Broken-cache alarm
+
+A cache that keeps missing right after the previous request, with no long idle and no model switch to explain it, means something is changing the start of each request (an extension that rewrites history, for instance), so the whole conversation is re-billed on every call. After `alarm.misses` such requests in a row (default 3) cache guard says so with an error notification (naming the tokens and cost re-billed), the held-prompt sound or Herdr notification, and the status `cache broken`, which stays until a request hits the cache again. With `alarm.abort` (default on) it also stops the run, in a subagent too, so a broken prefix costs a few requests, not a night. It fires once per streak; `/cache-guard off` does not mute it, `alarm.enabled: false` does. A reload does not clear the fault; update or disable the extension that changed the request, then `/reload`.
 
 ## Trimming tool output (classifier)
 
@@ -171,6 +175,7 @@ Pi reads every setting except `warm` and `warn.confirmSeconds`, which are for po
 {
   "enabled": true,
   "warn": { "enabled": true, "minTokens": 100000, "idleMinutes": 180, "sound": "Basso" },
+  "alarm": { "enabled": true, "misses": 3, "abort": true },
   "herdr": { "enabled": true, "expiringMinutes": 10 },
   "jev": { "enabled": true, "provider": "", "model": "", "timeoutMs": 2500 },
   "trim": { "enabled": true, "minChars": 12000, "readMinChars": 50000, "maxBlocks": 150, "stateBudgetChars": 60000,
@@ -180,6 +185,7 @@ Pi reads every setting except `warm` and `warn.confirmSeconds`, which are for po
 ```
 
 - `warn.minTokens` is the cold-cache question's threshold for every model; `0` asks on every cold cache. Pi ignores `warn.minCost` (the other ports still use it when they know prices). The Herdr `cache` and `cache_expires` tokens use the same threshold.
+- `alarm.misses` is how many unexplained misses in a row raise the broken-cache alarm; `alarm.abort` stops the run when it does; `alarm.enabled: false` turns it off.
 - `herdr.expiringMinutes` is how long before expiry an idle session shows `⧗` in the `cache` token and reports `cache_expires`; `0` turns that token off.
 - In Jev mode, an empty `jev.provider` picks the first available provider; an empty `jev.model` uses that provider's default from the table.
 - `trim.keepThreshold` is the probability at which a block is kept. `compact.timeoutMs` is per the classifier request.

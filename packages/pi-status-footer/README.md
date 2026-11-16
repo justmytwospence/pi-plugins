@@ -118,7 +118,7 @@ System 1's optional Context chip shows only the classifier in use (`S1 Jev` or `
 | Extension | Status | Shown as |
 | --- | --- | --- |
 | pi-system1 | Structured order, recent-route and health snapshot | `S1 Jev`, `S1 OpenAI` or `S1 unavailable` on Context; no new row |
-| pi-cache-guard | `cache 4:12`, `cache cold` | `Cache 4:12` or `Cache ❄` on the context row (warm in green, cold in the warning color) |
+| pi-cache-guard | `cache 4:12`, `cache cold`, `cache broken` | `Cache 4:12` or `Cache ❄` on the context row (warm in green, cold in the warning color), or `Cache broken` in the error color when cache guard's alarm is up |
 | pi-tool-gate | `workflow: work (shift+tab to cycle)` and `⏵⏵ auto mode on (alt+a to cycle)` | separate Workflow and Approvals rows, with key hints and the gate tally on Approvals |
 | pi-plan-mode | workflow status | standalone work/plan workflow; any Approvals row remains independent |
 | pi-cache-guard (Jev trimming, key `lean-context`) | `lean: −12k tok` | `Lean −12k tok` on the context row |

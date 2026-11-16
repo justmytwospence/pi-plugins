@@ -144,8 +144,9 @@ function harnessWith(entries: unknown[], herdr: HerdrReporter, model: any = opus
   };
   const sent: any[] = [];
   const sessions: any[] = [];
+  const aborts: number[] = [];
   const ctx: any = {
-    cwd: "/nonexistent", hasUI: true, model, ui,
+    cwd: "/nonexistent", hasUI: true, model, ui, abort: () => { aborts.push(1); },
     sessionManager: { getBranch: () => entries, getSessionFile: () => "/sessions/old.jsonl" },
     compact: (options: any) => ui.compactions.push(options),
     modelRegistry: { find: (provider: string, id: string) => ({ ...model, provider, id }), ...registry },
@@ -162,7 +163,7 @@ function harnessWith(entries: unknown[], herdr: HerdrReporter, model: any = opus
     for (const handler of handlers.get(name) ?? []) result = (await handler(event, context)) ?? result;
     return result;
   };
-  return { emit, ui, ctx, pi, commands, sent, sessions, appended, renderers, blocked, alerts, states, choices, listen };
+  return { emit, ui, ctx, pi, commands, sent, sessions, appended, renderers, blocked, alerts, states, choices, listen, aborts };
 }
 
 const input = (text: string, extra: Record<string, unknown> = {}) => ({ type: "input", text, source: "interactive", ...extra });
@@ -367,6 +368,12 @@ describe("held-prompt alert", () => {
     const silent = bus();
     alertHeld(silent.events, "", "proj: next step", "linux");
     expect(silent.sent).toEqual([{ channel: "herdr:notify", data: { title: "Prompt not sent: cache cold", body: "proj: next step", sound: "none" } }]);
+  });
+
+  test("a caller can name the notification", () => {
+    const linux = bus();
+    alertHeld(linux.events, "Basso", "proj: broken", "linux", "Prompt cache broken");
+    expect(linux.sent).toEqual([{ channel: "herdr:notify", data: { title: "Prompt cache broken", body: "proj: broken", sound: "request" } }]);
   });
 });
 
@@ -1054,6 +1061,130 @@ describe("notices", () => {
     vi.advanceTimersByTime(2_000);
     vi.advanceTimersByTime(2_000);
     expect(h.appended.slice(1)).toEqual([{ customType: "cache-guard-notice", data: { kind: "warm", cost: 0.12, note: undefined } }]);
+    await h.emit("session_shutdown", {});
+  });
+});
+
+describe("alarm", () => {
+  beforeEach(() => { vi.useFakeTimers(); vi.setSystemTime(NOW); });
+  afterEach(() => { vi.useRealTimers(); rmSync(path.join(process.env.PI_CODING_AGENT_DIR!, "cache-guard.json"), { force: true }); });
+
+  const message = (at: number, cacheRead: number, cacheWrite: number) => ({
+    role: "assistant", provider: "anthropic", model: opus.id, timestamp: at, stopReason: "stop",
+    usage: { input: 2, cacheRead, cacheWrite, output: 10, cost: { input: 0, cacheRead: 0, cacheWrite: cacheWrite ? 3 : 0 } },
+  });
+  /** A request that re-wrote the whole 600k conversation. */
+  const miss = (at: number) => message(at, 0, 600_000);
+  const hit = (at: number) => message(at, 600_000, 0);
+  const start = async (seedAt = NOW - 60_000) => {
+    const entries: any[] = [assistant(seedAt, 600_000)];
+    const h = harness(entries);
+    await h.emit("session_start", {});
+    // A request ends: message_end sees the branch before it, turn_end writes the notice.
+    const request = async (m: ReturnType<typeof message>) => {
+      await h.emit("message_end", { message: m });
+      await h.emit("turn_end", {});
+      entries.push({ type: "message", message: m });
+    };
+    const alarms = () => h.ui.notes.filter((note) => note.startsWith("Prompt cache broken"));
+    return { h, entries, request, alarms };
+  };
+  const writeSettings = (data: unknown) => writeFileSync(path.join(process.env.PI_CODING_AGENT_DIR!, "cache-guard.json"), JSON.stringify(data));
+
+  test("three unexplained misses in a row raise the alarm once: message, sound, stop, status", async () => {
+    const { h, request, alarms } = await start();
+    await request(miss(NOW - 50_000));
+    await request(miss(NOW - 40_000));
+    expect(alarms()).toEqual([]);
+    expect(h.aborts).toEqual([]);
+    await request(miss(NOW - 30_000));
+    expect(alarms()).toHaveLength(1);
+    expect(alarms()[0]).toMatch(/^Prompt cache broken: 3 requests in a row re-billed the conversation \(1\.8M tokens, ~\$\d+\.\d\d\)\. Something is changing the start of each request; check recently changed extensions\. Stopped the run\.$/);
+    expect(h.aborts).toHaveLength(1);
+    expect(h.alerts).toEqual([alarms()[0]]);
+    expect(h.ui.status.get("cache-guard")).toBe("cache broken");
+    // The streak keeps counting but the alarm does not repeat.
+    await request(miss(NOW - 20_000));
+    expect(alarms()).toHaveLength(1);
+    expect(h.aborts).toHaveLength(1);
+    vi.advanceTimersByTime(2_000);
+    expect(h.ui.status.get("cache-guard")).toBe("cache broken");
+    await h.emit("session_shutdown", {});
+  });
+
+  test("a request that hits the cache clears the alarm status", async () => {
+    const { h, request } = await start();
+    for (const at of [50_000, 40_000, 30_000]) await request(miss(NOW - at));
+    expect(h.ui.status.get("cache-guard")).toBe("cache broken");
+    await request(hit(NOW - 20_000));
+    vi.advanceTimersByTime(2_000);
+    expect(h.ui.status.get("cache-guard")).toMatch(/^cache /);
+    expect(h.ui.status.get("cache-guard")).not.toBe("cache broken");
+    await h.emit("session_shutdown", {});
+  });
+
+  test("two misses, a hit, two more misses: no alarm", async () => {
+    const { h, request, alarms } = await start();
+    await request(miss(NOW - 50_000));
+    await request(miss(NOW - 40_000));
+    await request(hit(NOW - 30_000));
+    await request(miss(NOW - 20_000));
+    await request(miss(NOW - 10_000));
+    expect(alarms()).toEqual([]);
+    expect(h.aborts).toEqual([]);
+    await h.emit("session_shutdown", {});
+  });
+
+  test("misses after a long idle are explained by the expiring cache, not an alarm", async () => {
+    const { h, request, alarms } = await start(NOW - 3_600_000);
+    for (const at of [2_900_000, 2_200_000, 1_500_000, 800_000]) await request(miss(NOW - at));
+    expect(alarms()).toEqual([]);
+    expect(h.aborts).toEqual([]);
+    await h.emit("session_shutdown", {});
+  });
+
+  test("alarm.abort: false warns and lets the run continue", async () => {
+    writeSettings({ alarm: { abort: false } });
+    const { h, request, alarms } = await start();
+    for (const at of [50_000, 40_000, 30_000]) await request(miss(NOW - at));
+    expect(alarms()).toHaveLength(1);
+    expect(alarms()[0]).toMatch(/ The run continues \(alarm\.abort is off\)\.$/);
+    expect(h.aborts).toEqual([]);
+    await h.emit("session_shutdown", {});
+  });
+
+  test("alarm.enabled: false and enabled: false do nothing", async () => {
+    for (const settings of [{ alarm: { enabled: false } }, { enabled: false }]) {
+      writeSettings(settings);
+      const { h, request, alarms } = await start();
+      for (const at of [50_000, 40_000, 30_000]) await request(miss(NOW - at));
+      expect(alarms()).toEqual([]);
+      expect(h.aborts).toEqual([]);
+      expect(h.ui.status.get("cache-guard")).not.toBe("cache broken");
+      await h.emit("session_shutdown", {});
+    }
+  });
+
+  test("without a UI the run is still stopped, with no message to show", async () => {
+    const { h, request, alarms } = await start();
+    h.ctx.hasUI = false;
+    for (const at of [50_000, 40_000, 30_000]) await request(miss(NOW - at));
+    expect(alarms()).toEqual([]);
+    expect(h.aborts).toHaveLength(1);
+    expect(h.alerts).toHaveLength(1);
+    await h.emit("session_shutdown", {});
+  });
+
+  test("/cache-guard status says whether the alarm is on and whether it is up", async () => {
+    const { h, request } = await start();
+    const status = async () => {
+      h.ui.notes.length = 0;
+      await h.commands.get("cache-guard").handler("status", h.ctx);
+      return h.ui.notes.join("\n");
+    };
+    expect(await status()).toContain("Alarm: on, after 3 unexplained misses in a row, stops the run.");
+    for (const at of [50_000, 40_000, 30_000]) await request(miss(NOW - at));
+    expect(await status()).toContain("Alarm: on, after 3 unexplained misses in a row, stops the run (now: broken).");
     await h.emit("session_shutdown", {});
   });
 });

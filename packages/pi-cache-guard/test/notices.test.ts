@@ -1,6 +1,6 @@
 import { describe, expect, test } from "vitest";
 
-import { detectMiss, mergeNotices, noticeLine, type Notice } from "../src/notices.ts";
+import { UNEXPLAINED_IDLE_MS, detectMiss, mergeNotices, nextMissStreak, noticeLine, type Notice } from "../src/notices.ts";
 import { Row, registerRowRun } from "../src/transcript-style.ts";
 
 const text = (n: Notice) => { const l = noticeLine(n); return `${l.title}: ${l.detail}`; };
@@ -68,5 +68,25 @@ describe("warm coalescing", () => {
     const out = renderer(branch[0], { expanded: false }, theme).render(120).join("\n");
     expect(out).toContain("Cache warmed ×2");
     expect(out).toContain("$0.03");
+  });
+});
+
+describe("nextMissStreak", () => {
+  const miss = (extra: Partial<Extract<Notice, { kind: "miss" }>> = {}): Notice =>
+    ({ kind: "miss", missedTokens: 600_000, missedCost: 3, idleMs: 10_000, modelChanged: false, ...extra });
+
+  test("an unexplained miss extends the streak", () => {
+    expect(nextMissStreak(0, miss())).toBe(1);
+    expect(nextMissStreak(2, miss({ idleMs: UNEXPLAINED_IDLE_MS - 1 }))).toBe(3);
+  });
+
+  test("a miss after a long idle or a model switch is explained and resets it", () => {
+    expect(nextMissStreak(2, miss({ idleMs: UNEXPLAINED_IDLE_MS }))).toBe(0);
+    expect(nextMissStreak(2, miss({ modelChanged: true }))).toBe(0);
+  });
+
+  test("a hit (no notice) or a warm notice resets it", () => {
+    expect(nextMissStreak(2, undefined)).toBe(0);
+    expect(nextMissStreak(2, { kind: "warm", cost: 0.01 })).toBe(0);
   });
 });

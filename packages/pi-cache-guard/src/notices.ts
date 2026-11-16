@@ -11,6 +11,8 @@ const NOISE_FLOOR_TOKENS = 1024;
 /** A miss is worth a line from this many tokens or this many dollars. */
 const MISS_MIN_TOKENS = 20_000;
 const MISS_MIN_COST = 0.1;
+/** A miss after at least this long idle is explained by the cache expiring, not by a broken prefix. */
+export const UNEXPLAINED_IDLE_MS = 300_000;
 
 export type Notice =
   | { kind: "miss"; missedTokens: number; missedCost: number; idleMs: number; modelChanged: boolean }
@@ -104,6 +106,14 @@ export function detectMiss(entries: readonly unknown[], message: AssistantLike, 
   };
 }
 
+/**
+ * Consecutive unexplained misses after a message's notice (the notice is undefined for a hit or a miss
+ * too small to mention). A miss after a long idle or a model switch is explained and resets the count.
+ */
+export function nextMissStreak(streak: number, notice: Notice | undefined): number {
+  return notice?.kind === "miss" && !notice.modelChanged && notice.idleMs < UNEXPLAINED_IDLE_MS ? streak + 1 : 0;
+}
+
 /** Pi's token format: 950, 1.2k, 601k, 1.4M. */
 export function formatTokens(count: number): string {
   if (count < 1000) return count.toString();
@@ -120,7 +130,7 @@ export function noticeLine(notice: Notice): { tone: "warning" | "info"; title: s
       const cost = notice.missedCost >= 0.01 ? ` (~$${notice.missedCost.toFixed(2)})` : "";
       let label = "Cache miss";
       if (notice.modelChanged) label = "Cache miss after model switch";
-      else if (notice.idleMs >= 300_000) label = `Cache miss after ${Math.round(notice.idleMs / 60_000)}m idle`;
+      else if (notice.idleMs >= UNEXPLAINED_IDLE_MS) label = `Cache miss after ${Math.round(notice.idleMs / 60_000)}m idle`;
       return { tone: "warning", title: label, detail: `${formatTokens(notice.missedTokens)} tokens re-billed${cost}` };
     }
     case "warm": {

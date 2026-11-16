@@ -22,6 +22,12 @@ export interface Price {
 export interface Settings {
   enabled: boolean;
   effortUpdates: { enabled: boolean; models: string[] };
+  /**
+   * Repeated cache misses that idle time or a model switch do not explain: something is changing the
+   * start of each request, so the whole conversation is re-billed on every call. After `misses` in a
+   * row the alarm says so and, with `abort`, stops the run.
+   */
+  alarm: { enabled: boolean; misses: number; abort: boolean };
   warn: {
     enabled: boolean;
     /** Ask before a prompt whose re-cache costs at least this many dollars (when prices are known). */
@@ -101,6 +107,7 @@ export interface Settings {
 export const DEFAULT_SETTINGS: Settings = {
   enabled: true,
   effortUpdates: { enabled: true, models: ["openai-codex/gpt-6-astra", "openai-codex/gpt-6.1-sol", "openai-codex/gpt-6.1-terra"] },
+  alarm: { enabled: true, misses: 3, abort: true },
   warn: { enabled: true, minCost: 0.5, minTokens: 100_000, confirmSeconds: 120, idleMinutes: 180, sound: "Basso" },
   warm: {
     enabled: true,

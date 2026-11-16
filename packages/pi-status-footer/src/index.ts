@@ -297,7 +297,7 @@ export function absorbStatuses(statuses: ReadonlyMap<string, string>, options: {
     const plainText = clean(text);
     const lean = key === "lean-context" ? /^lean: (.+)$/.exec(plainText) : null;
     if (lean) { result.lean = lean[1]; continue; }
-    const cache = key === "cache-guard" ? /^cache (~?(?:\d+:\d\d|\d+h\d\dm)|cold(?: \(model\)|\?)?)$/.exec(plainText) : null;
+    const cache = key === "cache-guard" ? /^cache (~?(?:\d+:\d\d|\d+h\d\dm)|cold(?: \(model\)|\?)?|broken)$/.exec(plainText) : null;
     if (cache) { result.cache = cache[1]; continue; }
     const billed = key === "anthropic-billing" ? /^extra usage x(\d+)$/.exec(plainText) : null;
     if (billed && options.claudeRow) { result.extraBilled = +billed[1]; continue; }
@@ -995,7 +995,7 @@ export function layoutFooter(snapshot: Snapshot, width: number, theme: Paint): F
   const context = s.context.percent;
   const ctxValue = context === null ? theme.fg("muted", "unknown") : theme.bold(theme.fg(context < 70 ? "muted" : heat(context), percent(context)));
   const cache = s.cache ? clean(s.cache) : s.actions?.["cache.status"] ? "unknown" : "";
-  const cacheNote = cache === "cold (model)" ? "model changed" : "";
+  const cacheNote = cache === "cold (model)" ? "model changed" : cache === "broken" ? "prefix changing" : "";
   const cacheValue = cache === "cold?" || cache === "unknown" ? "unknown" : cache.startsWith("cold") ? "cold" : cache;
   const ctxParts: Part[] = [{ text: label("Context") }, { text: ctxValue, action: action("context.open") }];
   // What fills the context besides the conversation: MCP servers (our chip, or the
@@ -1013,7 +1013,7 @@ export function layoutFooter(snapshot: Snapshot, width: number, theme: Paint): F
       { text: theme.fg(system1Value === "unavailable" ? "warning" : "muted", `S1 ${system1Value}`), action: action("system1.open") },
     ] : [], 35),
     { text: s.lean ? theme.fg("muted", `Lean ${clean(s.lean)}`) : "", priority: 20 },
-    partsSegment([{ text: cache ? `${theme.fg("muted", "Cache")} ${theme.fg(cacheValue === "unknown" ? "muted" : cacheValue === "cold" ? "warning" : "success", cacheValue)}` : "", action: action("cache.status") }], 30),
+    partsSegment([{ text: cache ? `${theme.fg("muted", "Cache")} ${theme.fg(cacheValue === "unknown" ? "muted" : cacheValue === "broken" ? "error" : cacheValue === "cold" ? "warning" : "success", cacheValue)}` : "", action: action("cache.status") }], 30),
     { text: cacheNote ? theme.fg("dim", cacheNote) : "", priority: 10 },
     // Inline icons and their gaps are not controls; only the visible chip is.
     partsSegment(mcpText ? [{ text: `${theme.fg("dim", ICONS.mcp)} ` }, { text: mcpStatus ? mcpStatus.replace(`${ICONS.mcp} `, "").replace(/[\r\n\t]/g, " ") : mcpChip(s.mcp!, theme), action: action("mcp.open") }] : [], 25),

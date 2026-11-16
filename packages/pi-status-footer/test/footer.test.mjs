@@ -412,7 +412,7 @@ test("companion extension statuses fold into their rows, and degrade when absent
   assert.match(rows[1], /reasoning medium/);
   assert.match(rows[2], /Lean \u221212k tok/);
   assert.match(rows[2], /Cache 4:12/);
-  for (const text of ["cache cold", "cache cold (model)", "cache cold?", "cache 1h05m", "cache ~4:12", "cache ~1h05m"]) {
+  for (const text of ["cache cold", "cache cold (model)", "cache cold?", "cache 1h05m", "cache ~4:12", "cache ~1h05m", "cache broken"]) {
     const reading = mod.absorbStatuses(new Map([["cache-guard", text]]), { claudeRow: false });
     assert.equal(reading.cache, text.slice(6));
     assert.deepEqual(reading.rest, [], "estimated cache clocks must not escape onto their own notice row");
@@ -529,6 +529,7 @@ test("optional companions share label style and preserve meaningful qualifiers",
   assert.equal(rows[4], " \uf085  Background vite starting kept · lint ✗ · fmt ■");
   assert.match(rows[5], /^ \uf0f3  Plan /);
   assert.match(mod.renderFooter({ ...s, cache: "cold?" }, 200, theme)[2], /Cache unknown/);
+  assert.match(mod.renderFooter({ ...s, cache: "broken" }, 200, theme)[2], /Cache broken.*prefix changing/);
   assert.deepEqual(mod.absorbStatuses(new Map([["plan", "plan: new format"]]), { claudeRow: false }).rest, ["plan: new format"]);
   assert.deepEqual(mod.absorbStatuses(new Map([["third-party", "widget: Mixed CASE (keep me)"]]), { claudeRow: false }).rest, ["widget: Mixed CASE (keep me)"]);
 });
@@ -552,7 +553,7 @@ test("all optional footer rows fit both themes at every width, alone and combine
   combined.quotas[0].windows[0].reset = now - 1;
   const variants = [combined, ...["stash", "marimo", "bg", "cache", "lean", "extraBilled"].map((key) => ({ ...fixture(), [key]: combined[key] })),
     { ...fixture(), stash: {} },
-    ...["4:12", "1h05m", "cold", "cold?"].map((cache) => ({ ...fixture(), cache })),
+    ...["4:12", "1h05m", "cold", "cold?", "broken"].map((cache) => ({ ...fixture(), cache })),
     ...["marimo: idle.py", "marimo: local.py · :2718", "marimo: remote.py · nb.example.com/lab · disconnected", "marimo: queued.py · 2 queued", "marimo: broken.py · 2 errors · not open", "marimo: older.py · +3 open", "marimo: /marimo to pick one"].map((text) => ({ ...fixture(), marimo: [mod.parseMarimoStatus(text)] })),
     { ...fixture(), bg: mod.parseBgStatus("bg: api up · vite ready · lint ✗") },
     { ...fixture(), pressure: mod.parsePressureStatus("pressure: cpu 97 ↑ hot · load 1.6 warn · mem warn · swap-in 40MB/s ok · top Google Chrome Helper (R…") },

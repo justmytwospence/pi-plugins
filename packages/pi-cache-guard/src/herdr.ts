@@ -84,7 +84,13 @@ export async function whileBlocked<T>(events: EventBus | undefined, label: strin
  * pi-herdr) a notification names the session, with herdr's request sound where no macOS sound
  * played. Elsewhere the terminal bell rings; herdr does not pass the bell on.
  */
-export function alertHeld(events: EventBus | undefined, sound: string, body: string, platform: NodeJS.Platform = process.platform): void {
+export function alertHeld(
+  events: EventBus | undefined,
+  sound: string,
+  body: string,
+  platform: NodeJS.Platform = process.platform,
+  title = "Prompt not sent: cache cold",
+): void {
   const file = platform === "darwin" ? soundFile(sound) : undefined;
   let played = false;
   if (file) {
@@ -98,7 +104,7 @@ export function alertHeld(events: EventBus | undefined, sound: string, body: str
     }
   }
   try {
-    events?.emit("herdr:notify", { title: "Prompt not sent: cache cold", body, sound: played || !sound ? "none" : "request" });
+    events?.emit("herdr:notify", { title, body, sound: played || !sound ? "none" : "request" });
   } catch {
     // A failing listener must not break the question.
   }

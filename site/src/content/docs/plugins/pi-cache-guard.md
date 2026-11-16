@@ -83,6 +83,10 @@ For warning-only operation, place this in `.pi/cache-guard.json`:
 
 In Jev mode, with empty `jev.provider` and `jev.model`, discovery checks configured providers in order: TypeSafe, OpenRouter, Vercel AI Gateway, Cloudflare Workers AI and OpenCode. The direct default candidate is `typesafe/jev-latest`, using Pi's `TYPESAFE_API_KEY` or `/login typesafe`. Legacy Jev settings in `~/.pi/agent/cache-guard.json` can be overridden by project settings. Decisions uses the isolated provider instead of Jev discovery.
 
+## Broken-cache alarm
+
+When requests keep re-billing the conversation with no long idle or model switch to explain it, something is changing the start of each request. After `alarm.misses` such requests in a row (default 3) cache guard shows an error naming the tokens and cost re-billed, sounds the same alert as the held prompt, sets the status to `cache broken` until a request hits the cache again, and with `alarm.abort` (default on) stops the run. Defaults: `"alarm": { "enabled": true, "misses": 3, "abort": true }`. `/cache-guard off` does not mute it; `alarm.enabled: false` does. See [Cache and cost](/recipes/cache-cost/).
+
 ## Data sent and context reduction
 
 Trimming sends the latest user request, assistant text, tool name, arguments and output blocks to the selected classifier. Default thresholds are over 12,000 characters for supported command, MCP and web outputs, and over 50,000 for `read`. Large outputs are bounded before classification. Kept blocks retain their order, with head and tail lines and omission markers.

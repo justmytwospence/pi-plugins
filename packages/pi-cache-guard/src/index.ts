@@ -19,7 +19,7 @@ import { JEV_LOGINS, type JevState, label } from "./jev.ts";
 import { installSystem1Notifications, readSystem1Setting, resolveSystem1Route } from "./system1.ts";
 import { JEV_KEY_URL, JEV_PITCH } from "./lean.ts";
 import { Row, appendReport, registerReportRenderer, registerRowRun } from "./transcript-style.ts";
-import { type AssistantLike, NOTICE_TYPE, type Notice, detectMiss, mergeNotices, noticeLine } from "./notices.ts";
+import { type AssistantLike, NOTICE_TYPE, type Notice, detectMiss, mergeNotices, nextMissStreak, noticeLine } from "./notices.ts";
 import { type Wire, cachePolicy, echoedRetention, requestedTtl } from "./policy.ts";
 import { MODEL_CHOICE, MODEL_OFFERS, type ModelChoice, type ModelOffer, type ModelOffers, collectOffers, oneLine } from "./offers.ts";
 import { Text } from "@earendil-works/pi-tui";
@@ -241,6 +241,12 @@ export default function cacheGuard(
   };
   // A miss found at message_end, written at turn_end once the message itself is in the session.
   let pendingMiss: Notice | undefined;
+  // Unexplained misses in a row (no long idle, no model switch), what they re-billed, and whether the
+  // alarm is up: the status says "cache broken" until a request hits the cache again.
+  let missStreak = 0;
+  let missTotals = { tokens: 0, cost: 0 };
+  let broken = false;
+  const resetAlarm = () => { missStreak = 0; missTotals = { tokens: 0, cost: 0 }; broken = false; };
   // Keep-warm refreshes already noted (Pi has no event for them; the tick looks for new ones).
   let seenWarm = new Set<string>();
 
@@ -376,7 +382,7 @@ export default function cacheGuard(
     const full = settings.enabled ? current(ctx) : undefined;
     emitState(ctx, full, false);
     const v = sessionOn ? full : undefined;
-    const text = statusText(v);
+    const text = broken && settings.enabled ? "cache broken" : statusText(v);
     if (text !== shown) {
       shown = text;
       ctx.ui.setStatus(STATUS_KEY, text);
@@ -388,7 +394,25 @@ export default function cacheGuard(
     expiring.report(soon?.value, soon?.ttlMs);
   };
 
+  /** Say loudly, once per streak, that the start of each request keeps changing; stop the run unless told not to. */
+  const raiseAlarm = (context: ExtensionContext) => {
+    broken = true;
+    const text = `Prompt cache broken: ${missStreak} requests in a row re-billed the conversation (${formatTokens(missTotals.tokens)} tokens, ~$${missTotals.cost.toFixed(2)}). ` +
+      `Something is changing the start of each request; check recently changed extensions.` +
+      (settings.alarm.abort ? " Stopped the run." : " The run continues (alarm.abort is off).");
+    if (context.hasUI) {
+      try { context.ui.notify(text, "error"); } catch { /* A stale context must not stop the alarm. */ }
+    }
+    if (options.alert) options.alert(text);
+    else alertHeld(pi.events, settings.warn.sound, text, process.platform, "Prompt cache broken");
+    if (settings.alarm.abort) {
+      try { context.abort(); } catch { /* Nothing running to stop. */ }
+    }
+    publish();
+  };
+
   const stop = () => {
+    resetAlarm();
     sessionReady = false;
     updates = emptyState();
     generation++;
@@ -442,6 +466,7 @@ export default function cacheGuard(
     refresh(context, false);
   });
   pi.on("session_compact", (event, context) => {
+    resetAlarm();
     const usage = (event.compactionEntry as { usage?: { input: number; output: number; cacheRead: number; cacheWrite: number; cost: { total: number } } }).usage;
     if (ctx && usage) {
       notify({ kind: "compaction", tokens: usage.input + usage.output + usage.cacheRead + usage.cacheWrite, cost: usage.cost.total });
@@ -453,6 +478,14 @@ export default function cacheGuard(
     if (!ctx || message.role !== "assistant" || !message.usage || message.stopReason === "error" || message.stopReason === "aborted") return;
     // The session does not have this message yet, so the branch ends at the request before it.
     pendingMiss = detectMiss(context.sessionManager.getBranch(), message, (provider, id) => context.modelRegistry.find(provider, id)?.cost.cacheRead);
+    missStreak = nextMissStreak(missStreak, pendingMiss);
+    if (missStreak === 0) resetAlarm();
+    else if (pendingMiss?.kind === "miss") {
+      missTotals.tokens += pendingMiss.missedTokens;
+      missTotals.cost += pendingMiss.missedCost;
+    }
+    // `===` raises it once per streak; `broken` stays up until a request hits the cache again.
+    if (settings.enabled && settings.alarm.enabled && missStreak === settings.alarm.misses) raiseAlarm(context);
   });
   const flushMiss = () => {
     if (pendingMiss) notify(pendingMiss);
@@ -729,6 +762,9 @@ export default function cacheGuard(
         }
       }
     }
+    lines.push(settings.alarm.enabled
+      ? `Alarm: on, after ${settings.alarm.misses} unexplained misses in a row${settings.alarm.abort ? ", stops the run" : ""}${broken ? " (now: broken)" : ""}.`
+      : "Alarm: off.");
     lines.push(`Warning: ${warningLine()}. Keep-warm: Pi's cacheWarming setting (/session shows its next decision).`);
     lines.push(jevLine(await lean.jev(context), settings, lean.savedChars()));
     if (isCurrent()) appendReport(pi, "Cache guard", lines.join("\n"));

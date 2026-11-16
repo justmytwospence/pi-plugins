@@ -36,6 +36,10 @@ Choose based on the work:
 
 The classifier `/system1` order is separate from `/waterfall`, which routes subscription chat models. A chat model switch can also make the cache cold. System/tool changes and other invalidations are not all visible to the clock.
 
+## When the alarm says the cache is broken
+
+`cache broken` (and an error naming the tokens re-billed) means several requests in a row re-sent the whole conversation uncached with no idle time or model switch to explain it: something is changing the start of each request. Cache guard stops the run by default. Run `/reload`, then check which extension was updated recently and update or disable it; if the status clears after one request, the fault was a one-off. Compare `cacheRead` against `cacheWrite` in the session's recent assistant messages to confirm. `alarm.abort: false` only warns; `alarm.enabled: false` turns it off.
+
 ## Enable classifier features deliberately
 
 Cache guard’s warnings and clock work without a classifier. Its optional trimming and fast compaction send tool output or conversation items to a classifier provider. To keep those off, use your Pi-specific `~/.pi/agent/cache-guard.json`:
