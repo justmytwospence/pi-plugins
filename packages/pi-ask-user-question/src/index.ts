@@ -3,16 +3,17 @@
 // they are shown in a dialog at the bottom (see dialog.ts); RPC hosts get native select/input
 // dialogs (rpc.ts); without a UI the tool is withdrawn (reconcile.ts). While the user is being
 // asked, the tool holds `herdr:blocked`, so herdr shows the pane as blocked.
-import type { ExtensionAPI, ExtensionContext, Theme } from "@earendil-works/pi-coding-agent";
-import { Text } from "@earendil-works/pi-tui";
-import { Block, expandHint, glyph, Row, toneOfTool } from "./transcript-style.ts";
+import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import type { Component } from "@earendil-works/pi-tui";
+import { AnswerCard, cardDetail, cardTitle } from "./answer-card.ts";
+import { Block, Row, toneOfTool } from "./transcript-style.ts";
 import { QuestionDialog } from "./dialog.ts";
 import { embeddedEditorFactory } from "./editor.ts";
 import { whileBlocked } from "./herdr.ts";
 import { DESCRIPTION, PROMPT_GUIDELINES, PROMPT_SNIPPET } from "./prompt.ts";
 import { reconcile } from "./reconcile.ts";
 import { imageBlocks } from "./images.ts";
-import { type Answer, type DialogResult, type Details, errorResult, shortenImagePaths, toolResult, userWords } from "./result.ts";
+import { type DialogResult, type Details, errorResult, toolResult, userWords } from "./result.ts";
 import { askWithDialogs } from "./rpc.ts";
 import { NO_UI_MESSAGE, normalize, type Params, ParamsSchema, type Question, TOOL_NAME, validate } from "./schema.ts";
 import { offerUserWords } from "./user-words.ts";
@@ -74,25 +75,39 @@ export default function askUserQuestion(pi: ExtensionAPI) {
       const headers = (Array.isArray(args?.questions) ? args.questions : [])
         .map((q) => (typeof q?.header === "string" ? q.header.trim() : ""))
         .filter(Boolean);
-      return new Row(theme, () => ({
+      const row = new Row(theme, () => ({
         tone: toneOfTool(context ?? {}, context?.lastComponent !== undefined),
         title: "Question",
         detail: headers.length ? headers.join(" · ") : undefined,
       }));
+      // Once the result card is shown it carries the title, so the call row steps aside.
+      const state = context?.state as { answered?: boolean } | undefined;
+      return { invalidate() {}, render: (w: number) => (state?.answered ? [] : row.render(w)) };
     },
 
     renderResult(result, options, theme, context) {
       const details = result.details as Details | undefined;
-      const tone = toneOfTool(context ?? {}, true);
-      const lines = details?.questions
-        ? resultLines(details, result.content, theme)
-        : [theme.fg(tone === "failed" ? "error" : "dim", firstText(result.content))];
-      if (options?.expanded && lines.length > 1) {
-        return new Block(theme, () => ({ tone, title: "Question", body: new Text(lines.join("\n"), 0, 0), expanded: true }));
+      const state = context?.state as { answered?: boolean } | undefined;
+      const expanded = options?.expanded === true;
+      let component: Component;
+      if (details?.error) {
+        component = new Row(theme, () => ({ tone: "failed", title: "Question", detail: firstText(result.content) || details.error }));
+      } else if (details?.cancelled) {
+        component = new Row(theme, () => ({ tone: "stopped", title: "Question", detail: "Declined" }));
+      } else if (details?.questions) {
+        component = new Block(theme, () => ({
+          tone: toneOfTool(context ?? {}, true),
+          title: cardTitle(details),
+          detail: cardDetail(details),
+          body: new AnswerCard(theme, details, expanded),
+          fold: 16,
+          expanded,
+        }));
+      } else {
+        component = new Row(theme, () => ({ tone: toneOfTool(context ?? {}, true), title: "Question", detail: firstText(result.content) || undefined }));
       }
-      const summary = details?.questions ? resultSummary(details, result.content) : firstText(result.content);
-      const text = theme.fg("dim", `   ↳ ${summary}`) + (lines.length > 1 ? expandHint(theme) : "");
-      return new Text(text, 0, 0);
+      if (state) state.answered = true;
+      return component;
     },
   });
 }
@@ -100,16 +115,6 @@ export default function askUserQuestion(pi: ExtensionAPI) {
 function firstText(content: readonly { type: string; text?: string }[]): string {
   const first = content[0];
   return first?.type === "text" ? (first.text ?? "").split("\n")[0]! : "";
-}
-
-/** The one-line answer summary for the collapsed result: `header: value` per answered question. */
-function resultSummary(details: Details, content: readonly { type: string; text?: string }[]): string {
-  if (details.error) return firstText(content) || details.error;
-  if (details.cancelled) return "Declined";
-  const parts = details.answers
-    .filter((a) => a.kind !== "skipped")
-    .map((a) => `${a.header || a.question}: ${a.kind === "unanswered" ? "Unanswered" : shortenImagePaths(a.answer ?? "", details.images).replace(/\s*\n\s*/gu, " ")}`);
-  return parts.join(" · ") || "no answers";
 }
 
 /** The dialog in the terminal UI; native dialogs elsewhere, or if the terminal dialog cannot show. */
@@ -137,24 +142,4 @@ async function ask(pi: ExtensionAPI, ctx: ExtensionContext, questions: Question[
 export function blockedLabel(questions: readonly Question[]): string {
   const label = questions.map((q) => q.header || q.question).join(" · ");
   return label.length > LABEL_WIDTH ? `${label.slice(0, LABEL_WIDTH - 1)}…` : label;
-}
-
-export function resultLines(details: Details, content: readonly { type: string; text?: string }[], theme: Theme): string[] {
-  if (details.error) {
-    const first = content[0];
-    return [theme.fg("error", first?.type === "text" ? (first.text ?? details.error) : details.error)];
-  }
-  if (details.cancelled) return [theme.fg("warning", "Declined")];
-  const lines = details.answers.filter((a) => a.kind !== "skipped").map((a) => answerLine(a, theme, details.images));
-  if (details.note) lines.push(theme.fg("dim", `note: ${shortenImagePaths(details.note, details.images).replace(/\s+/gu, " ")}`));
-  return lines;
-}
-
-function answerLine(a: Answer, theme: Theme, images?: readonly string[]): string {
-  const header = theme.fg("accent", a.header || a.question);
-  const note = a.notes ? theme.fg("dim", ` · note: ${shortenImagePaths(a.notes, images).replace(/\s+/gu, " ")}`) : "";
-  if (a.kind === "unanswered") return `${theme.fg("warning", "- ")}${header}: ${theme.fg("warning", "Unanswered")}${note}`;
-  const value = shortenImagePaths(a.answer ?? "", images).replace(/\s*\n\s*/gu, " ");
-  const wrote = a.kind === "custom" ? theme.fg("muted", "(wrote) ") : "";
-  return `${glyph(theme, "done")} ${header}: ${wrote}${value}${note}`;
 }

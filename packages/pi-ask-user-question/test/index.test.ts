@@ -152,28 +152,71 @@ describe("transcript", () => {
     expect(render(h.tool.renderCall({}, plainTheme, {}))).toBe(" ? Question");
   });
 
-  test("the result: one line per answer, Unanswered, Declined", () => {
+  const ans = (o: any) => ({ index: 0, question: "Q?", kind: "option", ...o });
+  const result = (h: any, details: any, opts: any = {}, ctx: any = {}, content: any[] = []) =>
+    render(h.tool.renderResult({ content, details }, opts, plainTheme, ctx));
+
+  test("the call row steps aside once the result is shown", () => {
+    const h = setup();
+    const ctx = { state: {} };
+    const args = { questions: [{ header: "Library" }] };
+    expect(render(h.tool.renderCall(args, plainTheme, ctx))).toBe(" ? Question · Library");
+    result(h, { questions: [], cancelled: false, answers: [ans({ header: "Library", answer: "x" })] }, {}, ctx);
+    expect(render(h.tool.renderCall(args, plainTheme, ctx))).toBe("");
+    expect(render(h.tool.renderCall(args, plainTheme, { state: { answered: true } }))).toBe("");
+  });
+
+  test("the result card: header, question, answers, notes", () => {
     const h = setup();
     const details = {
       questions: [],
       cancelled: false,
+      note: "ship it",
       answers: [
-        { index: 0, header: "Library", question: "Which?", kind: "option", answer: "dayjs", notes: "small\nbundle" },
-        { index: 1, header: "Name", question: "Name?", kind: "custom", answer: "Temporal" },
-        { index: 2, header: "Target", question: "Where?", kind: "unanswered", answer: null },
+        ans({ header: "Library", question: "Which date library?", answer: "dayjs", notes: "small\nbundle" }),
+        ans({ header: "Name", question: "Name?", kind: "custom", answer: "Temporal" }),
+        ans({ header: "Features", question: "Which features?", kind: "multi", answer: "a, b", selected: ["a", "b"] }),
+        ans({ header: "Target", question: "Where?", kind: "unanswered", answer: null }),
+        ans({ header: "Hidden", question: "Skipped?", kind: "skipped", answer: null }),
       ],
     };
-    expect(render(h.tool.renderResult({ content: [], details }, {}, plainTheme, {}))).toContain(
-      "↳ Library: dayjs · Name: Temporal · Target: Unanswered",
-    );
-    const expanded = render(h.tool.renderResult({ content: [], details }, { expanded: true }, plainTheme, {}));
-    expect(expanded).toContain("✓ Library: dayjs · note: small bundle");
-    expect(expanded).toContain("✓ Name: (wrote) Temporal");
-    expect(expanded).toContain("- Target: Unanswered");
-    expect(render(h.tool.renderResult({ content: [], details: { ...details, cancelled: true } }, {}, plainTheme, {}))).toBe("   ↳ Declined");
-    expect(
-      render(h.tool.renderResult({ content: [{ type: "text", text: "Error: x" }], details: { ...details, error: "no_ui" } }, {}, plainTheme, {})),
-    ).toBe("   ↳ Error: x");
+    const out = result(h, details, { expanded: true });
+    for (const line of ["Library", "Which date library?", "› dayjs", "note: small", "› wrote: Temporal", "› a", "› b", "› Unanswered", "Note: ship it"]) {
+      expect(out).toContain(line);
+    }
+    expect(out).toContain("✓ Questions · 3/4 answered");
+    expect(out).not.toContain("Hidden");
+  });
+
+  test("a header equal to the question is not repeated", () => {
+    const h = setup();
+    const out = result(h, { questions: [], cancelled: false, answers: [ans({ header: "", question: "Proceed?", answer: "Yes" })] });
+    expect(out.split("\n").filter((l: string) => l.includes("Proceed?"))).toHaveLength(1);
+  });
+
+  test("previews only when expanded", () => {
+    const h = setup();
+    const details = { questions: [], cancelled: false, answers: [ans({ header: "H", answer: "A", preview: "line one" })] };
+    const collapsed = result(h, details);
+    expect(collapsed).toContain("· preview");
+    expect(collapsed).toContain("to expand");
+    expect(collapsed).not.toContain("│ line one");
+    expect(result(h, details, { expanded: true })).toContain("│ line one");
+  });
+
+  test("declined and errors are one row", () => {
+    const h = setup();
+    const details = { questions: [], cancelled: true, answers: [] };
+    expect(result(h, details)).toBe(" ■ Question · Declined");
+    expect(result(h, { ...details, error: "no_ui" }, {}, {}, [{ type: "text", text: "Error: x" }])).toBe(" ✗ Question · Error: x");
+  });
+
+  test("long cards fold", () => {
+    const h = setup();
+    const answers = Array.from({ length: 6 }, (_, i) => ans({ header: `H${i}`, answer: "A", notes: "n" }));
+    const details = { questions: [], cancelled: false, answers };
+    expect(result(h, details)).toContain("more lines");
+    expect(result(h, details, { expanded: true })).not.toContain("more lines");
   });
 });
 
