@@ -122,6 +122,7 @@ import {
   PLAN_PROVIDER,
 } from "./modes.ts";
 import { MODE_GUIDANCE_TYPE, MODE_SETTINGS_NOTICE_TYPE, modeGuidanceText } from "./mode-guidance.ts";
+import { GUIDANCE_ANCHOR_ENTRY, placeGuidance, restoreAnchors, type GuidanceAnchor } from "./guidance-anchors.ts";
 import { answerSubagentEnv, inheritedModes, SUBAGENT_ENV_CHANNEL, subagentEnv, subagentEnvHonored } from "./subagent-env.ts";
 import { effectiveDenyInsteadOfPrompting, PROMPTING_CONTINUE, PROMPTING_DISABLED, PROMPTING_ENTRY, PROMPTING_STATUS_KEY, promptingDenied, restorePromptingOverride, type PromptingOverride } from "./prompting.ts";
 import { loadRules } from "./rules.ts";
@@ -521,6 +522,8 @@ export default function toolGate(pi: ExtensionAPI) {
   const effectiveWorkflow = (): WorkflowMode => workflow;
   const currentModeGuidance = () => modeGuidanceText({ workflow: effectiveWorkflow(), approval, denyInsteadOfPrompting: denyInsteadOfPrompting() });
   let modeSettingsNoticePending = false;
+  /** Where each guidance snapshot first appeared; see guidance-anchors.ts. */
+  let guidanceAnchors: GuidanceAnchor[] = [];
   // Mode and classifier changes cancel decisions, not usage of tools already running on this branch.
   const invalidate = () => { revision++; pushedBackThisTurn.clear(); classifierFailures.clear(); };
   const staleResult = () => ({ block: true, reason: "tool-gate blocked this call: modes changed or System 1 changed; the call must be reevaluated." });
@@ -1378,6 +1381,7 @@ export default function toolGate(pi: ExtensionAPI) {
     promptingOverride = restorePromptingOverride(entries);
     workflow = restored.workflow;
     approval = restored.approval;
+    guidanceAnchors = restoreAnchors(entries);
     const told = [...entries].reverse().find((entry) => entry.type === "custom" && entry.customType === CHAT_ENTRY);
     chatTold = told?.type === "custom" && (told.data as { told?: unknown } | undefined)?.told === true;
     delegatedTold = entries.some((entry) => entry.type === "custom" && entry.customType === DELEGATED_ENTRY);
@@ -1395,27 +1399,28 @@ export default function toolGate(pi: ExtensionAPI) {
     sessionGeneration++;
     sessionReady = false;
     modeSettingsNoticePending = false;
+    guidanceAnchors = [];
     invalidate();
     pendingUsage.clear();
     hostCtx = undefined;
   });
 
-  // The snapshot sits at a fixed position right after the leading system prompt, so the request
-  // prefix stays byte-identical until settings change. Appending it at the tail and removing the
-  // previous copy rewrote history on every request and defeated provider prompt caching.
-  // Filtering busy settings notices is deterministic, so it keeps the prefix stable too.
+  // Each snapshot is anchored where it first appeared and re-inserted there, so the request stays
+  // append-only and the provider cache keeps hitting. A settings change anchors a new snapshot at
+  // the tail; earlier ones stay and are superseded by its text. Filtering busy settings notices is
+  // deterministic, so it keeps the prefix stable too.
   pi.on("context_with_system", (event) => {
     modeSettingsNoticePending = false;
     const rest = event.messages.filter(message => message.role !== "custom" ||
       (message.customType !== MODE_GUIDANCE_TYPE && message.customType !== MODE_SETTINGS_NOTICE_TYPE));
-    const head = rest[0]?.role === "system" ? 1 : 0;
-    return {
-      messages: [
-        ...rest.slice(0, head),
-        { role: "custom", customType: MODE_GUIDANCE_TYPE, content: currentModeGuidance(), display: false, timestamp: 0 },
-        ...rest.slice(head),
-      ],
-    };
+    const placed = placeGuidance(rest, currentModeGuidance(), guidanceAnchors, Date.now(), MODE_GUIDANCE_TYPE);
+    const known = new Set(guidanceAnchors);
+    for (const anchor of placed.anchors) {
+      if (known.has(anchor)) continue;
+      try { pi.appendEntry(GUIDANCE_ANCHOR_ENTRY, anchor); } catch { /* No session: memory only. */ }
+    }
+    guidanceAnchors = placed.anchors;
+    return { messages: placed.messages };
   });
 
   pi.on("before_agent_start", async (_event, ctx) => {

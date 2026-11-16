@@ -226,11 +226,14 @@ export default function (pi) {
         if (expectedSystems) assert.deepEqual(systems, expectedSystems, `${label}: preserve every system message and patch in order`);
         if (hasGate) {
           const guidance = context.messages.filter(message => messageText(message).includes('Current tool-gate settings:'));
-          assert.equal(guidance.length, 1, `${label}: exactly one request-local current settings block`);
-          assert.equal(guidance[0].role, 'user', 'the hidden custom snapshot is provider user content, not a system override');
+          // Earlier snapshots stay where they first appeared (an append-only prefix keeps the provider
+          // cache hitting); the newest one states the live settings.
+          assert(guidance.length >= 1, `${label}: at least one request-local settings block`);
+          const newest = guidance.at(-1);
+          assert.equal(newest.role, 'user', 'the hidden custom snapshot is provider user content, not a system override');
           const mode = /workflow: (\w+)/.exec(statuses.get('workflow-mode') ?? '')?.[1];
           const approval = approvalEvents.at(-1)?.mode === 'bypassPermissions' ? 'yolo' : 'auto';
-          assert(messageText(guidance[0]).includes(`Current tool-gate settings: workflow **${mode}**; approvals **${approval}**; permission prompts **${expectedPrompts}**`),
+          assert(messageText(newest).includes(`Current tool-gate settings: workflow **${mode}**; approvals **${approval}**; permission prompts **${expectedPrompts}**`),
             `${label}: request uses live workflow, approval and prompting state`);
           assert(!context.messages.some(message => messageText(message).includes(settingsNoticeText)),
             `${label}: stale busy notice is replaced, not delivered alongside the snapshot`);

@@ -912,17 +912,16 @@ describe("request-local mode guidance", () => {
   };
   const expectState = (messages: any[], state: ModeGuidanceState) => {
     const guidance = messages.filter(message => message.role === "custom" && message.customType === MODE_GUIDANCE_TYPE);
-    expect(guidance).toHaveLength(1);
-    expect(guidance[0]).toEqual({
+    expect(guidance.length).toBeGreaterThanOrEqual(1);
+    // Earlier snapshots stay where they first appeared; the newest one states the live settings.
+    expect(guidance.at(-1)).toEqual({
       role: "custom", customType: MODE_GUIDANCE_TYPE, content: modeGuidanceText(state), display: false, timestamp: expect.any(Number),
     });
-    // Fixed position after the leading system prompt keeps the cached request prefix stable.
-    expect(messages[messages[0]?.role === "system" ? 1 : 0]).toBe(guidance[0]);
   };
   const withoutGuidance = (messages: any[]) => messages.filter(message => message.role !== "custom" || message.customType !== MODE_GUIDANCE_TYPE);
   const notices = (s: ReturnType<typeof setup>) => s.h.messages.filter(({ message }) => message.customType === MODE_SETTINGS_NOTICE_TYPE);
 
-  test("first and repeated/tool-continuation requests replace only gate snapshots and settings notices, without persistence", async () => {
+  test("first and repeated/tool-continuation requests keep one anchored snapshot and an append-only prefix", async () => {
     const s = await start(setup());
     expect(s.h.handlers.get("context_with_system")).toHaveLength(1);
     const head = Object.freeze({ role: "system", content: "host prompt", sections: { preamble: "Host rules" }, toolsAdded: [{ name: "read", parameters: {} }], timestamp: 1 });
@@ -952,8 +951,10 @@ describe("request-local mode guidance", () => {
       // Unchanged settings: the earlier request is a byte-identical prefix of the next one.
       expect(JSON.stringify(next.slice(0, first.length))).toBe(JSON.stringify(first));
     }
-    expect(s.h.entries).toEqual(entries);
+    // The anchor is the only thing saved, once; request snapshots never become messages.
+    expect(s.h.entries).toEqual([...entries, { customType: "tool-gate:guidance-anchor", data: expect.objectContaining({ count: preserved.length, text: modeGuidanceText({ workflow: "work", approval: "auto", denyInsteadOfPrompting: false }) }) }]);
     expect(s.h.messages).toEqual(messages);
+    expect(first.filter(message => message.customType === MODE_GUIDANCE_TYPE && message.role === "custom")).toHaveLength(1);
   });
 
   test("idle approval and prompting changes are silent and the next request reads live state", async () => {
@@ -980,6 +981,9 @@ describe("request-local mode guidance", () => {
     const next = await snapshot(s, [...old, { role: "custom", ...notices(s)[0].message, timestamp: 1 }]);
     expectState(next, { workflow: "work", approval: "default", denyInsteadOfPrompting: true });
     expect(next.some(message => message.customType === MODE_SETTINGS_NOTICE_TYPE)).toBe(false);
+    // The earlier snapshot stays where it was; the new one is appended after it.
+    expect(next.filter(message => message.role === "custom" && message.customType === MODE_GUIDANCE_TYPE)).toHaveLength(2);
+    expect(JSON.stringify(next.slice(0, old.length))).toBe(JSON.stringify(old));
     await s.h.commands.get("gate").handler("prompts on", s.ctx);
     expect(notices(s)).toHaveLength(2);
     expectState(await snapshot(s), { workflow: "work", approval: "default", denyInsteadOfPrompting: false });
@@ -1057,6 +1061,26 @@ describe("request-local mode guidance", () => {
     expectState(await snapshot(s), { workflow: "chat", approval: "acceptEdits", denyInsteadOfPrompting: true });
   });
 
+  test.each(["session_start", "session_tree"])("%s restores saved guidance anchors: kept at their position when the history matches, re-anchored when it does not", async hook => {
+    const s = await start(setup());
+    const state = { workflow: "work", approval: "auto", denyInsteadOfPrompting: false } as const;
+    const text = modeGuidanceText(state);
+    const m1 = { role: "user", content: "m1", timestamp: 1 };
+    const m2 = { role: "user", content: "m2", timestamp: 2 };
+    const m3 = { role: "user", content: "m3", timestamp: 3 };
+    s.branch.splice(0, s.branch.length, entry("tool-gate:guidance-anchor", { text, count: 1, ts: 1, timestamp: 50 }));
+    await s.h.emit(hook, {}, s.ctx);
+    const kept = await snapshot(s, [m1, m2, m3]);
+    expect(kept.map(m => m.customType === MODE_GUIDANCE_TYPE ? "G" : m.content)).toEqual(["m1", "G", "m2", "m3"]);
+    expect(kept[1].timestamp).toBe(50);
+    expect(s.h.entries.filter(e => e.customType === "tool-gate:guidance-anchor")).toEqual([]);
+    // The history was rewritten (compaction or another branch): the stale anchor is dropped.
+    await s.h.emit(hook, {}, s.ctx);
+    const moved = await snapshot(s, [{ ...m1, timestamp: 99 }, m2]);
+    expect(moved.map(m => m.customType === MODE_GUIDANCE_TYPE ? "G" : m.content)).toEqual(["m1", "m2", "G"]);
+    expect(s.h.entries.filter(e => e.customType === "tool-gate:guidance-anchor")).toHaveLength(1);
+  });
+
   test("shutdown clears pending notices and detaches the event context without sending anything", async () => {
     const s = await start(setup());
     s.ctx.isIdle = () => false;
@@ -1129,7 +1153,7 @@ describe("request-local mode guidance", () => {
     const entries = [...s.h.entries];
     expect(await s.h.emit("before_agent_start", { prompt: "x" }, s.ctx)).toBeUndefined();
     expectState(await snapshot(s), { workflow: "plan", approval: "bypassPermissions", denyInsteadOfPrompting: false });
-    expect(s.h.entries).toEqual(entries);
+    expect(s.h.entries).toEqual([...entries, { customType: "tool-gate:guidance-anchor", data: expect.objectContaining({ count: 0 }) }]);
     expect(s.h.messages).toEqual([]);
   });
 
