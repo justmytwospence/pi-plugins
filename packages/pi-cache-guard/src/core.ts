@@ -330,6 +330,7 @@ export function formatCost(dollars: number): string {
  * Codex has no use for it). Longest prefix wins; unknown models price as Opus 5.5.
  */
 const CLAUDE_PRICES: ReadonlyArray<readonly [string, Price]> = [
+  ["claude-fable-5-2", { input: 8, cacheRead: 0.2 }],
   ["claude-fable-5-1", { input: 10, cacheRead: 0.25 }],
   ["claude-fable-5", { input: 10, cacheRead: 1 }],
   ["claude-mythos-5-1", { input: 10, cacheRead: 0.25 }],
