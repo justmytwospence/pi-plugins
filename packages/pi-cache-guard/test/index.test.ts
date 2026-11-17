@@ -305,6 +305,26 @@ describe("extension", () => {
     expect(h.ui.confirms).toEqual([]);
   });
 
+  test("a virtual selection (a plan model pair) reads the cache of the model behind it", async () => {
+    const pair = { provider: "plan", id: "fableplan", api: "pi-virtual" };
+    const physicals = [opus, sonnet];
+    const registry = {
+      find: (provider: string, id: string) => provider === pair.provider && id === pair.id ? pair : physicals.find((m) => m.provider === provider && m.id === id),
+      getAvailable: () => [pair, ...physicals],
+    };
+    const h = harness([assistant(NOW - 60_000, 600_000)], pair, registry);
+    await h.emit("session_start", {});
+    expect(h.ui.status.get("cache-guard")).toBe("cache 4:00");
+    expect(await h.emit("input", input("go on"))).toEqual({ action: "continue" });
+    expect(h.ui.confirms).toEqual([]);
+    // Expiry is still caught.
+    vi.advanceTimersByTime(300_000);
+    expect(h.ui.status.get("cache-guard")).toBe("cache cold");
+    h.ui.answer = undefined;
+    expect(await h.emit("input", input("next"))).toEqual({ action: "handled" });
+    expect(h.ui.confirms[0]).toContain("expired");
+  });
+
   test("asks before a cold prompt and keeps it in the editor on No", async () => {
     const h = harness([assistant(NOW - 900_000, 600_000)]);
     await h.emit("session_start", {});

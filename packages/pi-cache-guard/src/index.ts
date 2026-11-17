@@ -22,6 +22,7 @@ import { Row, appendReport, registerReportRenderer, registerRowRun } from "./tra
 import { type AssistantLike, NOTICE_TYPE, type Notice, detectMiss, mergeNotices, nextMissStreak, noticeLine } from "./notices.ts";
 import { type Wire, cachePolicy, echoedRetention, requestedTtl } from "./policy.ts";
 import { MODEL_CHOICE, MODEL_OFFERS, type ModelChoice, type ModelOffer, type ModelOffers, collectOffers, oneLine } from "./offers.ts";
+import { isVirtual, payloadModel, routedModel } from "./routed-model.ts";
 import { Text } from "@earendil-works/pi-tui";
 import {
   DEFAULT_SETTINGS,
@@ -322,7 +323,15 @@ export default function cacheGuard(
   };
   pi.on("before_provider_request", (event, context) => {
     const request = requestedTtl(event.payload);
-    const model = context.model;
+    // A virtual selection (a plan model pair) names the physical model in the payload.
+    let model = context.model;
+    if (isVirtual(model)) {
+      try {
+        model = payloadModel(context as never, (event.payload as { model?: unknown } | undefined)?.model);
+      } catch {
+        model = undefined;
+      }
+    }
     // Only this session's model: other requests (Jev, for one) go to other models.
     if (request && model && request.model === model.id) wireFor(model.provider, model.id).ttl = request.ttl;
     if (!model || (event.payload as { model?: unknown } | undefined)?.model !== model.id || !settings.effortUpdates.enabled ||
@@ -334,8 +343,14 @@ export default function cacheGuard(
     const retention = echoedRetention(event.data);
     if (retention !== undefined) wireFor(event.provider, event.model).retention = retention;
   });
+  /**
+   * The model whose cache the next request reads: the selection, or for a virtual one (a plan model
+   * pair) the physical model behind its latest response. Comparing the virtual id with the requests'
+   * physical model would call every prompt a model switch.
+   */
+  const physical = (context: ExtensionContext) => routedModel(context as never);
   const infoFor = (context: ExtensionContext) => {
-    const model = context.model;
+    const model = physical(context);
     if (!model) return undefined;
     let oauth = false;
     try {
