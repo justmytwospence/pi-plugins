@@ -127,7 +127,8 @@ describe("tiers and pairs", () => {
       ["openai/astraplan", "Astra plan, Sol build", ["openai"]],
       ["openai/astraplan-terra", "Astra plan, Terra build", ["openai"]],
       ["openai/solplan", "Sol plan, Terra build", ["openai"]],
-      ["google/carbonplan", "Carbon plan, Hydrogen build", ["google/antigravity-gemini", "google/gemini"]],
+      ["google/carbonplan", "Carbon plan, Argon build", ["google/antigravity-gemini", "google/gemini"]],
+      ["google/carbonplan-hydrogen", "Carbon plan, Hydrogen build", ["google/antigravity-gemini", "google/gemini"]],
       ["google/argonplan", "Argon plan, Hydrogen build", ["google/antigravity-gemini", "google/gemini"]],
     ]);
   });

@@ -30,7 +30,8 @@ test("the built-in pairs plan on a stronger family and build on a cheaper one", 
       ["openai/astraplan", "Astra plan, Sol build"],
       ["openai/astraplan-terra", "Astra plan, Terra build"],
       ["openai/solplan", "Sol plan, Terra build"],
-      ["google/carbonplan", "Carbon plan, Hydrogen build"],
+      ["google/carbonplan", "Carbon plan, Argon build"],
+      ["google/carbonplan-hydrogen", "Carbon plan, Hydrogen build"],
       ["google/argonplan", "Argon plan, Hydrogen build"],
     ],
   );
@@ -180,14 +181,26 @@ test("a premium planner also offers a worker two tiers down", () => {
       worker: { provider: "openai", modelId: "gpt-6-terra" },
     },
   );
-  // carbonplan already builds on Hydrogen, two tiers down, so Google gets no extra pair.
-  assert.ok(!builtinPairs().some((pair) => pair.provider === "google" && pair.id.startsWith("carbonplan-")));
 });
 
-test("carbonplan plans on Carbon and builds on Hydrogen", () => {
+test("carbonplan builds on Argon and carbonplan-hydrogen on Hydrogen", () => {
   assert.deepEqual(
     resolvePair(
       def("google/carbonplan"),
+      catalog(
+        "google/antigravity-gemini-4-carbon",
+        "google/antigravity-gemini-4-argon",
+        "google/antigravity-gemini-4-hydrogen",
+      ),
+    ),
+    {
+      planner: { provider: "google", modelId: "antigravity-gemini-4-carbon" },
+      worker: { provider: "google", modelId: "antigravity-gemini-4-argon" },
+    },
+  );
+  assert.deepEqual(
+    resolvePair(
+      def("google/carbonplan-hydrogen"),
       catalog(
         "google/antigravity-gemini-4-carbon",
         "google/antigravity-gemini-4-argon",

@@ -147,7 +147,6 @@ export const BUILTIN_ROUTES: readonly RouteDef[] = [
       { id: "hydrogen", tiers: ["fast", "balanced"] },
       { id: "flash", tiers: ["fast", "balanced"] },
     ],
-    pairs: [{ planner: "carbon", worker: "hydrogen" }],
   },
   {
     id: "google/gemini",
@@ -166,7 +165,6 @@ export const BUILTIN_ROUTES: readonly RouteDef[] = [
       { id: "flash", tiers: ["balanced"] },
       { id: "flash-lite", tiers: ["fast"] },
     ],
-    pairs: [{ planner: "carbon", worker: "hydrogen" }],
   },
   {
     id: "muse-code",
