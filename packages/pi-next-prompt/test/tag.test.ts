@@ -91,3 +91,9 @@ test("pending rollout is explicit without making suggestions unconditional", () 
   expect(INSTRUCTION).toContain("when you need information from the user");
   expect(INSTRUCTION).toContain("response ended in an error");
 });
+
+test("suggestions are requests to the agent, not manual chores for the user", () => {
+  expect(INSTRUCTION).toContain("ask you to do next");
+  expect(INSTRUCTION).toContain("Never use it to tell the user to do something themselves");
+  expect(INTERACTIVE_INSTRUCTION).toContain("a manual step that is not a shell command belongs in prose");
+});

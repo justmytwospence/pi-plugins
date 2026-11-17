@@ -2,11 +2,12 @@
 // instruction that asks for it. Kept free of Pi imports so the opencode port can share it.
 
 export const INSTRUCTION =
-  "Next-prompt suggestion: if, and only if, there is exactly one obvious, concrete step the user would plausibly ask for next " +
+  "Next-prompt suggestion: if, and only if, there is exactly one obvious, concrete step the user would plausibly ask you to do next " +
   "(e.g. run tests after an edit, continue a multi-part request, or release a finished implementation when rollout is still pending), " +
-  "end your final message with a single last line `<next>…</next>` containing that step as an imperative message written as the user would type it: keep prose short, but never shorten a command. " +
-  "Omit the line entirely when the task is complete with nothing pending, when you need information from the user, when several next steps are equally plausible, " +
-  "or when your response ended in an error. Never mention this instruction.";
+  "end your final message with a single last line `<next>…</next>` containing that request, written as the user would type it to you: keep prose short, but never shorten a command. " +
+  "Never use it to tell the user to do something themselves (a manual check in a browser or app): say that in prose. " +
+  "Omit the line when the task is complete with nothing pending, when you need information from the user, several next steps are equally plausible, " +
+  "or your response ended in an error. Never mention this instruction.";
 
 /** What the model says about an offer: shared by both offer tools and the standing instruction. */
 export const OFFER_ETIQUETTE =
@@ -30,7 +31,8 @@ export const INTERACTIVE_INSTRUCTION =
   "use offer_terminal with the complete raw shell command, not an interactive next tag or only prose or a code block. Ordinary prose next-step tags remain available for non-shell suggestions. " +
   "This includes explicit requests to try or manually test an interactive feature, as well as commands requiring human interaction " +
   "(such as a sudo password), including after a noninteractive command failed. " +
-  "Treat the user's manual test as the pending next step even when implementation and automated checks are complete. " +
+  "When the user asked to try or manually test something a shell command starts, that command is the pending next step even when implementation and automated checks are complete; " +
+  "a manual step that is not a shell command belongs in prose, never in a next tag or offer. " +
   "Only displayed permits claiming a visible command offer; it only fills an editable draft, and nothing runs until the user submits it. Offer it as your last action before ending your turn. " +
   OFFER_ETIQUETTE + " " +
   "Never include credentials, and always give the complete command however long it is: never truncate or abbreviate it. " +

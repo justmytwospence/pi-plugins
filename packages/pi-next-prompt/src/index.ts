@@ -99,10 +99,11 @@ export const QUESTIONS: Record<string, ClassifierQuestion> = {
     type: "bool",
     instructions:
       "A coding agent finished answering `last_user_prompt` with a response ending in `assistant_text_tail`, and proposes `suggestion` as the user's next message. " +
-      "Is the suggestion a concrete, non-generic next step that follows from the response, is not already done, and the user would plausibly send next?",
+      "Is the suggestion a concrete, non-generic request to the agent that follows from the response, is not already done, and the user would plausibly send next? " +
+      "A suggestion telling the user to do something themselves (open a page, check a device, confirm something by hand) is not a message to the agent.",
     criteria: {
       true: "A specific, useful next step the user would likely send",
-      false: "Generic, already done, unrelated, or a guess among several options",
+      false: "Generic, already done, unrelated, a guess among several options, or a task for the user to do by hand",
     },
   },
 };
