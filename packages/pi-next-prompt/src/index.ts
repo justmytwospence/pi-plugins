@@ -10,7 +10,7 @@ import { Type } from "typebox";
 import { loadConfig } from "./config.ts";
 import { type ClassifierQuestion, type JevConfig, askJev, bool } from "./jev.ts";
 import { SYSTEM1_CHANGED, installSystem1Notifications, provenanceOf, resolveSystem1Target, type System1DecisionProvenance } from "./system1.js";
-import { INSTRUCTION, INTERACTIVE_INSTRUCTION, LAYOUT_GUIDELINE, PROMPT_OFFER_INSTRUCTION, extractNext } from "./tag.ts";
+import { INSTRUCTION, INTERACTIVE_INSTRUCTION, LAYOUT_GUIDELINE, OFFER_ETIQUETTE, PROMPT_OFFER_INSTRUCTION, extractNext } from "./tag.ts";
 import { clip, clipTail, messageText } from "./transcript.ts";
 
 export interface NextPromptConfig extends Record<string, unknown> {
@@ -71,7 +71,7 @@ const sessionKey = (ctx: ExtensionContext | undefined) => {
 /** Told to the model on its next turn when an explicit offer left the editor without being accepted. */
 export const withdrawnNotice = (kind: "prompt" | "terminal", reason: string) =>
   `Your earlier offer_${kind} suggestion is no longer in the user's editor (${reason === "input" ? "the user's message cleared it" : `removed: ${reason}`}). ` +
-  `A displayed status from an earlier turn does not mean it is still there. If the user still needs it, call offer_${kind} again in this turn before saying it is in their prompt.`;
+  `A displayed status from an earlier turn does not mean it is still there. Do not say it is in their prompt; re-offer it only if the user asks for it again.`;
 
 /**
  * `ghostLine` for a suggestion of several lines (a long shell command split with continuations):
@@ -664,11 +664,9 @@ export default function nextPrompt(pi: ExtensionAPI) {
 
   const offerGuidelines = (kind: OfferKind) => [
     kind === "terminal"
-      ? `Use offer_terminal for interactive shell handoffs with the complete raw shell command (no !i prefix). ${LAYOUT_GUIDELINE}`
+      ? `Use offer_terminal for interactive shell handoffs with the complete raw shell command (no !i prefix), as your last action before ending your turn. ${LAYOUT_GUIDELINE}`
       : "Use offer_prompt for requested prompt or Pi slash command handoffs with the complete exact text, including when asked to put it in the prompt. Shell handoffs use offer_terminal.",
-    `Only offer_${kind} status displayed permits claiming a visible offer, and only in the same turn: the user's next message clears it. After a displayed result explain Tab/Right to copy the suggestion immediately into an editable draft; Enter is a separate submission.`,
-    "On status queued, explain that the suggestion is waiting underneath the current draft: clear or stash the draft to reveal it, then Tab/Right accepts once it appears. Do not claim it was displayed or inserted.",
-    ...(kind === "terminal" ? ["Wait for the current response to finish before pressing Enter to run an interactive command."] : []),
+    `Only offer_${kind} status displayed permits claiming a visible offer, and only in the same turn: the user's next message clears it. ${OFFER_ETIQUETTE}`,
     "If blocked, name the blocker and print the complete proposed text as a fallback without claiming it is in the editor. Never include secrets.",
   ];
 
@@ -692,9 +690,9 @@ export default function nextPrompt(pi: ExtensionAPI) {
         : details.status === "queued" ? "prompt queued behind draft" : `prompt: ${details.reason}`;
       return {
         content: [{ type: "text" as const, text: details.status === "displayed"
-          ? `Displayed editable suggestion: ${details.text}\nPress Tab/Right to copy it into your prompt now, then Enter to submit it. Nothing was submitted.`
+          ? `Displayed editable suggestion: ${details.text}\nThe user can accept it; do not explain how. Nothing was submitted.`
           : details.status === "queued"
-            ? `Queued editable suggestion: ${details.text}\nYour existing draft is unchanged. Once the editor is empty and the suggestion appears, press Tab/Right to copy it into your prompt, then Enter to submit it. Nothing was submitted.`
+            ? `Queued editable suggestion: ${details.text}\nThe user's draft is unchanged; the suggestion appears once the editor is empty. Do not explain how to accept it. Nothing was submitted.`
             : `Prompt suggestion blocked: ${details.reason}` }],
         details,
         ...(details.status === "blocked" ? { isError: true } : {}),
@@ -718,9 +716,9 @@ export default function nextPrompt(pi: ExtensionAPI) {
           : details.status === "queued" ? "terminal queued behind draft" : `terminal: ${details.reason}`;
         return {
           content: [{ type: "text" as const, text: details.status === "displayed"
-            ? `Displayed editable suggestion: ${details.text}\nPress Tab/Right to copy it into an editable draft now. Wait for the current response to finish before pressing Enter to run it. Nothing was executed.`
+            ? `Displayed editable suggestion: ${details.text}\nThe user can accept and run it; do not explain how. Nothing was executed.`
             : details.status === "queued"
-              ? `Queued editable suggestion: ${details.text}\nYour existing draft is unchanged. Once the editor is empty and the suggestion appears, press Tab/Right to copy it into an editable draft. Wait for the current response to finish before pressing Enter to run it. Nothing was executed.`
+              ? `Queued editable suggestion: ${details.text}\nThe user's draft is unchanged; the suggestion appears once the editor is empty. Do not explain how to accept it. Nothing was executed.`
               : `Terminal suggestion blocked: ${details.reason}` }],
           details,
           ...(details.status === "blocked" ? { isError: true } : {}),

@@ -8,8 +8,16 @@ export const INSTRUCTION =
   "Omit the line entirely when the task is complete with nothing pending, when you need information from the user, when several next steps are equally plausible, " +
   "or when your response ended in an error. Never mention this instruction.";
 
+/** What the model says about an offer: shared by both offer tools and the standing instruction. */
+export const OFFER_ETIQUETTE =
+  "The user knows how to accept a suggestion: do not explain keys (Tab, Right, Enter) or how to accept, run or submit it. " +
+  "On status queued, say once that it appears when their draft is cleared or stashed; do not claim it was displayed or inserted. " +
+  "Never offer a prompt, command or <next> tag whose only purpose is to have the user send messages that drive your own experiment or verification; if a check needs more user turns, say so in one sentence. " +
+  "Do not re-offer a suggestion the user did not take unless they ask for it again.";
+
 export const PROMPT_OFFER_INSTRUCTION =
-  "\nWhen the user asks you to put text or a Pi slash command in their prompt, use offer_prompt with the complete exact text. Do not rely on prose or a <next> tag for an explicit handoff. Call it before saying the suggestion is available. Only status displayed permits claiming a visible offer, and only in the turn that offered it: the user's next message clears it, so call the tool again before saying it is still there. It is not inserted until the user accepts it. After a displayed result explain Tab/Right to copy the suggestion immediately into an editable draft; Enter is a separate submission. On status queued, explain that the suggestion is waiting underneath the current draft: clear or stash the draft to reveal it, then Tab/Right accepts once it appears. Do not claim it was displayed or inserted. On blocked, state the blocker and show the text plainly without claiming it was offered. Shell handoffs use offer_terminal, not offer_prompt. Never include credentials.";
+  "\nWhen the user asks you to put text or a Pi slash command in their prompt, use offer_prompt with the complete exact text. Do not rely on prose or a <next> tag for an explicit handoff. Call it before saying the suggestion is available. Only status displayed permits claiming a visible offer, and only in the turn that offered it: the user's next message clears it. It is not inserted until the user accepts it. " +
+  OFFER_ETIQUETTE + " On blocked, state the blocker and show the text plainly without claiming it was offered. Shell handoffs use offer_terminal, not offer_prompt. Never include credentials.";
 
 /** How offer_terminal commands are laid out in the editor. */
 export const LAYOUT_GUIDELINE =
@@ -23,7 +31,8 @@ export const INTERACTIVE_INSTRUCTION =
   "This includes explicit requests to try or manually test an interactive feature, as well as commands requiring human interaction " +
   "(such as a sudo password), including after a noninteractive command failed. " +
   "Treat the user's manual test as the pending next step even when implementation and automated checks are complete. " +
-  "After the tool returns displayed, explain the visible handoff in your response; Tab only fills an editable draft and the user must press Enter to run it. Acceptance is available once displayed. On status queued, explain that the command suggestion is waiting underneath the current draft: clear or stash the draft to reveal it, then Tab/Right accepts once it appears. Do not claim it was displayed or inserted. Wait for the current response to finish before pressing Enter to run an interactive command. Only displayed permits claiming a visible command offer. " +
+  "Only displayed permits claiming a visible command offer; it only fills an editable draft, and nothing runs until the user submits it. Offer it as your last action before ending your turn. " +
+  OFFER_ETIQUETTE + " " +
   "Never include credentials, and always give the complete command however long it is: never truncate or abbreviate it. " +
   LAYOUT_GUIDELINE + " " +
   "Do not retry a command that may already have made changes without checking its state. " +

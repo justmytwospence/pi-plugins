@@ -299,7 +299,7 @@ function expectDisplayed(result: any, text: string, ghost = false) {
   expect(result.isError).not.toBe(true);
   expect(result.content).toEqual([{
     type: "text",
-    text: `Displayed editable suggestion: ${text}\nPress Tab/Right to copy it into your prompt now, then Enter to submit it. Nothing was submitted.`,
+    text: `Displayed editable suggestion: ${text}\nThe user can accept it; do not explain how. Nothing was submitted.`,
   }]);
 }
 
@@ -308,7 +308,7 @@ function expectQueued(result: any, text = PROMPT, reason = "editor contains a dr
   expect(result.isError).toBeUndefined();
   expect(result.content).toEqual([{
     type: "text",
-    text: `Queued editable suggestion: ${text}\nYour existing draft is unchanged. Once the editor is empty and the suggestion appears, press Tab/Right to copy it into your prompt, then Enter to submit it. Nothing was submitted.`,
+    text: `Queued editable suggestion: ${text}\nThe user's draft is unchanged; the suggestion appears once the editor is empty. Do not explain how to accept it. Nothing was submitted.`,
   }]);
 }
 
@@ -331,9 +331,10 @@ test("registers the model-only exact-text prompt tool and verified-handoff guida
   expect(guidelines).toContain("status displayed");
   expect(guidelines).toMatch(/queued/i);
   expect(guidelines).toMatch(/clear.*stash|stash.*clear/i);
-  expect(guidelines).toContain("Do not claim it was displayed or inserted");
-  expect(guidelines).toContain("Tab/Right to copy the suggestion immediately into an editable draft");
-  expect(guidelines).toContain("Enter is a separate submission");
+  expect(guidelines).toContain("do not claim it was displayed or inserted");
+  expect(guidelines).toContain("do not explain keys");
+  expect(guidelines).toContain("drive your own experiment or verification");
+  expect(guidelines).not.toContain("Tab/Right");
   expect(guidelines).not.toContain("Wait for the current response to finish");
   expect(guidelines).toMatch(/blocker/i);
   expect(guidelines).toMatch(/secret|credential/i);

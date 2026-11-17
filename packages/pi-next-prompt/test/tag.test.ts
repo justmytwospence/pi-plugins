@@ -38,8 +38,11 @@ test("explicit handoffs require the tool and a displayed receipt to claim visibi
   expect(PROMPT_OFFER_INSTRUCTION).toContain("Only status displayed permits claiming a visible offer");
   expect(PROMPT_OFFER_INSTRUCTION).toContain("not inserted until the user accepts");
   expect(PROMPT_OFFER_INSTRUCTION).toContain("Do not rely on prose or a <next> tag");
-  expect(PROMPT_OFFER_INSTRUCTION).toContain("Tab/Right to copy the suggestion immediately into an editable draft");
-  expect(PROMPT_OFFER_INSTRUCTION).toContain("Enter is a separate submission");
+  expect(PROMPT_OFFER_INSTRUCTION).toContain("do not explain keys");
+  expect(PROMPT_OFFER_INSTRUCTION).toContain("drive your own experiment or verification");
+  expect(PROMPT_OFFER_INSTRUCTION).toContain("Do not re-offer");
+  expect(PROMPT_OFFER_INSTRUCTION).not.toContain("Tab/Right");
+  expect(PROMPT_OFFER_INSTRUCTION).not.toMatch(/\bexplain Tab/);
   expect(PROMPT_OFFER_INSTRUCTION).not.toContain("after the response finishes");
   expect(PROMPT_OFFER_INSTRUCTION).not.toContain("Wait for the current response to finish");
   expect(PROMPT_OFFER_INSTRUCTION).toContain("On blocked, state the blocker");
@@ -52,10 +55,8 @@ test.each([
   ["terminal", INTERACTIVE_INSTRUCTION],
 ])("%s queued guidance is distinct from display or insertion", (_kind, instruction) => {
   expect(instruction).toContain("On status queued");
-  expect(instruction).toContain("waiting underneath the current draft");
-  expect(instruction).toContain("clear or stash the draft to reveal it");
-  expect(instruction).toContain("Tab/Right accepts once it appears");
-  expect(instruction).toContain("Do not claim it was displayed or inserted");
+  expect(instruction).toContain("appears when their draft is cleared or stashed");
+  expect(instruction).toContain("do not claim it was displayed or inserted");
   expect(instruction).toContain("Never include credentials");
 });
 
@@ -70,11 +71,10 @@ test("blocked terminal guidance still names the blocker without executing or exp
   expect(INTERACTIVE_INSTRUCTION).toContain("Do not retry a command that may already have made changes without checking its state");
 });
 
-test("terminal offers allow immediate draft acceptance but require waiting before interactive execution", () => {
-  expect(INTERACTIVE_INSTRUCTION).toContain("Acceptance is available once displayed");
-  expect(INTERACTIVE_INSTRUCTION).toContain("Tab only fills an editable draft and the user must press Enter to run it");
-  expect(INTERACTIVE_INSTRUCTION).toContain("Wait for the current response to finish before pressing Enter to run an interactive command");
-  expect(INTERACTIVE_INSTRUCTION).not.toContain("Acceptance becomes available after the response finishes");
+test("terminal offers are made last and leave running to the user without explaining keys", () => {
+  expect(INTERACTIVE_INSTRUCTION).toContain("Offer it as your last action before ending your turn");
+  expect(INTERACTIVE_INSTRUCTION).toContain("nothing runs until the user submits it");
+  expect(INTERACTIVE_INSTRUCTION).not.toContain("Wait for the current response to finish before pressing Enter");
 });
 
 test("the instruction is short", () => {

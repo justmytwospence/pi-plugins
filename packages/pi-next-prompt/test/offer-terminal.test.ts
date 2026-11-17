@@ -143,7 +143,7 @@ function expectQueued(result: any, command = "printf 'one  two'", reason = "edit
   expect(result.isError).toBeUndefined();
   expect(result.content).toEqual([{
     type: "text",
-    text: `Queued editable suggestion: ${text}\nYour existing draft is unchanged. Once the editor is empty and the suggestion appears, press Tab/Right to copy it into an editable draft. Wait for the current response to finish before pressing Enter to run it. Nothing was executed.`,
+    text: `Queued editable suggestion: ${text}\nThe user's draft is unchanged; the suggestion appears once the editor is empty. Do not explain how to accept it. Nothing was executed.`,
   }]);
 }
 
@@ -162,13 +162,13 @@ test("model-only schema and guidelines distinguish verified display, queueing an
   const guidelines = tool.promptGuidelines.join(" ");
   expect(guidelines).toContain("status displayed permits claiming a visible offer");
   expect(guidelines).toContain("On status queued");
-  expect(guidelines).toContain("clear or stash the draft to reveal it");
-  expect(guidelines).toContain("Do not claim it was displayed or inserted");
+  expect(guidelines).toContain("appears when their draft is cleared or stashed");
+  expect(guidelines).toContain("do not claim it was displayed or inserted");
   expect(guidelines).toMatch(/blocker/i);
   expect(guidelines).toMatch(/secret|credential/i);
-  expect(guidelines).toContain("Tab/Right to copy the suggestion immediately into an editable draft");
-  expect(guidelines).toContain("Enter is a separate submission");
-  expect(guidelines).toContain("Wait for the current response to finish before pressing Enter to run an interactive command.");
+  expect(guidelines).toContain("do not explain keys");
+  expect(guidelines).toContain("as your last action before ending your turn");
+  expect(guidelines).not.toContain("Tab/Right");
 });
 
 test.each(["", "  ", " true", "true ", "one \\ \ntwo", "one\r\ntwo", "one\rtwo", "one\x1btwo", "one\x00two", "!i true", "!!i true"])("rejects invalid input %j", async command => {
@@ -189,7 +189,7 @@ test.each([false, true])("acknowledges only actual output, preserving raw shell 
   expect(result.details).toEqual({ status: "displayed", kind: "terminal", text: `!i ${command}`, surface: ghost ? "ghost" : "widget", acceptAfterTurn: false });
   expect(result.content).toEqual([{
     type: "text",
-    text: `Displayed editable suggestion: !i ${command}\nPress Tab/Right to copy it into an editable draft now. Wait for the current response to finish before pressing Enter to run it. Nothing was executed.`,
+    text: `Displayed editable suggestion: !i ${command}\nThe user can accept and run it; do not explain how. Nothing was executed.`,
   }]);
   expect(ctx.ui.editorWrites).toEqual([]);
 });
@@ -403,7 +403,7 @@ test.each([false, true].flatMap(ghost => ["\t", "\x1b[C"].map(key => ({ ghost, k
   expect(s.ctx.ui.editorWrites).toEqual([]);
   const result = await pending;
   expect(result.details).toEqual({ status: "displayed", kind: "terminal", text, surface: ghost ? "ghost" : "widget", acceptAfterTurn: false });
-  expect(result.content[0].text).toBe(`Displayed editable suggestion: ${text}\nPress Tab/Right to copy it into an editable draft now. Wait for the current response to finish before pressing Enter to run it. Nothing was executed.`);
+  expect(result.content[0].text).toBe(`Displayed editable suggestion: ${text}\nThe user can accept and run it; do not explain how. Nothing was executed.`);
   expect(s.diagnostics().state.busy).toBe(true);
   expect(s.diagnostics().ready).toBe(true);
   expect(s.ctx.ui.press(key)).toBe(true);
@@ -890,7 +890,7 @@ test("the next turn is told when an offer was cleared without acceptance", async
   const event = { prompt: "what do i need to run?", systemPromptOptions: { sections: {} as Record<string, string> } };
   const result: any = await s.h.emit("before_agent_start", event, s.ctx);
   expect(result.message.display).toBe(false);
-  expect(result.message.content).toContain("call offer_terminal again");
+  expect(result.message.content).toContain("re-offer it only if the user asks for it again");
   expect(await s.h.emit("before_agent_start", event, s.ctx)).toBeUndefined();
 });
 

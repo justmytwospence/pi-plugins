@@ -179,7 +179,9 @@ test("handoff guidance explicitly covers commands and requested manual tests", (
   expect(INTERACTIVE_INSTRUCTION).toContain("use offer_terminal with the complete raw shell command");
   expect(INTERACTIVE_INSTRUCTION).toContain("explicit requests to try or manually test an interactive feature");
   expect(INTERACTIVE_INSTRUCTION).toContain("pending next step even when implementation and automated checks are complete");
-  expect(INTERACTIVE_INSTRUCTION).toContain("Tab only fills an editable draft and the user must press Enter to run it");
+  expect(INTERACTIVE_INSTRUCTION).toContain("it only fills an editable draft, and nothing runs until the user submits it");
+  expect(INTERACTIVE_INSTRUCTION).toContain("do not explain keys");
+  expect(INTERACTIVE_INSTRUCTION).not.toContain("explain the visible handoff");
   expect(INTERACTIVE_INSTRUCTION).toContain("always give the complete command however long it is: never truncate");
   expect(INTERACTIVE_INSTRUCTION).toContain("static, memory-only output preview");
   expect(INTERACTIVE_INSTRUCTION).toContain("never sent to the model");
