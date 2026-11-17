@@ -119,10 +119,13 @@ describe("tiers and pairs", () => {
   it("derives today's plan pairs", () => {
     expect(derivePairs(table).map((p) => [`${p.provider}/${p.id}`, p.name, p.routes])).toEqual([
       ["anthropic/fableplan", "Fable plan, Opus build", ["anthropic"]],
+      ["anthropic/fableplan-sonnet", "Fable plan, Sonnet build", ["anthropic"]],
       ["anthropic/opusplan", "Opus plan, Sonnet build", ["anthropic"]],
       ["openai-codex/astraplan", "Astra plan, Sol build", ["openai"]],
+      ["openai-codex/astraplan-terra", "Astra plan, Terra build", ["openai"]],
       ["openai-codex/solplan", "Sol plan, Terra build", ["openai"]],
       ["openai/astraplan", "Astra plan, Sol build", ["openai"]],
+      ["openai/astraplan-terra", "Astra plan, Terra build", ["openai"]],
       ["openai/solplan", "Sol plan, Terra build", ["openai"]],
       ["google/carbonplan", "Carbon plan, Hydrogen build", ["google/antigravity-gemini", "google/gemini"]],
       ["google/argonplan", "Argon plan, Hydrogen build", ["google/antigravity-gemini", "google/gemini"]],

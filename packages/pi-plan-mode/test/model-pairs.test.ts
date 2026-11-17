@@ -22,10 +22,13 @@ test("the built-in pairs plan on a stronger family and build on a cheaper one", 
     builtinPairs().map((pair) => [pairKey(pair), pair.name]),
     [
       ["anthropic/fableplan", "Fable plan, Opus build"],
+      ["anthropic/fableplan-sonnet", "Fable plan, Sonnet build"],
       ["anthropic/opusplan", "Opus plan, Sonnet build"],
       ["openai-codex/astraplan", "Astra plan, Sol build"],
+      ["openai-codex/astraplan-terra", "Astra plan, Terra build"],
       ["openai-codex/solplan", "Sol plan, Terra build"],
       ["openai/astraplan", "Astra plan, Sol build"],
+      ["openai/astraplan-terra", "Astra plan, Terra build"],
       ["openai/solplan", "Sol plan, Terra build"],
       ["google/carbonplan", "Carbon plan, Hydrogen build"],
       ["google/argonplan", "Argon plan, Hydrogen build"],
@@ -33,8 +36,15 @@ test("the built-in pairs plan on a stronger family and build on a cheaper one", 
   );
 });
 
-test("only the three premium built-in identities retain their approved worker", () => {
-  const persistent = ["anthropic/fableplan", "openai-codex/astraplan", "openai/astraplan"];
+test("only the premium-planner built-in identities retain their approved worker", () => {
+  const persistent = [
+    "anthropic/fableplan",
+    "anthropic/fableplan-sonnet",
+    "openai-codex/astraplan",
+    "openai-codex/astraplan-terra",
+    "openai/astraplan",
+    "openai/astraplan-terra",
+  ];
   assert.deepEqual(
     builtinPairs()
       .filter((pair) => pair.handoff === "persistent")
@@ -152,6 +162,28 @@ test("argonplan resolves on one Google lane, preferring Antigravity", () => {
   );
 });
 
+test("a premium planner also offers a worker two tiers down", () => {
+  assert.deepEqual(
+    resolvePair(
+      def("anthropic/fableplan-sonnet"),
+      catalog("anthropic/claude-fable-5-5", "anthropic/claude-opus-5-5", "anthropic/claude-sonnet-5-5"),
+    ),
+    {
+      planner: { provider: "anthropic", modelId: "claude-fable-5-5" },
+      worker: { provider: "anthropic", modelId: "claude-sonnet-5-5" },
+    },
+  );
+  assert.deepEqual(
+    resolvePair(def("openai/astraplan-terra"), catalog("openai/gpt-6-astra", "openai/gpt-6-sol", "openai/gpt-6-terra")),
+    {
+      planner: { provider: "openai", modelId: "gpt-6-astra" },
+      worker: { provider: "openai", modelId: "gpt-6-terra" },
+    },
+  );
+  // carbonplan already builds on Hydrogen, two tiers down, so Google gets no extra pair.
+  assert.ok(!builtinPairs().some((pair) => pair.provider === "google" && pair.id.startsWith("carbonplan-")));
+});
+
 test("carbonplan plans on Carbon and builds on Hydrogen", () => {
   assert.deepEqual(
     resolvePair(
@@ -223,16 +255,16 @@ test("a custom pair replaces a built-in key in place and a new key is appended",
     },
   });
   assert.equal(defs.length, builtinPairs().length + 1);
-  assert.equal(defs[1] && pairKey(defs[1]), "anthropic/opusplan");
-  assert.equal(defs[1]?.name, "Mine");
+  assert.equal(defs[2] && pairKey(defs[2]), "anthropic/opusplan");
+  assert.equal(defs[2]?.name, "Mine");
   const added = defs[defs.length - 1];
   assert.equal(added && pairKey(added), "openai/deep");
   assert.equal(added?.name, "gpt-6-astra plan, gpt-6-terra build");
-  assert.deepEqual(resolvePair(defs[1] as never, catalog("anthropic/claude-opus-5-5", "anthropic/claude-sonnet-5-1")), {
+  assert.deepEqual(resolvePair(defs[2] as never, catalog("anthropic/claude-opus-5-5", "anthropic/claude-sonnet-5-1")), {
     planner: { provider: "anthropic", modelId: "claude-opus-5-5" },
     worker: { provider: "anthropic", modelId: "claude-sonnet-5-1" },
   });
-  assert.deepEqual(resolvePair(defs[1] as never, catalog("anthropic/claude-opus-5-5")), {
+  assert.deepEqual(resolvePair(defs[2] as never, catalog("anthropic/claude-opus-5-5")), {
     error: "anthropic/claude-sonnet-5-1 is not available",
   });
 });

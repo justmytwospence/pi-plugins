@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Premium planners can build two tiers down
+
+- `anthropic/fableplan-sonnet` (Fable plans, Sonnet builds) and `openai/astraplan-terra`, `openai-codex/astraplan-terra` (Astra plans, Terra builds) join the built-in pairs, with the same persistent worker handoff as Fableplan and Astraplan. Google's `carbonplan` already builds on Hydrogen.
+
 ### Configured models follow their family's newest release
 
 - `planners`, both sides of `scoutModelMap` and custom `modelPairs` resolve each model to its family's newest available generation, so `anthropic/claude-fable-5-1` plans on Claude Fable 5.2 once that is available.

@@ -22,9 +22,19 @@ export interface PairDefinition {
   handoff?: "persistent";
 }
 
+/** Premium-planner pairs: the worker keeps serving after approval. */
+const PERSISTENT = new Set([
+  "anthropic/fableplan",
+  "anthropic/fableplan-sonnet",
+  "openai/astraplan",
+  "openai/astraplan-terra",
+  "openai-codex/astraplan",
+  "openai-codex/astraplan-terra",
+]);
+
 /**
  * Built-in pairs, derived from the shared family table: each route's top premium and strong family
- * plans, the top family of the next tier down builds. Only ranked families take part, so the
+ * plans, the top family of the next tier down builds; a premium planner also builds on the balanced tier. Only ranked families take part, so the
  * registry (and its provisional discoveries) is not needed here.
  */
 export function builtinPairs(): PairDefinition[] {
@@ -35,9 +45,7 @@ export function builtinPairs(): PairDefinition[] {
     planner: { family: spec.planner },
     worker: { family: spec.worker },
     routes: spec.routes,
-    ...(["anthropic/fableplan", "openai/astraplan", "openai-codex/astraplan"].includes(pairKey(spec))
-      ? { handoff: "persistent" as const }
-      : {}),
+    ...(PERSISTENT.has(pairKey(spec)) ? { handoff: "persistent" as const } : {}),
   }));
 }
 

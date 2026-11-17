@@ -535,10 +535,28 @@ export function latestInFamily(
   return `${provider}/${best.id}`;
 }
 
-/** Plan model pairs for every route that derives them: the top premium and strong families, each over the next tier down. */
+/**
+ * Plan model pairs for every route that derives them: the top premium and strong families, each over the
+ * next tier down, and the premium family over the balanced tier too (`<planner>plan-<worker>`).
+ */
 export function derivePairs(table: FamilyTable): PairSpec[] {
   const specs = new Map<string, PairSpec>();
   const next: Record<string, Tier> = { premium: "strong", strong: "balanced" };
+  const add = (provider: string, id: string, planner: ResolvedFamily, worker: ResolvedFamily, route: string) => {
+    const existing = specs.get(`${provider}/${id}`);
+    if (existing) {
+      if (!existing.routes.includes(route)) existing.routes.push(route);
+      return;
+    }
+    specs.set(`${provider}/${id}`, {
+      provider,
+      id,
+      name: `${planner.name} plan, ${worker.name} build`,
+      planner: planner.id,
+      worker: worker.id,
+      routes: [route],
+    });
+  };
   for (const route of table.routes) {
     if (!route.derivePairs) continue;
     const ranked = route.families.filter((family) => family.source !== "provisional");
@@ -551,20 +569,12 @@ export function derivePairs(table: FamilyTable): PairSpec[] {
           ? ranked.find((family) => family.id === override)
           : ranked.find((family) => family.tiers.includes(next[planTier]!));
         if (!worker || worker.id === planner.id) continue;
-        const key = `${provider}/${planner.id}plan`;
-        const existing = specs.get(key);
-        if (existing) {
-          if (!existing.routes.includes(route.id)) existing.routes.push(route.id);
-        } else {
-          specs.set(key, {
-            provider,
-            id: `${planner.id}plan`,
-            name: `${planner.name} plan, ${worker.name} build`,
-            planner: planner.id,
-            worker: worker.id,
-            routes: [route.id],
-          });
-        }
+        add(provider, `${planner.id}plan`, planner, worker, route.id);
+        if (planTier !== "premium") continue;
+        // A premium planner also offers a worker two tiers down, unless its pair already builds there.
+        const lower = ranked.find((family) => family.tiers.includes("balanced"));
+        if (!lower || lower.id === planner.id || lower.id === worker.id) continue;
+        add(provider, `${planner.id}plan-${lower.id}`, planner, lower, route.id);
       }
     }
   }
