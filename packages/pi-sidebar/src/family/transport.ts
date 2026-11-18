@@ -19,6 +19,9 @@ export class FamilyServer {
     this.socketPath = `${this.directory}/s`;
     await new Promise<void>((resolve, reject) => { this.server.once("error", reject); this.server.listen(this.socketPath, () => { this.server.off("error", reject); resolve(); }); });
     await chmod(this.socketPath, 0o600);
+    // The kernel outlives sessions on purpose (retainFamily) and is never disposed at exit, so a
+    // listening socket must not keep Pi's process alive once everything else has finished.
+    this.server.unref();
     this.timer = setInterval(() => {
       for (const [id, m] of this.members) if (m.socket && Date.now() - m.lastSeen >= DISCONNECT_MS) { m.socket.destroy(); m.socket = undefined; this.disconnected(id); }
     }, HEARTBEAT_MS);
