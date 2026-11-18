@@ -1,4 +1,4 @@
-import type { AvailableImplementationModel, ModelSpec } from "./implementation-models.js";
+import type { AvailableImplementationModel, ModelSpec } from "./implementation-models.ts";
 import {
   compareGeneration,
   derivePairs,
@@ -6,7 +6,7 @@ import {
   familyOf,
   latestInFamily,
   loadFamilyTable,
-} from "./model-families.js";
+} from "./model-families.ts";
 
 export type PairEnd = { family: string } | { spec: ModelSpec };
 

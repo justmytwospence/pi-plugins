@@ -1,4 +1,4 @@
-import type { ModeColorSettings } from "./settings.js";
+import type { ModeColorSettings } from "./settings.ts";
 
 const MODE_COLORS = {
   insert: "borderMuted",

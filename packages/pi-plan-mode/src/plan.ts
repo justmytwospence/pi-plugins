@@ -18,12 +18,12 @@ import {
   SettingsManager,
 } from "@earendil-works/pi-coding-agent";
 import type { Component, EditorTheme, TUI } from "@earendil-works/pi-tui";
-import { ACTIVITY_CHANGED, ACTIVITY_GONE, ACTIVITY_HOST, ACTIVITY_SECTION } from "./activity.js";
-import { openPlanningView } from "./app/frame.js";
-import { type LaneAction, type LaneInput, type LaneInputHooks, LanesPage } from "./app/lanes-page.js";
-import { type OptionRow, OptionsPage, type TextArea } from "./app/options-page.js";
-import { RenderedPlans, renderedPlansUnavailable } from "./app/plan-embed.js";
-import { embedColors, planHtml, styleKey } from "./app/plan-html.js";
+import { ACTIVITY_CHANGED, ACTIVITY_GONE, ACTIVITY_HOST, ACTIVITY_SECTION } from "./activity.ts";
+import { openPlanningView } from "./app/frame.ts";
+import { type LaneAction, type LaneInput, type LaneInputHooks, LanesPage } from "./app/lanes-page.ts";
+import { type OptionRow, OptionsPage, type TextArea } from "./app/options-page.ts";
+import { RenderedPlans, renderedPlansUnavailable } from "./app/plan-embed.ts";
+import { embedColors, planHtml, styleKey } from "./app/plan-html.ts";
 import {
   EDITOR_MODE,
   EDITOR_SURFACE,
@@ -32,19 +32,19 @@ import {
   readEditorMode,
   readInputContext,
   requestEditorFactory,
-} from "./editor-contract.js";
-import { effortOrigin, withEffortOrigin } from "./effort-origin.js";
-import { editExternally, externalEditorCommand, prepareEditor } from "./external-editor.js";
-import { discoverFamily, FAMILY_ENTRY, type FamilyMembership } from "./family-contract.js";
-import { bindGateShell } from "./gate-shell.js";
-import { directImplementationBrief } from "./handoff.js";
-import { HERDR_BLOCKED_CHANNEL, holdBlocked, holdWorking, isOwnEmit } from "./herdr-blocked.js";
+} from "./editor-contract.ts";
+import { effortOrigin, withEffortOrigin } from "./effort-origin.ts";
+import { editExternally, externalEditorCommand, prepareEditor } from "./external-editor.ts";
+import { discoverFamily, FAMILY_ENTRY, type FamilyMembership } from "./family-contract.ts";
+import { bindGateShell } from "./gate-shell.ts";
+import { directImplementationBrief } from "./handoff.ts";
+import { HERDR_BLOCKED_CHANNEL, holdBlocked, holdWorking, isOwnEmit } from "./herdr-blocked.ts";
 import {
   type EffortSource,
   type ImplementationEffortPick,
   type ImplementationEffortRequest,
   pickImplementationEffort,
-} from "./implementation-effort.js";
+} from "./implementation-effort.ts";
 import {
   formatModelKey,
   formatModelSpec,
@@ -54,11 +54,11 @@ import {
   parseModelSpec,
   sameModel,
   subagentRoleModel,
-} from "./implementation-models.js";
-import { type Approval, enterPlanText, registerInlinePlanMode } from "./inline-plan.js";
-import { DEFAULT_JEV_MODEL, DEFAULT_JEV_PROVIDER, pickToolsWithJev } from "./jev-tool-picker.js";
-import { runLaneCommand } from "./lane-commands.js";
-import { isAuthError, loginInDialog, providerName } from "./login.js";
+} from "./implementation-models.ts";
+import { type Approval, enterPlanText, registerInlinePlanMode } from "./inline-plan.ts";
+import { DEFAULT_JEV_MODEL, DEFAULT_JEV_PROVIDER, pickToolsWithJev } from "./jev-tool-picker.ts";
+import { runLaneCommand } from "./lane-commands.ts";
+import { isAuthError, loginInDialog, providerName } from "./login.ts";
 import {
   MainAgentView,
   type MergedPlan,
@@ -67,16 +67,16 @@ import {
   registerMainChat,
   renderCollapsedMarkdown,
   setMainToolsActive,
-} from "./main-chat.js";
-import { buildMcpCatalog, readConfiguredMcpServers } from "./mcp-tools.js";
-import { modelCatalog, normalizeEffort } from "./model-catalog.js";
-import { latestSpec } from "./model-pairs.js";
-import { pairNote, registerPairs } from "./pairs.js";
-import { exportPlanToFile } from "./plan-export.js";
-import { plansDirectoryPath, planTitle, readPlan, writePlanFile } from "./plan-file.js";
-import { expandHome, runPlanCompleteHook } from "./plan-hook.js";
-import { type OtherTool, otherTools, otherToolsNode, resolveAccess } from "./planner/access.js";
-import { type PlannerAccessConfig, PlannerAgent } from "./planner/agent.js";
+} from "./main-chat.ts";
+import { buildMcpCatalog, readConfiguredMcpServers } from "./mcp-tools.ts";
+import { modelCatalog, normalizeEffort } from "./model-catalog.ts";
+import { latestSpec } from "./model-pairs.ts";
+import { pairNote, registerPairs } from "./pairs.ts";
+import { exportPlanToFile } from "./plan-export.ts";
+import { plansDirectoryPath, planTitle, readPlan, writePlanFile } from "./plan-file.ts";
+import { expandHome, runPlanCompleteHook } from "./plan-hook.ts";
+import { type OtherTool, otherTools, otherToolsNode, resolveAccess } from "./planner/access.ts";
+import { type PlannerAccessConfig, PlannerAgent } from "./planner/agent.ts";
 import {
   planDeliveryText,
   planFailureText,
@@ -84,18 +84,18 @@ import {
   plannerTaskPrompt,
   resumeMessage,
   writeMergedRequest,
-} from "./planner/prompt.js";
+} from "./planner/prompt.ts";
 import {
   inheritProviders,
   type PlannerSessionFactory,
   plannerSessionDir,
   readSessionMessages,
   writeSeededSession,
-} from "./planner/session.js";
-import { PlannerActivity } from "./planner-activity.js";
-import { buildPlannerTranscript } from "./planners.js";
-import { extensionsForProvider, resolveProviderExtensions } from "./provider-extensions.js";
-import { routedModel } from "./routed-model.js";
+} from "./planner/session.ts";
+import { PlannerActivity } from "./planner-activity.ts";
+import { buildPlannerTranscript } from "./planners.ts";
+import { extensionsForProvider, resolveProviderExtensions } from "./provider-extensions.ts";
+import { routedModel } from "./routed-model.ts";
 import {
   configuredAlwaysOffer,
   configuredImplementationContext,
@@ -107,15 +107,15 @@ import {
   type PlanModeSettings,
   readPlanModeSettings,
   updatePlanModeSettings,
-} from "./settings.js";
-import { SETTINGS_REASONING_COMMITTED, settingsCycles } from "./settings-cycle.js";
-import { resolveSystem1Route, resolveSystem1Target, SYSTEM1_CHANGED } from "./system1.js";
-import { judgeTaskEffort, recommendTaskEffort, type TaskEffortJudgment } from "./task-effort.js";
-import { applyAlwaysOffer, applyJevPick, buildToolTree, leafCapabilities, type ToolNode } from "./tool-tree.js";
-import { type ToolPreselection, ToolTreeView } from "./tool-tree-view.js";
-import { transcriptCheckpoint } from "./transcript-contract.js";
-import { Block } from "./transcript-style.js";
-import { effortText } from "./ui-kit.js";
+} from "./settings.ts";
+import { SETTINGS_REASONING_COMMITTED, settingsCycles } from "./settings-cycle.ts";
+import { resolveSystem1Route, resolveSystem1Target, SYSTEM1_CHANGED } from "./system1.ts";
+import { judgeTaskEffort, recommendTaskEffort, type TaskEffortJudgment } from "./task-effort.ts";
+import { applyAlwaysOffer, applyJevPick, buildToolTree, leafCapabilities, type ToolNode } from "./tool-tree.ts";
+import { type ToolPreselection, ToolTreeView } from "./tool-tree-view.ts";
+import { transcriptCheckpoint } from "./transcript-contract.ts";
+import { Block } from "./transcript-style.ts";
+import { effortText } from "./ui-kit.ts";
 
 const EXTENSION_ENTRY_PATH = fileURLToPath(new URL("./index.ts", import.meta.url));
 const RUN_ENTRY = "plan-run";

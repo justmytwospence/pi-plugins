@@ -10,16 +10,16 @@ import {
   type Theme,
 } from "@earendil-works/pi-coding-agent";
 import { Markdown, Text } from "@earendil-works/pi-tui";
-import { setToolsActive } from "./active-tools.js";
-import { PiChat, piChatTheme, type ToolRenderers } from "./app/pi-chat.js";
-import type { ModelSpec } from "./implementation-models.js";
-import type { PlannerAgent, PlannerStats, PlannerStatus } from "./planner/agent.js";
-import { consultMessage, MAIN_AGENT_GUIDELINES } from "./planner/prompt.js";
-import { describeToolArgs, PlannerTrace } from "./planner-trace.js";
-import { SubagentTracker } from "./subagent-progress.js";
-import { toolCallRow, toolResultView } from "./tool-rows.js";
-import { transcriptCheckpoint } from "./transcript-contract.js";
-import { messageView } from "./transcript-style.js";
+import { setToolsActive } from "./active-tools.ts";
+import { PiChat, piChatTheme, type ToolRenderers } from "./app/pi-chat.ts";
+import type { ModelSpec } from "./implementation-models.ts";
+import type { PlannerAgent, PlannerStats, PlannerStatus } from "./planner/agent.ts";
+import { consultMessage, MAIN_AGENT_GUIDELINES } from "./planner/prompt.ts";
+import { describeToolArgs, PlannerTrace } from "./planner-trace.ts";
+import { SubagentTracker } from "./subagent-progress.ts";
+import { toolCallRow, toolResultView } from "./tool-rows.ts";
+import { transcriptCheckpoint } from "./transcript-contract.ts";
+import { messageView } from "./transcript-style.ts";
 
 export const PLAN_MESSAGE_TYPE = "plan-mode-plan";
 export const ASK_PLANNER_TOOL = "plan_ask_planner";

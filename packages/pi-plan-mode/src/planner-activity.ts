@@ -1,7 +1,7 @@
 // Package-local producer for the suite's activity hosts. No sibling is required.
-import type { ActivityEntry, ActivityPill, ActivitySection } from "./activity.js";
-import type { PlannerAgent } from "./planner/agent.js";
-import type { SubagentView } from "./subagent-progress.js";
+import type { ActivityEntry, ActivityPill, ActivitySection } from "./activity.ts";
+import type { PlannerAgent } from "./planner/agent.ts";
+import type { SubagentView } from "./subagent-progress.ts";
 
 export const PLAN_SOURCE_ID = "plan";
 

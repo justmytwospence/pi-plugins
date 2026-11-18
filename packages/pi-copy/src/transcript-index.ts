@@ -6,7 +6,7 @@ import {
   type TranscriptBlock, type TranscriptContext, type TranscriptDescription, type TranscriptHooks,
   type TranscriptIndex, type TranscriptOptions, type TranscriptRenderContext,
   type ToolCallView, type UserWordsExtractor, type UserWordsRegistry, type UserWordsRequest,
-} from "./transcript-contract.js";
+} from "./transcript-contract.ts";
 
 const record = (value: unknown): Record<PropertyKey, any> | undefined => value && typeof value === "object" ? value as Record<PropertyKey, any> : undefined;
 const visible = (lines: readonly string[]) => lines.some(line => /\x1b_G|\x1b\]1337;File=/.test(line) || stripVTControlCharacters(line).trim());

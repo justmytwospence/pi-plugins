@@ -1,5 +1,5 @@
 import type { ToolDefinition } from "@earendil-works/pi-coding-agent";
-import { resultTone, toolCallRow, toolResultView } from "./tool-rows.js";
+import { resultTone, toolCallRow, toolResultView } from "./tool-rows.ts";
 
 export const PLAN_MODE_QUESTION_TOOL_NAME = "plan_mode_question";
 export const MAX_PLAN_MODE_RESPONSE_LENGTH = 4_000;

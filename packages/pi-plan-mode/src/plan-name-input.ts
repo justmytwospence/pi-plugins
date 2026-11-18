@@ -9,7 +9,7 @@ import {
   truncateToWidth,
   wrapTextWithAnsi,
 } from "@earendil-works/pi-tui";
-import { type RemoteUi, raceRemote } from "./switchyard-remote.js";
+import { type RemoteUi, raceRemote } from "./switchyard-remote.ts";
 
 interface PlanNameOptions {
   suggestion?: string;

@@ -2,7 +2,7 @@
 // run where this package's own session does not: planner sessions are in-process SDK sessions that
 // load no extensions, so they reach the main session's bus through this binding. Undefined when the
 // gate is not loaded: callers then use this package's own shell policy.
-import { askShellReads } from "./shell-reads.js";
+import { askShellReads } from "./shell-reads.ts";
 
 type Bus = Parameters<typeof askShellReads>[0];
 

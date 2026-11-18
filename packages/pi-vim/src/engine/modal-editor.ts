@@ -18,19 +18,19 @@ import type {
   EditorMode,
   EditorModeContext,
   EditorSnapshot as DraftSnapshot,
-} from "../contract.js";
-import type { SharedRegisterStore } from "./shared-register.js";
+} from "../contract.ts";
+import type { SharedRegisterStore } from "./shared-register.ts";
 import {
   ClipboardMirror,
   type ClipboardReadFn,
   readClipboardInChildProcess,
   writeClipboardInChildProcess,
-} from "./clipboard-mirror.js";
+} from "./clipboard-mirror.ts";
 import {
   type ClipboardMirrorPolicy,
   DEFAULT_CLIPBOARD_MIRROR_POLICY,
   type RegisterWriteSource,
-} from "./clipboard-policy.js";
+} from "./clipboard-policy.ts";
 import {
   BLOCK_CURSOR_SHAPE,
   type CursorShapeRuntime,
@@ -39,7 +39,7 @@ import {
   hasPromptCursorMarker,
   INSERT_CURSOR_SHAPE,
   stripSoftwareCursorWhenHardwareCursorIsUsed,
-} from "./cursor-shape.js";
+} from "./cursor-shape.ts";
 import {
   isBackspaceLikeInput,
   isCountStarter,
@@ -48,13 +48,13 @@ import {
   isEscapeLikeInput,
   isPrintableChunk,
   isPrintableInput,
-} from "./input-keys.js";
+} from "./input-keys.ts";
 import {
   isNeutralBorder,
   type ModeColorizers,
   type ModeColorKey,
-} from "./mode-colors.js";
-import { fitModeLabel } from "./mode-label.js";
+} from "./mode-colors.ts";
+import { fitModeLabel } from "./mode-label.ts";
 import {
   findCharMotionTarget,
   findFirstNonWhitespaceColumn,
@@ -62,12 +62,12 @@ import {
   getLineGraphemes,
   reverseCharMotion,
   type WordMotionClass,
-} from "./motions.js";
+} from "./motions.ts";
 import {
   DEFAULT_EX_COMMAND_SETTINGS,
   type ExCommandSettings,
   type SurfaceSyncMap,
-} from "./settings.js";
+} from "./settings.ts";
 import {
   normalizeDelimiterKey,
   resolveDelimitedTextObjectRange,
@@ -76,7 +76,7 @@ import {
   type TextObjectKind,
   type TextObjectRange,
   type WordTextObjectClass,
-} from "./text-objects.js";
+} from "./text-objects.ts";
 import type {
   CharMotion,
   GenericOperator,
@@ -84,7 +84,7 @@ import type {
   Mode,
   PendingMotion,
   PendingOperator,
-} from "./types.js";
+} from "./types.ts";
 import {
   CHAR_MOTION_KEYS,
   CTRL_A,
@@ -98,7 +98,7 @@ import {
   ESC_UP,
   NEWLINE,
   NORMAL_KEYS,
-} from "./types.js";
+} from "./types.ts";
 import {
   clampVisualPosition,
   getInclusiveEndColumn,
@@ -111,20 +111,20 @@ import {
   paintVisualRows,
   type VisualMode,
   type VisualPosition,
-} from "./visual.js";
-import { incrementNumber } from "./increment.js";
+} from "./visual.ts";
+import { incrementNumber } from "./increment.ts";
 import {
   surroundAdd,
   surroundChange,
   surroundLineSpan,
   surroundNeedsInput,
   type SurroundReplacement,
-} from "./surround.js";
+} from "./surround.ts";
 import {
   isTargetsTrigger,
   resolveTargetsObject,
   type TargetsModifier,
-} from "./targets.js";
+} from "./targets.ts";
 import {
   bckendWord,
   bckWord,
@@ -142,17 +142,17 @@ import {
   fwdWord,
   type OpSpan,
   resolveOpSpan,
-} from "./vim-objects.js";
-import { comparePos, type Pos, samePos, VimBuffer } from "./vim-pos.js";
-import { startPS as startsParagraph } from "./vim-objects.js";
-import { wordmotionMotion, wordmotionObject } from "./wordmotion.js";
+} from "./vim-objects.ts";
+import { comparePos, type Pos, samePos, VimBuffer } from "./vim-pos.ts";
+import { startPS as startsParagraph } from "./vim-objects.ts";
+import { wordmotionMotion, wordmotionObject } from "./wordmotion.ts";
 import {
   WordBoundaryCache,
   type WordMotionDirection,
   type WordMotionTarget,
-} from "./word-boundary-cache.js";
+} from "./word-boundary-cache.ts";
 
-export { setModeChangeCommandRunnerForTests } from "./mode-change-command.js";
+export { setModeChangeCommandRunnerForTests } from "./mode-change-command.ts";
 
 const MODE_COLOR_KEYS: readonly ModeColorKey[] = [
   "insert",

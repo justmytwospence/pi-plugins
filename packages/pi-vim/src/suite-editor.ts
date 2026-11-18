@@ -14,18 +14,18 @@ import {
   type EditorSurface,
   INPUT_CONTEXT,
   type SuiteEditor,
-} from "./contract.js";
+} from "./contract.ts";
 import { matchesKey } from "@earendil-works/pi-tui";
-import { acquireCursor } from "./cursor-owner.js";
-import { acquireViewportInput } from "./viewport-input.js";
-import { resolveTuiRuntime } from "./tui-runtime.js";
+import { acquireCursor } from "./cursor-owner.ts";
+import { acquireViewportInput } from "./viewport-input.ts";
+import { resolveTuiRuntime } from "./tui-runtime.ts";
 import {
   getCursorShapeRuntime,
   hasPromptCursorMarker,
   stripSoftwareCursorWhenHardwareCursorIsUsed,
   type CursorShapeSequence,
-} from "./engine/cursor-shape.js";
-import { ModalEditor, type ModalEditorOptions } from "./engine/modal-editor.js";
+} from "./engine/cursor-shape.ts";
+import { ModalEditor, type ModalEditorOptions } from "./engine/modal-editor.ts";
 
 type EditorConstructorArgs = ConstructorParameters<typeof ModalEditor>;
 

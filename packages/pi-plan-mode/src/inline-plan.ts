@@ -29,18 +29,18 @@ import {
   type Theme,
 } from "@earendil-works/pi-coding-agent";
 import { type Component, Container, Spacer, Text } from "@earendil-works/pi-tui";
-import { createApprovalState, pickApproval } from "./approval-picker.js";
-import { editInTerminal, externalEditorCommand } from "./external-editor.js";
-import { PLAN_STANDARD } from "./handoff.js";
-import { remoteUi } from "./switchyard-remote.js";
+import { createApprovalState, pickApproval } from "./approval-picker.ts";
+import { editInTerminal, externalEditorCommand } from "./external-editor.ts";
+import { PLAN_STANDARD } from "./handoff.ts";
+import { remoteUi } from "./switchyard-remote.ts";
 
-export { EDIT, HERE, KEEP, OPTION_MAX, SAVE } from "./approval-picker.js";
+export { EDIT, HERE, KEEP, OPTION_MAX, SAVE } from "./approval-picker.ts";
 
-import { holdBlocked } from "./herdr-blocked.js";
-import type { EffortSource, ImplementationEffortRequest } from "./implementation-effort.js";
-import type { ModelSpec, ModelSpecThinkingLevel } from "./implementation-models.js";
-import { PlanMarkdown } from "./mermaid-art.js";
-import { modelCatalog } from "./model-catalog.js";
+import { holdBlocked } from "./herdr-blocked.ts";
+import type { EffortSource, ImplementationEffortRequest } from "./implementation-effort.ts";
+import type { ModelSpec, ModelSpecThinkingLevel } from "./implementation-models.ts";
+import { PlanMarkdown } from "./mermaid-art.ts";
+import { modelCatalog } from "./model-catalog.ts";
 import {
   isPlanFile,
   newPlanFile,
@@ -51,21 +51,21 @@ import {
   savePlanSnapshot,
   scratchDirFor,
   writePlanFile,
-} from "./plan-file.js";
-import { expandHome } from "./plan-hook.js";
-import { promptPlanName } from "./plan-name-input.js";
-import { PlanReviewViewport } from "./plan-review-viewport.js";
-import { type ReviewStatus, reviewBody, reviewCard } from "./review-card.js";
-import { type SettingCycleTrigger, settingsCycles } from "./settings-cycle.js";
+} from "./plan-file.ts";
+import { expandHome } from "./plan-hook.ts";
+import { promptPlanName } from "./plan-name-input.ts";
+import { PlanReviewViewport } from "./plan-review-viewport.ts";
+import { type ReviewStatus, reviewBody, reviewCard } from "./review-card.ts";
+import { type SettingCycleTrigger, settingsCycles } from "./settings-cycle.ts";
 import {
   findBlockedCommandSegment,
   findBlockedPowerShellCommandSegment,
   readCommand,
   type SafeSubcommands,
-} from "./tool-policy.js";
-import { ResultLine, toolCallRow } from "./tool-rows.js";
-import { transcriptCheckpoint } from "./transcript-contract.js";
-import { registerWorkflowRenderer, sendWorkflowTransition, type WorkflowKind } from "./workflow-ui.js";
+} from "./tool-policy.ts";
+import { ResultLine, toolCallRow } from "./tool-rows.ts";
+import { transcriptCheckpoint } from "./transcript-contract.ts";
+import { registerWorkflowRenderer, sendWorkflowTransition, type WorkflowKind } from "./workflow-ui.ts";
 
 export const MODE_CHANGED = "workflow-mode:changed";
 export const MODE_SET = "workflow-mode:set";

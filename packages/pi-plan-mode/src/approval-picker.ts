@@ -8,10 +8,10 @@ import {
   visibleWidth,
   wrapTextWithAnsi,
 } from "@earendil-works/pi-tui";
-import type { EffortSource } from "./implementation-effort.js";
-import { formatModelKey, type ModelSpec, type ModelSpecThinkingLevel } from "./implementation-models.js";
-import { modelCatalog, normalizeEffort } from "./model-catalog.js";
-import { type RemoteUi, raceRemote } from "./switchyard-remote.js";
+import type { EffortSource } from "./implementation-effort.ts";
+import { formatModelKey, type ModelSpec, type ModelSpecThinkingLevel } from "./implementation-models.ts";
+import { modelCatalog, normalizeEffort } from "./model-catalog.ts";
+import { type RemoteUi, raceRemote } from "./switchyard-remote.ts";
 
 /** Pi 1.5's `blocked` option for inline `ctx.ui.custom()` (OSC 7501 program status). The 1.2.0 types here lack it, hence the cast; older Pi ignores it. */
 const blockedOn = (kind: "question" | "permission" | "auth", message: string) =>

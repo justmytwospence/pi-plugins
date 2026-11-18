@@ -1,4 +1,4 @@
-import { PLAN_STANDARD } from "./handoff.js";
+import { PLAN_STANDARD } from "./handoff.ts";
 
 const PLAN_CONTEXT_MARKER = "[CODEX-LIKE PLAN MODE ACTIVE]";
 

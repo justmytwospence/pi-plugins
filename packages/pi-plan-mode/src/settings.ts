@@ -4,7 +4,7 @@ import { lstat, mkdir, open, realpath, rename, rm, writeFile } from "node:fs/pro
 import { basename, dirname, join } from "node:path";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import type { KeyId } from "@earendil-works/pi-tui";
-import type { CommandGrant } from "./command-grants.js";
+import type { CommandGrant } from "./command-grants.ts";
 import {
   formatModelSpec,
   IMPLEMENTATION_CONTEXT_CHOICES,
@@ -13,10 +13,10 @@ import {
   isPendingImplementationModelIdentifier,
   type ModelSpec,
   parseModelSpec,
-} from "./implementation-models.js";
-import { pairDefinitions } from "./model-pairs.js";
-import type { PlannerToolset } from "./planners.js";
-import type { SafeSubcommands } from "./tool-policy.js";
+} from "./implementation-models.ts";
+import { pairDefinitions } from "./model-pairs.ts";
+import type { PlannerToolset } from "./planners.ts";
+import type { SafeSubcommands } from "./tool-policy.ts";
 
 export const PLAN_MODE_SETTINGS_FILE = "pi-plan-mode.json";
 const LEGACY_PLAN_MODE_SETTINGS_FILE = "plan-mode.json";

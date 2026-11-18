@@ -5,7 +5,7 @@
  * map those keys. Other keys and unknown/non-editor focus are untouched.
  */
 import { matchesKey } from "@earendil-works/pi-tui";
-import { readInputContext } from "./contract.js";
+import { readInputContext } from "./contract.ts";
 
 type ViewportHost = {
   handleViewportInput?: (data: string) => unknown;

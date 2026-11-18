@@ -4,16 +4,16 @@
 // plan_mode_complete. Nothing here runs in your main session.
 import type { ChildProcess } from "node:child_process";
 import type { ExtensionAPI, ExtensionFactory, ToolInfo } from "@earendil-works/pi-coding-agent";
-import { commandGrantAllows } from "../command-grants.js";
+import { commandGrantAllows } from "../command-grants.ts";
 import {
   normalizePlanModeCompletion,
   PLAN_MODE_COMPLETE_PARAMS,
   PLAN_MODE_COMPLETE_TOOL_NAME,
   planModeCompleted,
-} from "../completion-tool.js";
-import { discoverFamily } from "../family-contract.js";
-import { gateShellReads } from "../gate-shell.js";
-import { formatModelSpec, type ModelSpec } from "../implementation-models.js";
+} from "../completion-tool.ts";
+import { discoverFamily } from "../family-contract.ts";
+import { gateShellReads } from "../gate-shell.ts";
+import { formatModelSpec, type ModelSpec } from "../implementation-models.ts";
 import {
   checkMcpResourceCall,
   checkMcpTool,
@@ -21,8 +21,8 @@ import {
   MCP_RESOURCE_TOOLS,
   type McpGuardVerdict,
   mcpToolIdentity,
-} from "../mcp-tools.js";
-import { isPlanFile } from "../plan-file.js";
+} from "../mcp-tools.ts";
+import { isPlanFile } from "../plan-file.ts";
 import {
   normalizePlanModeQuestionParams,
   PLAN_MODE_QUESTION_PARAMS,
@@ -32,7 +32,7 @@ import {
   planModeQuestionAnswered,
   planModeQuestionCancelled,
   planModeQuestionRenderer,
-} from "../question-tool.js";
+} from "../question-tool.ts";
 import {
   addUsage,
   emptyUsage,
@@ -41,14 +41,14 @@ import {
   PLAN_SUBAGENTS_PARAMS,
   PLAN_SUBAGENTS_TOOL_NAME,
   runScout,
-} from "../scout-process.js";
-import { createSubagentReporter, type SubagentMeta } from "../subagent-progress.js";
+} from "../scout-process.ts";
+import { createSubagentReporter, type SubagentMeta } from "../subagent-progress.ts";
 import {
   findBlockedCommandSegment,
   findBlockedPowerShellCommandSegment,
   readCommand,
   type SafeSubcommands,
-} from "../tool-policy.js";
+} from "../tool-policy.ts";
 
 const BLOCKED_TOOLS = new Set(["edit", "write", "update_plan"]);
 

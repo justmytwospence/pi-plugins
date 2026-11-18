@@ -2,7 +2,7 @@
  * Motion calculation utilities for vim-mode
  */
 
-import type { CharMotion } from "./types.js";
+import type { CharMotion } from "./types.ts";
 
 // Character types for word boundary detection
 export type WordMotionClass = "word" | "WORD";

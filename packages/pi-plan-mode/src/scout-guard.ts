@@ -1,7 +1,7 @@
 // Inside a scout (a `pi --mode json` subprocess a planner starts), this package rides along only to
 // enforce the MCP allowlist the planner was given.
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { checkMcpResourceCall, checkMcpTool, isMcpToolName, MCP_RESOURCE_TOOLS, mcpToolIdentity } from "./mcp-tools.js";
+import { checkMcpResourceCall, checkMcpTool, isMcpToolName, MCP_RESOURCE_TOOLS, mcpToolIdentity } from "./mcp-tools.ts";
 
 export function installScoutGuard(pi: ExtensionAPI, allow: readonly string[]) {
   pi.on("tool_call", (event) => {

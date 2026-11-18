@@ -6,10 +6,10 @@ import {
   type SettingCycleTrigger,
   type SettingsCycleInputPorts,
   type SettingsCycleInputStatus,
-} from "./settings-cycle-input.js";
-import { rowLine, type Tone } from "./transcript-style.js";
+} from "./settings-cycle-input.ts";
+import { rowLine, type Tone } from "./transcript-style.ts";
 
-export type { SettingCycleTrigger, SettingsCycleInputPorts, SettingsCycleInputStatus } from "./settings-cycle-input.js";
+export type { SettingCycleTrigger, SettingsCycleInputPorts, SettingsCycleInputStatus } from "./settings-cycle-input.ts";
 /**
  * Commit after this long without another press. Modifier release commits sooner;
  * the timer stays armed during a hold so a terminal that misreports or omits the

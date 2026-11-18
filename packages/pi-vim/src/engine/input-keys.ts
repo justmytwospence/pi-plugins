@@ -1,5 +1,5 @@
 import { matchesKey } from "@earendil-works/pi-tui";
-import { getLineGraphemes } from "./motions.js";
+import { getLineGraphemes } from "./motions.ts";
 
 // Keyboard-input classification predicates. Pure functions over the raw
 // input chunk a terminal delivers to the editor — no editor state. Shared

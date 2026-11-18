@@ -4,7 +4,7 @@
  * Keyed by semantic class + exact line content to avoid stale boundary reuse.
  */
 
-import type { WordMotionClass } from "./motions.js";
+import type { WordMotionClass } from "./motions.ts";
 
 export type WordMotionDirection = "forward" | "backward";
 export type WordMotionTarget = "start" | "end";

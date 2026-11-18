@@ -1,6 +1,6 @@
 import type { ExtensionContext, KeybindingsManager, Theme } from "@earendil-works/pi-coding-agent";
 import type { Component, TUI } from "@earendil-works/pi-tui";
-import type { FamilyService } from "../family-contract.js";
+import type { FamilyService } from "../family-contract.ts";
 
 export type PlanningViewFactory = (
   tui: TUI,
@@ -30,7 +30,7 @@ export async function openPlanningView(
   );
 }
 
-import { rule, titleLine, type WorkflowStep } from "../ui-kit.js";
+import { rule, titleLine, type WorkflowStep } from "../ui-kit.ts";
 
 /** Every page starts the same way: a rule, then the title with the steps at the top right. */
 export function pageHeader(theme: Theme, width: number, title: string, context: string, step: WorkflowStep) {

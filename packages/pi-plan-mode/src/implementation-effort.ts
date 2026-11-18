@@ -3,7 +3,7 @@ import {
   type recommendTaskEffort,
   type TaskEffortInput,
   type TaskEffortJudgment,
-} from "./task-effort.js";
+} from "./task-effort.ts";
 
 export type EffortSource = "manual" | "configured" | "system1" | "fallback";
 export type ImplementationEffortPick = ReturnType<typeof recommendTaskEffort>;

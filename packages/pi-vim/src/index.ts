@@ -8,7 +8,7 @@
  * `pi-plugins.editor-factory.v1` provider and a once-per-process diagnostic
  * when the standalone pi-vim package is loaded next to this one.
  */
-import { createFileSharedRegister } from "./engine/shared-register.js";
+import { createFileSharedRegister } from "./engine/shared-register.ts";
 import {
   CustomEditor,
   type ExtensionAPI,
@@ -20,23 +20,23 @@ import {
   type EditorFactoryOptions,
   type EditorFactoryRequest,
   type SuiteEditor,
-} from "./contract.js";
-import { EmbeddedEditor } from "./embedded-editor.js";
-import { EX_BUILTIN_COMMAND_NAMES } from "./engine/modal-editor.js";
-import { cancelModeChangeCommands } from "./engine/mode-change-command.js";
-import { FilePicker } from "./file-picker.js";
-import { MainEditor } from "./main-editor.js";
-import { collectUserWords } from "./transcript-index.js";
-import { scrollToCheckpoint } from "./transcript-viewport.js";
-import { resolveSessionConfig, type SessionConfig } from "./session.js";
+} from "./contract.ts";
+import { EmbeddedEditor } from "./embedded-editor.ts";
+import { EX_BUILTIN_COMMAND_NAMES } from "./engine/modal-editor.ts";
+import { cancelModeChangeCommands } from "./engine/mode-change-command.ts";
+import { FilePicker } from "./file-picker.ts";
+import { MainEditor } from "./main-editor.ts";
+import { collectUserWords } from "./transcript-index.ts";
+import { scrollToCheckpoint } from "./transcript-viewport.ts";
+import { resolveSessionConfig, type SessionConfig } from "./session.ts";
 
 export {
   ModalEditor,
   setModeChangeCommandRunnerForTests,
-} from "./engine/modal-editor.js";
-export { EmbeddedEditor } from "./embedded-editor.js";
-export { MainEditor } from "./main-editor.js";
-export * from "./contract.js";
+} from "./engine/modal-editor.ts";
+export { EmbeddedEditor } from "./embedded-editor.ts";
+export { MainEditor } from "./main-editor.ts";
+export * from "./contract.ts";
 
 export const PROVIDER_NAME = "pi-vim";
 export const MODE_CHANGE_EVENT = "pi-vim:mode-change";

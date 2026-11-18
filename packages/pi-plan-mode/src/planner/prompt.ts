@@ -1,8 +1,8 @@
-import { describeGrants, type ResolvedGrant } from "../command-grants.js";
-import { PLAN_STANDARD } from "../handoff.js";
-import { MCP_GATEWAY_TOOL } from "../mcp-tools.js";
-import { describedTools, mcpToolsNote } from "../planners.js";
-import { buildPlanModePrompt } from "../prompt.js";
+import { describeGrants, type ResolvedGrant } from "../command-grants.ts";
+import { PLAN_STANDARD } from "../handoff.ts";
+import { MCP_GATEWAY_TOOL } from "../mcp-tools.ts";
+import { describedTools, mcpToolsNote } from "../planners.ts";
+import { buildPlanModePrompt } from "../prompt.ts";
 
 /** The planner's role, appended to its system prompt. */
 export function plannerSystemPrompt() {

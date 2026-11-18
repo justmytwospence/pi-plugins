@@ -6,7 +6,7 @@ import {
   type ModelSpecThinkingLevel,
   parseModelSpec,
   snapshotAvailableImplementationModels,
-} from "./implementation-models.js";
+} from "./implementation-models.ts";
 
 type RegistryModel = {
   provider: string;

@@ -5,25 +5,25 @@
  * building colorizers is pi-vim's upstream `session_start` logic, kept in one
  * place so every editor the session creates behaves the same.
  */
-import type { ClipboardMirrorPolicy } from "./engine/clipboard-policy.js";
-import { resolveClipboardMirrorPolicy } from "./engine/clipboard-policy.js";
-import type { ModalEditorOptions } from "./engine/modal-editor.js";
-import { createModeChangeHandler } from "./engine/mode-change-command.js";
+import type { ClipboardMirrorPolicy } from "./engine/clipboard-policy.ts";
+import { resolveClipboardMirrorPolicy } from "./engine/clipboard-policy.ts";
+import type { ModalEditorOptions } from "./engine/modal-editor.ts";
+import { createModeChangeHandler } from "./engine/mode-change-command.ts";
 import {
   buildModeColorizers,
   buildOffBorderColor,
   buildSelectionColor,
   resolveModeColors,
   type ThemeLike,
-} from "./engine/mode-colors.js";
+} from "./engine/mode-colors.ts";
 import {
   type ExCommandSettings,
   readPiVimSettings,
   resolveExCommandSettings,
   resolveSurfaceSyncMaps,
-} from "./engine/settings.js";
-import type { Mode } from "./engine/types.js";
-import type { EditorSurface, ModeChangeEvent } from "./contract.js";
+} from "./engine/settings.ts";
+import type { Mode } from "./engine/types.ts";
+import type { EditorSurface, ModeChangeEvent } from "./contract.ts";
 
 export type ModeChangeFn = (mode: Mode, previousMode: Mode) => void;
 

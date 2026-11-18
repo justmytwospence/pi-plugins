@@ -15,9 +15,9 @@ import {
   deleteBecomesLinewise,
   type OpSpan,
   resolveOpSpan,
-} from "./vim-objects.js";
-import { resolveWordTextObjectRange } from "./text-objects.js";
-import { type Pos, VimBuffer } from "./vim-pos.js";
+} from "./vim-objects.ts";
+import { resolveWordTextObjectRange } from "./text-objects.ts";
+import { type Pos, VimBuffer } from "./vim-pos.ts";
 
 /** Replacement characters that read more input before wrapping. */
 export function surroundNeedsInput(char: string): "tag" | "function" | null {

@@ -18,9 +18,9 @@ import {
   truncateToWidth,
   visibleWidth,
 } from "@earendil-works/pi-tui";
-import type { PlannerAgent } from "../planner/agent.js";
-import type { SubagentView } from "../subagent-progress.js";
-import type { PlanRenders } from "./plan-embed.js";
+import type { PlannerAgent } from "../planner/agent.ts";
+import type { SubagentView } from "../subagent-progress.ts";
+import type { PlanRenders } from "./plan-embed.ts";
 
 /** What a lane shows of an agent: a planner, or M, your main agent seen through the same lens. */
 export type LaneAgent = Pick<
@@ -49,10 +49,10 @@ import {
   INPUT_CONTEXT,
   idleNormal,
   readEditorMode,
-} from "../editor-contract.js";
-import { matchingCommands } from "../lane-commands.js";
-import { formatCost, formatDuration, formatTokens } from "../planners.js";
-import type { PlanModeQuestionAnswer } from "../question-tool.js";
+} from "../editor-contract.ts";
+import { matchingCommands } from "../lane-commands.ts";
+import { formatCost, formatDuration, formatTokens } from "../planners.ts";
+import type { PlanModeQuestionAnswer } from "../question-tool.ts";
 import {
   effortText,
   type Hint,
@@ -67,10 +67,10 @@ import {
   selectedRow,
   spinner,
   type WorkflowStep,
-} from "../ui-kit.js";
-import { pageHeader } from "./frame.js";
-import { type PiChat, setPiChatTheme } from "./pi-chat.js";
-import { TraceRenderer, wrap } from "./trace-lines.js";
+} from "../ui-kit.ts";
+import { pageHeader } from "./frame.ts";
+import { type PiChat, setPiChatTheme } from "./pi-chat.ts";
+import { TraceRenderer, wrap } from "./trace-lines.ts";
 
 export interface LaneAction {
   id: string;

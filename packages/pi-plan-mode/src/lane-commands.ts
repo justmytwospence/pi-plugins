@@ -1,6 +1,6 @@
 // Pi's built-in commands that matter for a planner, typed in its lane: they act on that planner's
 // own session (its model, effort, context, login), since a planner has no editor of its own.
-import type { ModelSpec } from "./implementation-models.js";
+import type { ModelSpec } from "./implementation-models.ts";
 
 type Level = NonNullable<ModelSpec["thinkingLevel"]>;
 type Tone = "info" | "warning" | "error";

@@ -3,27 +3,27 @@
 // how many there are.
 import { randomUUID } from "node:crypto";
 import type { AgentSessionEvent, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { PiChat, piChatTheme } from "../app/pi-chat.js";
-import type { FamilyService, PreparedAgent } from "../family-contract.js";
-import { formatModelSpec, type ModelSpec } from "../implementation-models.js";
-import { describeToolArgs, PlannerTrace } from "../planner-trace.js";
-import { buildPlannerConversation, buildPlannerTranscript, PLANNER_SEED_END_ENTRY } from "../planners.js";
+import { PiChat, piChatTheme } from "../app/pi-chat.ts";
+import type { FamilyService, PreparedAgent } from "../family-contract.ts";
+import { formatModelSpec, type ModelSpec } from "../implementation-models.ts";
+import { describeToolArgs, PlannerTrace } from "../planner-trace.ts";
+import { buildPlannerConversation, buildPlannerTranscript, PLANNER_SEED_END_ENTRY } from "../planners.ts";
 import {
   PLAN_MODE_QUESTION_TOOL_NAME,
   type PlanModeQuestion,
   type PlanModeQuestionAnswer,
   planModeQuestionRenderer,
-} from "../question-tool.js";
-import { addUsage as addUsageTo, emptyUsage, PLAN_SUBAGENTS_TOOL_NAME, type Usage } from "../scout-process.js";
-import { SubagentTracker } from "../subagent-progress.js";
-import { type PlannerPolicy, plannerExtension } from "./extension.js";
+} from "../question-tool.ts";
+import { addUsage as addUsageTo, emptyUsage, PLAN_SUBAGENTS_TOOL_NAME, type Usage } from "../scout-process.ts";
+import { SubagentTracker } from "../subagent-progress.ts";
+import { type PlannerPolicy, plannerExtension } from "./extension.ts";
 import {
   createPlannerSession,
   type PlannerSessionFactory,
   type PlannerSessionHandle,
   readSessionEntries,
   readSessionId,
-} from "./session.js";
+} from "./session.ts";
 
 /** Fraction of the time limit after which a working planner is asked to wrap up. */
 export const SOFT_DEADLINE_FRACTION = 0.8;

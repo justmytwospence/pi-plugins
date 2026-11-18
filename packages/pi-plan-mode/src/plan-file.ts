@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { closeSync, mkdirSync, openSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import { basename, join, resolve } from "node:path";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
-import { expandHome } from "./plan-hook.js";
+import { expandHome } from "./plan-hook.ts";
 
 /** A unique working draft path; generating it does not create a file or directory. */
 export function newPlanFile(directory: string): string {

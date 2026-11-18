@@ -1,4 +1,4 @@
-import { getLineGraphemes } from "./motions.js";
+import { getLineGraphemes } from "./motions.ts";
 
 export type TextObjectKind = "i" | "a";
 

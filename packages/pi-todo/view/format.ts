@@ -1,11 +1,11 @@
 import type { Theme } from "@earendil-works/pi-coding-agent";
 import { type Component, Text } from "@earendil-works/pi-tui";
 import { Block, expandHint, Row, toneOfTool } from "../src/transcript-style.ts";
-import { formatStatusLabel } from "../state/i18n-bridge.js";
-import { selectTaskSubjectById } from "../state/selectors.js";
-import type { TaskState } from "../state/state.js";
-import { sanitizeTerminalText } from "../tool/sanitize.js";
-import type { Task, TaskAction, TaskMutationParams, TaskStatus } from "../tool/types.js";
+import { formatStatusLabel } from "../state/i18n-bridge.ts";
+import { selectTaskSubjectById } from "../state/selectors.ts";
+import type { TaskState } from "../state/state.ts";
+import { sanitizeTerminalText } from "../tool/sanitize.ts";
+import type { Task, TaskAction, TaskMutationParams, TaskStatus } from "../tool/types.ts";
 
 type ToneContext = { isError?: boolean; isPartial?: boolean; executionStarted?: boolean; lastComponent?: unknown };
 

@@ -5,7 +5,7 @@
  * The prompt is always fully visible, so off-screen range types never occur.
  */
 
-import { currentBlock, currentTagBlock, findMatchingBracket, FORWARD } from "./vim-objects.js";
+import { currentBlock, currentTagBlock, findMatchingBracket, FORWARD } from "./vim-objects.ts";
 import {
   anyOf,
   charPattern,
@@ -18,7 +18,7 @@ import {
   samePos,
   type SearchFlags,
   VimBuffer,
-} from "./vim-pos.js";
+} from "./vim-pos.ts";
 
 export type TargetsModifier = "i" | "a" | "I" | "A";
 export type TargetsWhich = "c" | "n" | "l";

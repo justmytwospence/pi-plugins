@@ -19,8 +19,8 @@ import {
   SessionManager,
   SettingsManager,
 } from "@earendil-works/pi-coding-agent";
-import type { ModelSpec } from "../implementation-models.js";
-import { PLANNER_SEED_END_ENTRY } from "../planners.js";
+import type { ModelSpec } from "../implementation-models.ts";
+import { PLANNER_SEED_END_ENTRY } from "../planners.ts";
 
 /** What a planner session runs with. */
 export interface PlannerSessionOptions {

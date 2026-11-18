@@ -1,5 +1,5 @@
 import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
-import { getLineGraphemes } from "./motions.js";
+import { getLineGraphemes } from "./motions.ts";
 
 // Mode-label fitting for the footer. Pure, grapheme-aware string functions
 // that shrink the ` INSERT `/` NORMAL `/` EX … ` status label to a target

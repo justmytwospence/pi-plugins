@@ -14,7 +14,7 @@
  */
 import type { Theme } from "@earendil-works/pi-coding-agent";
 import { type Component, Container, Spacer, Text } from "@earendil-works/pi-tui";
-import { Block, expandHint, type Tone } from "./transcript-style.js";
+import { Block, expandHint, type Tone } from "./transcript-style.ts";
 
 /** Lines a decided document keeps before it folds. */
 export const COLLAPSED_LINES = 12;

@@ -7,8 +7,8 @@
  * line-wise selections span whole lines and ignore the columns.
  */
 
-import { getLineGraphemes } from "./motions.js";
-import type { Mode } from "./types.js";
+import { getLineGraphemes } from "./motions.ts";
+import type { Mode } from "./types.ts";
 
 export type VisualMode = "visual" | "visual-line";
 export type VisualPosition = { line: number; col: number };

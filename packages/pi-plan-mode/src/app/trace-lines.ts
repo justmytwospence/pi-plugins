@@ -1,7 +1,7 @@
 import { getMarkdownTheme, type Theme } from "@earendil-works/pi-coding-agent";
 import { Markdown, truncateToWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
-import { mermaidArt } from "../mermaid-art.js";
-import type { PlannerTrace, TraceEntry } from "../planner-trace.js";
+import { mermaidArt } from "../mermaid-art.ts";
+import type { PlannerTrace, TraceEntry } from "../planner-trace.ts";
 
 /** Wrapped lines of a planner's trace, cached per entry and width. */
 export class TraceRenderer {

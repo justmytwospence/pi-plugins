@@ -9,10 +9,10 @@ import {
   visibleWidth,
   wrapTextWithAnsi,
 } from "@earendil-works/pi-tui";
-import { pageHeader } from "./app/frame.js";
-import { INPUT_CONTEXT } from "./editor-contract.js";
-import { groupState, leaves, type ToolNode, toggle } from "./tool-tree.js";
-import { fieldLine, type Hint, hintLine, padLines, padVisible, rule, selectedRow, spinner } from "./ui-kit.js";
+import { pageHeader } from "./app/frame.ts";
+import { INPUT_CONTEXT } from "./editor-contract.ts";
+import { groupState, leaves, type ToolNode, toggle } from "./tool-tree.ts";
+import { fieldLine, type Hint, hintLine, padLines, padVisible, rule, selectedRow, spinner } from "./ui-kit.ts";
 
 export type ToolTreeResult =
   | { kind: "start" /** You changed the selection yourself. */; touched: boolean }

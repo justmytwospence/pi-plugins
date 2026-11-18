@@ -9,7 +9,7 @@ import { homedir, tmpdir } from "node:os";
 import { basename, isAbsolute, join } from "node:path";
 import type { Theme } from "@earendil-works/pi-coding-agent";
 import { type Color, colorToHex, mixColors } from "@earendil-works/pi-tui";
-import { reportedTerminalColors } from "./app/plan-html.js";
+import { reportedTerminalColors } from "./app/plan-html.ts";
 
 function settingFrom(path: string): string | undefined {
   try {

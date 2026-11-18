@@ -8,7 +8,7 @@
  * a motion picks the next or previous of those matches.
  */
 
-import { comparePos, type Pos, VimBuffer } from "./vim-pos.js";
+import { comparePos, type Pos, VimBuffer } from "./vim-pos.ts";
 
 const ALPHA = "\\p{Lu}\\p{Ll}";
 const ALNUM = `${ALPHA}0-9`;

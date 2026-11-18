@@ -1,6 +1,6 @@
 import { basename } from "node:path";
 import type { ModelRegistry } from "@earendil-works/pi-coding-agent";
-import { askSystem1, provenanceOf } from "./system1.js";
+import { askSystem1, provenanceOf } from "./system1.ts";
 
 /** One toggle in the planner picker that Jev can preselect. */
 export interface ToolCapability {

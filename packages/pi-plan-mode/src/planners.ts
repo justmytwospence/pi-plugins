@@ -1,5 +1,5 @@
-import { type CommandGrant, type ResolvedGrant, resolveGrant } from "./command-grants.js";
-import { isMcpToolName, type McpServerCatalog, mcpToolNames } from "./mcp-tools.js";
+import { type CommandGrant, type ResolvedGrant, resolveGrant } from "./command-grants.ts";
+import { isMcpToolName, type McpServerCatalog, mcpToolNames } from "./mcp-tools.ts";
 
 export const PLANNER_ENV = "PI_PLAN_MODE_PLANNER";
 /** Comma-separated extra tools a planner may use; Plan mode admits them inside planners. */

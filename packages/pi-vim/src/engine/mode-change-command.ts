@@ -1,7 +1,7 @@
 import { spawn } from "node:child_process";
 
-import type { ModeChangeSettings } from "./settings.js";
-import type { Mode } from "./types.js";
+import type { ModeChangeSettings } from "./settings.ts";
+import type { Mode } from "./types.ts";
 
 const MODE_CHANGE_COMMAND_TIMEOUT_MS = 2000;
 

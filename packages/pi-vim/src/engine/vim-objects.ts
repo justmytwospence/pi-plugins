@@ -5,7 +5,7 @@
  * Positions are UTF-16 offsets; grapheme clusters are not special-cased here.
  */
 
-import { comparePos, type Pos, samePos, VimBuffer } from "./vim-pos.js";
+import { comparePos, type Pos, samePos, VimBuffer } from "./vim-pos.ts";
 
 export const FORWARD = 1;
 export const BACKWARD = -1;

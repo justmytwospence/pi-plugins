@@ -2,7 +2,7 @@ import { spawn } from "node:child_process";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
-import type { ImplementationModelOverride } from "./implementation-models.js";
+import type { ImplementationModelOverride } from "./implementation-models.ts";
 
 const HOOK_TIMEOUT_MS = 30_000;
 

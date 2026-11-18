@@ -5,7 +5,7 @@
 // vim mode works there too).
 import type { Theme } from "@earendil-works/pi-coding-agent";
 import { Input, type KeyId, matchesKey, truncateToWidth, visibleWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
-import { EDITOR_MODE, EDITOR_SURFACE, INPUT_CONTEXT, readEditorMode } from "../editor-contract.js";
+import { EDITOR_MODE, EDITOR_SURFACE, INPUT_CONTEXT, readEditorMode } from "../editor-contract.ts";
 import {
   type Hint,
   hintLine,
@@ -15,8 +15,8 @@ import {
   rule,
   selectedRow,
   type WorkflowStep,
-} from "../ui-kit.js";
-import { pageHeader } from "./frame.js";
+} from "../ui-kit.ts";
+import { pageHeader } from "./frame.ts";
 
 export interface OptionRow {
   id: string;

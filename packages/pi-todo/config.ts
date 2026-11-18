@@ -1,7 +1,7 @@
 import { existsSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { expandTilde, type GuidanceFields, loadJsonConfig, loadLegacyConfig, validateGuidanceFields } from "./config-helpers.js";
+import { expandTilde, type GuidanceFields, loadJsonConfig, loadLegacyConfig, validateGuidanceFields } from "./config-helpers.ts";
 
 interface TodoConfig {
 	guidance?: GuidanceFields;

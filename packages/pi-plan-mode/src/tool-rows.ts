@@ -2,7 +2,7 @@
 // then a dim `↳` result line collapsed or a tone block expanded.
 import type { Theme } from "@earendil-works/pi-coding-agent";
 import { type Component, truncateToWidth } from "@earendil-works/pi-tui";
-import { Block, expandHint, Row, type Tone, toneOfTool } from "./transcript-style.js";
+import { Block, expandHint, Row, type Tone, toneOfTool } from "./transcript-style.ts";
 
 type Paint = Pick<Theme, "fg" | "bg">;
 interface ToolContext {

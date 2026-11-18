@@ -3,7 +3,7 @@ import {
   getCursorShapeRuntime,
   RESET_CURSOR_SHAPE,
   type CursorShapeSequence,
-} from "./engine/cursor-shape.js";
+} from "./engine/cursor-shape.ts";
 
 const owners = new WeakMap<object, CursorOwner>();
 type CursorOwner = {

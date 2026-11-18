@@ -1,6 +1,6 @@
 // Canonical: shared/transcript/transcript-viewport.ts. Sync: node scripts/sync-transcript-helpers.mjs
-import { EMPTY_TRANSCRIPT_CONTEXT, type TranscriptContext, type TranscriptIndex } from "./transcript-contract.js";
-import { indexTranscript, selectCheckpoint } from "./transcript-index.js";
+import { EMPTY_TRANSCRIPT_CONTEXT, type TranscriptContext, type TranscriptIndex } from "./transcript-contract.ts";
+import { indexTranscript, selectCheckpoint } from "./transcript-index.ts";
 
 export interface TranscriptView {
   children?: readonly unknown[];

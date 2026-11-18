@@ -1,6 +1,6 @@
 import type { ExtensionAPI, ExtensionContext, Theme } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
-import { Row, registerRowRun } from "./transcript-style.js";
+import { Row, registerRowRun } from "./transcript-style.ts";
 
 export type WorkflowKind = "work" | "chat" | "plan";
 

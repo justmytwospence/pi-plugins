@@ -1,7 +1,7 @@
-import type { CommandGrant } from "./command-grants.js";
-import type { JevToolPick, ToolCapability } from "./jev-tool-picker.js";
-import { MCP_GATEWAY_TOOL, type McpServerCatalog } from "./mcp-tools.js";
-import type { PlannerToolset, ToolSelection } from "./planners.js";
+import type { CommandGrant } from "./command-grants.ts";
+import type { JevToolPick, ToolCapability } from "./jev-tool-picker.ts";
+import { MCP_GATEWAY_TOOL, type McpServerCatalog } from "./mcp-tools.ts";
+import type { PlannerToolset, ToolSelection } from "./planners.ts";
 
 /** A row in the planner tool tree: a leaf tool, or a group whose state follows its children. */
 export interface ToolNode {

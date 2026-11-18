@@ -16,9 +16,9 @@
  * - `dispose()` releases its shared TUI cursor ownership; a live main editor
  *   keeps its hardware cursor until the session ends.
  */
-import type { EditorFactoryOptions } from "./contract.js";
-import { ModalEditor, type ModalEditorOptions } from "./engine/modal-editor.js";
-import { SuiteModalEditor } from "./suite-editor.js";
+import type { EditorFactoryOptions } from "./contract.ts";
+import { ModalEditor, type ModalEditorOptions } from "./engine/modal-editor.ts";
+import { SuiteModalEditor } from "./suite-editor.ts";
 
 const EX_SUBMIT_NAMES: ReadonlySet<string> = new Set(["w", "wq", "x"]);
 

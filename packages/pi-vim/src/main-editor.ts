@@ -4,9 +4,9 @@
  * Pi's `app.interrupt`) plus the suite protocol and explicit transcript
  * checkpoint navigation on Ctrl+U / Ctrl+D in Insert and idle Normal mode.
  */
-import type { ModalEditorOptions } from "./engine/modal-editor.js";
+import type { ModalEditorOptions } from "./engine/modal-editor.ts";
 import { isKeyRelease, matchesKey } from "@earendil-works/pi-tui";
-import { SuiteModalEditor } from "./suite-editor.js";
+import { SuiteModalEditor } from "./suite-editor.ts";
 
 /** Like Vim's 'timeoutlen': how long `Ctrl-X` waits for its second key. */
 export const CTRL_X_TIMEOUT_MS = 1000;

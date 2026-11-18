@@ -14,7 +14,7 @@ import os from "node:os";
 import path from "node:path";
 import zlib from "node:zlib";
 import { allocateImageId, getCapabilities, getCellDimensions } from "@earendil-works/pi-tui";
-import { READY_TITLE } from "./plan-html.js";
+import { READY_TITLE } from "./plan-html.ts";
 
 const PLACEHOLDER = "\u{10EEEE}";
 // Kitty's row/column diacritics (rowcolumn-diacritics.txt), in order: index n is row or column n.

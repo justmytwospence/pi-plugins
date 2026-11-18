@@ -3,7 +3,7 @@
  * plan_subagents tool's partial results (RPC `tool_execution_update`), batched, and is rebuilt
  * there into one trace and stats per subagent.
  */
-import { describeToolArgs, PlannerTrace } from "./planner-trace.js";
+import { describeToolArgs, PlannerTrace } from "./planner-trace.ts";
 
 export const SUBAGENT_PROGRESS_KIND = "plan-subagents-progress";
 const FLUSH_MS = 200;

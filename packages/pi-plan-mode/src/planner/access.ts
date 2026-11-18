@@ -1,19 +1,19 @@
 // What a planner may use, from the tools screen: the tree (Shell, Subagents, toolsets, MCP servers,
 // Other tools) and its selection, resolved into the planner session's tools, extensions and policy.
 import type { ToolInfo } from "@earendil-works/pi-coding-agent";
-import type { CommandGrant, ResolvedGrant } from "../command-grants.js";
-import { PLAN_MODE_COMPLETE_TOOL_NAME } from "../completion-tool.js";
-import type { ModelSpec } from "../implementation-models.js";
-import { formatModelSpec } from "../implementation-models.js";
-import { MCP_GATEWAY_TOOL, type McpServerCatalog } from "../mcp-tools.js";
-import { type PlannerToolset, resolvePlannerAccess } from "../planners.js";
-import { PLAN_MODE_QUESTION_TOOL_NAME } from "../question-tool.js";
-import { PLAN_SUBAGENTS_TOOL_NAME } from "../scout-process.js";
-import type { SafeSubcommands } from "../tool-policy.js";
-import { isBuiltinTool } from "../tool-policy.js";
-import { buildToolTree, leaves, type ToolNode, treeToSelection } from "../tool-tree.js";
-import type { PlannerAccessConfig } from "./agent.js";
-import { plannerSystemPrompt } from "./prompt.js";
+import type { CommandGrant, ResolvedGrant } from "../command-grants.ts";
+import { PLAN_MODE_COMPLETE_TOOL_NAME } from "../completion-tool.ts";
+import type { ModelSpec } from "../implementation-models.ts";
+import { formatModelSpec } from "../implementation-models.ts";
+import { MCP_GATEWAY_TOOL, type McpServerCatalog } from "../mcp-tools.ts";
+import { type PlannerToolset, resolvePlannerAccess } from "../planners.ts";
+import { PLAN_MODE_QUESTION_TOOL_NAME } from "../question-tool.ts";
+import { PLAN_SUBAGENTS_TOOL_NAME } from "../scout-process.ts";
+import type { SafeSubcommands } from "../tool-policy.ts";
+import { isBuiltinTool } from "../tool-policy.ts";
+import { buildToolTree, leaves, type ToolNode, treeToSelection } from "../tool-tree.ts";
+import type { PlannerAccessConfig } from "./agent.ts";
+import { plannerSystemPrompt } from "./prompt.ts";
 
 const READ_TOOLS = ["read", "grep", "find", "ls"];
 /** Tools that make no sense in a planner: it asks you with plan_mode_question instead. */

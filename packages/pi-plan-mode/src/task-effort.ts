@@ -6,7 +6,7 @@ import {
   choice,
   provenanceOf,
   type System1DecisionProvenance,
-} from "./system1.js";
+} from "./system1.ts";
 
 const LEVELS = ["low", "medium", "high", "xhigh"] as const;
 export type TaskThinkingLevel = (typeof LEVELS)[number];

@@ -3,21 +3,21 @@
 // Nothing here changes the selected model.
 import { relative, resolve } from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { setToolsActive } from "./active-tools.js";
-import { shortModelName } from "./approval-picker.js";
-import { effortOrigin, withEffortOrigin } from "./effort-origin.js";
-import { gateShellReads } from "./gate-shell.js";
-import { MODEL_SPEC_THINKING_LEVELS, type ModelSpec, type ModelSpecThinkingLevel } from "./implementation-models.js";
-import { type PairDefinition, pairKey, resolvePair } from "./model-pairs.js";
-import { inPlan, isPlanFile, planPaths, readPlan } from "./plan-file.js";
-import { expandHome } from "./plan-hook.js";
+import { setToolsActive } from "./active-tools.ts";
+import { shortModelName } from "./approval-picker.ts";
+import { effortOrigin, withEffortOrigin } from "./effort-origin.ts";
+import { gateShellReads } from "./gate-shell.ts";
+import { MODEL_SPEC_THINKING_LEVELS, type ModelSpec, type ModelSpecThinkingLevel } from "./implementation-models.ts";
+import { type PairDefinition, pairKey, resolvePair } from "./model-pairs.ts";
+import { inPlan, isPlanFile, planPaths, readPlan } from "./plan-file.ts";
+import { expandHome } from "./plan-hook.ts";
 import {
   PLAN_PAIR_CHANNEL,
   type PlanPairPhase,
   type PlanPairRequest,
   type PlanPairSnapshot,
-} from "./plan-pair-contract.js";
-import { findBlockedCommandSegment, readCommand, type SafeSubcommands } from "./tool-policy.js";
+} from "./plan-pair-contract.ts";
+import { findBlockedCommandSegment, readCommand, type SafeSubcommands } from "./tool-policy.ts";
 
 export const PAIR_ENTRY = "plan-mode:pair";
 export const PAIR_TOOLS = ["ask_planner", "planner_answer"] as const;

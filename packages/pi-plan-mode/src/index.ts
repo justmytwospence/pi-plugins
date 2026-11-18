@@ -1,8 +1,8 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import plan, { type PlanDependencies } from "./plan.js";
-import { mcpAllowFromEnv } from "./planners.js";
-import { installScoutGuard } from "./scout-guard.js";
-import { installSystem1Notifications } from "./system1.js";
+import plan, { type PlanDependencies } from "./plan.ts";
+import { mcpAllowFromEnv } from "./planners.ts";
+import { installScoutGuard } from "./scout-guard.ts";
+import { installSystem1Notifications } from "./system1.ts";
 
 export default async function planMode(pi: ExtensionAPI, dependencies: PlanDependencies = {}): Promise<void> {
   installSystem1Notifications(pi);
