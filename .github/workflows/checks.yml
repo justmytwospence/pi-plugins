@@ -3,18 +3,16 @@ on:
   push:
     branches: [main]
   pull_request:
+  workflow_dispatch:
+concurrency:
+  group: checks-${{ github.ref }}
+  cancel-in-progress: true
 permissions:
   contents: read
 jobs:
-  catalog:
-    runs-on: ubuntu-latest
-    outputs:
-      plugins: ${{ steps.plugins.outputs.names }}
-    steps:
-      - uses: actions/checkout@v4
-      - id: plugins
-        run: echo "names=$(node -e 'console.log(JSON.stringify([...new Set(require("./package.json").pi.extensions.map(p => p.split("/")[2]))]))')" >> "$GITHUB_OUTPUT"
-  loader-and-docs:
+  suite:
+    # Release commits only change version fields of an already-checked tree.
+    if: "${{ !startsWith(github.event.head_commit.message, 'chore: release ') }}"
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -25,59 +23,17 @@ jobs:
           cache-dependency-path: |
             package-lock.json
             packages/pi-sidebar/package-lock.json
-            site/package-lock.json
       - run: npm ci
-      # Root integration tests exercise the sidebar's locked Pi 1.2 and 1.4 SDKs.
+      # Root integration tests exercise the sidebar's locked Pi 1.4 SDK.
       - run: npm ci --prefix packages/pi-sidebar
-      - run: npm test
-      - run: npm ci
-        working-directory: site
-      - run: npm run check && npm run build
-        working-directory: site
-  switchyard-compat:
+      - run: node scripts/test-suite.mjs --full
+  components:
+    if: "${{ !startsWith(github.event.head_commit.message, 'chore: release ') }}"
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
-        pi: ['1.4.0', '1.5.0', '1.5.2']
-    env:
-      SWITCHYARD_DIR: ${{ github.workspace }}/../switchyard
-      TYPESAFE_API_KEY: ''
-      OPENAI_API_KEY: ''
-      ANTHROPIC_API_KEY: ''
-      GEMINI_API_KEY: ''
-      OPENROUTER_API_KEY: ''
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with: { node-version: '24' }
-      - run: |
-          commit=$(node -p "require('./.github/compat-switchyard.json').commit")
-          git clone --no-checkout https://github.com/justmytwospence/switchyard.git "$SWITCHYARD_DIR"
-          git -C "$SWITCHYARD_DIR" checkout --detach "$commit"
-          echo "PNPM_VERSION=$(node -p "require(process.env.SWITCHYARD_DIR + '/package.json').packageManager.split('@')[1]")" >> "$GITHUB_ENV"
-      - uses: pnpm/action-setup@v4
-        with:
-          version: ${{ env.PNPM_VERSION }}
-          package_json_file: ${{ env.SWITCHYARD_DIR }}/package.json
-      - run: npm install -g @earendil-works/pi-coding-agent@${{ matrix.pi }}
-      - run: |
-          npm ci
-          for component in pi-ask-user-question pi-tool-gate pi-plan-mode pi-subagents pi-todo pi-bg; do
-            npm ci --prefix "packages/$component"
-          done
-      # The counterpart is deliberately built here, never by check:switchyard itself.
-      - run: pnpm install --frozen-lockfile && pnpm build
-        working-directory: ${{ env.SWITCHYARD_DIR }}
-      - run: npm run check:switchyard
-
-  component:
-    needs: catalog
-    runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        plugin: ${{ fromJSON(needs.catalog.outputs.plugins) }}
+        shard: [1, 2, 3, 4]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -86,7 +42,6 @@ jobs:
           cache: npm
           cache-dependency-path: |
             package-lock.json
-            packages/${{ matrix.plugin }}/package-lock.json
+            packages/*/package-lock.json
       - run: npm ci
-      - run: npm ci && npm run check
-        working-directory: packages/${{ matrix.plugin }}
+      - run: node scripts/check-components.mjs --shard ${{ matrix.shard }}/4 --install --full

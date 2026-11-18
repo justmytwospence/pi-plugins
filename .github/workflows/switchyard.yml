@@ -1,0 +1,62 @@
+name: Switchyard
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'packages/*/src/switchyard/**'
+      - 'scripts/check-switchyard.mjs'
+      - '.github/compat-switchyard.json'
+      - '.github/workflows/switchyard.yml'
+      - 'package.json'
+  pull_request:
+    paths:
+      - 'packages/*/src/switchyard/**'
+      - 'scripts/check-switchyard.mjs'
+      - '.github/compat-switchyard.json'
+      - '.github/workflows/switchyard.yml'
+      - 'package.json'
+  schedule:
+    - cron: '0 12 * * 1'
+  workflow_dispatch:
+concurrency:
+  group: switchyard-${{ github.ref }}
+  cancel-in-progress: true
+permissions:
+  contents: read
+jobs:
+  switchyard-compat:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        pi: ['1.4.0', '1.5.0', '1.5.2']
+    env:
+      SWITCHYARD_DIR: ${{ github.workspace }}/../switchyard
+      TYPESAFE_API_KEY: ''
+      OPENAI_API_KEY: ''
+      ANTHROPIC_API_KEY: ''
+      GEMINI_API_KEY: ''
+      OPENROUTER_API_KEY: ''
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: '24' }
+      - run: |
+          commit=$(node -p "require('./.github/compat-switchyard.json').commit")
+          git clone --no-checkout https://github.com/justmytwospence/switchyard.git "$SWITCHYARD_DIR"
+          git -C "$SWITCHYARD_DIR" checkout --detach "$commit"
+          echo "PNPM_VERSION=$(node -p "require(process.env.SWITCHYARD_DIR + '/package.json').packageManager.split('@')[1]")" >> "$GITHUB_ENV"
+      - uses: pnpm/action-setup@v4
+        with:
+          version: ${{ env.PNPM_VERSION }}
+          package_json_file: ${{ env.SWITCHYARD_DIR }}/package.json
+      - run: npm install -g @earendil-works/pi-coding-agent@${{ matrix.pi }}
+      - run: |
+          npm ci
+          for component in pi-ask-user-question pi-tool-gate pi-plan-mode pi-subagents pi-todo pi-bg; do
+            npm ci --prefix "packages/$component"
+          done
+      # The counterpart is deliberately built here, never by check:switchyard itself.
+      - run: pnpm install --frozen-lockfile && pnpm build
+        working-directory: ${{ env.SWITCHYARD_DIR }}
+      - run: npm run check:switchyard

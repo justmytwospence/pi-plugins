@@ -1,0 +1,33 @@
+name: Docs
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'site/**'
+      - 'package.json'
+      - '.github/workflows/docs.yml'
+  pull_request:
+    paths:
+      - 'site/**'
+      - 'package.json'
+      - '.github/workflows/docs.yml'
+  workflow_dispatch:
+concurrency:
+  group: docs-${{ github.ref }}
+  cancel-in-progress: true
+permissions:
+  contents: read
+jobs:
+  docs:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: site/package-lock.json
+      - run: npm ci
+        working-directory: site
+      - run: npm run check && npm run build
+        working-directory: site
