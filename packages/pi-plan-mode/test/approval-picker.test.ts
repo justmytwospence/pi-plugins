@@ -177,7 +177,7 @@ test("a named implementer replaces here and a selected pair's planner gets its o
       .includes(" → Yes, compact and implement with Sonnet 5.5"),
   );
   component.handleInput("\r");
-  assert.equal(done.mock.calls[0]?.[0].choice.kind, "compact-here");
+  assert.equal(done.mock.calls[0]?.[0]?.choice.kind, "compact-here");
   assert.equal(shortModelName("Claude Opus 5.5\n"), "Opus 5.5");
 });
 
