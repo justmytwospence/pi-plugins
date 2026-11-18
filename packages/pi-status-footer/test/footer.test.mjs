@@ -575,7 +575,8 @@ test("all optional footer rows fit both themes at every width, alone and combine
     }
     assert.match(plain(mod.renderFooter(combined, 22, paint).find((row) => plain(row).startsWith("\uf085  Bg "))), /lint ✗/);
   }
-});
+  // An exhaustive CPU-bound width sweep (2 themes x 24 variants x 240 widths): give it room under load.
+}, 30_000);
 
 test("pi-bg's tasks get their own row under the context row", () => {
   const absorbed = mod.absorbStatuses(new Map([["bg", "bg: tests 2:14 \u00b7 vite ready (kept) \u00b7 lint \u2717 \u00b7 fmt \u2713 \u00b7 +1"]]), { claudeRow: true });
