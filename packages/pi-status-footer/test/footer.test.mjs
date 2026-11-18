@@ -1723,7 +1723,7 @@ test("the top border gauge keeps pi's embedded working status at its left", () =
   editor.workingStatusIndicator = { renderInBorder: () => "* Working" };
   const line = editor.renderTopBorder(20, 0);
   assert.equal(visibleWidth(line), 20);
-  assert.equal(line, "━━━* Working ───────");
+  assert.equal(line, "━━ * Working ───────");
   // Too narrow for the status beside the gauge: pi's own border.
   assert.equal(editor.renderTopBorder(12, 0), "top120");
   // A plain editor that does not embed the status keeps the gauge alone.

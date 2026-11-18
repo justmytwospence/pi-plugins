@@ -675,7 +675,8 @@ export function drawGaugeOnBorders(editor: unknown, used: () => number | null, t
     const label = hidden > 0 ? ` ↑ ${hidden} more ` : "";
     const fits = label && Math.floor((width - visibleWidth(label)) / 2) >= statusWidth + 5;
     const line = gaugeBorder(width, pct, paint, this.borderColor, fits ? label : "");
-    return sliceByColumn(line, 0, 3) + status + this.borderColor(" ") + sliceByColumn(line, statusWidth + 4, width - statusWidth - 4);
+    // Pi's own layout: "── " + status + " " + the rest of the rule.
+    return sliceByColumn(line, 0, 2) + this.borderColor(" ") + status + this.borderColor(" ") + sliceByColumn(line, statusWidth + 4, width - statusWidth - 4);
   };
   e.renderBottomBorder = draw(original.bottom, "↓");
   return true;
