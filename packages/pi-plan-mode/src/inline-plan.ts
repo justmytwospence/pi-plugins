@@ -966,11 +966,19 @@ function renderExit(
               text: details?.feedback ? `Kept planning: ${details.feedback}` : "Kept planning",
             }
           : { tone: "pending", text: "Waiting for approval" };
-  // Collapsed and decided: one dim result line. Expanded or pending: the toned card.
-  if (outcome !== "pending" && !options.expanded) {
+  // A declined plan stays a full card: you keep reading it while you say what should change.
+  const open = outcome === "pending" || outcome === "kept";
+  // Collapsed and otherwise decided: one dim result line. Expanded or open: the toned card.
+  if (!open && !options.expanded) {
     return new ResultLine(theme, `${status.text}${status.context ? ` · ${status.context}` : ""}`, true);
   }
-  const card = reviewBody(theme, plan, status, options, (text) => new PlanMarkdown(text, getMarkdownTheme(), theme));
+  const card = reviewBody(
+    theme,
+    plan,
+    status,
+    outcome === "kept" ? { ...options, expanded: true } : options,
+    (text) => new PlanMarkdown(text, getMarkdownTheme(), theme),
+  );
   // While it waits, one more row of the card's background under the status, above the question.
   const body = new Container();
   body.addChild(card);
@@ -978,7 +986,7 @@ function renderExit(
     reviewCard(theme, outcome === "pending" ? "Plan review" : "Plan", component, status.tone, {
       expanded: options.expanded,
     });
-  if (outcome !== "pending" || !details?.previous || details.previous === plan) return wrap(body);
+  if (!open || !details?.previous || details.previous === plan) return wrap(body);
   // The full current plan remains authoritative; never guess a semantic summary from a diff.
   const container = new Container();
   if (details.changes?.length) {

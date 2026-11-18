@@ -18,6 +18,7 @@
 
 ### Fixed
 
+- A plan you decline with **No, keep planning** stays a full plan card in the transcript (title, whole plan, "What changed" for a revision, then **Kept planning**) instead of folding to one dim line.
 - Fableplan and both Astraplan identities retain their worker after approval for later work and chat, with branch-local persisted handoffs and temporary planner consultations.
 
 ### Chat on the planner, Argon and Carbon pairs and the next model for the footer

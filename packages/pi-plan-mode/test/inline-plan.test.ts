@@ -714,6 +714,44 @@ test("saving clears the declined baseline both immediately and after branch rest
   }
 });
 
+test("a declined plan stays a full plan card in the transcript, even collapsed", async () => {
+  const h = await setup({ select: ["No, keep planning"] });
+  await h.mock.commands.get("plan")?.handler("", h.context.ctx);
+  const lines = Array.from({ length: 20 }, (_, index) => `- Step ${index + 1}`);
+  writeFileSync(h.inline().planFile, `# Declined document\n\n${lines.join("\n")}\n`);
+  const result = await h.tool(EXIT_TOOL).execute("render-kept", {}, undefined, undefined, h.context.ctx);
+  assert.equal(result.details.outcome, "kept");
+  initTheme("dark", false);
+  const theme = {
+    fg: (_role: string, text: string) => text,
+    bg: (_role: string, text: string) => text,
+    bold: (text: string) => text,
+  } as ExtensionContext["ui"]["theme"];
+  const exit = h.mock.tools.find((candidate) => candidate.name === EXIT_TOOL) as unknown as ToolDefinition;
+  const rendered = exit
+    .renderResult?.(result as never, { expanded: false, isPartial: false }, theme, {
+      toolCallId: "render-kept",
+      args: {},
+      state: {},
+      invalidate() {},
+      lastComponent: undefined,
+      cwd: (h.context.ctx as ExtensionContext).cwd,
+      executionStarted: true,
+      argsComplete: true,
+      isPartial: false,
+      expanded: false,
+      showImages: false,
+      isError: false,
+      durationMs: undefined,
+      outputPad: 0,
+    } as never)
+    ?.render(120)
+    .map(stripVTControlCharacters)
+    .join("\n");
+  assert.match(rendered ?? "", /Declined document[\s\S]*Step 1\b[\s\S]*Step 20[\s\S]*Kept planning/u);
+  assert.doesNotMatch(rendered ?? "", /more lines?|↳/u);
+});
+
 test("a saved review renders the saved path neutrally rather than approval or pending status", async () => {
   const h = await setup({ select: ["Save for later", "Enter different name"], input: "rendered-save" });
   await h.mock.commands.get("plan")?.handler("", h.context.ctx);
