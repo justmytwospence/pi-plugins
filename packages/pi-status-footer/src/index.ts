@@ -18,7 +18,7 @@ import { CustomEditor, getAgentDir, type ExtensionAPI, type ExtensionContext, ty
 import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
 import { getSupportedThinkingLevels } from "@earendil-works/pi-ai/compat";
 import { clampThinkingLevel, type Model } from "@earendil-works/pi-ai";
-import { hyperlink, truncateToWidth, visibleWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
+import { hyperlink, sliceByColumn, truncateToWidth, visibleWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
 import { builtinMcpOwnsCommand, connectedMcpServers, countMcp, McpConfigReader, MCP_STATUS_KEY, type McpCount } from "./mcp.ts";
 import { SHOW_TIMER_AFTER_MS, WORKING_REFRESH_MS, WORKING_STATS_CHANNEL, workingMessage, WorkingStats, workingStatsService, type WorkingStatsRequest } from "./working.ts";
 import { WORKING_MESSAGE_EVENT, type WorkingMessageClaim } from "./working-message.ts";
@@ -637,6 +637,9 @@ export function gaugeBorder(width: number, used: number, theme: Paint, border: (
 
 interface BorderedEditor {
   borderColor?: (text: string) => string;
+  /** Pi's CustomEditor: the working spinner rides in the top border while it has an indicator. */
+  embedWorkingStatus?: boolean;
+  workingStatusIndicator?: { renderInBorder?(width: number): string };
   renderTopBorder?(width: number, hidden: number): string;
   renderBottomBorder?(width: number, hidden: number): string;
   [ORIGINAL_BORDERS]?: { top: BorderRenderer; bottom: BorderRenderer };
@@ -658,7 +661,22 @@ export function drawGaugeOnBorders(editor: unknown, used: () => number | null, t
     if (pct === null || !paint || typeof this.borderColor !== "function") return fallback.call(this, width, hidden);
     return gaugeBorder(width, pct, paint, this.borderColor, hidden > 0 ? ` ${arrow} ${hidden} more ` : "");
   };
-  e.renderTopBorder = draw(original.top, "↑");
+  const top = draw(original.top, "↑");
+  // Pi's embedded working status (spinner and message) keeps its place at the
+  // left of the top border, as in pi's own border; the gauge fills the rest.
+  e.renderTopBorder = function (width, hidden) {
+    const indicator = this.embedWorkingStatus ? this.workingStatusIndicator : undefined;
+    const pct = used(), paint = theme();
+    if (!indicator?.renderInBorder || pct === null || !paint || typeof this.borderColor !== "function") return top.call(this, width, hidden);
+    const status = indicator.renderInBorder(Math.max(1, width - 5));
+    const statusWidth = visibleWidth(status);
+    if (statusWidth === 0) return top.call(this, width, hidden);
+    if (width < statusWidth + 5) return original.top.call(this, width, hidden);
+    const label = hidden > 0 ? ` ↑ ${hidden} more ` : "";
+    const fits = label && Math.floor((width - visibleWidth(label)) / 2) >= statusWidth + 5;
+    const line = gaugeBorder(width, pct, paint, this.borderColor, fits ? label : "");
+    return sliceByColumn(line, 0, 3) + status + this.borderColor(" ") + sliceByColumn(line, statusWidth + 4, width - statusWidth - 4);
+  };
   e.renderBottomBorder = draw(original.bottom, "↓");
   return true;
 }
@@ -1887,7 +1905,7 @@ export default function statusFooter(pi: ExtensionAPI): void {
     const factory: EditorFactory & { [ORIGINAL_BORDERS]?: EditorFactory | null } = (tui, theme, keybindings) => {
       // A foreign factory may itself capture the outgoing context.
       if (!currentSession()) return new CustomEditor(tui, theme, keybindings);
-      const editor = previous?.(tui, theme, keybindings) ?? new CustomEditor(tui, theme, keybindings);
+      const editor = previous?.(tui, theme, keybindings) ?? new CustomEditor(tui, theme, keybindings, { embedWorkingStatus: true });
       releaseInput?.();
       mainEditor = editor as FooterEditor; mainTui = tui; mainKeys = keybindings;
       bindCycleGuard();

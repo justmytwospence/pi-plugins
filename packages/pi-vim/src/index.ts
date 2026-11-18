@@ -250,7 +250,7 @@ export default function piVim(pi: ExtensionAPI) {
     ctx.ui.setEditorComponent((tui, theme, keybindings) =>
       session === current
         ? createEditor(current, { surface: "main", tui, theme, keybindings })
-        : new CustomEditor(tui, theme, keybindings),
+        : new CustomEditor(tui, theme, keybindings, { embedWorkingStatus: true }),
     );
   });
 

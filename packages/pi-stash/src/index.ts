@@ -453,7 +453,7 @@ export default function promptStash(pi: ExtensionAPI): void {
     const base = previous;
     let created: EditorComponent | undefined;
     const factory: TaggedFactory = (tui, theme, keybindings) => {
-      const editor = base?.(tui, theme, keybindings) ?? new CustomEditor(tui, theme, keybindings);
+      const editor = base?.(tui, theme, keybindings) ?? new CustomEditor(tui, theme, keybindings, { embedWorkingStatus: true });
       attach(editor, tui);
       created = editor;
       return editor;

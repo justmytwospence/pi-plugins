@@ -620,7 +620,10 @@ export class ModalEditor extends CustomEditor {
     kb: CustomEditorConstructorArgs[2],
     opts?: ModalEditorOptions,
   ) {
-    super(tui, theme, kb);
+    // Pi's working spinner and message ride in the top border, as with its
+    // default editor, instead of a separate row above the editor. Only the
+    // editor Pi gives a working indicator shows it.
+    super(tui, theme, kb, { embedWorkingStatus: true });
     this.cursorShapeRuntime = getCursorShapeRuntime(tui);
     this.cursorShapeTui =
       typeof tui === "object" && tui !== null ? (tui as object) : null;

@@ -87,7 +87,9 @@ readings fresh; the working row is independent of the footer mode.
 2. `Context 32% used`. The gauge itself is the editor's border lines, above and
    below the prompt: the used share of the width in heavy rule (accent, then the
    warning and error colors), the rest in the editor's own border color, so pi-vim's
-   mode colors still show. Scroll markers (`↑ 3 more`) stay centered on it. An
+   mode colors still show. Scroll markers (`↑ 3 more`) stay centered on it, and
+   pi's working spinner and message keep their place at the left of the top
+   border while the agent works. An
    editor without pi's border hooks keeps its borders, and the gauge stays in the
    footer. An extension that installs an editor without wrapping the previous one
    (pi-vim) must load before this one; pi-stash wraps, so its order is free.

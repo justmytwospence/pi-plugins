@@ -1709,6 +1709,28 @@ test("border hooks fall back to the editor's own until a percentage is known", (
   assert.equal(mod.drawGaugeOnBorders({}, () => 50, () => theme), false);
 });
 
+test("the top border gauge keeps pi's embedded working status at its left", () => {
+  class Editor {
+    borderColor = (t) => t;
+    embedWorkingStatus = true;
+    workingStatusIndicator = undefined;
+    renderTopBorder(width, hidden) { return `top${width}${hidden}`; }
+    renderBottomBorder(width, hidden) { return `bottom${width}${hidden}`; }
+  }
+  const editor = new Editor();
+  mod.drawGaugeOnBorders(editor, () => 50, () => theme);
+  assert.equal(editor.renderTopBorder(10, 0), "━━━━━─────");
+  editor.workingStatusIndicator = { renderInBorder: () => "* Working" };
+  const line = editor.renderTopBorder(20, 0);
+  assert.equal(visibleWidth(line), 20);
+  assert.equal(line, "━━━* Working ───────");
+  // Too narrow for the status beside the gauge: pi's own border.
+  assert.equal(editor.renderTopBorder(12, 0), "top120");
+  // A plain editor that does not embed the status keeps the gauge alone.
+  editor.embedWorkingStatus = false;
+  assert.equal(editor.renderTopBorder(10, 0), "━━━━━─────");
+});
+
 test("the context row drops its own gauge when the editor borders draw it", () => {
   const row = mod.renderFooter({ ...fixture(), borderGauge: true }, 160, theme)[2];
   assert.match(row, /Context\s+28% used/);
