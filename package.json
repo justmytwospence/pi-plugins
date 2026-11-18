@@ -5,6 +5,9 @@
   "private": true,
   "type": "module",
   "license": "MIT",
+  "engines": {
+    "node": ">=24"
+  },
   "keywords": [
     "pi-package",
     "pi-extension"
@@ -85,7 +88,7 @@
     "shiki": "^4.5.0"
   },
   "devDependencies": {
-    "@earendil-works/pi-coding-agent": "1.2.0"
+    "@earendil-works/pi-coding-agent": "1.5.2"
   },
   "scripts": {
     "test": "node scripts/test-suite.mjs",

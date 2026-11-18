@@ -1,8 +1,8 @@
-// Audited POSIX stock bindings from Pi 1.2.0's KeybindingsManager, not a user profile.
+// Audited POSIX stock bindings from Pi 1.5.2's KeybindingsManager, not a user profile.
 // This snapshot keeps site checks independent of runtime SDK installs/imports.
 // When the configured test target changes, re-audit against its keybinding reference
 // and actual SDK, update this baseline, then review guide/platform prose together.
-export const keymapSdkVersion = "1.2.0";
+export const keymapSdkVersion = "1.5.2";
 
 // Suite-owned configurable shortcuts, separate from stock action IDs and personal profiles.
 // pi-select-nav optionally forwards the todo default/common rebind in dialogs;

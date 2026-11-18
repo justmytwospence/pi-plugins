@@ -44,7 +44,7 @@ npm ci
 npm test
 ```
 
-The [root package scripts](https://github.com/justmytwospence/pi-plugins/blob/main/package.json) configure **Pi 1.2.0** as the SDK test target. They run loader, shortcut, contract, question-flow and lifecycle checks, then the shared eval helpers' unit tests. [The loader test](https://github.com/justmytwospence/pi-plugins/blob/main/scripts/test-loader.mjs) uses Pi's actual `DefaultResourceLoader` with temporary, in-memory package settings rather than merely importing each factory through a stub.
+The [root package scripts](https://github.com/justmytwospence/pi-plugins/blob/main/package.json) configure **Pi 1.5.2** as the SDK test target. They run loader, shortcut, contract, question-flow and lifecycle checks, then the shared eval helpers' unit tests. [The loader test](https://github.com/justmytwospence/pi-plugins/blob/main/scripts/test-loader.mjs) uses Pi's actual `DefaultResourceLoader` with temporary, in-memory package settings rather than merely importing each factory through a stub.
 
 The loader checks:
 
@@ -127,7 +127,7 @@ The checks have different responsibilities:
 | `npm run check` | Runs `check-docs.mjs` for manifest/catalog coverage, frontmatter, uniform quick references, README catalog, keymap action IDs/defaults, JSON examples, selected entry paths and authored local links; then runs Astro diagnostics. |
 | `npm run build` | Builds the static site and search output, then runs `check-build.mjs` against rendered HTML, local links and fragments, assets, canonical URLs, metadata and required search output. |
 
-See [authored-document checks](https://github.com/justmytwospence/pi-plugins/blob/main/site/scripts/check-docs.mjs) and [rendered-build checks](https://github.com/justmytwospence/pi-plugins/blob/main/site/scripts/check-build.mjs). The action/default baseline in [keymap data](https://github.com/justmytwospence/pi-plugins/blob/main/site/src/data/keymap.mjs) is an audited Pi 1.2.0 snapshot, not personal configuration. The checker requires a deliberate re-audit if the root test SDK changes; it imports no runtime plugin or SDK. It checks documented defaults and IDs, not whether your terminal delivers a key.
+See [authored-document checks](https://github.com/justmytwospence/pi-plugins/blob/main/site/scripts/check-docs.mjs) and [rendered-build checks](https://github.com/justmytwospence/pi-plugins/blob/main/site/scripts/check-build.mjs). The action/default baseline in [keymap data](https://github.com/justmytwospence/pi-plugins/blob/main/site/src/data/keymap.mjs) is an audited Pi 1.5.2 snapshot, not personal configuration. The checker requires a deliberate re-audit if the root test SDK changes; it imports no runtime plugin or SDK. It checks documented defaults and IDs, not whether your terminal delivers a key.
 
 These scripts do not fetch external links, so a passing check does not verify GitHub availability or remote content.
 
