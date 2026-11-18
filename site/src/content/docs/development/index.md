@@ -79,7 +79,11 @@ Once dependencies are installed for all components, run this from the repository
 npm run check
 ```
 
-That first runs the root SDK tests (and the unit tests of the shared eval helpers), then [scripts/check-components.mjs](https://github.com/justmytwospence/pi-plugins/blob/main/scripts/check-components.mjs). The script reads the component list from the root `package.json`'s `pi.extensions`, runs `npm run check` in each package, continues through component failures and returns a failing exit status if any component fails. It does not install dependencies or check the site.
+That first runs the root SDK tests (and the unit tests of the shared eval helpers), then [scripts/check-components.mjs](https://github.com/justmytwospence/pi-plugins/blob/main/scripts/check-components.mjs). The script reads the component list from the root `package.json`'s `pi.extensions`, runs `npm run check` in each package in parallel (`--install` runs `npm ci` first), continues through component failures and returns a failing exit status if any component fails. It does not install dependencies or check the site.
+
+### Fast and full tiers
+
+`npm test` and `npm run check` run the fast tier in parallel. `npm run check:full` (and CI) add the slow tier, selected with `PI_TEST_FULL=1`: the checkpoint PTY test, footer controls, every mode-flow combination, exhaustive render width sweeps and tests with real timers. `npm run check:changed` checks only the components and root suites a change touches. `PI_CHECK_JOBS=1` runs everything one at a time with live output, `node scripts/test-suite.mjs --list` shows the root suite's tasks and `--only <names>` runs some. Use Node 24 or newer (`.nvmrc`).
 
 ### Keep paid evaluations separate
 

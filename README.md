@@ -121,11 +121,12 @@ npm ci
 npm test
 for dir in packages/*/; do (cd "$dir" && npm ci); done
 npm run check
+npm run check:changed
 ```
 
 Pi sessions started at the root of a checkout or worktree load the suite from that checkout, not the installed release, through the committed `.pi/settings.json`; edit, then `/reload`. See [development and testing](https://pi-plugins.vercel.app/development/#live-local-loading).
 
-The configured SDK test target is **Pi 1.5.2**. `npm test` checks real loader selection/registration, shortcut conflicts, shared contracts, question routing, local `AgentSession` lifecycle, in-memory TUI input and the unit tests of the shared eval helpers. It makes no live model calls and is not live PTY proof; terminal rendering, focus and reload still need interactive checks. `npm run check` runs these root tests and every component's own `check`, using the root manifest as the inventory.
+The configured SDK test target is **Pi 1.5.2**. `npm test` checks real loader selection/registration, shortcut conflicts, shared contracts, question routing, local `AgentSession` lifecycle, in-memory TUI input and the unit tests of the shared eval helpers. It makes no live model calls and is not live PTY proof; terminal rendering, focus and reload still need interactive checks. `npm run check` runs these root tests and every component's own `check`, using the root manifest as the inventory. `npm test` and `npm run check` run the fast tier in parallel; `npm run check:full` adds the slow tier that CI runs; `npm run check:changed` checks only what a change touches. Use Node 24 or newer (`.nvmrc`).
 
 Never run `npm run eval` without explicit authorization: evaluations make live, paid classifier calls. They are manual, run per package, and their shared helpers live in `evals/shared/`.
 
