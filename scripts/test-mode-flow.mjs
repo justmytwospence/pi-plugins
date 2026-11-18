@@ -153,9 +153,15 @@ export default function (pi) {
       }))).flatMap(testCase => testCase.names.includes('plan-mode') && testCase.names.includes('tool-gate')
         ? [testCase, { ...testCase, inlineActive: true }] : [testCase]),
   ];
+  // The fast tier runs four representative combinations; PI_TEST_FULL=1 runs all of them.
+  const FULL = process.env.PI_TEST_FULL === '1';
+  const labelOf = ({ names, inlineActive }) => names.join('+') + (inlineActive ? '-inline-active' : '');
+  const FAST = new Set(['tool-gate+plan-mode', 'plan-mode+tool-gate-inline-active',
+    'tool-gate+plan-mode+status-footer', 'status-footer+plan-mode+tool-gate-inline-active']);
+  for (const fast of FAST) if (!cases.some(testCase => labelOf(testCase) === fast)) throw new Error(`unknown fast mode-flow case: ${fast}`);
   const failures = [];
-  for (const { names, inlineActive } of cases) {
-    const label = names.join('+') + (inlineActive ? '-inline-active' : '');
+  for (const { names, inlineActive } of FULL ? cases : cases.filter(testCase => FAST.has(labelOf(testCase)))) {
+    const label = labelOf({ names, inlineActive });
     try {
       const dir = resolve(temp, label);
       mkdirSync(dir, { recursive: true });

@@ -15,6 +15,9 @@ import { fakeCall } from "./core/fake.ts";
 import { remoteRepo } from "./git-fixture.ts";
 import { relocatingHerdr } from "./relocation-fixture.ts";
 
+// Real-timer waits run in the full tier (PI_TEST_FULL=1).
+const FULL = process.env.PI_TEST_FULL === "1";
+
 const until = async (ok: () => boolean, ms = 3_000) => {
   const end = Date.now() + ms;
   while (!ok()) {
@@ -550,9 +553,12 @@ describe("drift in a worktree session (index.ts)", () => {
     expect(driftTokens().at(-1)).toMatch(/^↓2 main (✗ conflict|· 1 overlap)$/u);
 
     // The same upstream again (its own turn ending) is not a second note.
-    await emit("agent_settled");
-    await new Promise((res) => setTimeout(res, 2_000));
-    expect(sent).toHaveLength(1);
+    // Waits out a real 2 s window, so it runs in the full tier (PI_TEST_FULL=1).
+    if (FULL) {
+      await emit("agent_settled");
+      await new Promise((res) => setTimeout(res, 2_000));
+      expect(sent).toHaveLength(1);
+    }
     await emit("session_shutdown");
   }, 15_000);
 });

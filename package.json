@@ -93,6 +93,7 @@
   "scripts": {
     "test": "node scripts/test-suite.mjs",
     "check": "npm test && node scripts/check-components.mjs",
+    "check:full": "node scripts/test-suite.mjs --full && node scripts/check-components.mjs --full",
     "eval": "node scripts/eval.mjs",
     "version:set": "node scripts/set-version.mjs",
     "check:clients": "node scripts/test-remote-clients.mjs",

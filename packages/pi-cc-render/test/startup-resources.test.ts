@@ -24,6 +24,10 @@ import {
   type StartupTheme,
 } from "../src/feature/shell/startup-resources.ts";
 
+// Exhaustive width sweeps and candidate partitions run in the full tier (PI_TEST_FULL=1);
+// the fast tier keeps boundary widths and the first 40 candidates.
+const FULL = process.env.PI_TEST_FULL === "1";
+
 const plainTheme: StartupTheme = { fg: (_name, text) => text, bold: (text) => text };
 const screenshotModels = [
   ...["claude-3-7-sonnet-20250219", "claude-3-7-haiku-20250219", "claude-3-7-opus-20250219", "claude-3-7-fable-20250219"].map((id) => ({ provider: "anthropic", id, contextWindow: 200_000 })),
@@ -798,7 +802,7 @@ describe("startup resources", () => {
     ], Array.from({ length: 17 }, (_, n) => ({ provider: "google", id: `antigravity-gemini-${n}-flash` })))!;
     const mcp = buildMcpSection(Array.from({ length: 17 }, (_, n) => ({ name: `s${n}`, level: "user" as const })), () => "connected", undefined, () => 1)!;
     const stacked = buildModelsSection(screenshotModels, screenshotModels)!;
-    const widths = [...Array.from({ length: 201 }, (_, n) => n), 240];
+    const widths = FULL ? [...Array.from({ length: 201 }, (_, n) => n), 240] : [0, 1, 2, 3, 10, 24, 46, 80, 120, 158, 180, 200, 240];
     for (const width of widths) for (const section of [models, mcp, stacked]) {
       const layout = layoutSection(section, width, plainTheme);
       const { lines, hits } = layout;
@@ -1022,14 +1026,14 @@ describe("startup resources", () => {
     const models = manyProviderModels();
     const candidates = splashSectionCandidates("Models", models, width, plainTheme);
     expect(sectionRows(models, width, plainTheme)).toBe(renderSection(models, width, plainTheme).length);
-    // The exhaustive 158-column sweep is partitioned below; all other widths retain
-    // the original first-40 candidate coverage.
-    if (width !== 158) for (const candidate of candidates.slice(0, 40)) {
+    // The exhaustive 158-column sweep is partitioned below and runs in the full tier
+    // (PI_TEST_FULL=1); every other width, and 158 in the fast tier, keeps the first-40 coverage.
+    if (width !== 158 || !FULL) for (const candidate of candidates.slice(0, 40)) {
       expect(candidate.rows).toBe(renderSection(candidate.section, width, plainTheme).length);
     }
   });
 
-  test.each(Array.from({ length: 16 }, (_, i) => i))("all 158-column candidates match their rendered rows (batch %i)", (batch) => {
+  (FULL ? test : test.skip).each(Array.from({ length: 16 }, (_, i) => i))("all 158-column candidates match their rendered rows (batch %i)", (batch) => {
     const candidates = splashSectionCandidates("Models", manyProviderModels(), 158, plainTheme);
     expect(candidates.length).toBeGreaterThan(0);
     // Residue classes partition the entire candidate set; no layout assertion is sampled out.

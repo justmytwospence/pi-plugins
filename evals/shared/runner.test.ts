@@ -10,6 +10,9 @@ import { parseArgs, runEval, select, type RunnerDeps } from "./runner.ts";
 import type { Sample } from "./sessions.ts";
 import { type EvalTarget, type RunContext, defineEval } from "./target.ts";
 
+// The CLI subprocess tests take about 5 s each; they run in the full tier (PI_TEST_FULL=1).
+const FULL = process.env.PI_TEST_FULL === "1";
+
 interface Fake {
   deps: RunnerDeps;
   out: string[];
@@ -397,7 +400,7 @@ test("selection is rechecked between targets, after the previous record was save
   assert.equal(last("beta", 1, f.env).length, 0);
 });
 
-test("the CLI dry/list/last bootstrap reads the same global backend without loading an SDK or auth", () => {
+test("the CLI dry/list/last bootstrap reads the same global backend without loading an SDK or auth", { skip: !FULL && "full tier" }, () => {
   const dir = mkdtempSync(path.join(tmpdir(), "eval-cli-offline-"));
   try {
     for (const backend of ["jev", "openai-decisions"]) {
@@ -507,7 +510,7 @@ test("editing a later rung during live bootstrap stops before classification", a
   assert.match(json(f.out).stopped, /System 1 changed/u);
 });
 
-test("mixed CLI dry/list/last never load a registry, auth or models", () => {
+test("mixed CLI dry/list/last never load a registry, auth or models", { skip: !FULL && "full tier" }, () => {
   const dir = mkdtempSync(path.join(tmpdir(), "eval-cli-mixed-"));
   try {
     for (const waterfall of [["jev", "openai-decisions"], ["openai-decisions", "jev"]]) {

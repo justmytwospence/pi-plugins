@@ -50,7 +50,8 @@ describe("drift", () => {
     expect(await siblingOverlaps(realExec, r.root, [{ label: "a", branch: "a", base: "main" }])).toEqual([]);
   });
 
-  it("fires once per burst of ref changes, and not after close", async () => {
+  // Real watcher and timers (about 1 s): full tier (PI_TEST_FULL=1).
+  it.skipIf(process.env.PI_TEST_FULL !== "1")("fires once per burst of ref changes, and not after close", async () => {
     let fired = 0;
     const w = new RefWatcher({ common: r.common, kinds: ["remotes", "heads"], debounceMs: 150, onChange: () => fired++ });
     await new Promise((res) => setTimeout(res, 100));
