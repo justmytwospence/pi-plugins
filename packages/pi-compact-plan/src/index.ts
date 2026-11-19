@@ -18,7 +18,7 @@ import { convertToLlm, sessionEntryToContextMessages } from "@earendil-works/pi-
 import { matchesKey } from "@earendil-works/pi-tui";
 import { isAnswer, requestAsk, type ServiceQuestion } from "./ask-service.ts";
 import { holdBlocked, holdWorking } from "./herdr-blocked.ts";
-import { payloadModel } from "./routed-model.ts";
+import { payloadModel, routedModel } from "./routed-model.ts";
 import { outlineOf, outlineTokens } from "./outline.ts";
 import { type Answer, draftPrompt, OUTLINE_SYSTEM, outlineContext, parsePlan, type Plan, redraftPrompt, refinePrompt, replyText, revisePrompt } from "./protocol.ts";
 import { entryText, isConversationRequest, SUPPORTED_APIS, splicePayload } from "./splice.ts";
@@ -152,6 +152,14 @@ export default function piCompactPlan(pi: ExtensionAPI) {
     return undefined;
   });
 
+  /** The model a plain request goes to: the selection, or under a virtual one (a plan model pair) the model behind it. */
+  function physicalModel(ctx: ExtensionContext) {
+    if (!ctx.model) throw new Error("no model selected");
+    const model = routedModel(ctx as never);
+    if (!model) throw new Error(`${ctx.model.provider}/${ctx.model.id} has not answered yet in this session, so the model behind it is unknown`);
+    return model;
+  }
+
   /** One drafting request: spliced onto the session's last request when possible, else plain. */
   async function request(ctx: ExtensionContext, side: AgentMessage[], signal: AbortSignal, source: Source = "full"): Promise<{ reply: Reply; usage: Usage }> {
     const registry = ctx.modelRegistry as any;
@@ -160,8 +168,7 @@ export default function piCompactPlan(pi: ExtensionAPI) {
 
     if (source === "outline") {
       // The outline is the whole context: an ordinary request on the session's model, no tools.
-      const outlineModel = ctx.model;
-      if (!outlineModel) throw new Error("no model selected");
+      const outlineModel = physicalModel(ctx);
       const reply: Reply = await registry.complete(
         outlineModel,
         { systemPrompt: OUTLINE_SYSTEM, messages: convertToLlm(side), tools: [] },
@@ -209,8 +216,7 @@ export default function piCompactPlan(pi: ExtensionAPI) {
       }
     }
 
-    const fallbackModel = ctx.model;
-    if (!fallbackModel) throw new Error("no model selected");
+    const fallbackModel = physicalModel(ctx);
     const context = ctx.sessionManager.buildSessionProjection().messages as AgentMessage[];
     const reply: Reply = await registry.complete(
       fallbackModel,

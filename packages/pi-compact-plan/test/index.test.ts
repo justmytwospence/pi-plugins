@@ -273,6 +273,26 @@ describe("/compact-plan", () => {
     expect(t.compacts).toHaveLength(1);
   });
 
+  it("sends a plain request to the model behind a virtual selection (a plan model pair)", async () => {
+    const t = setup({ replies: [json("D")] });
+    const targets: any[] = [];
+    const complete = t.ctx.modelRegistry.complete;
+    t.ctx.modelRegistry.complete = (m: any, ...rest: any[]) => (targets.push(m), complete(m, ...rest));
+    t.ctx.model = { api: "pi-virtual", provider: "anthropic", id: "opusplan" };
+    await t.run("next");
+    expect(targets).toEqual([model]);
+    expect(t.compacts).toHaveLength(1);
+  });
+
+  it("reports a virtual selection that has not answered yet instead of sending to it", async () => {
+    const t = setup({ replies: [json("D")], branch: [msg("u1", "user", "fix the bug")] });
+    t.ctx.model = { api: "pi-virtual", provider: "anthropic", id: "opusplan" };
+    await t.run("next");
+    expect(t.requests).toHaveLength(0);
+    expect(t.notes.at(-1)![0]).toContain("anthropic/opusplan has not answered yet");
+    expect(t.compacts).toHaveLength(0);
+  });
+
   it("falls back to a plain request when the splice is refused", async () => {
     const t = setup({ replies: [json("D")], failSplice: true });
     t.sendMain();
