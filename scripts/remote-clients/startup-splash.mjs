@@ -227,6 +227,11 @@ export async function startupSplashScreens({
           const selectorHost = {
             editor, editorContainer, ui: tui, keybindings: kb,
             disposeActiveSelector: InteractiveMode.prototype.disposeActiveSelector,
+            // Pi 1.5 stacks extension dialogs in the editor slot.
+            extensionDialogs: [], programStatus: { setBlocked() {} },
+            pushExtensionDialog: InteractiveMode.prototype.pushExtensionDialog,
+            removeExtensionDialog: InteractiveMode.prototype.removeExtensionDialog,
+            showTopExtensionDialog: InteractiveMode.prototype.showTopExtensionDialog,
           };
           InteractiveMode.prototype.showSelector.call(selectorHost, done => {
             selector = new ModelSelectorComponent(tui, availableModels[0], modelRuntime, [],
