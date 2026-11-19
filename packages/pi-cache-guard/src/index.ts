@@ -29,6 +29,7 @@ import {
   HERDR_EXPIRES_TOKEN,
   NAME,
   type Settings,
+  bigMiss,
   describeMiss,
   formatClock,
   formatDuration,
@@ -103,17 +104,25 @@ export const CACHE_STATE = "cache:state";
  * after a long idle, a model switch, or nothing cached yet: a new session or a fresh compaction).
  * `tokens`: the cached context the last request left (absent when nothing is cached). `model`:
  * `provider/id` of the model that cache belongs to (the session's model when nothing is cached).
+ * `big`: a miss on this context would reach the warning threshold (`warn.minCost`, or
+ * `warn.minTokens` without prices), the size the cold-cache warning uses; false when nothing is
+ * cached. Independent of `warn.enabled`.
  */
 export interface CacheState {
   cold: boolean;
+  big: boolean;
   tokens?: number;
   model?: string;
 }
 
 /** The `cache:state` payload for a view of the cache (undefined: nothing cached) and the session's model. */
-export function cacheState(v: CacheView | undefined, model: { provider: string; id: string } | undefined): CacheState {
-  if (!v) return { cold: true, ...(model ? { model: `${model.provider}/${model.id}` } : {}) };
-  return { cold: v.cold !== undefined, tokens: v.last.tokens, model: `${v.last.provider}/${v.last.model}` };
+export function cacheState(
+  v: CacheView | undefined,
+  model: { provider: string; id: string } | undefined,
+  settings: Settings,
+): CacheState {
+  if (!v) return { cold: true, big: false, ...(model ? { model: `${model.provider}/${model.id}` } : {}) };
+  return { cold: v.cold !== undefined, big: bigMiss(v.last.tokens, undefined, settings), tokens: v.last.tokens, model: `${v.last.provider}/${v.last.model}` };
 }
 
 /** What `/cache-guard fresh` hands the new session's runtime. */
@@ -380,7 +389,7 @@ export default function cacheGuard(
    */
   const emitState = (context: ExtensionContext, view: CacheView | undefined, force: boolean) => {
     if (!settings.enabled) return;
-    const state = cacheState(view, context.model);
+    const state = cacheState(view, context.model, settings);
     const key = JSON.stringify(state);
     if (!force && key === sentState) return;
     sentState = key;

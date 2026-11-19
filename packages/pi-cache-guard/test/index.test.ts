@@ -274,28 +274,32 @@ describe("extension", () => {
   test("emits cache:state on cold/warm changes, before each prompt and at agent start", async () => {
     const h = harness([assistant(NOW - 60_000, 600_000)]);
     await h.emit("session_start", {});
-    expect(h.states).toEqual([{ cold: false, tokens: 601_000, model: "anthropic/claude-opus-5-5" }]);
+    expect(h.states).toEqual([{ cold: false, big: true, tokens: 601_000, model: "anthropic/claude-opus-5-5" }]);
     // Ticks while nothing changes send nothing.
     vi.advanceTimersByTime(5_000);
     expect(h.states).toHaveLength(1);
     // The TTL runs out: one cold state.
     vi.advanceTimersByTime(300_000);
-    expect(h.states.slice(1)).toEqual([{ cold: true, tokens: 601_000, model: "anthropic/claude-opus-5-5" }]);
+    expect(h.states.slice(1)).toEqual([{ cold: true, big: true, tokens: 601_000, model: "anthropic/claude-opus-5-5" }]);
     vi.advanceTimersByTime(5_000);
     expect(h.states).toHaveLength(2);
     // A prompt and the run it starts each get a fresh value, changed or not.
     await h.emit("input", input("/cache-guard status"));
     await h.emit("agent_start", {});
     expect(h.states).toHaveLength(4);
-    expect(h.states[3]).toEqual({ cold: true, tokens: 601_000, model: "anthropic/claude-opus-5-5" });
+    expect(h.states[3]).toEqual({ cold: true, big: true, tokens: 601_000, model: "anthropic/claude-opus-5-5" });
     // A model switch is cold for the old model's cache.
     const s = harness([assistant(NOW - 60_000, 600_000)], sonnet);
     await s.emit("session_start", {});
-    expect(s.states).toEqual([{ cold: true, tokens: 601_000, model: "anthropic/claude-opus-5-5" }]);
+    expect(s.states).toEqual([{ cold: true, big: true, tokens: 601_000, model: "anthropic/claude-opus-5-5" }]);
     // Nothing cached yet (or just compacted): cold, no tokens, the session's model.
     const e = harness([]);
     await e.emit("session_start", {});
-    expect(e.states).toEqual([{ cold: true, model: "anthropic/claude-opus-5-5" }]);
+    expect(e.states).toEqual([{ cold: true, big: false, model: "anthropic/claude-opus-5-5" }]);
+    // A small cache is not a big miss.
+    const m = harness([assistant(NOW - 60_000, 50_000)]);
+    await m.emit("session_start", {});
+    expect(m.states).toEqual([{ cold: true, big: false, tokens: 51_000, model: "anthropic/claude-opus-5-5" }]);
   });
 
   test("lets a warm prompt through without asking", async () => {
