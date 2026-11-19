@@ -69,7 +69,7 @@ try {
     async select(title, options) {
       if (title === 'Implementation effort') return options[0];
       assert.equal(title.startsWith('Implement this plan?'), true, title);
-      assert.match(title, /With .*Sonnet.*, .*Opus.* answers its questions and takes over again when the implementation is done\./u, 'the approval says the planner takes over again');
+      assert.match(title, /With .*Sonnet.*, .*Opus.* answers its questions, then takes over\./u, 'the approval says the planner takes over again');
       assert(options.some(option => option.startsWith('Yes, implement with') && /Opus/u.test(option)), `the planner row is offered: ${options}`);
       assert.match(options[0], /^Yes, compact and implement with .*Sonnet/u, 'the compact worker row is the default');
       return options.find(option => option.startsWith('Yes, implement with') && /Sonnet/u.test(option));
