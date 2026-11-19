@@ -29,7 +29,12 @@ import {
   type Theme,
 } from "@earendil-works/pi-coding-agent";
 import { type Component, Container, Spacer, Text } from "@earendil-works/pi-tui";
-import { type ApprovalContextInfo, createApprovalState, pickApproval } from "./approval-picker.ts";
+import {
+  type ApprovalAlternate,
+  type ApprovalContextInfo,
+  createApprovalState,
+  pickApproval,
+} from "./approval-picker.ts";
 import { editInTerminal, externalEditorCommand } from "./external-editor.ts";
 import { PLAN_STANDARD } from "./handoff.ts";
 import { remoteUi } from "./switchyard-remote.ts";
@@ -117,12 +122,15 @@ export interface InlineHost {
         note?: string;
         /** Names the implementer of the first model (a selected pair's worker). */
         implementerName?: string;
-        /** Another model to offer: an offered pair's worker (no pair selected, the session model plans one) or a selected pair's planner. */
-        alternate?: { kind: "pair-worker" | "planner"; model: ModelSpec; name: string };
+        /**
+         * Other models to offer: a selected pair's planner, and the workers of the pairs that plan on the same
+         * planner (switching the session to that pair), e.g. Opus and Sonnet under Fable.
+         */
+        alternates?: ApprovalAlternate[];
       }
     | undefined;
-  /** Switch the session to the offered pair before implementing on its worker; false when it could not. */
-  selectPair?(ctx: ExtensionContext): Promise<boolean>;
+  /** Switch the session to the offered pair (its key) before implementing on its worker; false when it could not. */
+  selectPair?(ctx: ExtensionContext, pair: string): Promise<boolean>;
   /** A task-level default only; callers retain manual effort choices and approval freshness. */
   implementationEffort?(ctx: ExtensionContext, plan: Pick<Approval, "plan" | "planFile">): ImplementationEffortRequest;
   /** The conversation and its prompt cache, for the approval's context default. */
@@ -625,11 +633,14 @@ export function registerInlinePlanMode(pi: ExtensionAPI, host: InlineHost): Inli
                 "Plan review expired because the plan, workflow, branch, model or System 1 changed. Approve the plan again.",
               );
           }
-          const alternate = models?.alternate;
-          if (request && alternate && reasoning(alternate.model)) {
+          const alternates = (models?.alternates ?? []).filter(
+            (candidate) => candidate.kind === "planner" || (host.selectPair && candidate.pair),
+          );
+          for (const alternate of alternates) {
+            const key = `${alternate.model.provider}/${alternate.model.modelId}`;
+            if (!request || !reasoning(alternate.model) || recommendations.has(key)) continue;
             const effort = await request.pick(alternate.model, signal);
-            if (effort.kind === "system1")
-              recommendations.set(`${alternate.model.provider}/${alternate.model.modelId}`, effort.thinkingLevel);
+            if (effort.kind === "system1") recommendations.set(key, effort.thinkingLevel);
             if (!current() || readPlan(planFile) !== plan || (!signal?.aborted && !request.isCurrent()))
               return text(
                 "Plan review expired because the plan, workflow, branch, model or System 1 changed. Approve the plan again.",
@@ -643,7 +654,7 @@ export function registerInlinePlanMode(pi: ExtensionAPI, host: InlineHost): Inli
               ...(host.implementationContext ? { context: host.implementationContext(ctx) } : {}),
               ...(models?.note ? { note: models.note } : {}),
               ...(models?.implementerName ? { implementerName: models.implementerName } : {}),
-              ...(alternate && (alternate.kind === "planner" || host.selectPair) ? { alternate } : {}),
+              ...(alternates.length ? { alternates } : {}),
               ...(request ? { effortDefaultKey: request.key } : {}),
               recommendations,
             },
@@ -774,18 +785,19 @@ export function registerInlinePlanMode(pi: ExtensionAPI, host: InlineHost): Inli
             persist();
             announce();
           }
+          const alternate = choice.alternate === undefined ? undefined : alternates[choice.alternate];
           const approval: Approval = {
             plan,
             planFile,
             edited,
             thinkingLevel: picked?.thinkingLevel,
             effortSource: picked?.effortSource ?? "fallback",
-            ...(choice.alternate && alternate ? { alternate: alternate.kind } : {}),
+            ...(alternate ? { alternate: alternate.kind } : {}),
           };
           const mode = "work";
           // Switching to the pair while still planning routes nothing yet: the pair plans on this same model.
-          if (choice.alternate && alternate?.kind === "pair-worker") {
-            const switched = (await host.selectPair?.(ctx)) === true;
+          if (alternate?.kind === "pair-worker" && alternate.pair) {
+            const switched = (await host.selectPair?.(ctx, alternate.pair)) === true;
             if (!sameDestination()) return text("Plan review expired because the workflow or branch changed.");
             if (!switched)
               return text(

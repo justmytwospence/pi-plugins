@@ -61,6 +61,11 @@ export interface PairController {
   selected(ctx: ExtensionContext): SelectedPair | undefined;
   /** A registered pair whose planner is the current (physical) session model, to offer its worker at approval. */
   pairFor(ctx: ExtensionContext): SelectedPair | undefined;
+  /**
+   * Every other registered pair that plans on the same planner, to offer each worker at approval: for a plain
+   * session model, the pairs it plans (e.g. Fable over Opus and over Sonnet); for a selected pair, its siblings.
+   */
+  pairsFor(ctx: ExtensionContext): SelectedPair[];
   /** `implementer: "planner"` keeps the pair selected and leaves the planner serving, ending any worker handoff. */
   approve(ctx: ExtensionContext, planFile: string, implementer?: "worker" | "planner"): void;
   phaseChanged(ctx: ExtensionContext): void;
@@ -155,15 +160,38 @@ export function registerPairs(pi: ExtensionAPI, host: PairHost): PairController 
     return { def, ...result, plannerName: name(result.planner), workerName: name(result.worker) };
   };
 
+  const planningPairs = (ctx: ExtensionContext, planner: { provider: string; modelId: string }, except?: string) => {
+    const out: SelectedPair[] = [];
+    const workers = new Set<string>();
+    for (const def of defs) {
+      if (!registered.has(pairKey(def)) || pairKey(def) === except) continue;
+      const pair = resolved(ctx, def);
+      if (!pair || pair.planner.provider !== planner.provider || pair.planner.modelId !== planner.modelId) continue;
+      const worker = `${pair.worker.provider}/${pair.worker.modelId}`;
+      if (workers.has(worker)) continue;
+      workers.add(worker);
+      out.push(pair);
+    }
+    return out;
+  };
+
+  const pairsFor = (ctx: ExtensionContext): SelectedPair[] => {
+    const model = ctx.model;
+    if (!virtualApi || !model) return [];
+    if ((model as { api?: string }).api !== "pi-virtual")
+      return planningPairs(ctx, { provider: model.provider, modelId: model.id });
+    const current = selected(ctx);
+    if (!current) return [];
+    const own = `${current.worker.provider}/${current.worker.modelId}`;
+    return planningPairs(ctx, current.planner, pairKey(current.def)).filter(
+      (pair) => `${pair.worker.provider}/${pair.worker.modelId}` !== own,
+    );
+  };
+
   const pairFor = (ctx: ExtensionContext): SelectedPair | undefined => {
     const model = ctx.model;
-    if (!virtualApi || !model || (model as { api?: string }).api === "pi-virtual") return undefined;
-    for (const def of defs) {
-      if (!registered.has(pairKey(def))) continue;
-      const pair = resolved(ctx, def);
-      if (pair && pair.planner.provider === model.provider && pair.planner.modelId === model.id) return pair;
-    }
-    return undefined;
+    if (!model || (model as { api?: string }).api === "pi-virtual") return undefined;
+    return pairsFor(ctx)[0];
   };
 
   const register = (def: PairDefinition) => {
@@ -518,6 +546,7 @@ export function registerPairs(pi: ExtensionAPI, host: PairHost): PairController 
     define,
     selected,
     pairFor,
+    pairsFor,
     approve(ctx, planFile, implementer = "worker") {
       const pair = selected(ctx);
       if (!pair) return;

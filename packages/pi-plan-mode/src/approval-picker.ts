@@ -51,9 +51,22 @@ export function pairLabel(workerName: string, compact = false): string {
   return `Yes, ${compact ? "compact and " : ""}implement with ${shortModelName(workerName)}`;
 }
 
+/** Another model the plan can be implemented on. */
+export interface ApprovalAlternate {
+  model: ModelSpec;
+  name: string;
+  /** pair-worker: the worker of a plan model pair the session switches to; planner: a selected pair's planner. */
+  kind?: "pair-worker" | "planner";
+  /** The clause for the Model line while this worker is selected; defaults to the input's note for a pair worker. */
+  note?: string;
+  /** The pair's key (`provider/id`) to switch to, for a pair worker. */
+  pair?: string;
+}
+
+/** `alternate` is the index into the input's alternates; absent for the first model. */
 export type ApprovalChoice =
-  | { kind: "here"; alternate?: true }
-  | { kind: "compact-here"; alternate?: true }
+  | { kind: "here"; alternate?: number }
+  | { kind: "compact-here"; alternate?: number }
   | { kind: "edit" }
   | { kind: "save" }
   | { kind: "keep" };
@@ -89,8 +102,8 @@ export interface ApprovalInput {
   note?: string;
   /** Names the implementer of the first model (a selected pair's worker); without it the session model is named. */
   implementerName?: string;
-  /** Another model to offer: an offered pair's worker, or a selected pair's planner. */
-  alternate?: { model: ModelSpec; name: string; kind?: "pair-worker" | "planner" };
+  /** Other models to offer: pair workers (each switching to its pair), or a selected pair's planner. */
+  alternates?: ApprovalAlternate[];
   /** The conversation and its cache, for the context default. */
   context?: ApprovalContextInfo;
 }
@@ -104,8 +117,8 @@ export interface ApprovalResult {
 /** Keep this object for one approval, including returns from Edit; not across approvals. */
 export interface ApprovalState {
   selectedId: string;
-  /** The model the settings apply to: 0 is the session or the selected pair's worker, 1 the alternate. */
-  modelIndex: 0 | 1;
+  /** The model the settings apply to: 0 is the session or the selected pair's worker, then each alternate. */
+  modelIndex: number;
   /** A context chosen with `c` or an RPC row; undefined follows the automatic default. */
   context?: ImplementationContextChoice;
   efforts: Map<string, ModelSpecThinkingLevel | undefined>;
@@ -126,11 +139,11 @@ export function createApprovalState(): ApprovalState {
 
 const modelId = (spec: ModelSpec) => JSON.stringify([spec.provider, spec.modelId]);
 type Catalog = Pick<ReturnType<typeof modelCatalog>, "efforts">;
-type ModelEntry = { spec: ModelSpec | undefined; name: string };
+type ModelEntry = { spec: ModelSpec | undefined; name: string; worker: boolean; note?: string | undefined };
 type RpcRow = {
   id: string;
   label: string;
-  index?: 0 | 1;
+  index?: number;
   context?: ImplementationContextChoice;
   kind?: "edit" | "save" | "keep";
 };
@@ -155,9 +168,6 @@ const fmtTokens = (n: number) => (n >= 1000 ? `${Math.round(n / 1000)}k` : Strin
 /** A single inline Pi-layout component, also exported for remote-client rendering fixtures. */
 export class ApprovalPicker implements Component {
   private readonly models: [ModelEntry, ...ModelEntry[]];
-  /** The model whose rows are the pair's worker: the first of a selected pair, or the offered alternate. */
-  private readonly workerIndex: 0 | 1 | undefined;
-  private readonly note: string | undefined;
   private finished = false;
   private readonly onAbort = () => this.finish(undefined);
 
@@ -171,16 +181,26 @@ export class ApprovalPicker implements Component {
     private readonly done: (result: ApprovalResult | undefined) => void,
     private readonly signal?: AbortSignal,
   ) {
-    const alternate = input.alternate;
-    this.models = [
-      {
-        spec: input.planning,
-        name: shortModelName(input.implementerName ?? input.planningName ?? input.planning?.modelId ?? "this model"),
-      },
-      ...(alternate ? [{ spec: alternate.model, name: shortModelName(alternate.name) }] : []),
-    ];
-    this.workerIndex = input.implementerName ? 0 : alternate?.kind === "pair-worker" ? 1 : undefined;
-    this.note = input.note ? clean(input.note).trim() : undefined;
+    const note = (text: string | undefined) => (text ? clean(text).trim() || undefined : undefined);
+    const shared = note(input.note);
+    const first: ModelEntry = {
+      spec: input.planning,
+      name: shortModelName(input.implementerName ?? input.planningName ?? input.planning?.modelId ?? "this model"),
+      worker: !!input.implementerName,
+    };
+    const rest = (input.alternates ?? []).map(
+      (alternate): ModelEntry => ({
+        spec: alternate.model,
+        name: shortModelName(alternate.name),
+        worker: alternate.kind === "pair-worker",
+      }),
+    );
+    this.models = [first, ...rest];
+    const anyWorker = this.models.some((entry) => entry.worker);
+    this.models.forEach((entry, index) => {
+      const own = index === 0 ? undefined : note(input.alternates?.[index - 1]?.note);
+      entry.note = own ?? (entry.worker || !anyWorker ? shared : undefined);
+    });
     if (state.modelIndex >= this.models.length) state.modelIndex = 0;
     if (!(ACTIONS as readonly string[]).includes(state.selectedId)) state.selectedId = "implement";
     if (input.effortDefaultKey !== undefined && input.effortDefaultKey !== state.effortDefaultKey) {
@@ -227,17 +247,17 @@ export class ApprovalPicker implements Component {
   }
 
   private contextFor(index: number): ImplementationContextChoice {
-    return this.state.context ?? defaultImplementationContext(this.input.context, index === this.workerIndex);
+    return this.state.context ?? defaultImplementationContext(this.input.context, !!this.models[index]?.worker);
   }
 
-  private implementResult(index: 0 | 1, context: ImplementationContextChoice): ApprovalResult {
+  private implementResult(index: number, context: ImplementationContextChoice): ApprovalResult {
     const spec = this.models[index]?.spec;
     const thinkingLevel = this.effort(spec);
     const id = spec ? modelId(spec) : "";
     return {
       choice: {
         kind: context === "clear" ? "compact-here" : "here",
-        ...(index === 1 ? { alternate: true as const } : {}),
+        ...(index > 0 ? { alternate: index - 1 } : {}),
       },
       ...(thinkingLevel !== undefined ? { thinkingLevel } : {}),
       effortSource: this.state.manuallyAdjusted.has(id) ? "manual" : (this.state.sources.get(id) ?? "fallback"),
@@ -269,7 +289,7 @@ export class ApprovalPicker implements Component {
     const info = this.input.context;
     const parts = [
       ...(info?.tokens !== undefined ? [`${fmtTokens(info.tokens)} tokens`] : []),
-      ...(index === this.workerIndex ? ["other model"] : info?.cold ? ["cache cold"] : []),
+      ...(this.models[index]?.worker ? ["other model"] : info?.cold ? ["cache cold"] : []),
     ];
     return parts.length ? ` (${parts.join(", ")})` : "";
   }
@@ -286,10 +306,16 @@ export class ApprovalPicker implements Component {
         this.theme.fg("accent", bold ? this.theme.bold(text) : text) + (key ? this.theme.fg("dim", ` · ${key}`) : ""),
         contentWidth,
       ).map((wrapped) => ` ${wrapped}`);
-    const showNote = this.note && (this.workerIndex === undefined || index === this.workerIndex);
     const settings = [
       ...line(APPROVAL_QUESTION, undefined, true),
-      ...line(`Model: ${model.name}${showNote ? ` (${this.note})` : ""}`, this.models.length > 1 ? "tab" : undefined),
+      ...line(
+        `Model: ${model.name}${model.note ? ` (${model.note})` : ""}`,
+        this.models.length > 1
+          ? this.models.length > 2
+            ? `tab ${index + 1}/${this.models.length}`
+            : "tab"
+          : undefined,
+      ),
       ...line(
         levels.length ? `Effort: ${this.effort(model.spec) ?? "default"}` : "Effort: not supported",
         levels.length ? "←/→" : undefined,
@@ -349,7 +375,7 @@ export class ApprovalPicker implements Component {
       this.state.selectedId = ACTIONS[(index + 1) % ACTIONS.length] ?? "implement";
     } else if (matchesKey(data, "tab")) {
       if (this.models.length < 2) return;
-      this.state.modelIndex = this.state.modelIndex === 0 ? 1 : 0;
+      this.state.modelIndex = (this.state.modelIndex + 1) % this.models.length;
     } else if (data === "c" || data === "C") {
       this.state.context = this.contextFor(this.state.modelIndex) === "clear" ? "keep" : "clear";
     } else if (matchesKey(data, "left") || matchesKey(data, "right")) {
@@ -376,7 +402,7 @@ export class ApprovalPicker implements Component {
 
   /** The RPC list: one button per model and context, since buttons are all such a dialog has. */
   private rpcRows(): RpcRow[] {
-    const alternate = this.input.alternate;
+    const alternates = this.input.alternates ?? [];
     const first = this.input.implementerName;
     const rows = (compact: boolean): RpcRow[] => [
       {
@@ -385,16 +411,12 @@ export class ApprovalPicker implements Component {
         index: 0,
         context: compact ? "clear" : "keep",
       },
-      ...(alternate
-        ? [
-            {
-              id: compact ? "compact-pair" : "pair",
-              label: pairLabel(alternate.name, compact),
-              index: 1 as const,
-              context: compact ? ("clear" as const) : ("keep" as const),
-            },
-          ]
-        : []),
+      ...alternates.map((alternate, i) => ({
+        id: `${compact ? "compact-pair" : "pair"}${i === 0 ? "" : `-${i + 1}`}`,
+        label: pairLabel(alternate.name, compact),
+        index: i + 1,
+        context: compact ? ("clear" as const) : ("keep" as const),
+      })),
     ];
     const both = [...rows(false), ...rows(true)];
     return [
@@ -407,10 +429,13 @@ export class ApprovalPicker implements Component {
 
   /** RPC selects by unique labels, never by a possibly colliding truncated model name. */
   async selectRPC(ui: Pick<ExtensionUIContext, "select">): Promise<ApprovalResult | undefined> {
-    const worker = this.workerIndex === undefined ? undefined : this.models[this.workerIndex];
-    const question = `${APPROVAL_QUESTION}${
-      this.note ? (worker ? ` With ${worker.name}, ${this.note}.` : ` ${this.note}`) : ""
-    }`;
+    const workers = this.models.filter((entry) => entry.worker && entry.note);
+    const notes = workers.length
+      ? workers.map((entry) => ` With ${entry.name}, ${entry.note}.`).join("")
+      : this.models[0].note
+        ? ` ${this.models[0].note}`
+        : "";
+    const question = `${APPROVAL_QUESTION}${notes}`;
     while (!this.signal?.aborted) {
       const rows = this.rpcRows();
       const currentId =

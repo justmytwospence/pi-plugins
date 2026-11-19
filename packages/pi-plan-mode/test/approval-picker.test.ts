@@ -116,7 +116,7 @@ test("an offered pair worker is a second model with independent, recommended eff
   const { component, state, done } = fixture({
     input: {
       planning: planner,
-      alternate: { model: worker, name: "Claude Sonnet 5.5", kind: "pair-worker" },
+      alternates: [{ model: worker, name: "Claude Sonnet 5.5", kind: "pair-worker" }],
       recommendations: new Map([["test/worker", "low"]]),
       note: "Opus 5.5 answers its questions",
     },
@@ -138,9 +138,38 @@ test("an offered pair worker is a second model with independent, recommended eff
   component.handleInput("\t");
   component.handleInput("\r");
   assert.deepEqual(done.mock.calls, [
-    [{ effortSource: "manual", choice: { kind: "compact-here", alternate: true }, thinkingLevel: "medium" }],
+    [{ effortSource: "manual", choice: { kind: "compact-here", alternate: 0 }, thinkingLevel: "medium" }],
   ]);
   assert.equal(state.sources.get(JSON.stringify(["test", "planner"])), "fallback");
+});
+
+test("a premium planner offers each pair worker: tab cycles through them with their own notes", () => {
+  const opus: ModelSpec = { provider: "test", modelId: "opus", thinkingLevel: "high" };
+  const sonnet: ModelSpec = { provider: "test", modelId: "sonnet", thinkingLevel: "medium" };
+  const { component, done } = fixture({
+    input: {
+      planning: planner,
+      alternates: [
+        { model: opus, name: "Claude Opus 5", kind: "pair-worker", note: "Fable answers; Opus stays on", pair: "a/x" },
+        {
+          model: sonnet,
+          name: "Claude Sonnet 5",
+          kind: "pair-worker",
+          note: "Fable answers; Sonnet stays on",
+          pair: "a/y",
+        },
+      ],
+    },
+  });
+  assert.match(text(component), /Model: planner · tab 1\/3/u);
+  component.handleInput("\t");
+  assert.match(text(component), /Model: Opus 5 \(Fable answers; Opus stays on\) · tab 2\/3/u);
+  component.handleInput("\t");
+  assert.match(text(component), /Model: Sonnet 5 \(Fable answers; Sonnet stays on\) · tab 3\/3/u);
+  assert.match(text(component), /Effort: medium/u);
+  assert.match(text(component), /Context: compact to plan \(other model\)/u);
+  component.handleInput("\r");
+  assert.deepEqual(done.mock.calls[0]?.[0]?.choice, { kind: "compact-here", alternate: 1 });
 });
 
 test("pairLabel drops the Claude prefix and sanitizes the name", () => {
@@ -154,7 +183,7 @@ test("a named implementer is the first model and a selected pair's planner the s
     planning: worker,
     implementerName: "Claude Sonnet 5.5",
     note: "Opus 5.5 answers its questions",
-    alternate: { model: planner, name: "Claude Opus 5.5", kind: "planner" },
+    alternates: [{ model: planner, name: "Claude Opus 5.5", kind: "planner" }],
   };
   const first = fixture({ input: pair });
   assert.match(text(first.component), /Model: Sonnet 5\.5 \(Opus 5\.5 answers its questions\) · tab/u);
@@ -167,7 +196,7 @@ test("a named implementer is the first model and a selected pair's planner the s
   assert.doesNotMatch(text(second.component), /answers its questions/u);
   assert.match(text(second.component), /Context: keep conversation/u);
   second.component.handleInput("\r");
-  assert.deepEqual(second.done.mock.calls[0]?.[0]?.choice, { kind: "here", alternate: true });
+  assert.deepEqual(second.done.mock.calls[0]?.[0]?.choice, { kind: "here", alternate: 0 });
   assert.equal(shortModelName("Claude Opus 5.5\n"), "Opus 5.5");
 });
 
@@ -212,7 +241,7 @@ test("the context default: your setting, another model, a cold or big cache, els
 test("c toggles the context and a chosen context ignores the model's automatic one", () => {
   const worker: ModelSpec = { provider: "test", modelId: "worker", thinkingLevel: "high" };
   const { component, state, done } = fixture({
-    input: { planning: planner, alternate: { model: worker, name: "Worker", kind: "pair-worker" } },
+    input: { planning: planner, alternates: [{ model: worker, name: "Worker", kind: "pair-worker" }] },
   });
   component.handleInput("c");
   assert.equal(state.context, "clear");
@@ -222,7 +251,7 @@ test("c toggles the context and a chosen context ignores the model's automatic o
   assert.equal(state.context, "keep");
   assert.match(text(component), /Context: keep conversation/u);
   component.handleInput("\r");
-  assert.deepEqual(done.mock.calls[0]?.[0]?.choice, { kind: "here", alternate: true });
+  assert.deepEqual(done.mock.calls[0]?.[0]?.choice, { kind: "here", alternate: 0 });
 });
 
 test("RPC follows the context default and says who answers the worker's questions", async () => {
@@ -300,7 +329,10 @@ test("remote answers win only when they answer, and a remote Keep never changes 
   assert.equal(remoteResult?.choice.kind, "keep");
 
   const worker: ModelSpec = { provider: "test", modelId: "worker", thinkingLevel: "high" };
-  const pair: ApprovalInput = { planning: planner, alternate: { model: worker, name: "Worker", kind: "pair-worker" } };
+  const pair: ApprovalInput = {
+    planning: planner,
+    alternates: [{ model: worker, name: "Worker", kind: "pair-worker" }],
+  };
   const picked = createApprovalState();
   const remoteWins = vi
     .fn<ExtensionContext["ui"]["select"]>()
@@ -314,7 +346,7 @@ test("remote answers win only when they answer, and a remote Keep never changes 
     { select: remoteWins } as never,
   );
   assert.equal(won?.remote, true);
-  assert.deepEqual(won?.choice, { kind: "compact-here", alternate: true });
+  assert.deepEqual(won?.choice, { kind: "compact-here", alternate: 0 });
   assert.equal(picked.modelIndex, 1);
   assert.equal(picked.context, "clear");
 });

@@ -1006,6 +1006,29 @@ test("pairFor offers the pair whose planner is the session model, never for a vi
   assert.equal(pruned.controller.pairFor(pruned.ctx as never), undefined);
 });
 
+test("pairsFor offers every worker the planner pairs with, and a selected pair's siblings", () => {
+  const available = [
+    { provider: "anthropic", id: "claude-fable-5", name: "Fable 5" },
+    { provider: "anthropic", id: "claude-opus-5", name: "Opus 5" },
+    { provider: "anthropic", id: "claude-sonnet-5", name: "Sonnet 5" },
+  ];
+  const fable = setup({ available, model: { provider: "anthropic", id: "claude-fable-5", api: "anthropic-messages" } });
+  assert.deepEqual(
+    fable.controller.pairsFor(fable.ctx as never).map((pair) => [pairKey(pair.def), pair.workerName]),
+    [
+      ["anthropic/fableplan", "Opus 5"],
+      ["anthropic/fableplan-sonnet", "Sonnet 5"],
+    ],
+  );
+  const paired = setup({ available, model: { provider: "anthropic", id: "fableplan", api: "pi-virtual" } });
+  assert.deepEqual(
+    paired.controller.pairsFor(paired.ctx as never).map((pair) => pairKey(pair.def)),
+    ["anthropic/fableplan-sonnet"],
+  );
+  const opus = setup({ available, model: { provider: "anthropic", id: "opusplan", api: "pi-virtual" } });
+  assert.deepEqual(opus.controller.pairsFor(opus.ctx as never), [], "Opus plans only one pair");
+});
+
 test("approving with the offered worker switches a plain Opus session to opusplan and keeps the planning level", async () => {
   const { tmpdir } = await import("node:os");
   const { join } = await import("node:path");

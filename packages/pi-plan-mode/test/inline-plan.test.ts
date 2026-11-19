@@ -2163,8 +2163,8 @@ test("implementing with an offered pair worker switches to the pair first; a fai
     const plansDirectory = mkdtempSync(join(tmpdir(), "pair-plan-"));
     onTestFinished(() => rmSync(plansDirectory, { recursive: true, force: true }));
     const order: string[] = [];
-    const selectPair = vi.fn(async () => {
-      order.push("select");
+    const selectPair = vi.fn(async (_ctx: ExtensionContext, pair: string) => {
+      order.push(`select:${pair}`);
       return switched;
     });
     const implementHere = vi.fn((_ctx: ExtensionContext, approval: { alternate?: string }) => {
@@ -2178,11 +2178,14 @@ test("implementing with an offered pair worker switches to the pair first; a fai
       implementationChoices: () => ({
         planning: { provider: "anthropic", modelId: "claude-opus-5-5" },
         planningName: "Claude Opus 5.5",
-        alternate: {
-          kind: "pair-worker" as const,
-          model: { provider: "anthropic", modelId: "claude-sonnet-5-5" },
-          name: "Claude Sonnet 5.5",
-        },
+        alternates: [
+          {
+            kind: "pair-worker" as const,
+            model: { provider: "anthropic", modelId: "claude-sonnet-5-5" },
+            name: "Claude Sonnet 5.5",
+            pair: "anthropic/opusplan",
+          },
+        ],
       }),
       selectPair,
       approved: vi.fn(),
@@ -2203,11 +2206,11 @@ test("implementing with an offered pair worker switches to the pair first; a fai
     assert.ok(offered[0]?.includes("Yes, compact and implement with Sonnet 5.5"));
     if (switched) {
       assert.equal(result.details.outcome, "approved");
-      assert.deepEqual(order, ["select", "implement:true"]);
+      assert.deepEqual(order, ["select:anthropic/opusplan", "implement:true"]);
       assert.equal(inline.active, false);
     } else {
       assert.match(result.content[0]?.text ?? "", /Could not switch to the plan model pair for Claude Sonnet 5\.5/u);
-      assert.deepEqual(order, ["select"]);
+      assert.deepEqual(order, ["select:anthropic/opusplan"]);
       assert.equal(inline.active, true);
     }
   }
@@ -2230,11 +2233,19 @@ test("with a pair selected the default is the compact worker row and the planner
       planning: { provider: "anthropic", modelId: "claude-sonnet-5-5" },
       planningName: "Claude Sonnet 5.5",
       implementerName: "Claude Sonnet 5.5",
-      alternate: {
-        kind: "planner" as const,
-        model: { provider: "anthropic", modelId: "claude-opus-5-5" },
-        name: "Claude Opus 5.5",
-      },
+      alternates: [
+        {
+          kind: "planner" as const,
+          model: { provider: "anthropic", modelId: "claude-opus-5-5" },
+          name: "Claude Opus 5.5",
+        },
+        {
+          kind: "pair-worker" as const,
+          model: { provider: "anthropic", modelId: "claude-haiku-5-5" },
+          name: "Claude Haiku 5.5",
+          pair: "anthropic/opusplan-haiku",
+        },
+      ],
     }),
     selectPair,
     approved: vi.fn(),
@@ -2253,6 +2264,7 @@ test("with a pair selected the default is the compact worker row and the planner
   const exit = mock.tools.find((candidate) => candidate.name === EXIT_TOOL) as unknown as Tool;
   const result = await exit.execute("planner", {}, undefined, undefined, ctx);
   assert.equal(offered[0]?.[0], "Yes, compact and implement with Sonnet 5.5");
+  assert.ok(offered[0]?.includes("Yes, implement with Haiku 5.5"), "a sibling pair's worker is offered too");
   assert.equal(result.details.outcome, "approved");
   assert.equal(selectPair.mock.calls.length, 0);
   assert.equal(implementHere.mock.calls[0]?.[1].alternate, "planner");

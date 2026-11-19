@@ -241,12 +241,13 @@ async function approvalLines(width, spec = {}) {
 }
 
 // Render the actual approval component, including the live effort key path. With a plan model pair
-// selected the Model line carries a note naming who answers its questions. The settings (Model, Effort,
+// selected the Model line carries a note naming who answers its questions, and tab cycles three models
+// (the worker, the planner and a sibling pair's worker). The settings (Model, Effort,
 // Context) are flat question lines; only the four actions are rows.
 const PAIR_NOTE = 'Opus 5.5 answers its questions, then takes over';
 const planLabels = () => [IMPLEMENT, EDIT, SAVE, KEEP];
 const planQuestion = (note, effort) => note
-  ? `Implement this plan? Model: Sonnet 5.5 (${note}) · tab Effort: ${effort} · ←/→ Context: compact to plan (182k tokens, other model) · c`
+  ? `Implement this plan? Model: Sonnet 5.5 (${note}) · tab 1/3 Effort: ${effort} · ←/→ Context: compact to plan (182k tokens, other model) · c`
   : `Implement this plan? Model: Fable 5.5 Effort: ${effort} · ←/→ Context: keep conversation · c`;
 async function selectorLines(width, changed, note, recommendedThinkingLevel, effortDefaultKey) {
   let lines, component;
@@ -271,7 +272,10 @@ async function selectorLines(width, changed, note, recommendedThinkingLevel, eff
     ...(note
       ? {
         note, implementerName: 'Claude Sonnet 5.5', context: { tokens: 182_000, cold: true, big: true },
-        alternate: { model: { provider: 'anthropic', modelId: 'claude-fable-5-5', thinkingLevel: 'high' }, name: 'Claude Opus 5.5', kind: 'planner' },
+        alternates: [
+          { model: { provider: 'anthropic', modelId: 'claude-fable-5-5', thinkingLevel: 'high' }, name: 'Claude Opus 5.5', kind: 'planner' },
+          { model: { provider: 'anthropic', modelId: 'claude-haiku-5-5', thinkingLevel: 'high' }, name: 'Claude Haiku 5.5', kind: 'pair-worker', pair: 'anthropic/opusplan-haiku' },
+        ],
       }
       : { planningName: 'Claude Fable 5.5' }),
   }, state, controller.signal);

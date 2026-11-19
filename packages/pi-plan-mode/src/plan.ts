@@ -75,7 +75,7 @@ import {
 } from "./main-chat.ts";
 import { buildMcpCatalog, readConfiguredMcpServers } from "./mcp-tools.ts";
 import { modelCatalog, normalizeEffort } from "./model-catalog.ts";
-import { latestSpec } from "./model-pairs.ts";
+import { latestSpec, pairKey } from "./model-pairs.ts";
 import { pairNote, registerPairs } from "./pairs.ts";
 import { exportPlanToFile } from "./plan-export.ts";
 import { plansDirectoryPath, planTitle, readPlan, writePlanFile } from "./plan-file.ts";
@@ -982,6 +982,14 @@ export default async function plan(pi: ExtensionAPI, dependencies: PlanDependenc
       if (!planning) return undefined;
       const catalog = modelCatalog(ctx, "available");
       const pair = pairs.selected(ctx);
+      const offers = (thinkingLevel: ModelSpec["thinkingLevel"]) =>
+        pairs.pairsFor(ctx).map((offer) => ({
+          kind: "pair-worker" as const,
+          model: { ...offer.worker, ...(thinkingLevel ? { thinkingLevel } : {}) },
+          name: offer.workerName,
+          note: pairNote(offer),
+          pair: pairKey(offer.def),
+        }));
       if (pair) {
         const level = pi.getThinkingLevel() as ThinkingLevel;
         return {
@@ -989,34 +997,25 @@ export default async function plan(pi: ExtensionAPI, dependencies: PlanDependenc
           planningName: pair.workerName,
           implementerName: pair.workerName,
           note: pairNote(pair),
-          alternate: {
-            kind: "planner" as const,
-            model: { ...pair.planner, thinkingLevel: level },
-            name: pair.plannerName,
-          },
+          alternates: [
+            {
+              kind: "planner" as const,
+              model: { ...pair.planner, thinkingLevel: level },
+              name: pair.plannerName,
+            },
+            ...offers(level as ModelSpec["thinkingLevel"]),
+          ],
         };
       }
-      const offer = pairs.pairFor(ctx);
+      const alternates = offers(planning.thinkingLevel);
       return {
         planning,
         planningName: catalog.name(planning),
-        ...(offer ? { note: pairNote(offer) } : {}),
-        ...(offer
-          ? {
-              alternate: {
-                kind: "pair-worker" as const,
-                model: {
-                  ...offer.worker,
-                  ...(planning.thinkingLevel ? { thinkingLevel: planning.thinkingLevel } : {}),
-                },
-                name: offer.workerName,
-              },
-            }
-          : {}),
+        ...(alternates.length ? { alternates } : {}),
       };
     },
-    selectPair: async (ctx) => {
-      const offer = pairs.pairFor(ctx);
+    selectPair: async (ctx, key) => {
+      const offer = pairs.pairsFor(ctx).find((candidate) => pairKey(candidate.def) === key);
       const model = offer && ctx.modelRegistry.find(offer.def.provider, offer.def.id);
       if (!model) return false;
       // A model switch may apply a per-model default; keep the planning level for the pair's consultations.
