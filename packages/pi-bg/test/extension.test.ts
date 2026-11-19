@@ -647,8 +647,16 @@ describe("pi-bg", () => {
     expect(x.textOf(await x.call("bg_logs", {}))).toMatch(/fit {2}job {2}running 0:0\d {2}45% \(450\/1000, fold 3\)/);
     const snap = x.emitted.filter((e) => e.channel === "bg:tasks").at(-1)?.data.tasks[0];
     expect(snap.progress).toEqual({ fraction: 0.45, source: "file", count: "450/1000", note: "fold 3" });
-    await x.call("bg_wait", {});
-    expect(x.working.some((m) => /^Waiting on fit ███░░░░░ 45% · 0:0\d/u.test(m ?? ""))).toBe(true);
+    // bg_wait shows the progress in its transcript row; the working message only names the task.
+    const wait = x.tools.get("bg_wait");
+    const plain = { fg: (_c: string, t: string) => t, bold: (t: string) => t } as any;
+    const rows: string[] = [];
+    await wait.execute("wait-call", {}, undefined, (partial: any) => {
+      rows.push(wait.renderResult(partial, { expanded: false, isPartial: true }, plain, { toolCallId: "wait-call", invalidate: () => {} }).render(200)[0]);
+    }, x.ctx);
+    expect(rows[0]).toMatch(/^   ↳ fit running · 45% ███░░░░░ · 0:0\d$/u);
+    expect(x.working.some((m) => m === "Waiting on fit…")).toBe(true);
+    expect(x.working.some((m) => m?.includes("█"))).toBe(false);
     await x.shutdown();
   });
 

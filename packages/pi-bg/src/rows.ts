@@ -61,6 +61,11 @@ export function runResultView(result: Result, expanded: boolean, theme: Theme, t
   });
 }
 
+/** bg_wait while it waits: what it waits on, live (`fit running · 45% ████░░░░ · 2:14`). */
+export function waitResultView(theme: Theme, line: () => string): Component {
+  return new LineView(() => theme.fg("muted", `   ↳ ${line()}`));
+}
+
 /** bg_wait, bg_logs and bg_kill: their first line collapsed, the whole report in a block expanded. */
 export function reportResultView(result: Result, expanded: boolean, theme: Theme, isError = false, title = "Background job"): Component {
   if (expanded) return new Block(theme, () => ({ tone: isError ? "failed" : "done", title, body: blocksView(result, true, theme), expanded: true }));

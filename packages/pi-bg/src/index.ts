@@ -79,7 +79,7 @@ import { PillView } from "./pill.ts";
 import { LogViewer } from "./viewer.ts";
 import { MARIMO_READY, marimoName, marimoServer } from "./marimo.ts";
 import { type Block, blocks, blocksView } from "./result-view.ts";
-import { reportResultView, runResultView, type WakeDetails, wakeView } from "./rows.ts";
+import { reportResultView, runResultView, taskState, type WakeDetails, waitResultView, wakeView } from "./rows.ts";
 import { transcriptCheckpoint } from "./transcript-contract.ts";
 
 const STARTUP_WAIT_MS = 1_500;
@@ -333,7 +333,7 @@ export default function piBg(pi: ExtensionAPI) {
     const left = eta(p, now);
     return `${percent(p)}${left === undefined ? "" : ` · ${etaText(left)}`}`;
   };
-  /** `fit ███▌░░░░ 45% · 2:14` for the waiting message. */
+  /** `fit ███▌░░░░ 45% · 2:14` for the settle-wait's working message, which has no transcript row. */
   const waitLabel = (t: Task) => {
     const p = t.status === "running" ? t.progress : undefined;
     return p ? `${t.name} ${bar(p.fraction, 8)} ${percent(p)} · ${runtime(t)}` : `${t.name} ${runtime(t)}`;
@@ -515,6 +515,8 @@ export default function piBg(pi: ExtensionAPI) {
    * so a redraw re-registers its row; keying by row and walking a snapshot keeps a tick finite.
    */
   const liveRows = new Map<string, Map<string, () => void>>();
+  /** Running bg_wait calls by tool call: the tasks they wait on and their live row line. */
+  const waitRows = new Map<string, { tasks: () => Task[]; line: () => string }>();
   const redrawRows = () => {
     for (const [id, redraws] of [...liveRows]) {
       const running = reg.tasks.get(id)?.status === "running";
@@ -1082,12 +1084,25 @@ export default function piBg(pi: ExtensionAPI) {
       const a = args as { id?: string };
       return callRow(theme, context, "Wait", a.id ? (reg.find(a.id, sessionId)?.name ?? a.id) : "next job");
     },
-    renderResult(result, { expanded }, theme, context) {
+    renderResult(result, { expanded, isPartial }, theme, context) {
+      const c = context as { isError?: boolean; toolCallId?: string; invalidate?: () => void } | undefined;
+      // While it waits, the row shows what it waits on live (`↳ fit running · 45% ████░░░░ · 2:14`).
+      const live = isPartial && c?.toolCallId ? waitRows.get(c.toolCallId) : undefined;
+      if (live) {
+        if (c?.invalidate) {
+          for (const t of live.tasks()) {
+            if (t.status !== "running") continue;
+            const redraws = liveRows.get(t.id) ?? new Map<string, () => void>();
+            redraws.set(`wait:${c.toolCallId}`, c.invalidate);
+            liveRows.set(t.id, redraws);
+          }
+        }
+        return waitResultView(theme, live.line);
+      }
       // Reports keep the look of Pi's own tool output; a subagent's answer reads as Markdown.
-      const c = context as { isError?: boolean } | undefined;
       return reportResultView(result as never, expanded, theme, Boolean(c?.isError), "Wait");
     },
-    async execute(id, params, signal, _onUpdate, c) {
+    async execute(id, params, signal, onUpdate, c) {
       const generation = sessionGeneration;
       const timeoutS = Math.min(Math.max(1, Math.round(params.timeout ?? WAIT_DEFAULT_S)), WAIT_MAX_S);
       const targets = new Set<string>();
@@ -1147,7 +1162,13 @@ export default function piBg(pi: ExtensionAPI) {
         return ts.map((t) => t.name).join(" · ");
       };
       const started = Date.now();
-      const working = holdWorking(c, generation, label, what);
+      // The working message names what it waits on; the progress goes in the transcript row.
+      const working = holdWorking(c, generation, what, what);
+      const rowLine = () => {
+        const ts = names();
+        return ts.length ? ts.map((t) => taskState(t)).join(" · ") : what();
+      };
+      waitRows.set(id, { tasks: names, line: rowLine });
       let ticks = 0;
       let reason: Reason;
       let waiter: Waiter;
@@ -1162,11 +1183,17 @@ export default function piBg(pi: ExtensionAPI) {
         });
         waiter = waiting.waiter;
         cancelWait = () => waiter.resolve("aborted");
+        try {
+          onUpdate?.({ content: [{ type: "text", text: `Waiting on ${what()}` }], details: { waiting: true } });
+        } catch {
+          // No live row: the working message still says what it waits on.
+        }
         refresh();
         reason = await waiting.done;
       } finally {
         cancelWait?.();
         working.release();
+        waitRows.delete(id);
       }
       refresh();
       const out: Block[] = [];
