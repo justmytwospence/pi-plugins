@@ -21,6 +21,7 @@ import {
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import type { MainSnapshot, MainState } from "./main-state.ts";
 import { askReadOnlyCall } from "./read-only-call.ts";
+import { describeGithubIssueWrite } from "./github-issues.ts";
 import { draftsCreated } from "./slack-drafts.ts";
 import { askShellReads } from "./shell-reads.ts";
 import { GUARD_ENV, judgeCall, REFUSED_TOOLS, SUBAGENT_ENV_CHANNEL, type SubagentEnvRequest } from "./guard.ts";
@@ -478,6 +479,13 @@ export class SidebarAgent {
           shellReads: (command) => askShellReads(this.pi.events, command, cctx.cwd),
           // Drafts this thread created: its stored exchanges, then this turn's messages so far.
           slackDrafts: () => draftsCreated([...this.thread, ...((this.session?.messages.slice(this.turnStart) ?? []) as AgentMessage[])]),
+          // Issue writes are public at once, so each waits for the user's approval in main's UI.
+          githubIssues: async (write) => {
+            const ui = this.main.ctx;
+            if (!ui?.hasUI) return false;
+            const { title, message } = describeGithubIssueWrite(write, cctx.cwd);
+            return ui.ui.confirm(title, message, cctx.signal ? { signal: cctx.signal } : undefined);
+          },
           subagentsGuarded: () => subagentsGuarded(cpi.events),
           ...(cctx.signal ? { signal: cctx.signal } : {}),
         });

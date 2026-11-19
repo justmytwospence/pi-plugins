@@ -8,6 +8,7 @@
 import type { ToolInfo } from "@earendil-works/pi-coding-agent";
 import { findBlockedCommandSegment, findBlockedPowerShellCommandSegment, readCommand } from "./bash-policy.ts";
 import { askJevBool } from "./jev.ts";
+import { type GithubIssueWrite, mentionsGithubIssueWrite, parseGithubIssueCommand } from "./github-issues.ts";
 import { parseSlackDraftCommand } from "./slack-drafts.ts";
 
 /** Tools that change files or shared state, or need a person Sidebar cannot reach. */
@@ -73,6 +74,11 @@ export interface GuardHost {
    * delete these (see slack-drafts.ts); undefined (Sidebar's subagents) keeps Slack read-only.
    */
   slackDrafts?(): ReadonlySet<string>;
+  /**
+   * Asks the user to approve a GitHub issue write (see github-issues.ts); true runs it. When set,
+   * Sidebar may create, comment on and edit issues; undefined (Sidebar's subagents) keeps GitHub read-only.
+   */
+  githubIssues?(write: GithubIssueWrite): Promise<boolean>;
   /** Whether a subagent started now would run under this guard. */
   subagentsGuarded(): boolean;
   signal?: AbortSignal;
@@ -108,6 +114,10 @@ export async function judgeCall(toolName: string, input: unknown, host: GuardHos
       const slack = slackDraftVerdict(command, host.slackDrafts);
       if (slack) return slack;
     }
+    if (toolName === "bash" && host.githubIssues) {
+      const github = await githubIssueVerdict(command, host.githubIssues);
+      if (github) return github;
+    }
     // The gate's read-only analysis is the suite's one: its yes runs the command, its no goes to the
     // judgment below. This package's own policy decides only when the gate does not answer.
     const gate = toolName === "bash" ? host.shellReads?.(command) : undefined;
@@ -137,6 +147,22 @@ function slackDraftVerdict(command: string, created: () => ReadonlySet<string>):
   const foreign = parsed.deletes.filter((id) => !mine.has(id));
   if (foreign.length > 0) return refuse(`it deletes Slack draft ${foreign.join(", ")}, which Sidebar did not create in this thread, so it was not run.`);
   return { allowed: true, why: "Slack draft" };
+}
+
+/** Sidebar's GitHub issue exception: a verdict for issue writes, undefined for everything else. */
+async function githubIssueVerdict(command: string, confirm: (write: GithubIssueWrite) => Promise<boolean>): Promise<Verdict | undefined> {
+  const write = parseGithubIssueCommand(command);
+  if (!write) {
+    if (!mentionsGithubIssueWrite(command)) return undefined;
+    return {
+      allowed: false,
+      reason: `${PREFIX}, except for GitHub issue writes in a plain form, and this command is not one, so it was not run. Use one gh issue create (with --title and a body), comment or edit per command; pass the text with --body '<text>' or pipe it in (printf '%s' '<text>' | gh issue comment 12 --body-file -, or a quoted heredoc <<'EOF'); use only literal text or variables assigned earlier in the same command (no $(...), files, editors, --web or other commands).`,
+    };
+  }
+  let approved = false;
+  try { approved = await confirm(write); } catch { approved = false; }
+  if (!approved) return { allowed: false, reason: `${PREFIX}: the user did not approve this GitHub issue ${write.action}, so it was not run. Ask them what to change before trying again.` };
+  return { allowed: true, why: `GitHub issue ${write.action}, approved` };
 }
 
 /** The question Jev answers for a call the rules cannot settle. */

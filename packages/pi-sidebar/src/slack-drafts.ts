@@ -1,4 +1,4 @@
-// Sidebar's one write: Slack drafts. A draft is visible only to the user until they send it, so
+// One of Sidebar's two writes (see github-issues.ts for the other): Slack drafts. A draft is visible only to the user until they send it, so
 // Sidebar may create one (`slackcli messages draft`) and discard one it created in this thread
 // (`slackcli messages delete-draft <id>`), the way main does with the slackcli and slack-voice
 // skills. Everything else about Slack that writes (send, send-draft, schedule, someone else's
