@@ -25,6 +25,11 @@ import { type OptionRow, OptionsPage, type TextArea } from "./app/options-page.t
 import { RenderedPlans, renderedPlansUnavailable } from "./app/plan-embed.ts";
 import { embedColors, planHtml, styleKey } from "./app/plan-html.ts";
 import {
+  type ApprovalContextInfo,
+  COMPACT_DEFAULT_MIN_TOKENS,
+  defaultImplementationContext,
+} from "./approval-picker.ts";
+import {
   EDITOR_MODE,
   EDITOR_SURFACE,
   INPUT_CONTEXT,
@@ -98,7 +103,6 @@ import { extensionsForProvider, resolveProviderExtensions } from "./provider-ext
 import { routedModel } from "./routed-model.ts";
 import {
   configuredAlwaysOffer,
-  configuredImplementationContext,
   configuredModelPairs,
   configuredPlanExportPath,
   configuredPlanModeToggleShortcut,
@@ -274,6 +278,34 @@ export default async function plan(pi: ExtensionAPI, dependencies: PlanDependenc
     )
       invalidateEffort();
   });
+  // pi-cache-guard's view of the prompt cache, when it is loaded (`cache:state`).
+  let cacheView: { cold: boolean; tokens?: number; big?: boolean } | undefined;
+  pi.events.on("cache:state", (data: unknown) => {
+    const d = data as { cold?: unknown; tokens?: unknown; big?: unknown } | undefined;
+    if (typeof d?.cold !== "boolean") return;
+    cacheView = {
+      cold: d.cold,
+      ...(typeof d.tokens === "number" ? { tokens: d.tokens } : {}),
+      ...(typeof d.big === "boolean" ? { big: d.big } : {}),
+    };
+  });
+  /** What the approval's context default is decided from: the conversation's size, its cache and your setting. */
+  const implementationContextInfo = (ctx: ExtensionContext): ApprovalContextInfo => {
+    let tokens: number | undefined;
+    try {
+      const used = ctx.getContextUsage?.()?.tokens;
+      if (typeof used === "number") tokens = used;
+    } catch {
+      // Fall through to cache-guard's count.
+    }
+    tokens ??= cacheView?.tokens;
+    return {
+      ...(tokens !== undefined ? { tokens } : {}),
+      cold: cacheView?.cold === true,
+      big: cacheView?.big ?? (tokens !== undefined && tokens >= COMPACT_DEFAULT_MIN_TOKENS),
+      ...(settings.defaultImplementationContext ? { configured: settings.defaultImplementationContext } : {}),
+    };
+  };
   pi.events.on(SYSTEM1_CHANGED, () => {
     system1Epoch++;
     disposeEffortRequests();
@@ -997,6 +1029,7 @@ export default async function plan(pi: ExtensionAPI, dependencies: PlanDependenc
       if (pi.getThinkingLevel() !== level) withEffortOrigin("plan-mode", () => pi.setThinkingLevel(level));
       return true;
     },
+    implementationContext: (ctx) => implementationContextInfo(ctx),
     compactHere: (approval, ctx) => {
       pairs.approve(ctx, approval.planFile, approval.alternate === "planner" ? "planner" : "worker");
       pendingOperation = {
@@ -1754,15 +1787,23 @@ export default async function plan(pi: ExtensionAPI, dependencies: PlanDependenc
             id: "context",
             label: "Implement with",
             value: () =>
-              configuredImplementationContext(settings) === "clear" ? "compact to plan" : "this conversation",
+              settings.defaultImplementationContext === undefined
+                ? "automatic"
+                : settings.defaultImplementationContext === "clear"
+                  ? "compact to plan"
+                  : "this conversation",
             cycle: () => {
-              const next: ImplementationContextChoice =
-                configuredImplementationContext(settings) === "clear" ? "keep" : "clear";
+              const next: ImplementationContextChoice | undefined =
+                settings.defaultImplementationContext === undefined
+                  ? "keep"
+                  : settings.defaultImplementationContext === "keep"
+                    ? "clear"
+                    : undefined;
               settings = { ...settings, defaultImplementationContext: next };
-              saveSettings({ defaultImplementationContext: next });
+              saveSettings({ defaultImplementationContext: next ?? null });
             },
             description:
-              "How implementation starts by default: this conversation with the plan, or compacted to the plan (same session).",
+              "How implementation starts: automatic compacts to the plan when another model implements, the prompt cache is cold or the conversation is large; or always this conversation, or always compacted to the plan (same session).",
           },
           {
             id: "export",
@@ -1900,7 +1941,7 @@ export default async function plan(pi: ExtensionAPI, dependencies: PlanDependenc
       const implementPage = (first: PlanSource) => {
         let author = first;
         const ready = sources;
-        let context: ImplementationContextChoice = configuredImplementationContext(settings);
+        let context: ImplementationContextChoice = defaultImplementationContext(implementationContextInfo(ctx), false);
         const efforts = new Map<string, ModelSpec>();
         let recommendation: ThinkingLevel | undefined;
         let recommendationSource: EffortSource = "fallback";

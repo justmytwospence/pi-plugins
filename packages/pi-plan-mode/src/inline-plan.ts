@@ -29,7 +29,7 @@ import {
   type Theme,
 } from "@earendil-works/pi-coding-agent";
 import { type Component, Container, Spacer, Text } from "@earendil-works/pi-tui";
-import { createApprovalState, pickApproval } from "./approval-picker.ts";
+import { type ApprovalContextInfo, createApprovalState, pickApproval } from "./approval-picker.ts";
 import { editInTerminal, externalEditorCommand } from "./external-editor.ts";
 import { PLAN_STANDARD } from "./handoff.ts";
 import { remoteUi } from "./switchyard-remote.ts";
@@ -113,9 +113,9 @@ export interface InlineHost {
     | {
         planning: ModelSpec;
         planningName: string;
-        /** A sentence for the approval question, e.g. who implements and who answers its questions. */
+        /** A clause for the Model line while the pair's worker is selected, e.g. who answers its questions. */
         note?: string;
-        /** Names the implementer of the first two rows (a selected pair's worker). */
+        /** Names the implementer of the first model (a selected pair's worker). */
         implementerName?: string;
         /** Another model to offer: an offered pair's worker (no pair selected, the session model plans one) or a selected pair's planner. */
         alternate?: { kind: "pair-worker" | "planner"; model: ModelSpec; name: string };
@@ -125,6 +125,8 @@ export interface InlineHost {
   selectPair?(ctx: ExtensionContext): Promise<boolean>;
   /** A task-level default only; callers retain manual effort choices and approval freshness. */
   implementationEffort?(ctx: ExtensionContext, plan: Pick<Approval, "plan" | "planFile">): ImplementationEffortRequest;
+  /** The conversation and its prompt cache, for the approval's context default. */
+  implementationContext?(ctx: ExtensionContext): ApprovalContextInfo;
   compactHere(approval: Approval, ctx: ExtensionContext): void;
   /** Implement it here, by the agent that planned it; returns the tool result's text. */
   implementHere(ctx: ExtensionContext, approval: Approval): string;
@@ -582,7 +584,7 @@ export function registerInlinePlanMode(pi: ExtensionAPI, host: InlineHost): Inli
       const current = () => sameDestination() && revision === approvalRevision && state.active;
       let edited = false;
       const models = host.implementationChoices(ctx, { plan, planFile });
-      const pickerState = createApprovalState(models?.implementerName ? "compact-here" : "here");
+      const pickerState = createApprovalState();
       let effortRequest: ImplementationEffortRequest | undefined;
       const catalog = modelCatalog(ctx, "available");
       const reasoning = (spec: ModelSpec | undefined) =>
@@ -637,6 +639,8 @@ export function registerInlinePlanMode(pi: ExtensionAPI, host: InlineHost): Inli
             ctx,
             {
               ...(models?.planning ? { planning: models.planning } : {}),
+              ...(models?.planningName ? { planningName: models.planningName } : {}),
+              ...(host.implementationContext ? { context: host.implementationContext(ctx) } : {}),
               ...(models?.note ? { note: models.note } : {}),
               ...(models?.implementerName ? { implementerName: models.implementerName } : {}),
               ...(alternate && (alternate.kind === "planner" || host.selectPair) ? { alternate } : {}),

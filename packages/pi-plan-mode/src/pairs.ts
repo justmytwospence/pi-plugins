@@ -84,13 +84,13 @@ function readHandoff(value: unknown): WorkerHandoff | undefined {
   };
 }
 
-/** What the approval's worker rows do after the build: the worker stays on, or the planner takes over again. */
+/** A clause for the approval's Model line: who answers the worker's questions, and what happens after the build. */
 export const pairNote = (pair: Pick<SelectedPair, "def" | "workerName" | "plannerName">) => {
   const w = shortModelName(pair.workerName);
   const p = shortModelName(pair.plannerName);
   return pair.def.handoff === "persistent"
-    ? `With ${w}, ${p} answers its questions and ${w} stays on for later work.`
-    : `With ${w}, ${p} answers its questions and takes over again when the implementation is done.`;
+    ? `${p} answers its questions; ${w} stays on`
+    : `${p} answers its questions, then takes over`;
 };
 
 const text = (value: string, details?: unknown) => ({

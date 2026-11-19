@@ -9,7 +9,12 @@ import {
   wrapTextWithAnsi,
 } from "@earendil-works/pi-tui";
 import type { EffortSource } from "./implementation-effort.ts";
-import { formatModelKey, type ModelSpec, type ModelSpecThinkingLevel } from "./implementation-models.ts";
+import {
+  formatModelKey,
+  type ImplementationContextChoice,
+  type ModelSpec,
+  type ModelSpecThinkingLevel,
+} from "./implementation-models.ts";
 import { modelCatalog, normalizeEffort } from "./model-catalog.ts";
 import { type RemoteUi, raceRemote } from "./switchyard-remote.ts";
 
@@ -18,6 +23,8 @@ const blockedOn = (kind: "question" | "permission" | "auth", message: string) =>
   ({ blocked: { kind, message } }) as never;
 
 export const OPTION_MAX = 42;
+/** The terminal dialog's one implement action; model, effort and context are settings above it. */
+export const IMPLEMENT = "Yes, implement";
 export const HERE = "Yes, implement here";
 export const COMPACT_HERE = "Yes, compact plan and implement here";
 export const EDIT = "Edit the plan";
@@ -25,6 +32,8 @@ export const SAVE = "Save for later";
 export const KEEP = "No, keep planning";
 export const APPROVAL_QUESTION = "Implement this plan?";
 export const APPROVAL_HINT = "↑↓ navigate  enter select  escape/ctrl+c cancel";
+/** Without pi-cache-guard's `big`, a conversation of this many tokens defaults to compacting to the plan. */
+export const COMPACT_DEFAULT_MIN_TOKENS = 100_000;
 
 function clean(text: string): string {
   return stripVTControlCharacters(text).replace(/[\p{Cc}\p{Zl}\p{Zp}]/gu, " ");
@@ -49,18 +58,41 @@ export type ApprovalChoice =
   | { kind: "save" }
   | { kind: "keep" };
 
+/** What the context default is decided from: the conversation and its prompt cache. */
+export interface ApprovalContextInfo {
+  tokens?: number;
+  /** The next request would re-write the prompt cache. */
+  cold: boolean;
+  /** A miss on this conversation would reach pi-cache-guard's warning threshold. */
+  big: boolean;
+  /** The user's own `defaultImplementationContext`; it wins over the automatic rule. */
+  configured?: ImplementationContextChoice;
+}
+
+/** Explicit setting, then another model implementing (it reads the conversation uncached), then a cold or big cache, else keep. */
+export function defaultImplementationContext(
+  info: ApprovalContextInfo | undefined,
+  otherModel: boolean,
+): ImplementationContextChoice {
+  return info?.configured ?? (otherModel || info?.cold || info?.big ? "clear" : "keep");
+}
+
 export interface ApprovalInput {
   /** The model whose effort the approval sets: the session model, or a plan pair's worker. */
   planning?: ModelSpec;
+  /** Its display name (the Model line); without it the model id is shown. */
+  planningName?: string;
   recommendations?: ReadonlyMap<string, ModelSpecThinkingLevel>;
   recommendedThinkingLevel?: ModelSpecThinkingLevel;
   effortDefaultKey?: string;
-  /** A sentence after the question, e.g. who implements and who answers its questions. */
+  /** A short clause about the pair's worker (who answers its questions, who stays on), shown on the Model line while the worker is selected. */
   note?: string;
-  /** Names the implementer of the first two rows (a selected pair's worker); without it they say `here`. */
+  /** Names the implementer of the first model (a selected pair's worker); without it the session model is named. */
   implementerName?: string;
   /** Another model to offer: an offered pair's worker, or a selected pair's planner. */
-  alternate?: { model: ModelSpec; name: string };
+  alternate?: { model: ModelSpec; name: string; kind?: "pair-worker" | "planner" };
+  /** The conversation and its cache, for the context default. */
+  context?: ApprovalContextInfo;
 }
 
 export interface ApprovalResult {
@@ -72,15 +104,20 @@ export interface ApprovalResult {
 /** Keep this object for one approval, including returns from Edit; not across approvals. */
 export interface ApprovalState {
   selectedId: string;
+  /** The model the settings apply to: 0 is the session or the selected pair's worker, 1 the alternate. */
+  modelIndex: 0 | 1;
+  /** A context chosen with `c` or an RPC row; undefined follows the automatic default. */
+  context?: ImplementationContextChoice;
   efforts: Map<string, ModelSpecThinkingLevel | undefined>;
   manuallyAdjusted: Set<string>;
   sources: Map<string, EffortSource>;
   effortDefaultKey?: string;
 }
 
-export function createApprovalState(selectedId: "here" | "compact-here" = "here"): ApprovalState {
+export function createApprovalState(): ApprovalState {
   return {
-    selectedId,
+    selectedId: "implement",
+    modelIndex: 0,
     efforts: new Map(),
     manuallyAdjusted: new Set(),
     sources: new Map(),
@@ -88,9 +125,22 @@ export function createApprovalState(selectedId: "here" | "compact-here" = "here"
 }
 
 const modelId = (spec: ModelSpec) => JSON.stringify([spec.provider, spec.modelId]);
-type Row = { id: string; choice: ApprovalChoice; label: string; model?: ModelSpec };
-const effortId = (row: Row) => (row.model ? modelId(row.model) : "");
 type Catalog = Pick<ReturnType<typeof modelCatalog>, "efforts">;
+type ModelEntry = { spec: ModelSpec | undefined; name: string };
+type RpcRow = {
+  id: string;
+  label: string;
+  index?: 0 | 1;
+  context?: ImplementationContextChoice;
+  kind?: "edit" | "save" | "keep";
+};
+const ACTIONS = ["implement", "edit", "save", "keep"] as const;
+const ACTION_LABELS: Record<(typeof ACTIONS)[number], string> = {
+  implement: IMPLEMENT,
+  edit: EDIT,
+  save: SAVE,
+  keep: KEEP,
+};
 
 function recommendedFor(input: ApprovalInput, model: ModelSpec | undefined): ModelSpecThinkingLevel | undefined {
   return (model && input.recommendations?.get(formatModelKey(model))) ?? input.recommendedThinkingLevel;
@@ -100,15 +150,19 @@ function initialEffort(input: ApprovalInput, model: ModelSpec | undefined): Mode
   return recommendedFor(input, model) ?? model?.thinkingLevel ?? input.planning?.thinkingLevel;
 }
 
+const fmtTokens = (n: number) => (n >= 1000 ? `${Math.round(n / 1000)}k` : String(n));
+
 /** A single inline Pi-layout component, also exported for remote-client rendering fixtures. */
 export class ApprovalPicker implements Component {
-  private readonly rows: [Row, ...Row[]];
-  private readonly question: string;
+  private readonly models: [ModelEntry, ...ModelEntry[]];
+  /** The model whose rows are the pair's worker: the first of a selected pair, or the offered alternate. */
+  private readonly workerIndex: 0 | 1 | undefined;
+  private readonly note: string | undefined;
   private finished = false;
   private readonly onAbort = () => this.finish(undefined);
 
   constructor(
-    input: ApprovalInput,
+    private readonly input: ApprovalInput,
     private readonly state: ApprovalState,
     private readonly catalog: Catalog,
     private readonly theme: Theme,
@@ -117,46 +171,18 @@ export class ApprovalPicker implements Component {
     private readonly done: (result: ApprovalResult | undefined) => void,
     private readonly signal?: AbortSignal,
   ) {
-    this.question = `${APPROVAL_QUESTION}${input.note ? ` ${clean(input.note)}` : ""}`;
     const alternate = input.alternate;
-    this.rows = [
+    this.models = [
       {
-        id: "here",
-        choice: { kind: "here" },
-        label: input.implementerName ? pairLabel(input.implementerName) : HERE,
-        model: input.planning,
+        spec: input.planning,
+        name: shortModelName(input.implementerName ?? input.planningName ?? input.planning?.modelId ?? "this model"),
       },
-      ...(alternate
-        ? [
-            {
-              id: "pair",
-              choice: { kind: "here", alternate: true } as const,
-              label: pairLabel(alternate.name),
-              model: alternate.model,
-            },
-          ]
-        : []),
-      {
-        id: "compact-here",
-        choice: { kind: "compact-here" },
-        label: input.implementerName ? pairLabel(input.implementerName, true) : COMPACT_HERE,
-        model: input.planning,
-      },
-      ...(alternate
-        ? [
-            {
-              id: "compact-pair",
-              choice: { kind: "compact-here", alternate: true } as const,
-              label: pairLabel(alternate.name, true),
-              model: alternate.model,
-            },
-          ]
-        : []),
-      { id: "edit", choice: { kind: "edit" }, label: EDIT },
-      { id: "save", choice: { kind: "save" }, label: SAVE },
-      { id: "keep", choice: { kind: "keep" }, label: KEEP },
+      ...(alternate ? [{ spec: alternate.model, name: shortModelName(alternate.name) }] : []),
     ];
-    if (!this.rows.some((row) => row.id === state.selectedId)) state.selectedId = this.rows[0].id;
+    this.workerIndex = input.implementerName ? 0 : alternate?.kind === "pair-worker" ? 1 : undefined;
+    this.note = input.note ? clean(input.note).trim() : undefined;
+    if (state.modelIndex >= this.models.length) state.modelIndex = 0;
+    if (!(ACTIONS as readonly string[]).includes(state.selectedId)) state.selectedId = "implement";
     if (input.effortDefaultKey !== undefined && input.effortDefaultKey !== state.effortDefaultKey) {
       for (const id of state.efforts.keys()) {
         if (!state.manuallyAdjusted.has(id)) {
@@ -166,43 +192,63 @@ export class ApprovalPicker implements Component {
       }
       state.effortDefaultKey = input.effortDefaultKey;
     }
-    for (const row of this.rows) {
-      if (!row.model) continue;
-      const id = effortId(row);
-      const levels = this.levels(row);
+    for (const { spec } of this.models) {
+      if (!spec) continue;
+      const id = modelId(spec);
+      const levels = this.levels(spec);
       state.efforts.set(
         id,
-        normalizeEffort(state.efforts.has(id) ? state.efforts.get(id) : initialEffort(input, row.model), levels),
+        normalizeEffort(state.efforts.has(id) ? state.efforts.get(id) : initialEffort(input, spec), levels),
       );
       if (!state.manuallyAdjusted.has(id) && !state.sources.has(id)) {
-        state.sources.set(id, recommendedFor(input, row.model) !== undefined ? "system1" : "fallback");
+        state.sources.set(id, recommendedFor(input, spec) !== undefined ? "system1" : "fallback");
       }
     }
     signal?.addEventListener("abort", this.onAbort, { once: true });
     if (signal?.aborted) this.onAbort();
   }
 
-  private levels(row: Row): ModelSpecThinkingLevel[] {
-    return row.model ? this.catalog.efforts(row.model).filter((level) => level !== undefined) : [];
+  private levels(spec: ModelSpec | undefined): ModelSpecThinkingLevel[] {
+    return spec ? this.catalog.efforts(spec).filter((level) => level !== undefined) : [];
   }
 
-  private get selected(): Row {
-    return this.rows.find((row) => row.id === this.state.selectedId) ?? this.rows[0];
+  private get action(): (typeof ACTIONS)[number] {
+    return (ACTIONS as readonly string[]).includes(this.state.selectedId)
+      ? (this.state.selectedId as (typeof ACTIONS)[number])
+      : "implement";
   }
 
-  private effort(row: Row) {
-    return row.model ? this.state.efforts.get(effortId(row)) : undefined;
+  private get model(): ModelEntry {
+    return this.models[this.state.modelIndex] ?? this.models[0];
   }
 
-  private result(row: Row): ApprovalResult {
-    const thinkingLevel = this.effort(row);
+  private effort(spec: ModelSpec | undefined) {
+    return spec ? this.state.efforts.get(modelId(spec)) : undefined;
+  }
+
+  private contextFor(index: number): ImplementationContextChoice {
+    return this.state.context ?? defaultImplementationContext(this.input.context, index === this.workerIndex);
+  }
+
+  private implementResult(index: 0 | 1, context: ImplementationContextChoice): ApprovalResult {
+    const spec = this.models[index]?.spec;
+    const thinkingLevel = this.effort(spec);
+    const id = spec ? modelId(spec) : "";
     return {
-      choice: row.choice,
+      choice: {
+        kind: context === "clear" ? "compact-here" : "here",
+        ...(index === 1 ? { alternate: true as const } : {}),
+      },
       ...(thinkingLevel !== undefined ? { thinkingLevel } : {}),
-      effortSource: this.state.manuallyAdjusted.has(effortId(row))
-        ? "manual"
-        : (this.state.sources.get(effortId(row)) ?? "fallback"),
+      effortSource: this.state.manuallyAdjusted.has(id) ? "manual" : (this.state.sources.get(id) ?? "fallback"),
     };
+  }
+
+  private result(): ApprovalResult {
+    const action = this.action;
+    if (action === "implement")
+      return this.implementResult(this.state.modelIndex, this.contextFor(this.state.modelIndex));
+    return { choice: { kind: action }, effortSource: "fallback" };
   }
 
   private finish(result: ApprovalResult | undefined): void {
@@ -218,28 +264,49 @@ export class ApprovalPicker implements Component {
 
   invalidate(): void {}
 
+  /** The Context line's parenthesis: the conversation's size and why compacting is the default. */
+  private contextDetails(index: number): string {
+    const info = this.input.context;
+    const parts = [
+      ...(info?.tokens !== undefined ? [`${fmtTokens(info.tokens)} tokens`] : []),
+      ...(index === this.workerIndex ? ["other model"] : info?.cold ? ["cache cold"] : []),
+    ];
+    return parts.length ? ` (${parts.join(", ")})` : "";
+  }
+
   render(width: number): string[] {
-    const row = this.selected;
-    const effort =
-      row.choice.kind === "edit" || row.choice.kind === "save" || row.choice.kind === "keep"
-        ? "Select an implementation choice to adjust effort"
-        : !this.levels(row).length
-          ? "Effort: not supported"
-          : `←/→ effort: ${this.effort(row) ?? "default"}`;
+    const index = this.state.modelIndex;
+    const model = this.model;
+    const levels = this.levels(model.spec);
     const rule = this.theme.fg("border", "─".repeat(Math.max(0, width)));
     const contentWidth = Math.max(1, width - 2);
-    // A separate arrow-prefixed effort row looks like an option to Collie's screen reader.
-    const question = wrapTextWithAnsi(`${this.question} ${effort}`, contentWidth).map(
-      (line) => ` ${this.theme.fg("accent", this.theme.bold(line))}`,
-    );
+    // Flat lines in the question block, never rows: an arrow-prefixed or indented line looks like an option to Collie.
+    const line = (text: string, key?: string, bold = false) =>
+      wrapTextWithAnsi(
+        this.theme.fg("accent", bold ? this.theme.bold(text) : text) + (key ? this.theme.fg("dim", ` · ${key}`) : ""),
+        contentWidth,
+      ).map((wrapped) => ` ${wrapped}`);
+    const showNote = this.note && (this.workerIndex === undefined || index === this.workerIndex);
+    const settings = [
+      ...line(APPROVAL_QUESTION, undefined, true),
+      ...line(`Model: ${model.name}${showNote ? ` (${this.note})` : ""}`, this.models.length > 1 ? "tab" : undefined),
+      ...line(
+        levels.length ? `Effort: ${this.effort(model.spec) ?? "default"}` : "Effort: not supported",
+        levels.length ? "←/→" : undefined,
+      ),
+      ...line(
+        `Context: ${this.contextFor(index) === "clear" ? "compact to plan" : "keep conversation"}${this.contextDetails(index)}`,
+        "c",
+      ),
+    ];
     return [
       rule,
       "",
-      ...question,
+      ...settings,
       "",
-      ...this.rows.map((option) => {
-        const label = truncateToWidth(option.label, Math.min(OPTION_MAX, Math.max(0, width - 4)), "…");
-        return ` ${this.theme.fg(option.id === row.id ? "accent" : "text", `${option.id === row.id ? "→" : " "} ${label}`)}`;
+      ...ACTIONS.map((id) => {
+        const label = truncateToWidth(ACTION_LABELS[id], Math.min(OPTION_MAX, Math.max(0, width - 4)), "…");
+        return ` ${this.theme.fg(id === this.action ? "accent" : "text", `${id === this.action ? "→" : " "} ${label}`)}`;
       }),
       "",
       ...wrapTextWithAnsi(
@@ -252,20 +319,18 @@ export class ApprovalPicker implements Component {
           this.theme.fg("dim", "escape/ctrl+c") +
           this.theme.fg("muted", " cancel"),
         contentWidth,
-      ).map((line) => ` ${line}`),
+      ).map((hint) => ` ${hint}`),
       "",
       rule,
-    ].map((line) => {
-      const clipped = truncateToWidth(line, width);
+    ].map((row) => {
+      const clipped = truncateToWidth(row, width);
       return clipped + " ".repeat(Math.max(0, width - visibleWidth(clipped)));
     });
   }
 
   handleInput(data: string): void {
     if (this.finished) return;
-    const row = this.selected;
-    const rows = this.rows;
-    const index = rows.findIndex((item) => item.id === row.id);
+    const index = ACTIONS.indexOf(this.action);
     if (
       this.keybindings.matches(data, "tui.select.cancel") ||
       matchesKey(data, "ctrl+c") ||
@@ -275,26 +340,32 @@ export class ApprovalPicker implements Component {
       return;
     }
     if (this.keybindings.matches(data, "tui.select.confirm")) {
-      this.finish(this.result(row));
+      this.finish(this.result());
       return;
     }
     if (this.keybindings.matches(data, "tui.select.up")) {
-      this.state.selectedId = rows[(index - 1 + rows.length) % rows.length]?.id ?? row.id;
+      this.state.selectedId = ACTIONS[(index - 1 + ACTIONS.length) % ACTIONS.length] ?? "implement";
     } else if (this.keybindings.matches(data, "tui.select.down")) {
-      this.state.selectedId = rows[(index + 1) % rows.length]?.id ?? row.id;
+      this.state.selectedId = ACTIONS[(index + 1) % ACTIONS.length] ?? "implement";
+    } else if (matchesKey(data, "tab")) {
+      if (this.models.length < 2) return;
+      this.state.modelIndex = this.state.modelIndex === 0 ? 1 : 0;
+    } else if (data === "c" || data === "C") {
+      this.state.context = this.contextFor(this.state.modelIndex) === "clear" ? "keep" : "clear";
     } else if (matchesKey(data, "left") || matchesKey(data, "right")) {
-      const levels = this.levels(row);
-      if (!row.model || !levels.length) return;
-      const current = levels.indexOf(this.effort(row) as ModelSpecThinkingLevel);
+      const spec = this.model.spec;
+      const levels = this.levels(spec);
+      if (!spec || !levels.length) return;
+      const current = levels.indexOf(this.effort(spec) as ModelSpecThinkingLevel);
       const next =
         current < 0
           ? matchesKey(data, "right")
             ? 0
             : levels.length - 1
           : (current + (matchesKey(data, "right") ? 1 : -1) + levels.length) % levels.length;
-      if (levels[next] !== this.effort(row)) {
-        this.state.efforts.set(effortId(row), levels[next]);
-        this.state.manuallyAdjusted.add(effortId(row));
+      if (levels[next] !== this.effort(spec)) {
+        this.state.efforts.set(modelId(spec), levels[next]);
+        this.state.manuallyAdjusted.add(modelId(spec));
       }
     } else {
       return; // The review viewport's independent Ctrl+U/D listener remains in charge.
@@ -303,41 +374,94 @@ export class ApprovalPicker implements Component {
     this.requestRender();
   }
 
+  /** The RPC list: one button per model and context, since buttons are all such a dialog has. */
+  private rpcRows(): RpcRow[] {
+    const alternate = this.input.alternate;
+    const first = this.input.implementerName;
+    const rows = (compact: boolean): RpcRow[] => [
+      {
+        id: compact ? "compact-here" : "here",
+        label: first ? pairLabel(first, compact) : compact ? COMPACT_HERE : HERE,
+        index: 0,
+        context: compact ? "clear" : "keep",
+      },
+      ...(alternate
+        ? [
+            {
+              id: compact ? "compact-pair" : "pair",
+              label: pairLabel(alternate.name, compact),
+              index: 1 as const,
+              context: compact ? ("clear" as const) : ("keep" as const),
+            },
+          ]
+        : []),
+    ];
+    const both = [...rows(false), ...rows(true)];
+    return [
+      ...both,
+      { id: "edit", label: EDIT, kind: "edit" },
+      { id: "save", label: SAVE, kind: "save" },
+      { id: "keep", label: KEEP, kind: "keep" },
+    ];
+  }
+
   /** RPC selects by unique labels, never by a possibly colliding truncated model name. */
   async selectRPC(ui: Pick<ExtensionUIContext, "select">): Promise<ApprovalResult | undefined> {
+    const worker = this.workerIndex === undefined ? undefined : this.models[this.workerIndex];
+    const question = `${APPROVAL_QUESTION}${
+      this.note ? (worker ? ` With ${worker.name}, ${this.note}.` : ` ${this.note}`) : ""
+    }`;
     while (!this.signal?.aborted) {
-      const rows = this.rows;
+      const rows = this.rpcRows();
+      const currentId =
+        this.action === "implement"
+          ? (rows.find(
+              (row) => row.index === this.state.modelIndex && row.context === this.contextFor(this.state.modelIndex),
+            )?.id ?? "here")
+          : this.action;
       const currentLabels = rows.map((row) => row.label);
       const labels = currentLabels.map((label, index) =>
         currentLabels.some((other, otherIndex) => otherIndex !== index && other === label)
           ? `${truncateToWidth(label, OPTION_MAX - String(index + 1).length - 3, "…")} [${index + 1}]`
           : label,
       );
-      const selectedIndex = rows.findIndex((row) => row.id === this.selected.id);
+      const selectedIndex = Math.max(
+        0,
+        rows.findIndex((row) => row.id === currentId),
+      );
       const currentLabel = labels[selectedIndex] as string;
       const actions = [currentLabel, ...labels.filter((label) => label !== currentLabel)];
-      const selected = await ui.select(this.question, actions, { signal: this.signal });
+      const selected = await ui.select(question, actions, { signal: this.signal });
       if (this.signal?.aborted) return undefined;
       if (selected === undefined) return undefined;
       const row = rows[labels.indexOf(selected)];
       if (!row) return undefined;
-      this.state.selectedId = row.id;
-      const levels = this.levels(row);
-      if (row.model && levels.length) {
-        const current = this.effort(row);
+      if (row.kind) {
+        this.state.selectedId = row.kind;
+        return { choice: { kind: row.kind }, effortSource: "fallback" };
+      }
+      const modelIndex = row.index ?? 0;
+      const context = row.context ?? "keep";
+      this.state.selectedId = "implement";
+      this.state.modelIndex = modelIndex;
+      this.state.context = context;
+      const spec = this.models[modelIndex]?.spec;
+      const levels = this.levels(spec);
+      if (spec && levels.length) {
+        const current = this.effort(spec);
         const options = [current ?? "Model default", ...levels.filter((level) => level !== current)];
         const selectedEffort = await ui.select("Implementation effort", options, { signal: this.signal });
         if (this.signal?.aborted) return undefined;
         if (selectedEffort === undefined) continue;
         if (!options.includes(selectedEffort)) return undefined;
         this.state.efforts.set(
-          effortId(row),
+          modelId(spec),
           selectedEffort === "Model default" ? undefined : (selectedEffort as ModelSpecThinkingLevel),
         );
         if ((selectedEffort === "Model default" ? undefined : selectedEffort) !== current)
-          this.state.manuallyAdjusted.add(effortId(row));
+          this.state.manuallyAdjusted.add(modelId(spec));
       }
-      return this.result(row);
+      return this.implementResult(modelIndex, context);
     }
     return undefined;
   }
@@ -357,6 +481,7 @@ export async function pickApproval(
     (ctx.model ? { provider: ctx.model.provider, modelId: ctx.model.id, thinkingLevel: ctx.thinkingLevel } : undefined);
   const resolved = {
     ...input,
+    ...(input.planningName === undefined && !input.planning && ctx.model?.name ? { planningName: ctx.model.name } : {}),
     planning: planning ? { ...planning, thinkingLevel: planning.thinkingLevel ?? ctx.thinkingLevel } : undefined,
   };
   const catalog = modelCatalog(ctx);
@@ -411,6 +536,8 @@ export async function pickApproval(
       );
       if (value && from === "remote") {
         state.selectedId = remoteState.selectedId;
+        state.modelIndex = remoteState.modelIndex;
+        state.context = remoteState.context;
         state.efforts = remoteState.efforts;
         state.manuallyAdjusted = remoteState.manuallyAdjusted;
         state.sources = remoteState.sources;

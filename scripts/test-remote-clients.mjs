@@ -46,7 +46,7 @@ const { subagentScreens } = await import('./remote-clients/subagents.mjs');
 const { TerminalPanel } = await jiti.import('../packages/pi-interactive-shell/src/panel.ts');
 const { HistoryPicker } = await jiti.import('../packages/pi-history-search/src/picker.ts');
 const { default: historySearch } = await jiti.import('../packages/pi-history-search/src/index.ts');
-const { ApprovalPicker, pickApproval, createApprovalState, HERE: IMPLEMENT_HERE, COMPACT_HERE, EDIT, SAVE, KEEP } = await jiti.import('../packages/pi-plan-mode/src/approval-picker.ts');
+const { ApprovalPicker, pickApproval, createApprovalState, IMPLEMENT, EDIT, SAVE, KEEP } = await jiti.import('../packages/pi-plan-mode/src/approval-picker.ts');
 const { PlanNameInput } = await jiti.import('../packages/pi-plan-mode/src/plan-name-input.ts');
 const { default: askUserQuestion } = await jiti.import('../packages/pi-ask-user-question/src/index.ts');
 const { renderFooter, layoutFooter, absorbStatuses } = await jiti.import('../packages/pi-status-footer/src/index.ts');
@@ -241,9 +241,13 @@ async function approvalLines(width, spec = {}) {
 }
 
 // Render the actual approval component, including the live effort key path. With a plan model pair
-// selected the question carries a note naming who implements and who answers its questions.
-const PAIR_NOTE = 'Claude Sonnet 5.5 implements; Claude Opus 5.5 answers its questions.';
-const planLabels = () => [IMPLEMENT_HERE, COMPACT_HERE, EDIT, SAVE, KEEP];
+// selected the Model line carries a note naming who answers its questions. The settings (Model, Effort,
+// Context) are flat question lines; only the four actions are rows.
+const PAIR_NOTE = 'Opus 5.5 answers its questions, then takes over';
+const planLabels = () => [IMPLEMENT, EDIT, SAVE, KEEP];
+const planQuestion = (note, effort) => note
+  ? `Implement this plan? Model: Sonnet 5.5 (${note}) · tab Effort: ${effort} · ←/→ Context: compact to plan (182k tokens, other model) · c`
+  : `Implement this plan? Model: Fable 5.5 Effort: ${effort} · ←/→ Context: keep conversation · c`;
 async function selectorLines(width, changed, note, recommendedThinkingLevel, effortDefaultKey) {
   let lines, component;
   const selected = [];
@@ -263,7 +267,13 @@ async function selectorLines(width, changed, note, recommendedThinkingLevel, eff
   };
   void pickApproval(ctx, {
     planning: { provider: 'anthropic', modelId: note ? 'claude-sonnet-5-5' : 'claude-fable-5-5', thinkingLevel: 'high' },
-    recommendedThinkingLevel, effortDefaultKey, ...(note ? { note } : {}),
+    recommendedThinkingLevel, effortDefaultKey,
+    ...(note
+      ? {
+        note, implementerName: 'Claude Sonnet 5.5', context: { tokens: 182_000, cold: true, big: true },
+        alternate: { model: { provider: 'anthropic', modelId: 'claude-fable-5-5', thinkingLevel: 'high' }, name: 'Claude Opus 5.5', kind: 'planner' },
+      }
+      : { planningName: 'Claude Fable 5.5' }),
   }, state, controller.signal);
   await new Promise(resolve => setTimeout(resolve, 0));
   assert.deepEqual(selected, [], 'rendering a main screen still requires explicit approval');
@@ -467,16 +477,16 @@ const DIALOGS = [
   ...[false, true].flatMap(changed => [undefined, PAIR_NOTE].map(note => ({
     name: `plan approval (${note ? 'plan model pair' : 'physical model'}${changed ? ', effort changed' : ''})`,
     lines: w => selectorLines(w, changed, note),
-    question: `Implement this plan? ${note ? `${note} ` : ''}←/→ effort: ${changed ? 'off' : 'high'}`,
-    herdr: { options: 5, multi: false, labels: planLabels() },
-    collie: { kind: 'prompt-select', options: 6, labels: planLabels(), wraps: planLabels() },
+    question: planQuestion(note, changed ? 'off' : 'high'),
+    herdr: { options: 4, multi: false, labels: planLabels() },
+    collie: { kind: 'prompt-select', options: 5, labels: planLabels(), wraps: planLabels() },
   }))),
   ...[false, true].flatMap(changed => [undefined, PAIR_NOTE].map(note => ({
     name: `plan approval (${note ? 'plan model pair' : 'physical model'}, recommended${changed ? ', effort changed' : ''})`,
     lines: w => selectorLines(w, changed, note, 'low', 'recommended-fixture'),
-    question: `Implement this plan? ${note ? `${note} ` : ''}←/→ effort: ${changed ? 'medium' : 'low'}`,
-    herdr: { options: 5, multi: false, labels: planLabels() },
-    collie: { kind: 'prompt-select', options: 6, labels: planLabels(), wraps: planLabels() },
+    question: planQuestion(note, changed ? 'medium' : 'low'),
+    herdr: { options: 4, multi: false, labels: planLabels() },
+    collie: { kind: 'prompt-select', options: 5, labels: planLabels(), wraps: planLabels() },
   }))),
   ...[false, true].map(edited => ({
     name: `plan save filename (${edited ? 'edited' : 'prefilled'})`, question: 'Save plan as',
@@ -498,7 +508,7 @@ for (const width of [46, 120, 180]) {
     const lines = await dialog.lines(width);
     for (const [under, rows] of Object.entries(UNDERS)) {
       screens.push({ name: dialog.name, width, under, ansi: [...lines, ...rows(width)].join('\n'),
-        ...(width === 46 && under === 'footer' && dialog.name === 'plan approval (physical model)' ? { answer: { option_index: 3 } } : {}),
+        ...(width === 46 && under === 'footer' && dialog.name === 'plan approval (physical model)' ? { answer: { option_index: 2 } } : {}),
         ...(width === 46 && under === 'footer' && dialog.name === 'plan save filename (prefilled)' ? { answer: { custom_text: 'phone-renamed' } } : {}) });
     }
   }

@@ -11,8 +11,10 @@ import {
   type ApprovalResult,
   COMPACT_HERE,
   createApprovalState,
+  defaultImplementationContext,
   EDIT,
   HERE,
+  IMPLEMENT,
   KEEP,
   pairLabel,
   pickApproval,
@@ -55,6 +57,15 @@ function fixture(
   return { component, state, done, requestRender };
 }
 
+const text = (component: ApprovalPicker, width = 120) =>
+  component.render(width).map(stripVTControlCharacters).join("\n");
+const rowsOf = (component: ApprovalPicker, width = 120) =>
+  component
+    .render(width)
+    .map(stripVTControlCharacters)
+    .filter((line) => /^ [→ ] \S/u.test(line))
+    .map((line) => line.trim().replace(/^→ /u, ""));
+
 function rpcContext(select: ExtensionContext["ui"]["select"], overrides: Partial<ExtensionContext> = {}) {
   return {
     hasUI: true,
@@ -87,55 +98,47 @@ function tuiContext(run: (component: ApprovalPicker) => void, overrides: Partial
   return ctx;
 }
 
-test("approval has exactly five rows and no handoff or context rows", () => {
+test("approval has exactly four action rows; model, effort and context are not rows", () => {
   for (const width of [46, 120, 180]) {
     const { component } = fixture();
     const lines = component.render(width).map(stripVTControlCharacters);
     assert.ok(lines.every((line) => visibleWidth(line) === width));
     assert.deepEqual(
       lines.filter((line) => /^ [→ ] \S/u.test(line)).map((line) => line.trim()),
-      [`→ ${HERE}`, COMPACT_HERE, EDIT, SAVE, KEEP],
+      [`→ ${IMPLEMENT}`, EDIT, SAVE, KEEP],
     );
     component.dispose();
   }
-  const labels = [HERE, COMPACT_HERE, EDIT, SAVE, KEEP];
-  assert.ok(labels.every((label) => !/hand off|Linked|Context|Fresh/iu.test(label)));
 });
 
-test("an offered pair worker adds its own rows with independent, recommended effort", () => {
+test("an offered pair worker is a second model with independent, recommended effort", () => {
   const worker: ModelSpec = { provider: "test", modelId: "worker", thinkingLevel: "high" };
   const { component, state, done } = fixture({
     input: {
       planning: planner,
-      alternate: { model: worker, name: "Claude Sonnet 5.5" },
+      alternate: { model: worker, name: "Claude Sonnet 5.5", kind: "pair-worker" },
       recommendations: new Map([["test/worker", "low"]]),
+      note: "Opus 5.5 answers its questions",
     },
   });
-  const labels = component
-    .render(120)
-    .map(stripVTControlCharacters)
-    .filter((line) => /^ [→ ] \S/u.test(line))
-    .map((line) => line.trim().replace(/^→ /u, ""));
-  assert.deepEqual(labels, [
-    HERE,
-    "Yes, implement with Sonnet 5.5",
-    COMPACT_HERE,
-    "Yes, compact and implement with Sonnet 5.5",
-    EDIT,
-    SAVE,
-    KEEP,
-  ]);
-  for (const label of labels) assert.ok(label.length <= 42, label);
-  assert.match(component.render(120).join("\n"), /effort: high/u);
-  component.handleInput(down);
-  assert.match(component.render(120).join("\n"), /effort: low/u);
+  assert.deepEqual(rowsOf(component), [IMPLEMENT, EDIT, SAVE, KEEP]);
+  assert.match(text(component), /Model: planner · tab\s*\n/u);
+  assert.doesNotMatch(text(component), /Opus 5\.5 answers/u);
+  assert.match(text(component), /Effort: high · ←\/→/u);
+  assert.match(text(component), /Context: keep conversation · c/u);
+  component.handleInput("\t");
+  assert.match(text(component), /Model: Sonnet 5\.5 \(Opus 5\.5 answers its questions\) · tab/u);
+  assert.match(text(component), /Effort: low/u);
+  assert.match(text(component), /Context: compact to plan \(other model\)/u);
   component.handleInput(right);
-  component.handleInput(up);
-  assert.match(component.render(120).join("\n"), /effort: high/u);
-  component.handleInput(down);
+  assert.match(text(component), /Effort: medium/u);
+  component.handleInput("\t");
+  assert.match(text(component), /Effort: high/u);
+  assert.match(text(component), /Context: keep conversation/u);
+  component.handleInput("\t");
   component.handleInput("\r");
   assert.deepEqual(done.mock.calls, [
-    [{ effortSource: "manual", choice: { kind: "here", alternate: true }, thinkingLevel: "medium" }],
+    [{ effortSource: "manual", choice: { kind: "compact-here", alternate: true }, thinkingLevel: "medium" }],
   ]);
   assert.equal(state.sources.get(JSON.stringify(["test", "planner"])), "fallback");
 });
@@ -145,45 +148,32 @@ test("pairLabel drops the Claude prefix and sanitizes the name", () => {
   assert.equal(pairLabel("GPT-5.5 Sol\n", true), "Yes, compact and implement with GPT-5.5 Sol");
 });
 
-test("a named implementer replaces here and a selected pair's planner gets its own rows", () => {
+test("a named implementer is the first model and a selected pair's planner the second", () => {
   const worker: ModelSpec = { provider: "test", modelId: "worker", thinkingLevel: "high" };
-  const { component, done } = fixture({
-    input: {
-      planning: worker,
-      implementerName: "Claude Sonnet 5.5",
-      alternate: { model: planner, name: "Claude Opus 5.5" },
-    },
-    state: createApprovalState("compact-here"),
-  });
-  const labels = component
-    .render(120)
-    .map(stripVTControlCharacters)
-    .filter((line) => /^ [→ ] \S/u.test(line))
-    .map((line) => line.trim().replace(/^→ /u, ""));
-  assert.deepEqual(labels, [
-    "Yes, implement with Sonnet 5.5",
-    "Yes, implement with Opus 5.5",
-    "Yes, compact and implement with Sonnet 5.5",
-    "Yes, compact and implement with Opus 5.5",
-    EDIT,
-    SAVE,
-    KEEP,
-  ]);
-  for (const label of labels) assert.ok(label.length <= 42, label);
-  assert.ok(
-    component
-      .render(120)
-      .map((line) => stripVTControlCharacters(line).trimEnd())
-      .includes(" → Yes, compact and implement with Sonnet 5.5"),
-  );
-  component.handleInput("\r");
-  assert.equal(done.mock.calls[0]?.[0]?.choice.kind, "compact-here");
+  const pair: ApprovalInput = {
+    planning: worker,
+    implementerName: "Claude Sonnet 5.5",
+    note: "Opus 5.5 answers its questions",
+    alternate: { model: planner, name: "Claude Opus 5.5", kind: "planner" },
+  };
+  const first = fixture({ input: pair });
+  assert.match(text(first.component), /Model: Sonnet 5\.5 \(Opus 5\.5 answers its questions\) · tab/u);
+  assert.match(text(first.component), /Context: compact to plan \(other model\)/u);
+  first.component.handleInput("\r");
+  assert.deepEqual(first.done.mock.calls[0]?.[0]?.choice, { kind: "compact-here" });
+  const second = fixture({ input: pair });
+  second.component.handleInput("\t");
+  assert.match(text(second.component), /Model: Opus 5\.5 · tab/u);
+  assert.doesNotMatch(text(second.component), /answers its questions/u);
+  assert.match(text(second.component), /Context: keep conversation/u);
+  second.component.handleInput("\r");
+  assert.deepEqual(second.done.mock.calls[0]?.[0]?.choice, { kind: "here", alternate: true });
   assert.equal(shortModelName("Claude Opus 5.5\n"), "Opus 5.5");
 });
 
-test("the optional note follows the question, sanitized, and is absent without it", () => {
+test("the optional note is on the Model line, sanitized, and absent without it", () => {
   const plain = fixture();
-  assert.ok(plain.component.render(120).join("\n").includes(` ${APPROVAL_QUESTION} ←/→ effort: high`));
+  assert.ok(!text(plain.component).includes("("));
   plain.component.dispose();
   const note = "Sonnet implements; Opus answers its questions.";
   const noted = fixture({ input: { ...input, note: `${note}\x1b[31m\n` } });
@@ -192,10 +182,68 @@ test("the optional note follows the question, sanitized, and is absent without i
       .render(width)
       .map((line) => stripVTControlCharacters(line).trim())
       .join(" ");
-    assert.ok(rendered.includes(`${APPROVAL_QUESTION} ${note}`), rendered);
+    assert.ok(rendered.includes(`Model: planner (${note})`), rendered);
     assert.ok(!rendered.includes("\x1b"));
   }
   noted.component.dispose();
+});
+
+test("the Context line gives the size and why compacting is the default", () => {
+  const cold = fixture({ input: { ...input, context: { tokens: 182_000, cold: true, big: true } } });
+  assert.match(text(cold.component), /Context: compact to plan \(182k tokens, cache cold\) · c/u);
+  const small = fixture({ input: { ...input, context: { tokens: 800, cold: false, big: false } } });
+  assert.match(text(small.component), /Context: keep conversation \(800 tokens\) · c/u);
+  const bare = fixture({ input: { ...input, context: { cold: false, big: true } } });
+  assert.match(text(bare.component), /Context: compact to plan · c/u);
+});
+
+test("the context default: your setting, another model, a cold or big cache, else keep", () => {
+  const quiet = { cold: false, big: false };
+  assert.equal(defaultImplementationContext(undefined, false), "keep");
+  assert.equal(defaultImplementationContext(quiet, false), "keep");
+  assert.equal(defaultImplementationContext(quiet, true), "clear");
+  assert.equal(defaultImplementationContext({ cold: true, big: false }, false), "clear");
+  assert.equal(defaultImplementationContext({ cold: false, big: true }, false), "clear");
+  assert.equal(defaultImplementationContext({ ...quiet, configured: "keep" }, true), "keep");
+  assert.equal(defaultImplementationContext({ cold: true, big: true, configured: "keep" }, false), "keep");
+  assert.equal(defaultImplementationContext({ ...quiet, configured: "clear" }, false), "clear");
+});
+
+test("c toggles the context and a chosen context ignores the model's automatic one", () => {
+  const worker: ModelSpec = { provider: "test", modelId: "worker", thinkingLevel: "high" };
+  const { component, state, done } = fixture({
+    input: { planning: planner, alternate: { model: worker, name: "Worker", kind: "pair-worker" } },
+  });
+  component.handleInput("c");
+  assert.equal(state.context, "clear");
+  component.handleInput("\t");
+  assert.match(text(component), /Context: compact to plan/u);
+  component.handleInput("C");
+  assert.equal(state.context, "keep");
+  assert.match(text(component), /Context: keep conversation/u);
+  component.handleInput("\r");
+  assert.deepEqual(done.mock.calls[0]?.[0]?.choice, { kind: "here", alternate: true });
+});
+
+test("RPC follows the context default and says who answers the worker's questions", async () => {
+  const cold = vi.fn<ExtensionContext["ui"]["select"]>().mockResolvedValueOnce(KEEP);
+  await pickApproval(rpcContext(cold), { context: { cold: true, big: false } }, createApprovalState());
+  assert.deepEqual(cold.mock.calls[0]?.[1], [COMPACT_HERE, HERE, EDIT, SAVE, KEEP]);
+  const configured = vi.fn<ExtensionContext["ui"]["select"]>().mockResolvedValueOnce(KEEP);
+  await pickApproval(
+    rpcContext(configured),
+    { context: { cold: true, big: true, configured: "keep" } },
+    createApprovalState(),
+  );
+  assert.equal(configured.mock.calls[0]?.[1][0], HERE);
+  const pair = vi.fn<ExtensionContext["ui"]["select"]>().mockResolvedValueOnce(KEEP);
+  await pickApproval(
+    rpcContext(pair),
+    { implementerName: "Claude Sonnet 5.5", note: "Opus 5.5 answers its questions" },
+    createApprovalState(),
+  );
+  assert.equal(pair.mock.calls[0]?.[0], `${APPROVAL_QUESTION} With Sonnet 5.5, Opus 5.5 answers its questions.`);
+  assert.equal(pair.mock.calls[0]?.[1][0], pairLabel("Claude Sonnet 5.5", true));
 });
 
 test("note appears in the RPC question", async () => {
@@ -232,8 +280,8 @@ test("remote answers win only when they answer, and a remote Keep never changes 
   const state = createApprovalState();
   const result = pickApproval(ctx, input, state, undefined, { select } as never);
   await vi.waitFor(() => assert.equal(select.mock.calls.length, 1));
-  assert.equal(state.selectedId, "here");
-  terminal.handleInput(down);
+  assert.equal(state.selectedId, "implement");
+  terminal.handleInput("c");
   terminal.handleInput("\r");
   const approved = await result;
   assert.equal(approved?.remote, false);
@@ -250,9 +298,28 @@ test("remote answers win only when they answer, and a remote Keep never changes 
   );
   assert.equal(remoteResult?.remote, true);
   assert.equal(remoteResult?.choice.kind, "keep");
+
+  const worker: ModelSpec = { provider: "test", modelId: "worker", thinkingLevel: "high" };
+  const pair: ApprovalInput = { planning: planner, alternate: { model: worker, name: "Worker", kind: "pair-worker" } };
+  const picked = createApprovalState();
+  const remoteWins = vi
+    .fn<ExtensionContext["ui"]["select"]>()
+    .mockResolvedValueOnce(pairLabel("Worker", true))
+    .mockResolvedValueOnce("low");
+  const won = await pickApproval(
+    tuiContext(() => {}),
+    pair,
+    picked,
+    undefined,
+    { select: remoteWins } as never,
+  );
+  assert.equal(won?.remote, true);
+  assert.deepEqual(won?.choice, { kind: "compact-here", alternate: true });
+  assert.equal(picked.modelIndex, 1);
+  assert.equal(picked.context, "clear");
 });
 
-test("direct implementation is first/default and selection uses the Pi bindings", () => {
+test("implement is first/default and selection uses the Pi bindings", () => {
   const first = fixture();
   first.component.handleInput("\r");
   assert.deepEqual(first.done.mock.calls, [
@@ -263,7 +330,7 @@ test("direct implementation is first/default and selection uses the Pi bindings"
   assert.equal(first.done.mock.calls.length, 1);
 
   const compact = fixture();
-  compact.component.handleInput(down);
+  compact.component.handleInput("c");
   compact.component.handleInput("\r");
   assert.deepEqual(compact.done.mock.calls, [
     [{ effortSource: "fallback", choice: { kind: "compact-here" }, thinkingLevel: "high" }],
@@ -272,7 +339,6 @@ test("direct implementation is first/default and selection uses the Pi bindings"
 
   const edit = fixture();
   edit.component.handleInput(down);
-  edit.component.handleInput(down);
   edit.component.handleInput("\r");
   assert.deepEqual(edit.done.mock.calls, [[{ effortSource: "fallback", choice: { kind: "edit" } }]]);
 
@@ -280,22 +346,21 @@ test("direct implementation is first/default and selection uses the Pi bindings"
   keep.component.handleInput(up);
   keep.component.handleInput("\r");
   assert.deepEqual(keep.done.mock.calls, [[{ effortSource: "fallback", choice: { kind: "keep" } }]]);
+
+  const single = fixture();
+  single.component.handleInput("\t");
+  assert.equal(single.requestRender.mock.calls.length, 0);
 });
 
-test("Save for later is between Edit and Keep and ignores effort keys", () => {
-  const { component, state, done, requestRender } = fixture();
+test("Save for later is between Edit and Keep; effort keys adjust the settings, not the action", () => {
+  const { component, state, done } = fixture();
   component.handleInput(up); // Keep
   component.handleInput(up); // Save
   assert.equal(state.selectedId, "save");
-  const before = component.render(120);
-  const efforts = new Map(state.efforts);
-  const renders = requestRender.mock.calls.length;
-  assert.ok(before.join("\n").includes(`→ ${SAVE}`));
-  component.handleInput(left);
+  assert.ok(text(component).includes(`→ ${SAVE}`));
   component.handleInput(right);
-  assert.deepEqual(component.render(120), before);
-  assert.deepEqual(state.efforts, efforts);
-  assert.equal(requestRender.mock.calls.length, renders);
+  assert.match(text(component), /Effort: low/u);
+  assert.ok(text(component).includes(`→ ${SAVE}`));
   component.handleInput(up);
   assert.equal(state.selectedId, "edit");
   component.handleInput(down);
@@ -303,41 +368,41 @@ test("Save for later is between Edit and Keep and ignores effort keys", () => {
   assert.deepEqual(done.mock.calls, [[{ effortSource: "fallback", choice: { kind: "save" } }]]);
 });
 
-test("left/right cycle only supported efforts; both direct rows share effort", () => {
+test("left/right cycle only supported efforts, on every row", () => {
   const { component, state, requestRender, done } = fixture();
   component.handleInput(right); // high -> low, no registry-default pseudo-level
-  assert.match(component.render(120).join("\n"), /←\/→ effort: low/u);
+  assert.match(text(component), /Effort: low · ←\/→/u);
   component.handleInput(down);
-  assert.match(component.render(120).join("\n"), /←\/→ effort: low/u);
+  assert.match(text(component), /Effort: low · ←\/→/u);
   component.handleInput(left);
-  assert.match(component.render(120).join("\n"), /←\/→ effort: high/u);
+  assert.match(text(component), /Effort: high · ←\/→/u);
   component.handleInput(left);
   component.handleInput(left);
-  assert.match(component.render(120).join("\n"), /←\/→ effort: low/u);
+  assert.match(text(component), /Effort: low · ←\/→/u);
   component.handleInput(right);
   component.handleInput(up);
-  assert.match(component.render(120).join("\n"), /←\/→ effort: medium/u);
+  assert.match(text(component), /Effort: medium · ←\/→/u);
   component.handleInput("\r");
   assert.deepEqual(done.mock.calls, [[{ effortSource: "manual", choice: { kind: "here" }, thinkingLevel: "medium" }]]);
   assert.equal(state.efforts.get(JSON.stringify(["test", "planner"])), "medium");
   assert.equal(requestRender.mock.calls.length, 7);
 });
 
-test("selection and effort survive Edit", () => {
+test("selection, effort, model and context survive Edit", () => {
   const state = createApprovalState();
   const first = fixture({ state });
   first.component.handleInput(left); // high -> medium
-  first.component.handleInput(down);
+  first.component.handleInput("c");
   first.component.handleInput(down);
   first.component.handleInput("\r");
   assert.deepEqual(first.done.mock.calls, [[{ effortSource: "fallback", choice: { kind: "edit" } }]]);
 
   const second = fixture({ state });
   assert.equal(state.selectedId, "edit");
-  assert.match(second.component.render(120).join("\n"), /Select an implementation choice to adjust effort/u);
+  assert.match(text(second.component), /Effort: medium/u);
+  assert.match(text(second.component), /Context: compact to plan/u);
   second.component.handleInput(up);
-  assert.equal(state.selectedId, "compact-here");
-  assert.match(second.component.render(120).join("\n"), /effort: medium/u);
+  assert.equal(state.selectedId, "implement");
   second.component.handleInput("\r");
   assert.deepEqual(second.done.mock.calls, [
     [{ effortSource: "manual", choice: { kind: "compact-here" }, thinkingLevel: "medium" }],
@@ -359,7 +424,7 @@ test("effort defaults to the planning level, normalized down; unset stays the re
         component
           .render(width)
           .join("\n")
-          .includes(`←/→ effort: ${expected ?? "default"}`),
+          .includes(`Effort: ${expected ?? "default"}`),
       );
     }
     component.handleInput("\r");
@@ -379,7 +444,7 @@ test("nonreasoning models have no effort control or returned level", () => {
 
 test("registry-default direct effort is retained until explicitly changed", () => {
   const { component, done } = fixture({ input: { ...input, planning: { ...planner, thinkingLevel: undefined } } });
-  assert.match(component.render(120).join("\n"), /effort: default/u);
+  assert.match(text(component), /Effort: default/u);
   component.handleInput(left);
   component.handleInput("\r");
   assert.equal(done.mock.calls[0]?.[0]?.thinkingLevel, "high");
@@ -418,23 +483,25 @@ test("standard Pi layout at 46 and 120 columns, with and without a note, and eff
       assert.equal(lines[0], "─".repeat(width));
       assert.equal(lines.at(-1), "─".repeat(width));
       assert.equal(lines[1], "");
-      assert.equal(lines[2], ` ${APPROVAL_QUESTION} ←/→ effort: ${changed ? "medium" : "high"}`);
-      assert.equal(lines[3], "");
-      assert.equal(lines[4], ` → ${HERE}`);
-      assert.equal(lines[5], `   ${COMPACT_HERE}`);
-      assert.equal(lines[6], `   ${EDIT}`);
-      assert.equal(lines[7], `   ${SAVE}`);
-      assert.equal(lines[8], `   ${KEEP}`);
-      assert.equal(lines[9], "");
+      assert.equal(lines[2], ` ${APPROVAL_QUESTION}`);
+      assert.equal(lines[3], " Model: planner");
+      assert.equal(lines[4], ` Effort: ${changed ? "medium" : "high"} · ←/→`);
+      assert.equal(lines[5], " Context: keep conversation · c");
+      assert.equal(lines[6], "");
+      assert.equal(lines[7], ` → ${IMPLEMENT}`);
+      assert.equal(lines[8], `   ${EDIT}`);
+      assert.equal(lines[9], `   ${SAVE}`);
+      assert.equal(lines[10], `   ${KEEP}`);
+      assert.equal(lines[11], "");
       assert.equal(
         lines
-          .slice(10, -2)
+          .slice(12, -2)
           .map((line) => line.trim())
           .join(" "),
         APPROVAL_HINT,
       );
       assert.equal(lines.at(-2), "");
-      assert.equal(lines.length, width === 46 ? 14 : 13);
+      assert.equal(lines.length, width === 46 ? 16 : 15);
     }
     component.dispose();
   }
@@ -452,7 +519,7 @@ test("unhandled viewport scrolling keys do not change selection, effort or rende
   const before = component.render(46);
   component.handleInput("\x15");
   component.handleInput("\x04");
-  assert.equal(state.selectedId, "here");
+  assert.equal(state.selectedId, "implement");
   assert.deepEqual(component.render(46), before);
   assert.equal(requestRender.mock.calls.length, 0);
   component.dispose();
@@ -462,7 +529,7 @@ test("pickApproval uses one TUI component, current session effort, and cleans up
   const state = createApprovalState();
   const ctx = tuiContext((component) => {
     component.handleInput(left);
-    component.handleInput(down);
+    component.handleInput("c");
     component.handleInput("\r");
   });
   const result = await pickApproval(ctx, {}, state);
@@ -509,7 +576,8 @@ test("RPC effort cancellation returns to the retained action and preserves the e
     [1, 3].map((index) => select.mock.calls[index]?.[1][0]),
     ["low", "low"],
   );
-  assert.equal(state.selectedId, "compact-here");
+  assert.equal(state.selectedId, "implement");
+  assert.equal(state.context, "clear");
 });
 
 for (const stage of ["action", "effort", "back"] as const) {
@@ -599,8 +667,7 @@ test("recommendations initialize the direct rows and normalize, including inheri
         effortDefaultKey: "a",
       },
     });
-    assert.match(component.render(120).join("\n"), /effort: high/u);
-    component.handleInput(down);
+    assert.match(text(component), /Effort: high/u);
     component.handleInput("\r");
     assert.equal(done.mock.calls[0]?.[0]?.thinkingLevel, "high");
   }
@@ -670,7 +737,7 @@ test("RPC offers recommended effort first and retains explicit selection across 
     "medium",
   );
   const next = fixture({ state, input: { ...input, recommendedThinkingLevel: "high", effortDefaultKey: "b" } });
-  assert.match(next.component.render(120).join("\n"), /effort: medium/u);
+  assert.match(text(next.component), /Effort: medium/u);
 });
 
 test("no UI and pre-aborted signals never open a dialog; abort propagates to RPC selects", async () => {

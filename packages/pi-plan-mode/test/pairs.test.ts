@@ -1061,11 +1061,7 @@ test("approving with the offered worker switches a plain Opus session to opuspla
     writeFileSync(state.planFile, "# Offer plan\n\nDo it.\n");
     const result = await tool(EXIT_TOOL).execute("exit", {}, undefined, undefined, context.ctx);
     assert.ok(offered[0]?.includes("Yes, compact and implement with Sonnet 4.5"));
-    assert.ok(
-      titles[0]?.includes(
-        "With Sonnet 4.5, Opus 4.5 answers its questions and takes over again when the implementation is done.",
-      ),
-    );
+    assert.ok(titles[0]?.includes("With Sonnet 4.5, Opus 4.5 answers its questions, then takes over."));
     assert.equal(result.details?.outcome, "approved");
     assert.deepEqual(mock.setModels, [opusplan]);
     const pair = mock.entries.filter((entry) => entry.customType === PAIR_ENTRY).at(-1)?.data as {
@@ -1099,10 +1095,10 @@ test("approving on the planner keeps the pair on the planner and ends its persis
 test("pairNote states whether the worker stays on", () => {
   assert.equal(
     pairNote({ def: { handoff: "persistent" } as never, workerName: "Claude Opus 5.5", plannerName: "Claude Fable 5" }),
-    "With Opus 5.5, Fable 5 answers its questions and Opus 5.5 stays on for later work.",
+    "Fable 5 answers its questions; Opus 5.5 stays on",
   );
   assert.equal(
     pairNote({ def: {} as never, workerName: "Sonnet 4.5", plannerName: "Opus 4.5" }),
-    "With Sonnet 4.5, Opus 4.5 answers its questions and takes over again when the implementation is done.",
+    "Opus 4.5 answers its questions, then takes over",
   );
 });

@@ -2117,6 +2117,43 @@ test("a host note from implementationChoices appears in the approval question", 
   assert.equal(implementHere.mock.calls.length, 1);
 });
 
+test("a host's context info makes compacting the first approval option", async () => {
+  for (const [info, first] of [
+    [{ cold: false, big: true, tokens: 150_000 }, "Yes, compact plan and implement here"],
+    [{ cold: false, big: false, tokens: 20_000 }, "Yes, implement here"],
+    [{ cold: true, big: true, configured: "keep" as const }, "Yes, implement here"],
+  ] as const) {
+    const mock = createMockPi();
+    const context = createMockContext({ hasUI: true, mode: "rpc" });
+    const ctx = context.ctx as ExtensionContext;
+    Object.assign(ctx.sessionManager, { getLeafId: () => null });
+    const plansDirectory = mkdtempSync(join(tmpdir(), "context-plan-"));
+    onTestFinished(() => rmSync(plansDirectory, { recursive: true, force: true }));
+    const inline = registerInlinePlanMode(mock.pi, {
+      plansDirectory: () => plansDirectory,
+      safeSubcommands: () => undefined,
+      toggleKey: () => undefined,
+      implementationChoices: () => undefined,
+      implementationContext: () => info,
+      approved: vi.fn(),
+      compactHere: vi.fn(),
+      implementHere: vi.fn(() => "implemented"),
+    });
+    const offered: string[][] = [];
+    ctx.ui.select = async (title, choices) => {
+      if (!title.startsWith("Implement this plan?")) return undefined;
+      offered.push(choices);
+      return choices[0];
+    };
+    for (const handler of mock.events.get("session_start") ?? []) await handler({ reason: "startup" }, ctx);
+    await inline.enter(ctx);
+    writeFileSync(inline.planFile as string, "# Context plan\n");
+    const exit = mock.tools.find((candidate) => candidate.name === EXIT_TOOL) as unknown as Tool;
+    await exit.execute("context", {}, undefined, undefined, ctx);
+    assert.equal(offered[0]?.[0], first);
+  }
+});
+
 test("implementing with an offered pair worker switches to the pair first; a failed switch keeps planning", async () => {
   for (const switched of [true, false]) {
     const mock = createMockPi();

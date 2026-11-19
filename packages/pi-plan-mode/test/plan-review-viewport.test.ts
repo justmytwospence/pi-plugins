@@ -222,7 +222,7 @@ test.each([46, 120].flatMap((width) => [true, false].map((summary) => ({ width, 
     h.terminal.columns = width;
     const initial = h.run();
     await h.settle();
-    h.choose(4, "No, keep planning");
+    h.choose(3, "No, keep planning");
     await initial;
     writeFileSync(h.planFile, `# Revised beginning\n\n${longPlan}`);
     const revised = h.run(summary ? { changes: ["Use Redis for storage."] } : {});
@@ -347,7 +347,7 @@ test.each(["\x0b", "\x15"])("filename editing receives %j instead of review scro
   const h = setup(longPlan);
   const result = h.run();
   await h.settle();
-  h.choose(3, "Save for later");
+  h.choose(2, "Save for later");
   await h.settle();
   expect(h.picker()).toBeInstanceOf(PlanNameInput);
   expect(h.picker().render(120).map(stripTerminalSequences).join("\n")).toContain("beginning-of-plan");
@@ -377,7 +377,7 @@ test.each(["escape", "ctrl+c", "abort"])("filename %s releases suspended review 
   const controller = new AbortController();
   const result = h.run({}, controller.signal);
   await h.settle();
-  h.choose(3, "Save for later");
+  h.choose(2, "Save for later");
   await h.settle();
   expect(h.picker()).toBeInstanceOf(PlanNameInput);
   const position = h.scroll.scrollTop;
@@ -461,14 +461,13 @@ test("effort arrows keep the same picker, selected row and transcript position",
   const h = setup(longPlan);
   const result = h.run();
   await h.settle();
-  h.picker().handleInput?.("\x1b[B"); // Compact here, not the default row.
   h.scroll.scrollBy(9);
   await h.settle();
   const position = h.scroll.scrollTop;
   const picker = h.picker();
   const before = picker.render(64).map(stripTerminalSequences).join("\n");
-  expect(before).toContain("→ Yes, compact plan and implement here");
-  expect(before).toContain("effort: medium");
+  expect(before).toContain("→ Yes, implement");
+  expect(before).toContain("Effort: medium");
   const jump = vi.spyOn(h.scroll, "scrollTo");
   picker.handleInput?.("\x1b[C");
   await h.settle();
@@ -476,12 +475,12 @@ test("effort arrows keep the same picker, selected row and transcript position",
   expect(h.scroll.scrollTop).toBe(position);
   expect(jump).not.toHaveBeenCalled();
   const after = picker.render(64).map(stripTerminalSequences).join("\n");
-  expect(after).toContain("→ Yes, compact plan and implement here");
-  expect(after).not.toContain("effort: medium");
+  expect(after).toContain("→ Yes, implement");
+  expect(after).not.toContain("Effort: medium");
   picker.handleInput?.("\x1b[D");
   await h.settle();
   expect(h.scroll.scrollTop).toBe(position);
-  expect(picker.render(64).map(stripTerminalSequences).join("\n")).toContain("effort: medium");
+  expect(picker.render(64).map(stripTerminalSequences).join("\n")).toContain("Effort: medium");
   h.choose();
   await result;
   expect(h.keyHandlers.size).toBe(0);
@@ -519,7 +518,7 @@ test("editing returns to the start of the revised plan", async () => {
   const result = h.run();
   await h.settle();
   h.scroll.scrollBy(12);
-  h.choose(2); // Edit the plan first, without a gate installed.
+  h.choose(1); // Edit the plan first, without a gate installed.
   await Promise.resolve();
   const layout = await h.settle();
   // The revision is short: it sits inline at the end, all of it in view.
@@ -552,11 +551,11 @@ test.each(["escape", "keep", "compact", "abort"])(
     h.frame(); // Leave an anchor microtask queued while the user dismisses review.
     if (ending === "escape") h.picker().handleInput?.("\x1b");
     else if (ending === "abort") abort.abort();
-    else
-      h.choose(
-        ending === "keep" ? 4 : 1,
-        ending === "keep" ? "No, keep planning" : "Yes, compact plan and implement here",
-      );
+    else if (ending === "keep") h.choose(3, "No, keep planning");
+    else {
+      h.picker().handleInput?.("c"); // Compact to the plan.
+      h.choose(0, "Yes, implement");
+    }
     const final = await result;
     h.card.updateResult({ ...final, isError: false }, false);
     await h.settle();
