@@ -609,11 +609,12 @@ describe("HeadsUp with sharing", () => {
       const asked: Array<{ prompt: string; label: string }> = [];
       const saved: unknown[] = [];
       const host = { writeWithSidebar: async (prompt: string, label: string) => { asked.push({ prompt, label }); return REPLY; }, draftSaved: (outcome: unknown) => saved.push(outcome) };
-      const { headsUp, sent, notes, written, known, settle } = await setup([SHARE], {}, share, host);
+      const { headsUp, sent, notes, written, known } = await setup([SHARE], {}, share, host);
       await headsUp.check("turn");
       expect(headsUp.summary()).toContain(`drafts look up examples with ${TOOL}`);
       expect(headsUp.handleKey("2", true)).toBe(true);
-      await settle();
+      // The draft is written in the background; a fixed sleep raced it under CI load.
+      await vi.waitFor(() => expect(saved).toHaveLength(1));
       expect(sent).toHaveLength(1); // the check only: no side request for the draft
       expect(asked).toHaveLength(1);
       expect(asked[0]!.label).toBe("Writing a blog draft: Splicing a side request onto the main prompt cache.");
