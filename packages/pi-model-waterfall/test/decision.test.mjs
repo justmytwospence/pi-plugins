@@ -40,9 +40,10 @@ describe("subscription waterfall decision", () => {
   it("keeps only exact model-specific windows, plus shared ones", () => {
     assert.deepEqual(forPhysicalModel(reading([window(12), { ...window(99), model: "other" }, { ...window(13), model: "ours" }]), "ours").windows.map(w => w.used), [12, 13]);
   });
-  it("treats a blocked Codex account as unknown even below 95%", () => {
+  it("treats a blocked Codex account as exhausted even below 95%", () => {
     assert.match(evaluateAllowance({ ...reading([window(10)]), access: { allowed: true, limitReached: true } }, now), /limit reached/);
     assert.match(evaluateAllowance({ ...reading([window(10)]), access: { allowed: false } }, now), /limit reached/);
+    assert.deepEqual(inspectAllowance({ ...reading([window(10)]), access: { allowed: false } }, now), { state: "exhausted", reason: "Subscription limit reached.", tightest: { label: "5h", used: 10 } });
     assert.equal(evaluateAllowance({ ...reading([window(10)]), access: { allowed: true, limitReached: false } }, now), undefined);
   });
   it("separates the supported catalog from the three default active rungs", () => {
@@ -73,7 +74,7 @@ describe("subscription waterfall decision", () => {
     }
     assert.deepEqual(inspectAllowance(reading([window(94.99)]), now), { state: "available", tightest: { label: "5h", used: 94.99 } });
     assert.deepEqual(inspectAllowance(reading([window(20, "5h"), window(62, "week"), window(62, "Opus")]), now).tightest, { label: "week", used: 62 });
-    assert.equal(inspectAllowance({ ...reading([blocked]), access: { allowed: false } }, now).state, "unknown");
+    assert.deepEqual(inspectAllowance({ ...reading([blocked]), access: { allowed: false, limitReached: true } }, now), { state: "exhausted", reason: "Argon weekly allowance is 100% used (95% waterfall threshold).", resetAt: now + 120_000, blockingQuota: { scope: "model", label: "Argon weekly" }, tightest: { label: "Argon weekly", used: 100 } });
   });
   it("publishes only fresh, valid scoped exhaustion, never stale reset claims", () => {
     const w = { ...window(95, "Argon high"), scope: "variant" };
@@ -84,7 +85,7 @@ describe("subscription waterfall decision", () => {
       assert.equal(state.state, "unknown"); assert.equal(state.resetAt, undefined); assert.equal(state.blockingQuota, undefined);
     }
     assert.equal(rungState({ ...checked, verified: false, reason: "unverified" }, now).state, "unknown");
-    assert.equal(rungState({ ...checked, reading: { ...checked.reading, access: { limitReached: true } } }, now).state, "unknown");
+    assert.deepEqual(rungState({ ...checked, reading: { ...checked.reading, access: { limitReached: true } } }, now), { provider: "google", model: checked.model, ...inspectAllowance(checked.reading, now) });
   });
   it("chooses a Muse rung that has no usage yet without windows", () => {
     const decision = chooseWaterfall([candidate("anthropic", [window(99)]), { provider: "muse-code", model: "m", verified: true, noUsage: true, reading: reading([]) }], now);

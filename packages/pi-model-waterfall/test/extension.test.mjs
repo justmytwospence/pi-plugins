@@ -191,14 +191,22 @@ describe("session-start waterfall", () => {
     assert.equal(rung.resetAt, google.windows[2].reset);
     assert.doesNotMatch(rung.reason, /reject|outage/);
   });
-  it.each([0, 1, 2, 3])("reports missing Google scope %s precisely without substituting another Google model", async index => {
+  it.each([[0, "Shared Gemini 5h"], [1, "Shared Gemini weekly"], [3, "Argon medium"]])("reports missing Google scope %s (%s) precisely without substituting another Google model", async (index, label) => {
     claude = quota("anthropic", 100); codex = codexQuota(100);
     google.windows.splice(index, 1);
     const available = [...structuredClone(models), { ...models[2], id: "antigravity-gemini-flash" }];
     const f = fixture(available); await settle(f);
     assert.equal(f.pi.setModel.mock.calls.length, 0);
-    assert.match(f.output[0][0], new RegExp(["Shared Gemini 5h", "Shared Gemini weekly", "Argon weekly", "Argon medium"][index] + " quota is unknown"));
+    assert.match(f.output[0][0], new RegExp(label + " quota is unknown"));
     assert.equal(sources.every(source => source.model === ARGON_MODEL), true);
+  });
+  it("selects exact Argon when the plan has shared Gemini and variant windows without a separate Argon weekly bucket", async () => {
+    claude = quota("anthropic", 100); codex = codexQuota(100, { allowed: false, limitReached: true });
+    google.windows.splice(2, 1);
+    const f = fixture(); await settle(f);
+    assert.equal(f.pi.setModel.mock.calls[0][0].id, ARGON_MODEL);
+    await vi.waitFor(() => assert.ok(queryWaterfall(f.pi.events).rungs));
+    assert.deepEqual(queryWaterfall(f.pi.events).rungs.map(r => [r.provider, r.state]), [["anthropic", "exhausted"], ["openai", "exhausted"], ["google", "available"]]);
   });
   it("selects exact Argon only when all four scopes qualify, regardless of labels", async () => {
     claude = quota("anthropic", 100); codex = codexQuota(100);

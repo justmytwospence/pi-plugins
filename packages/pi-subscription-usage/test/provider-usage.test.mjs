@@ -152,10 +152,11 @@ describe("scoped Argon identity", () => {
     assert.equal(usage.windows[3].scope, "shared");
     assert.equal(usage.windows[3].quotaId, "3p-5h");
   });
-  it("reports each missing binding scope in order", () => {
+  it("reports each missing binding scope in order and allows plans without a separate Argon weekly bucket", () => {
     const usage = complete();
-    const required = ["gemini-5h", "gemini-weekly", "gemini-argon-wtu-weekly", `model:${argon.variant}`];
-    const reasons = ["Shared Gemini 5h quota is unknown.", "Shared Gemini weekly quota is unknown.", "Argon weekly quota is unknown.", "Argon medium quota is unknown."];
+    assert.equal(argonQuotaIssue({ ...usage, windows: usage.windows.filter(window => window.quotaId !== "gemini-argon-wtu-weekly") }, argon.variant), undefined);
+    const required = ["gemini-5h", "gemini-weekly", `model:${argon.variant}`];
+    const reasons = ["Shared Gemini 5h quota is unknown.", "Shared Gemini weekly quota is unknown.", "Argon medium quota is unknown."];
     required.forEach((quotaId, index) => {
       assert.equal(argonQuotaIssue({ ...usage, windows: usage.windows.filter(window => window.quotaId !== quotaId) }, argon.variant), reasons[index]);
       assert.equal(argonQuotaIssue({ ...usage, windows: usage.windows.filter(window => !required.slice(index).includes(window.quotaId)) }, argon.variant), reasons[index]);
@@ -163,9 +164,9 @@ describe("scoped Argon identity", () => {
     for (const [field, value] of [["scope", "model"], ["model", "antigravity-gemini-pro"], ["variant", "gemini-4-argon-high"], ["quotaId", "model:gemini-4-argon-high"], ["pool", "third-party"]]) {
       const malformed = structuredClone(usage);
       malformed.windows.at(-1)[field] = value;
-      assert.equal(argonQuotaIssue(malformed, argon.variant), reasons[3]);
+      assert.equal(argonQuotaIssue(malformed, argon.variant), reasons[2]);
     }
-    assert.equal(argonQuotaIssue(complete("gemini-4-argon-high"), argon.variant), reasons[3]);
+    assert.equal(argonQuotaIssue(complete("gemini-4-argon-high"), argon.variant), reasons[2]);
     assert.equal(argonQuotaIssue({ ...usage, state: "unavailable", reason: "scope failed" }, argon.variant), "scope failed");
     assert.equal(argonQuotaIssue({ ...usage, state: "unavailable" }, argon.variant), "Antigravity quota is unavailable.");
   });
@@ -273,13 +274,12 @@ describe("collector", () => {
     collector.dispose();
   });
 
-  it.each(["5h", "weekly", "Argon weekly", "model"])("requires the %s Argon quota alongside the other applicable windows", async missing => {
+  it.each(["5h", "weekly", "model"])("requires the %s Argon quota alongside the other applicable windows", async missing => {
     const buckets = [
       { bucketId: "gemini-5h", remainingFraction: 0.5 },
       { bucketId: "gemini-weekly", remainingFraction: 0.5 },
-      { bucketId: "gemini-argon-wtu-weekly", remainingFraction: 0.5 },
     ];
-    const ids = { "5h": "gemini-5h", weekly: "gemini-weekly", "Argon weekly": "gemini-argon-wtu-weekly" };
+    const ids = { "5h": "gemini-5h", weekly: "gemini-weekly" };
     const collector = createProviderUsageCollector({ now: () => now, fetch: async url => {
       if (url.endsWith("loadCodeAssist")) return project();
       if (url.endsWith("retrieveUserQuotaSummary")) return json({ groups: [{ buckets: buckets.filter(bucket => bucket.bucketId !== ids[missing]) }] });
@@ -288,7 +288,7 @@ describe("collector", () => {
     const result = await collector.refresh(argon);
     assert.equal(result.state, "unavailable");
     assert.deepEqual(result.windows, []);
-    assert.match(result.reason, new RegExp({ "5h": "Shared Gemini 5h quota is unknown", weekly: "Shared Gemini weekly quota is unknown", "Argon weekly": "Argon weekly quota is unknown", model: "Argon medium quota is unavailable" }[missing]));
+    assert.match(result.reason, new RegExp({ "5h": "Shared Gemini 5h quota is unknown", weekly: "Shared Gemini weekly quota is unknown", model: "Argon medium quota is unavailable" }[missing]));
     collector.dispose();
   });
 

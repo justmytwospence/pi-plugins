@@ -989,6 +989,48 @@ test("waterfall footer reads only the routed Argon variant, never a generic medi
   }
 });
 
+test("Google plan pairs resolve the active physical model and Argon variant quota across phase switches", async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "pi-footer-google-pair-"));
+  const originalFetch = globalThis.fetch;
+  const resetTime = new Date(Date.now() + 3_600_000).toISOString();
+  globalThis.fetch = async (url) => {
+    if (String(url).endsWith("loadCodeAssist")) return new Response(JSON.stringify({ cloudaicompanionProject: "synthetic-project" }));
+    if (String(url).endsWith("retrieveUserQuotaSummary")) return new Response(JSON.stringify({ groups: [{ buckets: [
+      { bucketId: "gemini-5h", remainingFraction: 0.9, resetTime },
+      { bucketId: "gemini-weekly", remainingFraction: 0.8, resetTime },
+    ] }] }));
+    return new Response(JSON.stringify({ models: {
+      "gemini-4-argon-high": { quotaInfo: { remainingFraction: 0.01, resetTime } },
+      "gemini-4-argon-medium": { quotaInfo: { remainingFraction: 0.8, resetTime } },
+    } }));
+  };
+  let h;
+  try {
+    h = host([], dir);
+    const carbon = { provider: "google", id: "antigravity-gemini-4-carbon", api: "google", baseUrl: "https://cloudcode-pa.googleapis.com", contextWindow: 1048576, reasoning: true };
+    const argon = { provider: "google", id: "antigravity-gemini-4-argon", api: "google", baseUrl: "https://cloudcode-pa.googleapis.com", contextWindow: 1048576, reasoning: true };
+    h.ctx.model = { provider: "google", id: "carbonplan", api: "pi-virtual", contextWindow: 0, reasoning: true };
+    h.ctx.modelRegistry.getAvailable = () => [carbon, argon];
+    h.ctx.modelRegistry.getProvider = () => ({ getModels: () => [carbon, argon] });
+    h.ctx.modelRegistry.find = (_provider, id) => id === carbon.id ? carbon : id === argon.id ? argon : undefined;
+    h.ctx.modelRegistry.getApiKeyForProvider = async provider => provider === "google" ? "ya29.synthetic" : undefined;
+    let route = { version: 1, pair: "google/carbonplan", phase: "work", next: { provider: "google", id: argon.id },
+      planner: { provider: "google", id: carbon.id }, worker: { provider: "google", id: argon.id }, thinkingLevel: "medium" };
+    h.pi.events.on("pi-plugins.plan-pair.v1", request => { if (request.kind === "query" && route) request.snapshot = structuredClone(route); });
+    await h.handlers.get("session_start")({}, h.ctx);
+    await vi.waitFor(() => assert.match(plain(h.footer.render(160).join("\n")), /Antigravity.*Argon medium 20% used/));
+    route = { ...route, phase: "consult", thinkingLevel: "high" };
+    await refreshFrame(h);
+    await vi.waitFor(() => assert.match(plain(h.footer.render(160).join("\n")), /Antigravity.*Argon high 99% used/));
+    await h.commands.get("status").handler("details", h.ctx);
+    assert.match(h.notices.at(-1), /Argon high \[variant; gemini-4-argon-high\] 99% used/);
+  } finally {
+    await h?.handlers.get("session_shutdown")?.({}, h.ctx);
+    globalThis.fetch = originalFetch;
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
 function syntheticCodex(h, account = "acct-1") {
   h.ctx.modelRegistry.getApiKeyForProvider = async (provider) => provider === "openai-codex"
     ? jwt({ "https://api.openai.com/auth": { chatgpt_account_id: account } }) : undefined;

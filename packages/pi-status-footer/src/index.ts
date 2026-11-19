@@ -1589,11 +1589,27 @@ export default function statusFooter(pi: ExtensionAPI): void {
       if (next?.connected !== mcp?.connected || next?.total !== mcp?.total) { mcp = next; requestRender?.(); }
     } catch { /* The footer must not fail over a tool list or config read. */ } finally { if (epoch === generation) mcpBusy = false; }
   };
+  const activeRoute = (context: ExtensionContext) => {
+    const routed = context.model?.provider === "waterfall" ? queryWaterfall(pi.events)?.physical : undefined;
+    const last = isVirtual(context.model) ? routedModel(context) : undefined;
+    const pairRoute = isVirtual(context.model) && context.model ? queryPlanPair(pi.events) : undefined;
+    const pair = pairRoute && pairRoute.pair === `${context.model!.provider}/${context.model!.id}` ? pairRoute : undefined;
+    let physical = isVirtual(context.model) ? last : context.model;
+    if (routed) {
+      try { physical = context.modelRegistry.find(routed.provider, routed.id); }
+      catch { physical = undefined; }
+    } else if (pair) {
+      try { physical = context.modelRegistry.find(pair.next.provider, pair.next.id) ?? physical; }
+      catch { /* keep the last answering model */ }
+    }
+    const thinking = routed?.thinkingLevel ?? pair?.thinkingLevel ?? pi.getThinkingLevel();
+    return { routed, pair, last, physical, thinking };
+  };
   // Discovery is explicitly outside render, including other-session chrome. The
   // provider descriptor excludes virtual-only models, which are not accounts.
   const discoverProviders = (context: ExtensionContext) => {
-    const activeModel = context.model;
-    let available: readonly typeof activeModel[] = [];
+    const { physical: activePhysical } = activeRoute(context);
+    let available: readonly (typeof activePhysical)[] = [];
     try { available = typeof context.modelRegistry.getAvailable === "function" ? context.modelRegistry.getAvailable() : []; }
     catch { /* Keep the active physical model when optional discovery fails. */ }
     const found = new Map<string, { id: string; baseUrl?: string }>();
@@ -1607,9 +1623,9 @@ export default function statusFooter(pi: ExtensionAPI): void {
         if (!found.has(model.provider)) found.set(model.provider, { id: model.id, baseUrl: model.baseUrl });
       } catch { /* An unavailable optional provider must not take down the footer. */ }
     }
-    if (activeModel && activeModel.api !== "pi-virtual") {
-      rememberGoogleVariants(activeModel);
-      found.set(activeModel.provider, { id: activeModel.id, baseUrl: activeModel.baseUrl });
+    if (activePhysical && activePhysical.api !== "pi-virtual") {
+      rememberGoogleVariants(activePhysical);
+      found.set(activePhysical.provider, { id: activePhysical.id, baseUrl: activePhysical.baseUrl });
     }
     providerModels.clear();
     for (const [id, model] of found) providerModels.set(id, model);
@@ -1659,8 +1675,8 @@ export default function statusFooter(pi: ExtensionAPI): void {
     if (!active || !ctx) return;
     const context = ctx, epoch = generation, selectionEpoch = providerSelectionEpoch;
     discoverProviders(context);
-    const routed = context.model?.provider === "waterfall" ? queryWaterfall(pi.events)?.physical : undefined;
-    const ids = showAll ? orderedProviders() : [routed?.provider ?? context.model?.provider].filter((id): id is string => !!id).map(accountUsageProvider);
+    const { routed, pair, thinking } = activeRoute(context);
+    const ids = showAll ? orderedProviders() : [routed?.provider ?? pair?.next.provider ?? context.model?.provider].filter((id): id is string => !!id).map(accountUsageProvider);
     await Promise.all(ids.filter((id) => id !== "anthropic" && id !== "openai-codex").map(async (id) => {
       let model;
       try { model = routed?.provider === id ? context.modelRegistry.find(id, routed.id) : providerModels.get(id); }
@@ -1673,7 +1689,7 @@ export default function statusFooter(pi: ExtensionAPI): void {
         let physical;
         try { physical = context.modelRegistry.find(id, model.id); } catch { /* Unknown. */ }
         if (physical) rememberGoogleVariants(physical);
-        variant = expectedGoogleVariant(model.id, routed?.thinkingLevel ?? pi.getThinkingLevel());
+        variant = expectedGoogleVariant(model.id, thinking);
         if (routed?.provider === id && routed.quotaVariant !== variant) variant = undefined;
         if (!variant) {
           providerReadings.delete(id); providerVariants.delete(id); providerIdentities.delete(id);
@@ -1721,20 +1737,8 @@ export default function statusFooter(pi: ExtensionAPI): void {
   const snapshot = (branch: string | null, statuses: ReadonlyMap<string, string>): Snapshot => {
     if (!ctx) throw new Error("Footer rendered outside its session lifecycle");
     const current = ctx;
-    const routed = current.model?.provider === "waterfall" ? queryWaterfall(pi.events)?.physical : undefined;
-    const provider = routed?.provider ?? current.model?.provider ?? "no provider";
-    let physicalModel = isVirtual(current.model) ? (routedModel(current) ?? current.model) : current.model;
-    if (routed) {
-      try { physicalModel = current.modelRegistry.find(routed.provider, routed.id); }
-      catch { physicalModel = undefined; }
-    }
-    const last = isVirtual(current.model) ? routedModel(current) : undefined;
-    const pairRoute = isVirtual(current.model) && current.model ? queryPlanPair(pi.events) : undefined;
-    const pair = pairRoute && pairRoute.pair === `${current.model!.provider}/${current.model!.id}` ? pairRoute : undefined;
-    if (pair) {
-      try { physicalModel = current.modelRegistry.find(pair.next.provider, pair.next.id) ?? physicalModel; }
-      catch { /* keep the last answering model */ }
-    }
+    const { routed, pair, last, physical: physicalModel, thinking } = activeRoute(current);
+    const provider = routed?.provider ?? pair?.next.provider ?? current.model?.provider ?? "no provider";
     const quotas: Quota[] = [];
     let unavailableQuota: string | undefined;
     if (provider === "anthropic" || showAll) {
@@ -1742,7 +1746,7 @@ export default function statusFooter(pi: ExtensionAPI): void {
     }
     const usage = routed && !physicalModel
       ? { rows: [{ provider, source: "Waterfall", state: "unavailable" as const, windows: [], reason: "The verified physical model is no longer available." }], more: 0 }
-      : selectedUsage(provider, physicalModel?.id, routed?.thinkingLevel ?? pi.getThinkingLevel());
+      : selectedUsage(provider, physicalModel?.id, thinking);
     const absorbed = absorbStatuses(statuses, { claudeRow: quotas.some((q) => q.source === "Claude acct") });
     const controls: FooterControlState = {};
     for (const [id, descriptor] of Object.entries(discoveredActions)) {
@@ -1770,7 +1774,7 @@ export default function statusFooter(pi: ExtensionAPI): void {
       thinking: current.model?.reasoning ? (pair?.thinkingLevel ?? pi.getThinkingLevel()) : undefined,
       oauth: physicalModel ? current.modelRegistry.isUsingOAuth(physicalModel) : false,
       sessionName: ownName(pi.getSessionName(), recapName), phase, queued: current.hasPendingMessages(),
-      context: current.getContextUsage() ?? { tokens: null, contextWindow: physicalModel?.contextWindow ?? 0, percent: null },
+      context: current.getContextUsage() ?? { tokens: null, contextWindow: (physicalModel ?? current.model)?.contextWindow ?? 0, percent: null },
       totals, cacheHit, git: { ...git, branch: git.branch ?? branch ?? undefined },
       quotas, unavailableQuota, providerUsage: usage.rows, providerUsageMore: usage.more,
       statuses: absorbed.rest, workflow: absorbed.workflow, mode: absorbed.mode, permissionPrompts: absorbed.permissionPrompts, lean: absorbed.lean, cache: absorbed.cache, extraBilled: absorbed.extraBilled,
@@ -1826,6 +1830,17 @@ export default function statusFooter(pi: ExtensionAPI): void {
         if (!current()) return;
         discoveredSystem1 = querySystem1State(pi.events);
         discoveredActions = queryFooterActions(pi.events);
+        if (ctx) {
+          const { physical, thinking } = activeRoute(ctx);
+          if (physical && physical.provider === "google" && physical.api !== "pi-virtual") {
+            rememberGoogleVariants(physical);
+            const expected = expectedGoogleVariant(physical.id, thinking);
+            if (providerModels.get("google")?.id !== physical.id ||
+                (physical.id === ARGON_MODEL && expected !== undefined && providerVariants.get("google") !== expected)) {
+              void updateProviderUsage();
+            }
+          }
+        }
         const next = snapshot(branch, footerData.getExtensionStatuses());
         if (!clock && prepared) next.now = prepared.now;
         if (JSON.stringify(next) === JSON.stringify(prepared)) return;
@@ -2080,9 +2095,9 @@ export default function statusFooter(pi: ExtensionAPI): void {
       if (command === "details") {
         const usage = context.getContextUsage();
         const providerIds = new Set(orderedProviders());
-        const selectedRoute = context.model?.provider === "waterfall" ? queryWaterfall(pi.events)?.physical : undefined;
-        const selectedPhysical = context.model?.provider === "waterfall" ? selectedRoute : context.model;
-        const selectedThinking = selectedRoute?.thinkingLevel ?? pi.getThinkingLevel();
+        const { routed: selectedRoute, physical: resolvedPhysical, thinking: selectedThinking } = activeRoute(context);
+        const selectedPhysical = context.model?.provider === "waterfall" ? selectedRoute
+          : resolvedPhysical && resolvedPhysical.api !== "pi-virtual" ? resolvedPhysical : context.model;
         if (selectedPhysical?.provider) providerIds.add(accountUsageProvider(selectedPhysical.provider));
         const accountDetails = [...providerIds].sort((a, b) => usageOrder(a) - usageOrder(b) || a.localeCompare(b)).flatMap((id) => {
           const selected = selectedPhysical && accountUsageProvider(selectedPhysical.provider) === id ? selectedPhysical.id : providerModels.get(id)?.id;

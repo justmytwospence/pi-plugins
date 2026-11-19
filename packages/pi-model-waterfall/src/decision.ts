@@ -53,7 +53,6 @@ export function inspectAllowance(reading: ProviderUsage | undefined, now: number
   if (!reading || reading.state !== "ready") return unknown(reading?.reason ?? "Subscription allowance is unavailable.");
   if (reading.observedAt === undefined || !Number.isFinite(reading.observedAt) || reading.observedAt > now + 30_000 ||
       isUsageStale(reading, now)) return unknown("Subscription allowance is stale or its reset is due.");
-  if (reading.access?.limitReached === true || reading.access?.allowed === false) return unknown("Subscription limit reached.");
   if (!reading.windows.length) return unknown("No applicable subscription allowance window was reported.");
   for (const window of reading.windows) {
     if (!validPercent(window.used)) return unknown(`${window.label} allowance percentage is unknown.`);
@@ -67,10 +66,14 @@ export function inspectAllowance(reading: ProviderUsage | undefined, now: number
   const tightest = { label: peak.label, used: peak.used! };
   const spent = reading.windows.filter(window => window.used! >= 95);
   const first = spent[0];
-  if (!first) return { state: "available", tightest };
-  return { state: "exhausted", reason: `${first.label} allowance is ${first.used}% used (95% waterfall threshold).`,
-    resetAt: Math.max(...spent.map(window => window.reset!)),
-    ...(first.scope ? { blockingQuota: { scope: first.scope, label: first.label } } : {}), tightest };
+  if (first) {
+    return { state: "exhausted", reason: `${first.label} allowance is ${first.used}% used (95% waterfall threshold).`,
+      resetAt: Math.max(...spent.map(window => window.reset!)),
+      ...(first.scope ? { blockingQuota: { scope: first.scope, label: first.label } } : {}), tightest };
+  }
+  if (reading.access?.limitReached === true || reading.access?.allowed === false)
+    return { state: "exhausted", reason: "Subscription limit reached.", tightest };
+  return { state: "available", tightest };
 }
 
 /** Compatibility wrapper used by selection; inspection also supplies display state. */

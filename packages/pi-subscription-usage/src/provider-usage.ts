@@ -106,7 +106,8 @@ export function argonQuotaIssue(usage: ProviderUsage, variant: ArgonQuotaVariant
   for (const [quotaId, label] of [["gemini-5h", "Shared Gemini 5h"], ["gemini-weekly", "Shared Gemini weekly"]]) {
     if (!usage.windows.some(window => isSharedGeminiQuotaWindow(window) && window.quotaId === quotaId)) return `${label} quota is unknown.`;
   }
-  if (!usage.windows.some(window => isArgonQuotaWindow(window) && window.scope === "model")) return "Argon weekly quota is unknown.";
+  // A separate Argon weekly bucket binds when the plan reports one; plans that
+  // share the Gemini weekly bucket across Gemini 4 models omit it.
   if (!usage.windows.some(window => isArgonVariantQuotaWindow(window) && window.variant === variant)) return `${argonVariantLabel(variant)} quota is unknown.`;
   return undefined;
 }
