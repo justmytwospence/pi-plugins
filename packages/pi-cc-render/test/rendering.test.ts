@@ -148,6 +148,14 @@ describe("renderer gates", () => {
     const { preservesOriginalRenderer } = await import("../src/renderer/default-mode.ts");
     expect(preservesOriginalRenderer({ renderShell: "self", renderCall: () => undefined }, "todo", undefined, [])).toBe(true);
   });
+
+  test("suite tools with their own renderer are kept without excludeRenderers", async () => {
+    const { preservesOriginalRenderer } = await import("../src/renderer/default-mode.ts");
+    const custom = { renderCall: () => undefined };
+    expect(preservesOriginalRenderer(custom, "herdr", undefined, [])).toBe(true);
+    expect(preservesOriginalRenderer(custom, "offer_terminal", undefined, [])).toBe(true);
+    expect(preservesOriginalRenderer({}, "herdr", undefined, [])).toBe(false);
+  });
 });
 
 describe("own result rows", () => {

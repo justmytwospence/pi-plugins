@@ -109,6 +109,18 @@ export const THINKING_PREVIEW_LINES_VALUES = ["0", "1", "3", "5", "10"];
 export const THINKING_ANIMATION_INTERVAL_VALUES = ["40", "60", "90", "120", "180"];
 /** Mouse wheel step presets (lines) in fullscreen mode. */
 export const SCROLL_STEP_LINES_VALUES = ["1", "2", "3", "5", "10"];
+/** Suite tools that keep their own renderer without being listed in excludeRenderers. */
+export const SUITE_OWN_RENDERERS: readonly string[] = [
+	"ask_planner",
+	"enter_plan_mode",
+	"herdr",
+	"offer_prompt",
+	"offer_terminal",
+	"plan_mode_complete",
+	"plan_subagents",
+	"planner_answer",
+];
+
 /** Tools commonly toggled in excludeRenderers via the settings panel. */
 export const EXCLUDE_RENDERER_CANDIDATES = [
 	"bash",

@@ -136,7 +136,7 @@ The interrupted prompt stays in the transcript and the session, so resending it 
 
 ## Coexisting with other tool renderers
 
-A tool whose extension provides `renderCall`, `renderResult` or `renderShell: "self"` is still restyled unless its name is listed in `excludeRenderers`. Suite components such as pi-bg and pi-subagents that draw their own tool output should be listed there (the panel's Exclude tools entry toggles common names; any name can be added to the file). The `Agent` tool always keeps its dedicated renderer.
+A tool whose extension provides `renderCall`, `renderResult` or `renderShell: "self"` is still restyled unless its name is listed in `excludeRenderers`. Suite components such as pi-bg and pi-subagents that draw their own tool output should be listed there (the panel's Exclude tools entry toggles common names; any name can be added to the file). The suite's `herdr`, `offer_prompt`, `offer_terminal` and plan-mode tools (`enter_plan_mode`, `plan_mode_complete`, `plan_subagents`, `ask_planner`, `planner_answer`) keep their own renderer without being listed. The `Agent` tool always keeps its dedicated renderer.
 
 A tool can instead keep only its result row: with `ccstyleOwnResult: true` on its definition, pi-cc-render draws the call row and places the tool's own `renderResult` under it (pi-bg uses this for its live task line). pi-bg's `bg_run`, `bg_wait`, `bg_logs` and `bg_kill` read as command rows: `Bash <command> · background job`, `Wait <task>`, `Task log <task>`, `Stop <task>`, in single and grouped cards alike.
 

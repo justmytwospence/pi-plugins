@@ -6,7 +6,7 @@
  */
 import { ToolExecutionComponent } from "@earendil-works/pi-coding-agent";
 import { Text, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
-import { config, getToolDisplayConfig, type CompactStyleMode } from "../config/config.ts";
+import { config, getToolDisplayConfig, SUITE_OWN_RENDERERS, type CompactStyleMode } from "../config/config.ts";
 import {
 	COMPONENT_TOOL_RENDER_MODE,
 	GLOBAL_TOOL_RENDER_PATCH,
@@ -113,7 +113,7 @@ export function shouldRenderRichDiff(
 	return mode === "on" && !isError && (toolName === "edit" || toolName === "write");
 }
 
-/** Tools on the exclusion list that ship their own renderer keep their original rendering. */
+/** Tools on the exclusion list (the user's, or the suite's built-in one) that ship their own renderer keep their original rendering. */
 export function preservesOriginalRenderer(
 	extensionDefinition: any,
 	toolName: string,
@@ -121,7 +121,7 @@ export function preservesOriginalRenderer(
 	excludeRenderers: readonly string[] = config.excludeRenderers,
 ): boolean {
 	if (extensionDefinition?.renderShell === "self") return true;
-	if (!excludeRenderers.includes(toolName)) return false;
+	if (!excludeRenderers.includes(toolName) && !SUITE_OWN_RENDERERS.includes(toolName)) return false;
 	return [extensionDefinition, builtInToolDefinition].some(
 		(definition) =>
 			definition?.renderShell === "self" ||

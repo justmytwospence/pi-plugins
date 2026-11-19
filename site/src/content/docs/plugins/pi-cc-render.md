@@ -93,7 +93,7 @@ The renderer patches private members of Pi's coding-agent and TUI packages: `Too
 
 ## Interactions and coexistence
 
-A tool whose extension supplies its own `renderCall`, `renderResult` or `renderShell: "self"` is still restyled unless its name appears in `excludeRenderers`. Suite components that draw their own tool output, such as [pi-bg](/plugins/pi-bg/), [pi-subagents](/plugins/pi-subagents/) and [pi-ask-user-question](/plugins/pi-ask-user-question/), belong there. The panel's exclude entry toggles common names, and you can add any name to the file. The `Agent` tool always keeps its dedicated renderer. An exclusion only affects display. It never disables a tool.
+A tool whose extension supplies its own `renderCall`, `renderResult` or `renderShell: "self"` is still restyled unless its name appears in `excludeRenderers`. Suite components that draw their own tool output, such as [pi-bg](/plugins/pi-bg/), [pi-subagents](/plugins/pi-subagents/) and [pi-ask-user-question](/plugins/pi-ask-user-question/), belong there. The panel's exclude entry toggles common names, and you can add any name to the file. The suite's `herdr`, `offer_prompt`, `offer_terminal` and plan-mode tools keep their own renderer without being listed. The `Agent` tool always keeps its dedicated renderer. An exclusion only affects display. It never disables a tool.
 
 Pi's `Markdown` component is not patched, so [pi-prose-width](/plugins/pi-prose-width/) still sets the measure inside thinking, assistant messages and the agent summary. [pi-markdown-extras](/plugins/pi-markdown-extras/) adds diagrams and admonitions independently. The footer is left to Pi or [pi-status-footer](/plugins/pi-status-footer/), and [pi-context](/plugins/pi-context/) provides `/context`.
 
