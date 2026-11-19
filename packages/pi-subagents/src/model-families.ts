@@ -142,6 +142,7 @@ export const BUILTIN_ROUTES: readonly RouteDef[] = [
     derivePairs: true,
     families: [
       { id: "carbon", tiers: ["premium"] },
+      { id: "neon", tiers: ["strong"] },
       { id: "argon", tiers: ["strong"] },
       { id: "pro", tiers: ["strong"] },
       { id: "hydrogen", tiers: ["fast", "balanced"] },
@@ -159,6 +160,7 @@ export const BUILTIN_ROUTES: readonly RouteDef[] = [
     derivePairs: true,
     families: [
       { id: "carbon", tiers: ["premium"] },
+      { id: "neon", tiers: ["strong"] },
       { id: "argon", tiers: ["strong"] },
       { id: "pro", tiers: ["strong"] },
       { id: "hydrogen", tiers: ["balanced"] },

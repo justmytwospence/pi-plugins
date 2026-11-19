@@ -23,17 +23,17 @@ test("Anthropic and both OpenAI provider names route four capability tiers witho
 
 test("plain and Antigravity Gemini are distinct stable, numeric-only Google routes", () => {
   const plain = "google/gemini-4-argon";
-  const ids = ["gemini-3.8-flash-lite", "gemini-3.8-flash", "gemini-4-hydrogen", "gemini-4-argon", "gemini-4-carbon", "gemini-3.8-pro", "antigravity-gemini-4-hydrogen", "gemini-4-pro-image", "gemini-3.8-flash-preview", "gemini-3.8-flash-exp", "gemini-3.8-flash-image", "gemini-flash"];
+  const ids = ["gemini-3.8-flash-lite", "gemini-3.8-flash", "gemini-4-hydrogen", "gemini-4-argon", "gemini-4-neon", "gemini-4-carbon", "gemini-3.8-pro", "antigravity-gemini-4-hydrogen", "gemini-4-pro-image", "gemini-3.8-flash-preview", "gemini-3.8-flash-exp", "gemini-3.8-flash-image", "gemini-flash"];
   expect(offered(plain, ids, "fast")).toEqual(["gemini-3.8-flash-lite"]);
   expect(offered(plain, ids, "balanced")).toEqual(["gemini-4-hydrogen", "gemini-3.8-flash"]);
-  expect(offered(plain, ids, "strong")).toEqual(["gemini-4-argon", "gemini-3.8-pro"]);
+  expect(offered(plain, ids, "strong")).toEqual(["gemini-4-neon", "gemini-4-argon", "gemini-3.8-pro"]);
   expect(offered(plain, ids, "premium")).toEqual(["gemini-4-carbon"]);
   const ag = "google/antigravity-gemini-4-argon";
   expect(providerPolicy(ag, table)?.route.id).toBe("google/antigravity-gemini");
-  const agIds = ["antigravity-gemini-3.8-flash", "antigravity-gemini-4-hydrogen", "antigravity-gemini-4-argon", "antigravity-gemini-4-carbon", "antigravity-gemini-3.8-pro", "gemini-3.8-flash", "gemini-4-argon", "antigravity-gemini-3.8-flash-lite", "antigravity-gemini-4-argon-preview"];
+  const agIds = ["antigravity-gemini-3.8-flash", "antigravity-gemini-4-hydrogen", "antigravity-gemini-4-argon", "antigravity-gemini-4-neon", "antigravity-gemini-4-carbon", "antigravity-gemini-3.8-pro", "gemini-3.8-flash", "gemini-4-argon", "antigravity-gemini-3.8-flash-lite", "antigravity-gemini-4-argon-preview"];
   expect(offered(ag, agIds, "fast")).toEqual(["antigravity-gemini-4-hydrogen", "antigravity-gemini-3.8-flash"]);
   expect(offered(ag, agIds, "balanced")).toEqual(["antigravity-gemini-4-hydrogen", "antigravity-gemini-3.8-flash"]);
-  expect(offered(ag, agIds, "strong")).toEqual(["antigravity-gemini-4-argon", "antigravity-gemini-3.8-pro"]);
+  expect(offered(ag, agIds, "strong")).toEqual(["antigravity-gemini-4-neon", "antigravity-gemini-4-argon", "antigravity-gemini-3.8-pro"]);
   expect(offered(ag, agIds, "premium")).toEqual(["antigravity-gemini-4-carbon"]);
 });
 

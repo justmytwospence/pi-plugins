@@ -30,9 +30,9 @@ test("the built-in pairs plan on a stronger family and build on a cheaper one", 
       ["openai/astraplan", "Astra plan, Sol build"],
       ["openai/astraplan-terra", "Astra plan, Terra build"],
       ["openai/solplan", "Sol plan, Terra build"],
-      ["google/carbonplan", "Carbon plan, Argon build"],
+      ["google/carbonplan", "Carbon plan, Neon build"],
       ["google/carbonplan-hydrogen", "Carbon plan, Hydrogen build"],
-      ["google/argonplan", "Argon plan, Hydrogen build"],
+      ["google/neonplan", "Neon plan, Hydrogen build"],
     ],
   );
 });
@@ -129,35 +129,35 @@ test("the Astra and Sol pairs resolve on openai-codex and openai", () => {
   }
 });
 
-test("argonplan resolves on one Google lane, preferring Antigravity", () => {
+test("neonplan resolves on one Google lane, preferring Antigravity", () => {
   assert.deepEqual(
     resolvePair(
-      def("google/argonplan"),
+      def("google/neonplan"),
       catalog(
-        "google/antigravity-gemini-4-argon",
+        "google/antigravity-gemini-4-neon",
         "google/antigravity-gemini-4-hydrogen",
         "google/antigravity-gemini-3.8-flash",
-        "google/gemini-4-argon",
+        "google/gemini-4-neon",
         "google/gemini-4.1-hydrogen",
       ),
     ),
     {
-      planner: { provider: "google", modelId: "antigravity-gemini-4-argon" },
+      planner: { provider: "google", modelId: "antigravity-gemini-4-neon" },
       worker: { provider: "google", modelId: "antigravity-gemini-4-hydrogen" },
     },
   );
-  assert.deepEqual(resolvePair(def("google/argonplan"), catalog("google/gemini-4-argon", "google/gemini-4-hydrogen")), {
-    planner: { provider: "google", modelId: "gemini-4-argon" },
+  assert.deepEqual(resolvePair(def("google/neonplan"), catalog("google/gemini-4-neon", "google/gemini-4-hydrogen")), {
+    planner: { provider: "google", modelId: "gemini-4-neon" },
     worker: { provider: "google", modelId: "gemini-4-hydrogen" },
   });
   assert.deepEqual(
-    resolvePair(def("google/argonplan"), catalog("google/antigravity-gemini-4-argon", "google/gemini-4-hydrogen")),
+    resolvePair(def("google/neonplan"), catalog("google/antigravity-gemini-4-neon", "google/gemini-4-hydrogen")),
     { error: "no available Hydrogen model on google" },
   );
   assert.deepEqual(
     resolvePair(
-      def("google/argonplan"),
-      catalog("google/antigravity-gemini-4-argon", "google/antigravity-gemini-3.8-flash"),
+      def("google/neonplan"),
+      catalog("google/antigravity-gemini-4-neon", "google/antigravity-gemini-3.8-flash"),
     ),
     { error: "no available Hydrogen model on google" },
   );
@@ -183,19 +183,20 @@ test("a premium planner also offers a worker two tiers down", () => {
   );
 });
 
-test("carbonplan builds on Argon and carbonplan-hydrogen on Hydrogen", () => {
+test("carbonplan builds on Neon and carbonplan-hydrogen on Hydrogen", () => {
   assert.deepEqual(
     resolvePair(
       def("google/carbonplan"),
       catalog(
         "google/antigravity-gemini-4-carbon",
+        "google/antigravity-gemini-4-neon",
         "google/antigravity-gemini-4-argon",
         "google/antigravity-gemini-4-hydrogen",
       ),
     ),
     {
       planner: { provider: "google", modelId: "antigravity-gemini-4-carbon" },
-      worker: { provider: "google", modelId: "antigravity-gemini-4-argon" },
+      worker: { provider: "google", modelId: "antigravity-gemini-4-neon" },
     },
   );
   assert.deepEqual(
@@ -203,7 +204,7 @@ test("carbonplan builds on Argon and carbonplan-hydrogen on Hydrogen", () => {
       def("google/carbonplan-hydrogen"),
       catalog(
         "google/antigravity-gemini-4-carbon",
-        "google/antigravity-gemini-4-argon",
+        "google/antigravity-gemini-4-neon",
         "google/antigravity-gemini-4-hydrogen",
       ),
     ),
@@ -212,7 +213,7 @@ test("carbonplan builds on Argon and carbonplan-hydrogen on Hydrogen", () => {
       worker: { provider: "google", modelId: "antigravity-gemini-4-hydrogen" },
     },
   );
-  assert.deepEqual(resolvePair(def("google/carbonplan"), catalog("google/antigravity-gemini-4-argon")), {
+  assert.deepEqual(resolvePair(def("google/carbonplan"), catalog("google/antigravity-gemini-4-neon")), {
     error: "no available Carbon model on google",
   });
 });

@@ -602,6 +602,7 @@ test("unchanged built-ins and newly named custom pairs still return to their pla
     { provider: "openai", id: "gpt-6-terra", name: "Terra" },
     { provider: "openai-codex", id: "gpt-6-terra", name: "Terra" },
     { provider: "google", id: "gemini-4-carbon", name: "Carbon" },
+    { provider: "google", id: "gemini-4-neon", name: "Neon" },
     { provider: "google", id: "gemini-4-argon", name: "Argon" },
     { provider: "google", id: "gemini-4-hydrogen", name: "Hydrogen" },
   ];

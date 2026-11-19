@@ -4,7 +4,7 @@
 
 ### Premium planners can build two tiers down
 
-- `anthropic/fableplan-sonnet` (Fable plans, Sonnet builds) and `openai/astraplan-terra`, `openai-codex/astraplan-terra` (Astra plans, Terra builds) join the built-in pairs, with the same persistent worker handoff as Fableplan and Astraplan. `google/carbonplan` now builds on Argon, one tier down like the other pairs, and `google/carbonplan-hydrogen` builds on Hydrogen.
+- `anthropic/fableplan-sonnet` (Fable plans, Sonnet builds) and `openai/astraplan-terra`, `openai-codex/astraplan-terra` (Astra plans, Terra builds) join the built-in pairs, with the same persistent worker handoff as Fableplan and Astraplan. With Neon leading Google's `strong` tier, `google/carbonplan` builds on Neon, one tier down like the other pairs, `google/carbonplan-hydrogen` builds on Hydrogen, and `google/neonplan` (Neon plans, Hydrogen builds) replaces `google/argonplan`.
 
 ### Configured models follow their family's newest release
 

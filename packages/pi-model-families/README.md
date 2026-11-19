@@ -21,12 +21,12 @@ A discovery is announced once. `/families` lists them: confirm the provisional t
   "version": 1,
   "routes": {
     "google/antigravity-gemini": {
-      "add": [{ "id": "neon", "name": "Neon", "tiers": ["strong"], "before": "argon" }],
+      "add": [{ "id": "xenon", "name": "Xenon", "tiers": ["strong"], "before": "neon" }],
       "ignore": ["lithium"],
       "pairs": [{ "planner": "carbon", "worker": "hydrogen" }]
     }
   },
-  "seen": { "google/antigravity-gemini": ["neon"] }
+  "seen": { "google/antigravity-gemini": ["xenon"] }
 }
 ```
 

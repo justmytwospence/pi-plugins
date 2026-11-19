@@ -10,10 +10,10 @@ import {
 const m = (provider: string, id: string, input = 0, output = 0): ModelInfo => ({ provider, id, cost: { input, output } });
 const google = [
   m("google", "gemini-3.5-flash-lite", 0.1, 0.4), m("google", "gemini-3.8-flash", 0.75, 3.75),
-  m("google", "gemini-4-argon", 2, 10), m("google", "gemini-4-carbon", 2, 10), m("google", "gemini-4-hydrogen", 1.5, 7.5),
+  m("google", "gemini-4-argon", 2, 10), m("google", "gemini-4-carbon", 2, 10), m("google", "gemini-4-hydrogen", 1.5, 7.5), m("google", "gemini-4-neon", 3, 15),
   m("google", "gemini-flash-latest"), m("google", "gemini-4-argon-preview"),
   m("google", "antigravity-gemini-3.8-flash"), m("google", "antigravity-gemini-4-argon"),
-  m("google", "antigravity-gemini-4-carbon"), m("google", "antigravity-gemini-4-hydrogen"),
+  m("google", "antigravity-gemini-4-carbon"), m("google", "antigravity-gemini-4-hydrogen"), m("google", "antigravity-gemini-4-neon"),
   m("google", "antigravity-gemini-3.8-flash-lite"), m("google", "antigravity-claude-opus-5-5"), m("google", "antigravity-claude-sonnet-5-5"),
 ];
 const anthropic = [
@@ -61,14 +61,15 @@ describe("discovery", () => {
   it("prices Antigravity families through their API twin and places them like the nearest cheaper family", () => {
     expect(familyTable(catalog).routes.find((r) => r.id === "google/antigravity-gemini")!.families.find((f) => f.id === "hydrogen")!.price).toBe(9);
     const ag = route("google/antigravity-gemini");
-    const unaware = { ...ag, pairs: undefined, families: ag.families.filter((f) => !["hydrogen", "carbon"].includes(f.id)) };
+    const unaware = { ...ag, pairs: undefined, families: ag.families.filter((f) => !["hydrogen", "neon", "carbon"].includes(f.id)) };
     const table = familyTable(catalog, { version: 1 }, undefined, [unaware, route("google/gemini")]);
     expect(table.discoveries.map((d) => [d.family, d.tiers, d.basis])).toEqual([
       ["carbon", ["strong"], "priced like Argon"],
       ["hydrogen", ["fast", "balanced"], "priced like Flash"],
+      ["neon", ["strong"], "priced like Argon"],
     ]);
     const placed = table.routes[0]!.families.map((f) => `${f.id}:${f.source}`);
-    expect(placed).toEqual(["carbon:provisional", "argon:builtin", "pro:builtin", "hydrogen:provisional", "flash:builtin"]);
+    expect(placed).toEqual(["carbon:provisional", "neon:provisional", "argon:builtin", "pro:builtin", "hydrogen:provisional", "flash:builtin"]);
   });
   it("skips families below the route's newest generation and ignored families", () => {
     const withCyber = familyTable([...catalog, m("openai", "gpt-6.1-newname", 3, 9), m("openai", "gpt-5.6-cyber", 1, 5)]);
@@ -106,6 +107,9 @@ describe("tiers and pairs", () => {
     expect(tierModels(table, "google/antigravity-gemini-4-argon", google, "balanced")).toEqual([
       "google/antigravity-gemini-4-hydrogen", "google/antigravity-gemini-3.8-flash",
     ]);
+    expect(tierModels(table, "google/antigravity-gemini-4-argon", google, "strong")).toEqual([
+      "google/antigravity-gemini-4-neon", "google/antigravity-gemini-4-argon",
+    ]);
     expect(tierModels(table, "google/antigravity-gemini-4-argon", google, "premium")).toEqual(["google/antigravity-gemini-4-carbon"]);
     expect(tierModels(table, "google/gemini-4-argon", google, "fast")).toEqual(["google/gemini-3.5-flash-lite"]);
     expect(tierModels(table, "google/antigravity-claude-opus-5-5", google, "fast")).toEqual(["google/antigravity-claude-sonnet-5-5"]);
@@ -127,9 +131,9 @@ describe("tiers and pairs", () => {
       ["openai/astraplan", "Astra plan, Sol build", ["openai"]],
       ["openai/astraplan-terra", "Astra plan, Terra build", ["openai"]],
       ["openai/solplan", "Sol plan, Terra build", ["openai"]],
-      ["google/carbonplan", "Carbon plan, Argon build", ["google/antigravity-gemini", "google/gemini"]],
+      ["google/carbonplan", "Carbon plan, Neon build", ["google/antigravity-gemini", "google/gemini"]],
       ["google/carbonplan-hydrogen", "Carbon plan, Hydrogen build", ["google/antigravity-gemini", "google/gemini"]],
-      ["google/argonplan", "Argon plan, Hydrogen build", ["google/antigravity-gemini", "google/gemini"]],
+      ["google/neonplan", "Neon plan, Hydrogen build", ["google/antigravity-gemini", "google/gemini"]],
     ]);
   });
   it("excludes provisional families and honors user pair overrides", () => {

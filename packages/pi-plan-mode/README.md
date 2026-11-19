@@ -96,9 +96,9 @@ A plan model pair is a Pi virtual model: one entry in `/model` that plans on one
 | `openai-codex/astraplan`, `openai/astraplan` | Astra | Sol |
 | `openai-codex/astraplan-terra`, `openai/astraplan-terra` | Astra | Terra |
 | `openai-codex/solplan`, `openai/solplan` | Sol | Terra |
-| `google/carbonplan` | Carbon | Argon |
+| `google/carbonplan` | Carbon | Neon |
 | `google/carbonplan-hydrogen` | Carbon | Hydrogen |
-| `google/argonplan` | Argon | Hydrogen |
+| `google/neonplan` | Neon | Hydrogen |
 
 Built-in pairs are derived from the suite's shared model-family table (the same one pi-subagents uses, plus an optional `~/.pi/agent/model-families.json`): each route's top premium and strong family plans and the top family of the next tier down builds. A premium planner (Fable, Astra, Carbon) also gets a `-<worker>` pair that builds two tiers down, on the balanced family. Provisional (newly discovered) families never become planners or workers until confirmed with `/families`. Each family resolves at request time to the highest available generation on the pair's provider (the worker prefers the planner's generation). A pair whose models are unavailable is removed from `/model` at session start, unless it is the one selected. On Google, the planner prefers the Antigravity (`antigravity-`) models and the worker uses the same lane as the planner. Define your own with `modelPairs` (see [Configuration](#configuration)).
 
