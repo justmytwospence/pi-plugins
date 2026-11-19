@@ -165,6 +165,10 @@ export function settingsCycles(pi: ExtensionAPI, options: SettingsCycleOptions =
   let latest: SettingCycleSnapshot | undefined;
   let inFlight = false;
   let running: { burst: Burst; done: Promise<void> } | undefined;
+  // Pi emits thinking_level_select without awaiting its handlers, so the echo of
+  // our own reasoning change can arrive after the burst settled. Recognize it
+  // instead of sealing the row the next burst should reuse.
+  let echoes: SettingValue[] = [];
   const modelIdentity = (ctx: ExtensionContext) => (ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : "");
   const leaf = (ctx: ExtensionContext) =>
     ctx.sessionManager.getLeafId?.() ?? ctx.sessionManager.getBranch().at(-1)?.id ?? null;
@@ -360,6 +364,7 @@ export function settingsCycles(pi: ExtensionAPI, options: SettingsCycleOptions =
         }
         const item = b.items[key]!;
         b.active = key;
+        if (key === "reasoning") echoes.push(item.target);
         const ok = await item.change.apply(item.target, targets);
         checkpoint(b);
         b.active = undefined;
@@ -446,6 +451,7 @@ export function settingsCycles(pi: ExtensionAPI, options: SettingsCycleOptions =
           return Promise.resolve(false);
         }
         if (!burst) {
+          echoes = [];
           let resolve!: (value: boolean) => void;
           const promise = new Promise<boolean>((r) => {
             resolve = r;
@@ -685,7 +691,12 @@ export function settingsCycles(pi: ExtensionAPI, options: SettingsCycleOptions =
     if (!burst) seal();
     if (burst?.phase === "pending" && modelIdentity(ctx) !== burst.model) cancel("model changed");
   });
-  pi.on("thinking_level_select", () => {
+  pi.on("thinking_level_select", (event) => {
+    const echo = echoes.indexOf((event as { level?: SettingValue } | undefined)?.level as SettingValue);
+    if (echo >= 0) {
+      echoes.splice(echo, 1);
+      return;
+    }
     if (!burst) seal();
     const item = burst?.items.reasoning;
     if (burst?.phase === "pending" && item && item.change.read() !== item.baseline) cancel("reasoning changed");

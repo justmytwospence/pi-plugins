@@ -456,6 +456,22 @@ describe("settings cycle coordinator", () => {
     expect(calls).toEqual(Array(5).fill("workflow"));
     expect(h.entries.every(entry => entry.data.version === 1)).toBe(true);
   });
+  it("keeps reusing the row when Pi echoes its own reasoning change after the batch settled", async () => {
+    const h = host(), cycles = settingsCycles(h.pi), c = control("reasoning", "low", ["low", "medium", "high"]);
+    // Pi does not await thinking_level_select handlers, so the echo can land after settlement.
+    c.apply = v => { c.value = v; setTimeout(() => void h.emit("thinking_level_select", { level: v }), 1); return true; };
+    for (let i = 0; i < 3; i++) {
+      const p = cycles.stage(h.ctx, c.change);
+      await vi.advanceTimersByTimeAsync(I + 10);
+      expect(await p).toBe(true);
+    }
+    expect(anchors(h)).toHaveLength(1);
+    expect(c.value).toBe("low");
+    c.apply = undefined;
+    await h.emit("thinking_level_select", { level: "high" });
+    void cycles.stage(h.ctx, c.change);
+    expect(anchors(h)).toHaveLength(2);
+  });
   it("shows only the latest batch, including unchanged round trips, without reusing an old baseline", async () => {
     const h = host(), cycles = settingsCycles(h.pi), calls = [], workflow = control("workflow", "work", ["work", "plan"], calls), reasoning = control("reasoning", "low", ["low", "high"], calls);
     const first = cycles.stage(h.ctx, workflow.change);
