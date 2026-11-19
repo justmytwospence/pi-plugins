@@ -32,7 +32,8 @@ function fail(message) {
   process.exit(1);
 }
 const step = (name) => console.log(`==> ${name}`);
-const run = (cmd, argv, opts = {}) => execFileSync(cmd, argv, { cwd: root, encoding: 'utf8', stdio: ['ignore', 'pipe', 'inherit'], ...opts }).trim();
+// With stdio 'inherit' execFileSync returns null, not the output.
+const run = (cmd, argv, opts = {}) => (execFileSync(cmd, argv, { cwd: root, encoding: 'utf8', stdio: ['ignore', 'pipe', 'inherit'], ...opts }) ?? '').trim();
 const git = (...argv) => run('git', argv);
 const ok = (cmd, argv, opts = {}) => spawnSync(cmd, argv, { cwd: root, stdio: 'ignore', ...opts }).status === 0;
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
