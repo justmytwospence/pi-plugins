@@ -37,7 +37,7 @@ Esc offers Hide, Stop planning or Back. Hiding keeps planners running. Reopen wi
 **Implement…** opens a page where you choose:
 
 - The plan: M (first, once there is one), A or B.
-- The context: **keep conversation** or explicitly **compact to plan (same session)**. Both use ordinary chat execution on the main session's current model (with a [plan model pair](/plugins/pi-plan-mode/#plan-model-pairs) selected, the pair routes it to the worker), with no child session.
+- The context: **keep conversation** or explicitly **compact to plan (same session)**. Both use ordinary chat execution on the main session's current model (or, when you choose a [worker](/plugins/pi-plan-mode/#choosing-who-implements), on that worker until the run ends), with no child session.
 - The effort for that implementation.
 
 Only an explicit compact choice replaces context. Normal manual and automatic compaction still apply; plan mode does not substitute a plan-only summary for them. Anything essential for compacted context must be in the plan. Exporting a plan writes a Markdown file; configured completion hooks can also run at implementation/export time.

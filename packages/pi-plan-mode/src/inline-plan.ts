@@ -2,8 +2,8 @@
 // on, your agent researches, may spike in a scratch directory beside the plan file, and writes its
 // plan to a plan file, while the repository stays unchanged; then it calls exit_plan_mode, which shows you the plan and asks how to implement it: here
 // (optionally after compacting to the plan), save a snapshot for later, edit the plan first, or keep
-// planning. With a plan model pair selected, the worker model takes over on the next request (see
-// pairs.ts). The workflow returns to work after approval, without changing approvals.
+// planning. Another model can implement it: the session switches to it for that run and returns to your
+// model when it ends (see build-route.ts). The workflow returns to work after approval, without changing approvals.
 // With pi-tool-gate installed, the gate owns workflow and enforces plan's scope (nothing in the
 // repository changes) under either approval setting. Without it, this extension enforces a read-only
 // shell and the plan file and scratch directory as the only writes, and its configured shortcut
@@ -34,6 +34,7 @@ import {
   type ApprovalContextInfo,
   createApprovalState,
   pickApproval,
+  shortModelName,
 } from "./approval-picker.ts";
 import { editInTerminal, externalEditorCommand } from "./external-editor.ts";
 import { PLAN_STANDARD } from "./handoff.ts";
@@ -100,8 +101,8 @@ export interface Approval {
   edited: boolean;
   thinkingLevel?: ModelSpecThinkingLevel;
   effortSource?: EffortSource;
-  /** Implemented on the offered pair's worker (the session switched to the pair) or on the selected pair's planner. */
-  alternate?: "pair-worker" | "planner";
+  /** The worker that implements it (the session switched to it for the build); absent: your own model. */
+  implementer?: { provider: string; modelId: string };
 }
 
 export interface InlineHost {
@@ -110,7 +111,7 @@ export interface InlineHost {
   plansDirectory(): string | undefined;
   /** Run the plan-complete hook for an approved plan. */
   approved(plan: string, ctx: ExtensionContext): void;
-  /** The model whose effort approval sets (the session model, or a plan pair's worker), with names; undefined without a session model. */
+  /** The model whose effort approval sets (the session model, or the default worker), with names; undefined without a session model. */
   implementationChoices(
     ctx: ExtensionContext,
     plan: Pick<Approval, "plan" | "planFile">,
@@ -118,19 +119,18 @@ export interface InlineHost {
     | {
         planning: ModelSpec;
         planningName: string;
-        /** A clause for the Model line while the pair's worker is selected, e.g. who answers its questions. */
+        /** A clause for the Model line while a worker is selected, e.g. who answers its questions. */
         note?: string;
-        /** Names the implementer of the first model (a selected pair's worker). */
+        /** Names the implementer of the first model (the default worker, one tier down). */
         implementerName?: string;
-        /**
-         * Other models to offer: a selected pair's planner, and the workers of the pairs that plan on the same
-         * planner (switching the session to that pair), e.g. Opus and Sonnet under Fable.
-         */
+        /** Other models to offer: the other worker (two tiers down), then your own model. */
         alternates?: ApprovalAlternate[];
       }
     | undefined;
-  /** Switch the session to the offered pair (its key) before implementing on its worker; false when it could not. */
-  selectPair?(ctx: ExtensionContext, pair: string): Promise<boolean>;
+  /** Switch the session to the worker for the build; false (nothing changed) when it could not. */
+  beginBuild?(ctx: ExtensionContext, worker: ModelSpec, planFile: string): Promise<boolean>;
+  /** Return from a worker whose approval did not go through. */
+  cancelBuild?(ctx: ExtensionContext): Promise<void>;
   /** A task-level default only; callers retain manual effort choices and approval freshness. */
   implementationEffort?(ctx: ExtensionContext, plan: Pick<Approval, "plan" | "planFile">): ImplementationEffortRequest;
   /** The conversation and its prompt cache, for the approval's context default. */
@@ -634,7 +634,7 @@ export function registerInlinePlanMode(pi: ExtensionAPI, host: InlineHost): Inli
               );
           }
           const alternates = (models?.alternates ?? []).filter(
-            (candidate) => candidate.kind === "planner" || (host.selectPair && candidate.pair),
+            (candidate) => candidate.kind === "self" || (host.beginBuild && candidate.kind === "worker"),
           );
           for (const alternate of alternates) {
             const key = `${alternate.model.provider}/${alternate.model.modelId}`;
@@ -786,27 +786,46 @@ export function registerInlinePlanMode(pi: ExtensionAPI, host: InlineHost): Inli
             announce();
           }
           const alternate = choice.alternate === undefined ? undefined : alternates[choice.alternate];
+          const worker =
+            alternate === undefined
+              ? models?.implementerName
+                ? models.planning
+                : undefined
+              : alternate.kind === "worker"
+                ? alternate.model
+                : undefined;
+          const workerName = alternate?.name ?? models?.implementerName;
           const approval: Approval = {
             plan,
             planFile,
             edited,
             thinkingLevel: picked?.thinkingLevel,
             effortSource: picked?.effortSource ?? "fallback",
-            ...(alternate ? { alternate: alternate.kind } : {}),
+            ...(worker ? { implementer: { provider: worker.provider, modelId: worker.modelId } } : {}),
           };
           const mode = "work";
-          // Switching to the pair while still planning routes nothing yet: the pair plans on this same model.
-          if (alternate?.kind === "pair-worker" && alternate.pair) {
-            const switched = (await host.selectPair?.(ctx, alternate.pair)) === true;
-            if (!sameDestination()) return text("Plan review expired because the workflow or branch changed.");
+          // The worker serves the run that implements the plan; planning has run on your model until now.
+          let building = false;
+          if (worker && host.beginBuild) {
+            const switched = await host.beginBuild(ctx, worker, planFile);
+            building = switched;
+            if (!sameDestination()) {
+              if (switched) await host.cancelBuild?.(ctx);
+              return text("Plan review expired because the workflow or branch changed.");
+            }
             if (!switched)
               return text(
-                `Could not switch to the plan model pair for ${alternate?.name ?? "its worker"}. Stay in plan mode and approve the plan again.`,
+                `Could not switch to ${shortModelName(workerName ?? worker.modelId)}. Stay in plan mode and approve the plan again.`,
               );
           }
-          if (!(await requestWorkFromTool()))
+          if (!(await requestWorkFromTool())) {
+            if (building) await host.cancelBuild?.(ctx);
             return text("Work is unavailable. Stay in plan mode and approve the plan again.");
-          if (!sameDestination()) return text("Plan review expired because the workflow or branch changed.");
+          }
+          if (!sameDestination()) {
+            if (building) await host.cancelBuild?.(ctx);
+            return text("Plan review expired because the workflow or branch changed.");
+          }
           exitLocal(ctx, false);
           host.approved(plan, ctx);
           declined = undefined;

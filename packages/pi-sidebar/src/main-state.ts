@@ -4,7 +4,6 @@
 import { buildSessionContext, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import type { Api, Model } from "@earendil-works/pi-ai";
-import { queryPlanPair } from "./plan-pair-contract.ts";
 import { isVirtual, payloadModel } from "./routed-model.ts";
 import { summarizeArgs } from "./transcript.ts";
 
@@ -126,10 +125,7 @@ export class MainState {
   private disposed = false;
   private readonly unsubscribe: Array<() => void> = [];
 
-  private readonly events: ExtensionAPI["events"] | undefined;
-
   constructor(api: ExtensionAPI, private readonly now = () => Date.now()) {
-    this.events = (api as { events?: ExtensionAPI["events"] }).events;
     const pi = { on: ((event: string, handler: (...args: unknown[]) => unknown) => {
       const off = (api.on as Function)(event, (...args: unknown[]) => this.disposed ? undefined : handler(...args));
       if (typeof off === "function") this.unsubscribe.push(off);
@@ -235,9 +231,8 @@ export class MainState {
    */
   /**
    * Main's model as a provider sees it. A physical selection is itself (its level is the session's).
-   * A virtual selection (a plan model pair) never reaches a provider: the model and level of main's
-   * latest successful answer are the ones whose cache is warm, whatever the pair routes to next;
-   * before any answer, the pair's next model. Undefined when neither is known.
+   * A virtual selection never reaches a provider: the model and level of main's latest successful
+   * answer are the ones whose cache is warm, whatever it routes to next. Undefined before any answer.
    */
   physical(): PhysicalModel | undefined {
     const ctx = this.ctx;
@@ -256,10 +251,7 @@ export class MainState {
       if (!found || isVirtual(found)) continue;
       return { model: found, ...(typeof message.thinkingLevel === "string" ? { thinkingLevel: message.thinkingLevel } : {}) };
     }
-    const pair = this.events ? queryPlanPair(this.events) : undefined;
-    if (!pair || pair.pair !== `${selected.provider}/${selected.id}`) return undefined;
-    const next = ctx.modelRegistry.find(pair.next.provider, pair.next.id);
-    return next && !isVirtual(next) ? { model: next, thinkingLevel: pair.thinkingLevel } : undefined;
+    return undefined;
   }
 
   lastAnswer(): { at: number; promptTokens: number } | undefined {

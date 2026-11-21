@@ -884,63 +884,48 @@ test("footer displays an optional read-only waterfall snapshot without owning ro
   }
 });
 
-test("footer reads the published plan pair and falls back to the last answer without it", async () => {
+test("footer shows a worker build and a consultation from the published snapshot", async () => {
   const dir = await mkdtemp(path.join(os.tmpdir(), "pi-footer-plan-pair-"));
   const originalFetch = globalThis.fetch, originalCache = process.env.CLAUDE_STATUSLINE_CACHE_DIR;
   process.env.CLAUDE_STATUSLINE_CACHE_DIR = dir;
   globalThis.fetch = async () => { throw new Error("Offline test: no network"); };
-  const entries = [];
   let h;
   try {
-    h = host(entries, dir);
-    h.ctx.model = { provider: "anthropic", id: "opusplan", api: "pi-virtual", contextWindow: 0, reasoning: true };
+    h = host([], dir);
+    const model = id => ({ provider: "anthropic", id, api: "fake", contextWindow: 200000, reasoning: true });
+    const fable = { provider: "anthropic", id: "claude-fable-5-5" }, opus = { provider: "anthropic", id: "claude-opus-5-5" };
+    h.ctx.model = model(opus.id);
     h.ctx.modelRegistry.getApiKeyForProvider = async () => undefined;
     h.ctx.modelRegistry.find = (provider, id) => ({ provider, id, api: "fake", contextWindow: 200000, reasoning: true });
-    const opus = { provider: "anthropic", id: "claude-opus-5-5" }, sonnet = { provider: "anthropic", id: "claude-sonnet-5-5" };
     let route;
-    h.pi.events.on("pi-plugins.plan-pair.v1", request => {
+    h.pi.events.on("pi-plugins.plan-pair.v2", request => {
       if (request.kind === "query" && route) request.snapshot = structuredClone(route);
     });
     await h.handlers.get("session_start")({}, h.ctx);
-    const snapshot = (phase, next) => ({ version: 1, pair: "anthropic/opusplan", phase, next, planner: opus, worker: sonnet, thinkingLevel: "high" });
-    route = snapshot("plan", opus);
+    const snapshot = (phase, next) => ({ version: 2, phase, home: fable, worker: opus, next });
     await refreshFrame(h);
-    assert.match(plain(h.footer.render(160).join("\n")), /opusplan ▸ opus-5\.5/);
-    route = snapshot("build", sonnet);
+    assert.doesNotMatch(plain(h.footer.render(160).join("\n")), /building|consulting/);
+    route = snapshot("build", opus);
     await refreshFrame(h);
-    assert.match(plain(h.footer.render(160).join("\n")), /opusplan ▸ sonnet-5\.5/);
-    for (const [provider, id, planner, worker, plannerName, workerName] of [
-      ["anthropic", "fableplan", { provider: "anthropic", id: "claude-fable-5-5" }, opus, /fable-5\.5/i, /opus-5\.5/i],
-      ["openai-codex", "astraplan", { provider: "openai-codex", id: "gpt-6-astra" }, { provider: "openai-codex", id: "gpt-6-sol" }, /astra/i, /sol/i],
-      ["openai", "astraplan", { provider: "openai", id: "gpt-6-astra" }, { provider: "openai", id: "gpt-6-sol" }, /astra/i, /sol/i],
-    ]) {
-      h.ctx.model = { provider, id, api: "pi-virtual", contextWindow: 0, reasoning: true };
-      for (const [phase, next, name] of [["work", worker, workerName], ["chat", worker, workerName], ["plan", planner, plannerName], ["consult", planner, plannerName], ["work", worker, workerName], ["chat", worker, workerName]]) {
-        route = { version: 1, pair: `${provider}/${id}`, phase, next, planner, worker, thinkingLevel: "high" };
-        await refreshFrame(h);
-        for (const width of [46, 120, 180]) {
-          const rows = h.footer.render(width).map(plain);
-          assert.ok(rows.every(row => visibleWidth(row) <= width));
-          assert.match(rows.join("\n"), name, `${id} ${phase} at ${width}`);
-          h.pi.events.emit("herdr:blocked", { active: true });
-          const blocked = h.footer.render(width).map(plain);
-          assert.equal(blocked.length, 1);
-          assert.ok(visibleWidth(blocked[0]) <= width);
-          if (width >= 120) assert.match(blocked[0], name, `${id} blocked ${phase} at ${width}`);
-          h.pi.events.emit("herdr:blocked", { active: false });
-        }
-      }
+    assert.match(plain(h.footer.render(160).join("\n")), /opus-5\.5 building · then fable-5\.5/);
+    for (const width of [46, 120, 180]) {
+      const rows = h.footer.render(width).map(plain);
+      assert.ok(rows.every(row => visibleWidth(row) <= width));
+      assert.match(rows.join("\n"), /opus-5\.5/, `build at ${width}`);
+      h.pi.events.emit("herdr:blocked", { active: true });
+      const blocked = h.footer.render(width).map(plain);
+      assert.equal(blocked.length, 1);
+      assert.ok(visibleWidth(blocked[0]) <= width);
+      h.pi.events.emit("herdr:blocked", { active: false });
     }
-    h.ctx.model = { provider: "anthropic", id: "opusplan", api: "pi-virtual", contextWindow: 0, reasoning: true };
-    route = snapshot("build", sonnet);
-    entries.push({ type: "message", message: { role: "assistant", stopReason: "stop", provider: "anthropic", model: "claude-haiku-4-5" } });
+    h.ctx.model = model(fable.id);
+    route = snapshot("consult", fable);
     await refreshFrame(h);
-    assert.match(plain(h.footer.render(160).join("\n")), /last haiku-4\.5/);
-    route = undefined;
+    assert.match(plain(h.footer.render(160).join("\n")), /fable-5\.5 consulting · then opus-5\.5/);
+    // A snapshot for another model than the selected one is ignored.
+    route = snapshot("build", opus);
     await refreshFrame(h);
-    const fallback = plain(h.footer.render(160).join("\n"));
-    assert.match(fallback, /opusplan → haiku-4\.5/);
-    assert.doesNotMatch(fallback, /▸/);
+    assert.doesNotMatch(plain(h.footer.render(160).join("\n")), /building/);
   } finally {
     await h?.handlers.get("session_shutdown")?.({}, h.ctx);
     globalThis.fetch = originalFetch;
@@ -989,47 +974,6 @@ test("waterfall footer reads only the routed Argon variant, never a generic medi
   }
 });
 
-test("Google plan pairs resolve the active physical model and Argon variant quota across phase switches", async () => {
-  const dir = await mkdtemp(path.join(os.tmpdir(), "pi-footer-google-pair-"));
-  const originalFetch = globalThis.fetch;
-  const resetTime = new Date(Date.now() + 3_600_000).toISOString();
-  globalThis.fetch = async (url) => {
-    if (String(url).endsWith("loadCodeAssist")) return new Response(JSON.stringify({ cloudaicompanionProject: "synthetic-project" }));
-    if (String(url).endsWith("retrieveUserQuotaSummary")) return new Response(JSON.stringify({ groups: [{ buckets: [
-      { bucketId: "gemini-5h", remainingFraction: 0.9, resetTime },
-      { bucketId: "gemini-weekly", remainingFraction: 0.8, resetTime },
-    ] }] }));
-    return new Response(JSON.stringify({ models: {
-      "gemini-4-argon-high": { quotaInfo: { remainingFraction: 0.01, resetTime } },
-      "gemini-4-argon-medium": { quotaInfo: { remainingFraction: 0.8, resetTime } },
-    } }));
-  };
-  let h;
-  try {
-    h = host([], dir);
-    const carbon = { provider: "google", id: "antigravity-gemini-4-carbon", api: "google", baseUrl: "https://cloudcode-pa.googleapis.com", contextWindow: 1048576, reasoning: true };
-    const argon = { provider: "google", id: "antigravity-gemini-4-argon", api: "google", baseUrl: "https://cloudcode-pa.googleapis.com", contextWindow: 1048576, reasoning: true };
-    h.ctx.model = { provider: "google", id: "carbonplan", api: "pi-virtual", contextWindow: 0, reasoning: true };
-    h.ctx.modelRegistry.getAvailable = () => [carbon, argon];
-    h.ctx.modelRegistry.getProvider = () => ({ getModels: () => [carbon, argon] });
-    h.ctx.modelRegistry.find = (_provider, id) => id === carbon.id ? carbon : id === argon.id ? argon : undefined;
-    h.ctx.modelRegistry.getApiKeyForProvider = async provider => provider === "google" ? "ya29.synthetic" : undefined;
-    let route = { version: 1, pair: "google/carbonplan", phase: "work", next: { provider: "google", id: argon.id },
-      planner: { provider: "google", id: carbon.id }, worker: { provider: "google", id: argon.id }, thinkingLevel: "medium" };
-    h.pi.events.on("pi-plugins.plan-pair.v1", request => { if (request.kind === "query" && route) request.snapshot = structuredClone(route); });
-    await h.handlers.get("session_start")({}, h.ctx);
-    await vi.waitFor(() => assert.match(plain(h.footer.render(160).join("\n")), /Antigravity.*Argon medium 20% used/));
-    route = { ...route, phase: "consult", thinkingLevel: "high" };
-    await refreshFrame(h);
-    await vi.waitFor(() => assert.match(plain(h.footer.render(160).join("\n")), /Antigravity.*Argon high 99% used/));
-    await h.commands.get("status").handler("details", h.ctx);
-    assert.match(h.notices.at(-1), /Argon high \[variant; gemini-4-argon-high\] 99% used/);
-  } finally {
-    await h?.handlers.get("session_shutdown")?.({}, h.ctx);
-    globalThis.fetch = originalFetch;
-    await rm(dir, { recursive: true, force: true });
-  }
-});
 
 function syntheticCodex(h, account = "acct-1") {
   h.ctx.modelRegistry.getApiKeyForProvider = async (provider) => provider === "openai-codex"
@@ -2437,17 +2381,15 @@ test("a plan model pair shows the model behind it and drops it first when narrow
   assert.doesNotMatch(mod.renderFooter({ ...s, routedTo: undefined }, 120, theme).map(plain).join("\n"), /→/u);
 });
 
-test("a published plan pair shows the next model, consulting and a fallback warning", () => {
-  const s = { ...controlledFixture(), model: "opusplan", pair: { next: "claude-opus-5-5", phase: "plan" } };
+test("a published worker build shows what follows it, consulting, and keeps the model hit target", () => {
+  const s = { ...controlledFixture(), model: "claude-opus-5-5", build: { phase: "build", then: "claude-fable-5-2" } };
   const row = (state, width = 120) => plain(mod.renderFooter(state, width, theme)[1] ?? "");
-  assert.match(row(s), /opusplan ▸ opus-5\.5/u);
-  assert.doesNotMatch(row(s), /→/u);
-  assert.doesNotMatch(row(s), /consulting/u);
-  assert.match(row({ ...s, pair: { ...s.pair, phase: "consult" } }), /opus-5\.5 consulting/u);
-  assert.match(row({ ...s, pair: { ...s.pair, fallback: "claude-haiku-4-5" } }), /last haiku-4\.5/u);
+  assert.match(row(s), /opus-5\.5 building · then fable-5\.2/u);
+  assert.match(row({ ...s, model: "claude-fable-5-2", build: { phase: "consult", then: "claude-opus-5-5" } }), /fable-5\.2 consulting · then opus-5\.5/u);
+  assert.doesNotMatch(row({ ...s, build: undefined }), /building|then/u);
   const narrow = mod.renderFooter(s, 46, theme).map(plain).join("\n");
   assert.match(narrow, /opus-5\.5/u);
-  assert.doesNotMatch(narrow, /opusplan ▸/u);
+  assert.doesNotMatch(narrow, /then fable/u);
   const layout = mod.layoutFooter(s, 180, theme);
   const hit = layout.hits.find((candidate) => hitText(layout, candidate).includes("opus-5.5"));
   assert.equal(hit?.action, "model.open");

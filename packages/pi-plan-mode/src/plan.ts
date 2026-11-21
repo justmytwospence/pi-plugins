@@ -29,6 +29,7 @@ import {
   COMPACT_DEFAULT_MIN_TOKENS,
   defaultImplementationContext,
 } from "./approval-picker.ts";
+import { registerBuildRoute, workerNote } from "./build-route.ts";
 import {
   EDITOR_MODE,
   EDITOR_SURFACE,
@@ -60,6 +61,7 @@ import {
   sameModel,
   subagentRoleModel,
 } from "./implementation-models.ts";
+import { latestSpec } from "./implementers.ts";
 import { type Approval, enterPlanText, registerInlinePlanMode } from "./inline-plan.ts";
 import { DEFAULT_JEV_MODEL, DEFAULT_JEV_PROVIDER, pickToolsWithJev } from "./jev-tool-picker.ts";
 import { runLaneCommand } from "./lane-commands.ts";
@@ -75,8 +77,6 @@ import {
 } from "./main-chat.ts";
 import { buildMcpCatalog, readConfiguredMcpServers } from "./mcp-tools.ts";
 import { modelCatalog, normalizeEffort } from "./model-catalog.ts";
-import { latestSpec, pairKey } from "./model-pairs.ts";
-import { pairNote, registerPairs } from "./pairs.ts";
 import { exportPlanToFile } from "./plan-export.ts";
 import { plansDirectoryPath, planTitle, readPlan, writePlanFile } from "./plan-file.ts";
 import { expandHome, runPlanCompleteHook } from "./plan-hook.ts";
@@ -103,7 +103,6 @@ import { extensionsForProvider, resolveProviderExtensions } from "./provider-ext
 import { routedModel } from "./routed-model.ts";
 import {
   configuredAlwaysOffer,
-  configuredModelPairs,
   configuredPlanExportPath,
   configuredPlanModeToggleShortcut,
   configuredPlanners,
@@ -318,8 +317,6 @@ export default async function plan(pi: ExtensionAPI, dependencies: PlanDependenc
   const notifiedPlans = new Map<string, number>();
   const notifiedQuestions = new WeakSet<object>();
 
-  /** Registers the plan model pairs once they exist; custom ones come from the settings. */
-  let definePairs: (() => void) | undefined;
   const loadSettings = async () => {
     if (dependencies.readSettings) {
       settings = await dependencies.readSettings();
@@ -327,8 +324,6 @@ export default async function plan(pi: ExtensionAPI, dependencies: PlanDependenc
       const loaded = await readPlanModeSettings();
       settings = loaded.kind === "loaded" ? loaded.settings : { thinkingLevel: "inherit" };
     }
-    // Custom plan model pairs from the settings join (or replace) the built-in ones.
-    definePairs?.();
   };
 
   const saveSettings = (patch: Parameters<typeof updatePlanModeSettings>[0]) => {
@@ -931,10 +926,10 @@ export default async function plan(pi: ExtensionAPI, dependencies: PlanDependenc
     clearBranch();
   });
 
-  // Plan model pairs: virtual models that plan on the planner and build on the worker.
+  // Implementer choice at approval: another model builds, then the session returns to yours.
   const judgePlanEffort = async (ctx: ExtensionContext, prompt: string) => {
-    const pair = pairs.selected(ctx);
-    if (!pair) return undefined;
+    const planner = sessionSpecOf(ctx);
+    if (!planner) return undefined;
     try {
       const judgment = await judgeTaskEffort({
         phase: "plan",
@@ -948,23 +943,24 @@ export default async function plan(pi: ExtensionAPI, dependencies: PlanDependenc
       if (judgment.kind !== "system1") return undefined;
       const recommended = recommendTaskEffort(judgment);
       if (recommended.kind !== "system1") return undefined;
-      return normalizedSpec(ctx, pair.planner, recommended.thinkingLevel).thinkingLevel;
+      return normalizedSpec(ctx, planner, recommended.thinkingLevel).thinkingLevel;
     } catch {
       return undefined;
     }
   };
   const askPlannerNote = (plannerName: string) =>
     `\n\nWhen the plan does not fit what you find, call ask_planner; ${plannerName} planned it and reads this conversation.`;
+  const buildNote = (ctx: ExtensionContext) => {
+    const home = route.homeName(ctx);
+    return home ? askPlannerNote(home) : "";
+  };
   // The guards read pi-tool-gate's verdict on shell commands from the main session's bus.
   bindGateShell(pi.events);
-  const pairs = registerPairs(pi, {
+  const route = registerBuildRoute(pi, {
     planning: () => inline.active,
-    workflow: () => inline.workflow,
     safeSubcommands: () => settings.safeSubcommands,
     judgePlanEffort,
   });
-  definePairs = () => pairs.define(configuredModelPairs(settings));
-  definePairs();
 
   // Inline plan mode in your own conversation (Claude Code's): /plan, Shift+Tab, enter_plan_mode.
   const inline = registerInlinePlanMode(pi, {
@@ -981,56 +977,31 @@ export default async function plan(pi: ExtensionAPI, dependencies: PlanDependenc
       const planning = sessionSpecOf(ctx);
       if (!planning) return undefined;
       const catalog = modelCatalog(ctx, "available");
-      const pair = pairs.selected(ctx);
-      const offers = (thinkingLevel: ModelSpec["thinkingLevel"]) =>
-        pairs.pairsFor(ctx).map((offer) => ({
-          kind: "pair-worker" as const,
-          model: { ...offer.worker, ...(thinkingLevel ? { thinkingLevel } : {}) },
-          name: offer.workerName,
-          note: pairNote(offer),
-          pair: pairKey(offer.def),
-        }));
-      if (pair) {
-        const level = pi.getThinkingLevel() as ThinkingLevel;
-        return {
-          planning: { ...pair.worker, thinkingLevel: level },
-          planningName: pair.workerName,
-          implementerName: pair.workerName,
-          note: pairNote(pair),
-          alternates: [
-            {
-              kind: "planner" as const,
-              model: { ...pair.planner, thinkingLevel: level },
-              name: pair.plannerName,
-            },
-            ...offers(level as ModelSpec["thinkingLevel"]),
-          ],
-        };
-      }
-      const alternates = offers(planning.thinkingLevel);
+      const workers = route.workers(ctx);
+      const first = workers[0];
+      if (!first) return { planning, planningName: catalog.name(planning) };
+      const homeName = catalog.name(planning);
+      const note = workerNote(homeName);
       return {
-        planning,
-        planningName: catalog.name(planning),
-        ...(alternates.length ? { alternates } : {}),
+        planning: first.spec,
+        planningName: first.name,
+        implementerName: first.name,
+        note,
+        alternates: [
+          ...workers.slice(1).map((worker) => ({
+            kind: "worker" as const,
+            model: worker.spec,
+            name: worker.name,
+            note,
+          })),
+          { kind: "self" as const, model: planning, name: homeName },
+        ],
       };
     },
-    selectPair: async (ctx, key) => {
-      const offer = pairs.pairsFor(ctx).find((candidate) => pairKey(candidate.def) === key);
-      const model = offer && ctx.modelRegistry.find(offer.def.provider, offer.def.id);
-      if (!model) return false;
-      // A model switch may apply a per-model default; keep the planning level for the pair's consultations.
-      const level = pi.getThinkingLevel();
-      try {
-        if (!(await withEffortOrigin("plan-mode", () => pi.setModel(model)))) return false;
-      } catch {
-        return false;
-      }
-      if (pi.getThinkingLevel() !== level) withEffortOrigin("plan-mode", () => pi.setThinkingLevel(level));
-      return true;
-    },
+    beginBuild: (ctx, worker, planFile) => route.begin(ctx, worker, planFile),
+    cancelBuild: (ctx) => route.cancel(ctx),
     implementationContext: (ctx) => implementationContextInfo(ctx),
-    compactHere: (approval, ctx) => {
-      pairs.approve(ctx, approval.planFile, approval.alternate === "planner" ? "planner" : "worker");
+    compactHere: (approval) => {
       pendingOperation = {
         kind: "compact-here",
         approval,
@@ -1039,13 +1010,10 @@ export default async function plan(pi: ExtensionAPI, dependencies: PlanDependenc
       };
     },
     implementHere: (ctx, approval) => {
-      const onPlanner = approval.alternate === "planner";
-      const pair = onPlanner ? undefined : pairs.selected(ctx);
-      pairs.approve(ctx, approval.planFile, onPlanner ? "planner" : "worker");
       applyDirectEffort(ctx, approval.thinkingLevel);
-      return directImplementationBrief(approval) + (pair ? askPlannerNote(pair.plannerName) : "");
+      return directImplementationBrief(approval) + buildNote(ctx);
     },
-    phaseChanged: (ctx) => pairs.phaseChanged(ctx),
+    phaseChanged: (ctx) => route.phaseChanged(ctx),
     toggleKey: () => configuredPlanModeToggleShortcut(settings),
   });
 
@@ -1071,7 +1039,6 @@ export default async function plan(pi: ExtensionAPI, dependencies: PlanDependenc
       return undefined;
     }
     const { approval } = operation;
-    const pair = approval.alternate === "planner" ? undefined : pairs.selected(ctx);
     applyDirectEffort(ctx, approval.thinkingLevel);
     return {
       entries: [
@@ -1085,7 +1052,7 @@ export default async function plan(pi: ExtensionAPI, dependencies: PlanDependenc
           {
             type: "custom_message" as const,
             customType: "plan-mode-implementation",
-            content: directImplementationBrief(approval) + (pair ? askPlannerNote(pair.plannerName) : ""),
+            content: directImplementationBrief(approval) + buildNote(ctx),
             display: true,
             details: { planFile: approval.planFile, lines: approval.plan.split("\n").length },
           },
@@ -2301,10 +2268,8 @@ export default async function plan(pi: ExtensionAPI, dependencies: PlanDependenc
     const planFile = writePlanFile(plansDirectoryPath(settings.plansDirectory), plan);
     if (!(await inline.work(ctx))) return;
     disposeRun("implemented");
-    const pair = pairs.selected(ctx);
-    pairs.approve(ctx, planFile);
     applyDirectEffort(ctx, target.thinkingLevel);
-    const brief = directImplementationBrief({ plan, planFile }) + (pair ? askPlannerNote(pair.plannerName) : "");
+    const brief = directImplementationBrief({ plan, planFile });
     if (context === "clear") compactDirect(ctx, planFile, brief);
     else pi.sendUserMessage(brief);
   }

@@ -156,7 +156,7 @@ These keys are **local to the named focused surface**, not global shortcuts. No 
 
 ## Model, reasoning and footer controls
 
-`app.model.select` opens Pi's normal model selector, where a [plan model pair](/plugins/pi-plan-mode/#plan-model-pairs) such as `anthropic/opusplan` is one entry. With the custom [pi-status-footer](/plugins/pi-status-footer/), the model row also shows the model that will answer next. `app.thinking.cycle` cycles reasoning; with a pair selected the level applies to whichever model serves the request.
+`app.model.select` opens Pi's normal model selector, which lists real models only; the implementer of a plan is chosen at [plan approval](/plugins/pi-plan-mode/#choosing-who-implements). With the custom [pi-status-footer](/plugins/pi-status-footer/), the model row also shows a worker building a plan. `app.thinking.cycle` cycles reasoning for the current model.
 
 Workflow/standalone Plan, reasoning and approval cycles share a preview: repeated keys and eligible clicks update one combined, UI-only history line and apply only the final changes. Pending values are not effective or protective; a round trip to the original settings changes nothing. With the custom footer active, the reasoning key and click share this staging; without it native reasoning remains stock. Native model cycling is unchanged. Explicit picker, command and tool choices stay immediate, while plan/tool approvals still require confirmation.
 
@@ -217,7 +217,7 @@ Merge, `/reload`, then inspect `/hotkeys` and startup diagnostics. An array repl
 
 ## Optional personal profile
 
-**This is a labeled personal configuration, not stock Pi or automatic suite behavior.** It keeps every frequent control on a Ctrl key, binds dedicated history and reserves Ctrl+G for returning to the transcript tail. The model picker moves to Alt+P, opencode's model-list key, which frees Ctrl+L for clear-screen; plan model pairs such as `opusplan` are entries in it, while the workflow stays on tool-gate's own key. Effort cycles on Ctrl+T, opencode's variant-cycle key; Ctrl+O already expands thinking with pi-cc-render, so the native thinking-block toggle is unbound. Ctrl+Y gives up Pi's yank so that tool-gate can toggle approvals on it. The external editor remains available through pi-vim's Ctrl+X Ctrl+E chord when that component is selected.
+**This is a labeled personal configuration, not stock Pi or automatic suite behavior.** It keeps every frequent control on a Ctrl key, binds dedicated history and reserves Ctrl+G for returning to the transcript tail. The model picker moves to Alt+P, opencode's model-list key, which frees Ctrl+L for clear-screen; it lists real models only, while the workflow stays on tool-gate's own key. Effort cycles on Ctrl+T, opencode's variant-cycle key; Ctrl+O already expands thinking with pi-cc-render, so the native thinking-block toggle is unbound. Ctrl+Y gives up Pi's yank so that tool-gate can toggle approvals on it. The external editor remains available through pi-vim's Ctrl+X Ctrl+E chord when that component is selected.
 
 ```json
 {

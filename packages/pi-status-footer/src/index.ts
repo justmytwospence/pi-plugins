@@ -83,7 +83,7 @@ export interface Snapshot {
   primaryKeys?: { model?: string; reasoning?: string; workflow?: string; approvals?: string };
   /** Other-session chrome is string-only: no inherited controls or primary hints. */
   readOnly?: boolean;
-  cwd: string; model: string; /** The physical model behind a virtual selection (a plan model pair), once it has answered. */ routedTo?: string; /** A plan model pair published by pi-plan-mode: the model answering next, its phase, and a last answer from outside the pair. */ pair?: { next: string; phase: PlanPairPhase; fallback?: string }; provider: string; thinking?: string; oauth: boolean;
+  cwd: string; model: string; /** The physical model behind a virtual selection, once it has answered. */ routedTo?: string; /** A worker build published by pi-plan-mode: its phase and the model the session returns to (while consulting, the worker that continues). */ build?: { phase: PlanPairPhase; then: string }; provider: string; thinking?: string; oauth: boolean;
   sessionName?: string; phase?: string; queued: boolean;
   context: { tokens: number | null; contextWindow: number; percent: number | null };
   totals: Totals; cacheHit?: number; git: GitInfo;
@@ -967,7 +967,7 @@ export function layoutFooter(snapshot: Snapshot, width: number, theme: Paint): F
   const branch = outsideGit ? "" : `${branchIcon}${theme.fg("muted", clean(g.branch ?? ""))}${suffix}`;
   const branchShort = outsideGit ? "" : `${branchIcon}${theme.fg("muted", truncateToWidth(clean(g.branch ?? ""), 14))}${suffix}`;
   const phaseText = s.phase ? theme.fg(s.phase === "error" ? "error" : "warning", s.phase) : "";
-  const model = theme.bold(theme.fg("accent", shortModel(s.pair?.next ?? s.model)));
+  const model = theme.bold(theme.fg("accent", shortModel(s.model)));
   // Main-only target previews are detached from effective state; the chat line owns phase.
   const draft = !s.readOnly && !s.compact && ["pending", "applying"].includes(s.settingsCycle?.phase ?? "") ? s.settingsCycle : undefined;
   const pending = (key: SettingKey) => draft?.settings.find(setting => setting.key === key);
@@ -1015,16 +1015,18 @@ export function layoutFooter(snapshot: Snapshot, width: number, theme: Paint): F
   const statuses = gateStatus ? s.statuses.filter((status) => status !== gateStatus) : s.statuses;
   const workflowAction = action("workflow.cycle");
   const identitySegments = [
-    s.pair
+    s.build
       ? partsSegment(
           [
-            { text: theme.fg("dim", `${clean(s.model)} ▸ `), action: action("model.open") },
             { text: model, action: action("model.open") },
-            ...(s.pair.phase === "consult" ? [{ text: theme.fg("muted", " consulting") }] : []),
-            ...(s.pair.fallback ? [{ text: `${theme.fg("dim", " · ")}${theme.fg("warning", `last ${shortModel(s.pair.fallback)}`)}` }] : []),
+            { text: theme.fg("muted", s.build.phase === "consult" ? " consulting" : " building") },
+            { text: theme.fg("dim", ` · then ${shortModel(s.build.then)}`) },
           ],
           100,
-          [{ text: model, action: action("model.open") }, ...(s.pair.phase === "consult" ? [{ text: theme.fg("muted", " consulting") }] : [])],
+          [
+            { text: model, action: action("model.open") },
+            { text: theme.fg("muted", s.build.phase === "consult" ? " consulting" : " building") },
+          ],
         )
       : s.routedTo
       ? partsSegment(
@@ -1605,18 +1607,15 @@ export default function statusFooter(pi: ExtensionAPI): void {
   const activeRoute = (context: ExtensionContext) => {
     const routed = context.model?.provider === "waterfall" ? queryWaterfall(pi.events)?.physical : undefined;
     const last = isVirtual(context.model) ? routedModel(context) : undefined;
-    const pairRoute = isVirtual(context.model) && context.model ? queryPlanPair(pi.events) : undefined;
-    const pair = pairRoute && pairRoute.pair === `${context.model!.provider}/${context.model!.id}` ? pairRoute : undefined;
+    const published = context.model && !isVirtual(context.model) ? queryPlanPair(pi.events) : undefined;
+    const build = published && published.next.provider === context.model!.provider && published.next.id === context.model!.id ? published : undefined;
     let physical = isVirtual(context.model) ? last : context.model;
     if (routed) {
       try { physical = context.modelRegistry.find(routed.provider, routed.id); }
       catch { physical = undefined; }
-    } else if (pair) {
-      try { physical = context.modelRegistry.find(pair.next.provider, pair.next.id) ?? physical; }
-      catch { /* keep the last answering model */ }
     }
-    const thinking = routed?.thinkingLevel ?? pair?.thinkingLevel ?? pi.getThinkingLevel();
-    return { routed, pair, last, physical, thinking };
+    const thinking = routed?.thinkingLevel ?? pi.getThinkingLevel();
+    return { routed, build, last, physical, thinking };
   };
   // Discovery is explicitly outside render, including other-session chrome. The
   // provider descriptor excludes virtual-only models, which are not accounts.
@@ -1688,8 +1687,8 @@ export default function statusFooter(pi: ExtensionAPI): void {
     if (!active || !ctx) return;
     const context = ctx, epoch = generation, selectionEpoch = providerSelectionEpoch;
     discoverProviders(context);
-    const { routed, pair, thinking } = activeRoute(context);
-    const ids = showAll ? orderedProviders() : [routed?.provider ?? pair?.next.provider ?? context.model?.provider].filter((id): id is string => !!id).map(accountUsageProvider);
+    const { routed, thinking } = activeRoute(context);
+    const ids = showAll ? orderedProviders() : [routed?.provider ?? context.model?.provider].filter((id): id is string => !!id).map(accountUsageProvider);
     await Promise.all(ids.filter((id) => id !== "anthropic" && id !== "openai-codex").map(async (id) => {
       let model;
       try { model = routed?.provider === id ? context.modelRegistry.find(id, routed.id) : providerModels.get(id); }
@@ -1750,8 +1749,8 @@ export default function statusFooter(pi: ExtensionAPI): void {
   const snapshot = (branch: string | null, statuses: ReadonlyMap<string, string>): Snapshot => {
     if (!ctx) throw new Error("Footer rendered outside its session lifecycle");
     const current = ctx;
-    const { routed, pair, last, physical: physicalModel, thinking } = activeRoute(current);
-    const provider = routed?.provider ?? pair?.next.provider ?? current.model?.provider ?? "no provider";
+    const { routed, build, physical: physicalModel, thinking } = activeRoute(current);
+    const provider = routed?.provider ?? current.model?.provider ?? "no provider";
     const quotas: Quota[] = [];
     let unavailableQuota: string | undefined;
     if (provider === "anthropic" || showAll) {
@@ -1780,11 +1779,10 @@ export default function statusFooter(pi: ExtensionAPI): void {
         approvals: discoveredActions["approvals.open"] ? discoveredActions["approvals.open"].key ?? "" : absorbed.mode?.key,
       },
       cwd: current.cwd, provider, model: routed && physicalModel ? `auto → ${routed.id}` : current.model?.id ?? "no model",
-      ...(pair
-        ? { pair: { next: pair.next.id, phase: pair.phase,
-            ...(last && !(last.provider === pair.planner.provider && last.id === pair.planner.id) && !(last.provider === pair.worker.provider && last.id === pair.worker.id) ? { fallback: last.id } : {}) } }
+      ...(build
+        ? { build: { phase: build.phase, then: (build.phase === "build" ? build.home : build.worker).id } }
         : isVirtual(current.model) && physicalModel && physicalModel !== current.model ? { routedTo: physicalModel.id } : {}),
-      thinking: current.model?.reasoning ? (pair?.thinkingLevel ?? pi.getThinkingLevel()) : undefined,
+      thinking: current.model?.reasoning ? pi.getThinkingLevel() : undefined,
       oauth: physicalModel ? current.modelRegistry.isUsingOAuth(physicalModel) : false,
       sessionName: ownName(pi.getSessionName(), recapName), phase, queued: current.hasPendingMessages(),
       context: current.getContextUsage() ?? { tokens: null, contextWindow: (physicalModel ?? current.model)?.contextWindow ?? 0, percent: null },
@@ -1817,7 +1815,7 @@ export default function statusFooter(pi: ExtensionAPI): void {
       system1: undefined, actions: undefined, settingsCycle: undefined, primaryKeys: undefined, readOnly: true,
       workflow: undefined, mode: undefined, permissionPrompts: undefined,
       cache: undefined, lean: undefined,
-      cwd: session.cwd, provider: session.provider, model: session.model, pair: undefined, routedTo: undefined, thinking: session.thinking,
+      cwd: session.cwd, provider: session.provider, model: session.model, build: undefined, routedTo: undefined, thinking: session.thinking,
       oauth: false, quotas, unavailableQuota, providerUsage: usage.rows, providerUsageMore: usage.more,
       sessionName: session.sessionName, phase: session.phase, queued: session.queued === true,
       context: session.context, totals: session.totals, cacheHit: undefined,

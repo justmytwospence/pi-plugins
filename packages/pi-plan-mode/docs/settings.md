@@ -42,34 +42,11 @@ new draft.
 Export paths are not replaced by title-derived names, and exporting to an existing file still
 reports a collision rather than overwriting it.
 
-### Plan model pairs
+### Choosing who implements
 
-Built-in plan model pairs (`anthropic/fableplan`, `anthropic/fableplan-sonnet`, `anthropic/opusplan`, `openai-codex/astraplan`, `openai-codex/astraplan-terra`, `openai-codex/solplan`, `openai/astraplan`, `openai/astraplan-terra`, `openai/solplan`, `google/carbonplan`, `google/carbonplan-hydrogen`, `google/neonplan`) need no settings; see the README's [Plan model pairs](../README.md#plan-model-pairs). Planner and worker are Fable and Opus, Fable and Sonnet, Opus and Sonnet, Astra and Sol, Astra and Terra, Sol and Terra, Carbon and Neon, Carbon and Hydrogen, and Neon and Hydrogen. The pairs are derived from the shared model-family table. Each family resolves to the highest available generation on the pair's provider (the worker prefers the planner's generation), and a pair whose models are unavailable is not offered.
+The models offered at approval derive from the shared model-family table; see the README's [Choosing who implements](../README.md#choosing-who-implements). Nothing is configured here. The earlier `modelPairs` setting was removed and is ignored, like `implementationModelMap`, `defaultImplementationThinkingLevel`, `completionReview` and `completionMaxRevisions`.
 
-`modelPairs` adds or replaces pairs. Each key is the `provider/id` the pair registers under in `/model`:
-
-```json
-{
-  "modelPairs": {
-    "anthropic/fableplan": {
-      "planner": "anthropic/claude-fable-5-1",
-      "worker": "anthropic/claude-sonnet-5-1",
-      "name": "Fable plan, Sonnet build"
-    },
-    "openai/reviewplan": { "planner": "openai/gpt-6-astra", "worker": "openai/gpt-6.1-terra" }
-  }
-}
-```
-
-A key equal to a built-in pair replaces it in place; other keys are added after the built-ins. `anthropic/fableplan`, `openai/astraplan` and `openai-codex/astraplan` retain their persistent worker handoff after approval, including when replaced; newly named pairs do not. No setting is needed for this policy. `name` defaults to `<planner id> plan, <worker id> build`. The whole file is invalid (defaults apply, and it is never overwritten) when:
-
-- a key is not a `provider/modelId` or has an effort suffix;
-- `planner` or `worker` is missing, not a `provider/modelId`, or has an effort suffix;
-- `planner` and `worker` are the same model;
-- an entry has any key other than `planner`, `worker` and `name`;
-- `name` is not a non-empty string of at most 80 characters.
-
-A custom pair's planner and worker, like `planners` and both sides of `scoutModelMap`, follow their family's newest available generation (`claude-fable-5-1` runs as Claude Fable 5.2 once that is available). A custom pair whose planner or worker is not available is not offered, like a built-in one. Effort is not part of a pair: System 1 judges it at plan entry and at approval, and you can override either (see [Choosing effort](https://pi-plugins.vercel.app/guides/effort/)). `defaultImplementationContext` (`keep` or `clear`) selects the context default of the approval and the `/planners` Implement step; unset, it is automatic: compact when another model implements, the prompt cache is cold or the conversation is large. The earlier `implementationModelMap`, `defaultImplementationThinkingLevel`, `completionReview` and `completionMaxRevisions` keys are ignored.
+`defaultImplementationContext` (`keep` or `clear`) selects the context default of the approval and the `/planners` Implement step; unset, it is automatic: compact when a worker implements, the prompt cache is cold or the conversation is large. The earlier `implementationModelMap`, `defaultImplementationThinkingLevel`, `completionReview` and `completionMaxRevisions` keys are ignored.
 
 ### Rendered plans
 

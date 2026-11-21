@@ -2,118 +2,22 @@
 
 ## Unreleased
 
-### Premium planners can build two tiers down
+### Choose who implements at approval; plan model pairs removed
 
-- `anthropic/fableplan-sonnet` (Fable plans, Sonnet builds) and `openai/astraplan-terra`, `openai-codex/astraplan-terra` (Astra plans, Terra builds) join the built-in pairs, with the same persistent worker handoff as Fableplan and Astraplan. With Neon leading Google's `strong` tier, `google/carbonplan` builds on Neon, one tier down like the other pairs, `google/carbonplan-hydrogen` builds on Hydrogen, and `google/neonplan` (Neon plans, Hydrogen builds) replaces `google/argonplan`.
+- The `*plan` models (`opusplan`, `fableplan`, `astraplan`, `solplan`, `carbonplan`, ...) are gone from `/model`. You plan on the model you are on; on a premium or strong model (Fable, Opus, Astra, Sol, Carbon, Neon) the approval offers the model one tier down (the default), two tiers down, or your own model, taken from the shared model-family table.
+- A worker builds only the run that implements the plan. When that run ends, however it ends (finished, stopped, failed, reloaded), the session returns to your model and the level you planned at; an unfinished build in a saved session is ended at start with a warning. Choosing a model with `/model` during a build wins. Nothing stays on the worker, and there is no resume command.
+- `ask_planner` and `planner_answer` are available during a build only; the consult guard and unplanned-file notes are unchanged.
+- A session left on a removed `<family>plan` model moves to that family's newest model with a one-time notice. The `modelPairs` setting is ignored.
+- The `pi-plugins.plan-pair` footer query is now `v2` and publishes only an active build or consultation.
+- Cache: no request-shaping change. A build costs one cold read on the worker, as the pairs did.
 
 ### Configured models follow their family's newest release
 
-- `planners`, both sides of `scoutModelMap` and custom `modelPairs` resolve each model to its family's newest available generation, so `anthropic/claude-fable-5-1` plans on Claude Fable 5.2 once that is available.
-
-### Approval rows name the pair's models
-
-- With a plan model pair selected, the first two approval rows read **Yes, implement with <worker>** and **Yes, compact and implement with <worker>**, and the compact row is the default, since the worker re-reads the conversation without a prompt cache.
-- The approval note now says what happens after the build: the worker stays on (Fableplan, Astraplan) or the planner takes over again (other pairs). It also names the worker when a pair is only offered.
-- With a pair selected, **Yes, implement with <planner>** and **Yes, compact and implement with <planner>** let the planner build the plan itself. The pair stays selected and its persistent worker handoff ends.
+- `planners` and both sides of `scoutModelMap` resolve each model to its family's newest available generation, so `anthropic/claude-fable-5-1` plans on Claude Fable 5.2 once that is available.
 
 ### Fixed
 
 - A plan you decline with **No, keep planning** stays a full plan card in the transcript (title, whole plan, "What changed" for a revision, then **Kept planning**) instead of folding to one dim line.
-- Fableplan and both Astraplan identities retain their worker after approval for later work and chat, with branch-local persisted handoffs and temporary planner consultations.
-
-### Chat on the planner, Argon and Carbon pairs and the next model for the footer
-
-- A plan model pair now routes chat-mode requests (pi-tool-gate's chat workflow) to the planner, like plan mode and consultations; the worker serves only while an approved plan is being implemented, until that run settles (an aborted run stays on the worker), so ordinary work afterwards is back on the planner. `ask_planner` refuses when the planner already answers.
-- Built-in plan model pairs are now derived from the shared model-family table instead of a hardcoded list; the set is unchanged. A family confirmed with pi-model-families' `/families` can join them after `/reload`.
-- Added `google/carbonplan` (Carbon plans, Hydrogen builds) and `google/argonplan` (Argon plans, Hydrogen builds). The planner prefers the Antigravity (`antigravity-`) lane and the worker uses the planner's lane.
-- Published the selected pair's phase (plan, chat, consult or build), the model that answers next and its level on the synchronous `pi-plugins.plan-pair.v1` query, which pi-status-footer reads.
-
-### Implement on a pair's worker from approval
-
-- With no plan model pair selected and the session model the planner of a registered pair (Opus for `anthropic/opusplan`), approval also offers **Yes, implement with <worker>** and **Yes, compact and implement with <worker>**. They switch the session to the pair (keeping the planning level for `ask_planner`), then implement on the worker. Their effort row targets the worker, with its own System 1 recommendation.
-
-### Plan model pairs replace handoffs, exec mode and completion review
-
-- Added plan model pairs: virtual models (`anthropic/fableplan`, `anthropic/opusplan`, `openai-codex/astraplan`, `openai-codex/solplan`, `openai/astraplan`, `openai/solplan`, plus custom pairs from the `modelPairs` setting) that route each request to the planner while plan mode is on or a consultation is open, and to the worker otherwise. Approving a plan continues the same agent loop on the worker. A phase switch re-reads the conversation on the other model without its prompt cache.
-- Added `ask_planner` and `planner_answer`: an in-transcript consultation under a read-only guard (the plan file excepted), with recovery at settle when the planner does not call `planner_answer`. The unplanned-file note stays.
-- System 1 chooses effort at plan entry (once, skipped if you changed it) and at approval, where the picker's effort row targets the worker.
-- Approval rows are now **Yes, implement here**, **Yes, compact plan and implement here**, **Edit the plan**, **Save for later** and **No, keep planning**. With a pair selected the question names the worker and the planner.
-- Removed exec mode, `finish_plan`, `continue_plan`, `/plan-exec`, `/plan-back`, completion review (`completionReview`, `completionMaxRevisions`), `implementationModelMap`, `defaultImplementationThinkingLevel`, handoff approval rows, fresh-child handoffs and the `/planners` Handoff mode. Old settings keys are ignored. A session with an unfinished exec implementation continues as ordinary work, with a one-time notice.
-- `/planners` Implement keeps the Plan, Context (keep conversation or compact to plan, same session) and Effort rows.
-- pi-tool-gate's Linked flows and `/flow` are removed (see its README); pi-plan-mode no longer reacts to them.
-
-- Linked inline approval now separates **Approve and implement** from its Context selector, retaining history by default and limiting fresh conversation to supported initial handoffs.
-- Idle Linked execution can revisit a separate plan draft and resume the same supervised task without resetting findings, review limits or pauses. Busy requests do not cancel work; explicit stop ends the task without claiming completion.
-
-### Minor Changes
-
-- Exec handoffs are one dialog. The planner on call is the only agent that asks you (the implementer asks it with `ask_planner`; its own `ask_user_question` is blocked). Pauses, postponed planner questions and an implementer that stopped early open as `ask_user_question` dialogs, reopened when a turn ends with an empty editor and from the footer badge, `/plan-exec`, Shift+Tab and `/plan`. Chat-text answer capture (`replyId`) is gone; a review that fails with a provider error is retried once; consultation cards show cache hit rates; exec phase words are `planner asks you`, `needs your answer`, `needs your decision`, `review failed`, `implementing`, `idle`.
-
-- Exec mode reads as a mode of your chat: its footer label takes the permission mode's place
-  (`exec mode on · auto`), and plans are named by their first heading, not their random file name,
-  in the footer, the handoff row, the approval question and the cards. `finish_plan`'s card lists
-  the files edited (flagging those outside the plan) and the git diffstat; the planner's review
-  appears on it in full, with live progress, whether it is clean or not.
-
-- Plan approval offers **Yes, yolo mode** when pi-tool-gate's cycle includes yolo.
-- A planner's question is a picker at the bottom of its lane, as in pi-ask-user-question: options,
-  `Type something.` and `Skip`; arrows or `j`/`k` move, digits jump, Enter picks, typing on
-  `Type something.` opens the answer line (pi-vim in Insert mode), Esc returns to the options with
-  the draft kept. The question owns the lane's keys until it is answered, so it also works with
-  pi-vim lanes, which previously swallowed the arrows. Lane inputs no longer show the suite
-  editor's own border lines above and below the text.
-- The `/planners` screen: M's pane joins the screen only once both plans are in (or one is, and
-  the other planner failed); until then the lanes get the whole screen, and M's chat and a
-  notification say when it is there. The actions bar is **Write plan M · Implement… · Export… ·
-  Discard** (then **Implement… · Revise plan M · Export… · Discard**): Implement and Export
-  pick the plan on their own page, and coming back lands on the actions bar; **Save & close** is
-  gone (Esc hides the screen). Lane keys follow Pi: Ctrl+O expands tool output and Ctrl+T hides
-  thinking; Left/Right on an empty line switch a lane between its plan and its chat, shown as tabs
-  under the lane. Lane titles carry the state icon, model and version only; the stats table has
-  the rest (and the titles take over when it does not fit).
-
-- Fullscreen plan approval starts at the beginning of the plan in the main chat, with a
-  **Plan review** heading and scrolling reminder. Short plans get temporary trailing space;
-  manual scrolling stays under your control, editing returns to the beginning, and closing
-  review restores following the latest message. Regular terminal mode and RPC are unchanged.
-
-### Major Changes
-
-- Exec mode follows any approved plan: the footer shows `exec mode on` (on pi-status-footer's
-  permission-mode row, in the mode's place, with the permission mode underneath dim after it), and the model that planned stays on call. After a handoff, the implementer
-  gets `ask_planner`, which asks a copy of the planning session (every planner toolset, such as web
-  research and MCP, command grants and read-only subagents, with the plan file as its only writable
-  file) for a decision and shows any plan amendment as a diff; asks are counted
-  in the footer with their cost. The first edit of each file the plan does not list gets a note,
-  never a block. `finish_plan` ends exec mode with your choice: **Yes, done** (back to the planning
-  model), **Have the planner review it**, or **No, keep going**. `/planners`' Implement step writes
-  a plan file and starts exec mode with the author planner on call.
-- Plans are handoff-ready and approval picks who implements. Every plan (plan mode, `/planners` and
-  plan M) is written to one standard (Summary, Decisions, Changes, Steps, Verification, Out of
-  scope, Handoff notes) so a cheaper model can implement it without making a decision. The approval
-  rows are now `Yes, hand off to <model>`, `Yes, keep <planning model> on it`, **Edit the plan**
-  and **No, keep planning**; the per-permission-mode rows (auto, yolo, accept edits, approve each
-  edit) and **Yes, in a fresh session** are gone, and approving returns the permission mode to what
-  it was before planning. A handoff compacts the context down to the plan, switches the model in
-  the same session and starts implementing at once. The default target is `implementationModelMap`,
-  then pi-subagents' `worker` model, then the planning model; `/planners`' Implement step uses the
-  same resolver and the same implementation brief.
-
-- `/plan` is plan mode in your own conversation, as in Claude Code: your agent researches read-only,
-  writes its plan to a plan file (`~/.pi/agent/plans/<two-words>.md`, the only file it may write),
-  and calls `exit_plan_mode`, which shows the plan and asks you to implement it here (in the
-  permission mode you pick), in a fresh session, after editing it, or to keep planning. Your agent
-  can enter plan mode itself with `enter_plan_mode`. With pi-tool-gate, plan mode is a step of its
-  Shift+Tab permission-mode cycle; alone, `toggleShortcut` toggles it.
-- The full-screen planner moved to `/planners` and always runs two planners: Planner B can no
-  longer be `none`, and **Add a planner** is gone. Restored one-planner runs still open.
-- `toggleShortcut` toggles plan mode instead of opening the planner; the Settings step no longer
-  edits it. New `plansDirectory` setting.
-
-### Patch Changes
-
-- Plan review no longer shows the previous plan when your agent writes the plan file and calls
-  `exit_plan_mode` in the same message: `exit_plan_mode` now runs sequentially, after the write.
 
 ## 1.0.0
 

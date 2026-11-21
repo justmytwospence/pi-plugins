@@ -10,7 +10,7 @@ Model and reasoning effort are separate choices. Automatic recommendations are m
 | Boundary | Effort behavior |
 | --- | --- |
 | New subagent task or batch | Select open model and effort fields before scheduling; queued launches and chain items retain those selections. Resume, steering and retries retain the selected tuple. |
-| Enter plan mode with a plan model pair selected | Recommend effort once for the planner and apply it with your next message, unless you changed the level since entering plan mode. |
+| Enter plan mode on a model that offers implementers | Recommend effort once for the planner and apply it with your next message, unless you changed the level since entering plan mode. |
 | Approve a plan | Recommend effort for the worker (the pair's worker model, or the session model without a pair) in the picker's effort row; the approved level is applied without a second judgment. The approval default rates implementation after the settled design; Left/Right overrides it. |
 | Restore, reload, tree navigation or reconciliation | Restore native saved effort, without quota reads or effort classification. |
 

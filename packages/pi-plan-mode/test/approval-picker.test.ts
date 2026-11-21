@@ -116,7 +116,7 @@ test("an offered pair worker is a second model with independent, recommended eff
   const { component, state, done } = fixture({
     input: {
       planning: planner,
-      alternates: [{ model: worker, name: "Claude Sonnet 5.5", kind: "pair-worker" }],
+      alternates: [{ model: worker, name: "Claude Sonnet 5.5", kind: "worker" }],
       recommendations: new Map([["test/worker", "low"]]),
       note: "Opus 5.5 answers its questions",
     },
@@ -150,13 +150,12 @@ test("a premium planner offers each pair worker: tab cycles through them with th
     input: {
       planning: planner,
       alternates: [
-        { model: opus, name: "Claude Opus 5", kind: "pair-worker", note: "Fable answers; Opus stays on", pair: "a/x" },
+        { model: opus, name: "Claude Opus 5", kind: "worker", note: "Fable answers; Opus stays on" },
         {
           model: sonnet,
           name: "Claude Sonnet 5",
-          kind: "pair-worker",
+          kind: "worker",
           note: "Fable answers; Sonnet stays on",
-          pair: "a/y",
         },
       ],
     },
@@ -183,7 +182,7 @@ test("a named implementer is the first model and a selected pair's planner the s
     planning: worker,
     implementerName: "Claude Sonnet 5.5",
     note: "Opus 5.5 answers its questions",
-    alternates: [{ model: planner, name: "Claude Opus 5.5", kind: "planner" }],
+    alternates: [{ model: planner, name: "Claude Opus 5.5", kind: "self" }],
   };
   const first = fixture({ input: pair });
   assert.match(text(first.component), /Model: Sonnet 5\.5 \(Opus 5\.5 answers its questions\) · tab/u);
@@ -241,7 +240,7 @@ test("the context default: your setting, another model, a cold or big cache, els
 test("c toggles the context and a chosen context ignores the model's automatic one", () => {
   const worker: ModelSpec = { provider: "test", modelId: "worker", thinkingLevel: "high" };
   const { component, state, done } = fixture({
-    input: { planning: planner, alternates: [{ model: worker, name: "Worker", kind: "pair-worker" }] },
+    input: { planning: planner, alternates: [{ model: worker, name: "Worker", kind: "worker" }] },
   });
   component.handleInput("c");
   assert.equal(state.context, "clear");
@@ -331,7 +330,7 @@ test("remote answers win only when they answer, and a remote Keep never changes 
   const worker: ModelSpec = { provider: "test", modelId: "worker", thinkingLevel: "high" };
   const pair: ApprovalInput = {
     planning: planner,
-    alternates: [{ model: worker, name: "Worker", kind: "pair-worker" }],
+    alternates: [{ model: worker, name: "Worker", kind: "worker" }],
   };
   const picked = createApprovalState();
   const remoteWins = vi

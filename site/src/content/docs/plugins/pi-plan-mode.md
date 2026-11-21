@@ -18,7 +18,7 @@ See the [Switchyard integration contract](/architecture/switchyard/).
 
 - **Use it for:** Research before implementation in the main conversation, or compare two constrained planners.
 - **Enable:** Select `packages/pi-plan-mode/src/index.ts` with [`pi config`](/guides/install/#enable-an-explicit-subset).
-- **Controls:** `/plan`, `/planners`; enter/exit and active-run tools below. Approval offers implementing here or compacting the plan first; a selected [plan model pair](#plan-model-pairs) continues on its worker in the same loop and supplies `ask_planner`. No standalone shortcut by default; gate Shift+Tab needs an explicit stock remap.
+- **Controls:** `/plan`, `/planners`; enter/exit and active-run tools below. Approval offers implementing here or compacting the plan first; a [worker](#choosing-who-implements) builds the plan in the same loop, then the session returns to your model; `ask_planner` is available during that build. No standalone shortcut by default; gate Shift+Tab needs an explicit stock remap.
 - **Settings:** `pi-plan-mode.json`; `toggleShortcut` unset, implementation context keep, export `PLAN.md`; optional classifier tool selection on.
 - **Requirements, cost & privacy:** TUI and provider access for `/planners`; normal plan mode uses the main session. Planners/helpers each consume model usage; selected tools can send repository data externally.
 - **Integrations & limits:** Optional gate, activity views, footer and Herdr. Planner/scout entries join `/tasks` and FleetView; `/stop` remains shell-only. Read-only policies are not a sandbox.
@@ -45,7 +45,7 @@ While it is on, your agent writes its plan to a unique temporary draft, by defau
 When the plan is complete, your agent calls `exit_plan_mode` directly. Plan tools are model-only: calling them inside `codemode` is prohibited because nested calls have no inline plan renderer. The plan appears in the conversation. You choose:
 
 - **Yes, implement** (first and default): implement with the settings shown above the actions. Three flat lines of the question say what you are choosing, each with its key:
-  - **Model** (`tab` cycles, only when there are several; the key shows which of them is selected): the session's model, or another model on offer. With a [plan model pair](#plan-model-pairs) selected, the first model is the pair's worker and the next is the planner, which builds this plan itself (the pair stays selected and any persistent worker handoff ends). With no pair selected and the session model the planner of registered pairs (Opus for `anthropic/opusplan`, for example), the other models are those pairs' workers: choosing one switches the session to its pair, then implements on the worker, and `ask_planner` consults the model you planned with. A premium planner offers both of its workers (Fable: Opus and Sonnet; Astra: Sol and Terra), and with one of its pairs selected the other pair's worker follows the planner, so a `fableplan` plan can still be built on Sonnet. While a worker is selected, its line says who answers its questions and whether it stays on for later work (Fableplan, Astraplan) or the planner takes over again once the implementation is done (other pairs).
+  - **Model** (`tab` cycles, only when there are several; the key shows which of them is selected): who implements. On a premium or strong model (Fable, Opus, Astra, Sol, Carbon, Neon) the first model is the one a tier down, the next is two tiers down, and the last is your own model; see [Choosing who implements](#choosing-who-implements). A worker's line says who answers its questions and that the session returns to your model when the build ends. Other models implement on themselves.
   - **Effort** (`←/→`): the selected model's effort, separate for each model. It starts from System 1's recommendation, your planning level or the model's default.
   - **Context** (`c`): keep this conversation, or compact to the approved plan and implement in the same session, without creating a child session. It starts compacted when another model implements (it reads the conversation without a prompt cache), when the prompt cache is cold, or when the conversation is large (a miss would reach [pi-cache-guard](/plugins/pi-cache-guard/)'s warning threshold, else 100k tokens), and keeps the conversation otherwise. A `defaultImplementationContext` of `keep` or `clear` replaces that rule. The line shows the conversation's size and why it is compacted, and the default is decided when the dialog opens, never while you read it.
   Phone clients that read the dialog off the screen approve with the settings shown. An RPC dialog, where buttons are all it has, lists the same choices as **Yes, implement here**, **Yes, compact plan and implement here** and, for each other model, **Yes, implement with <model>** and **Yes, compact and implement with <model>**, with the default first.
@@ -63,33 +63,25 @@ When you decline and the agent revises a plan, approval shows a short **What cha
 
 Implementation is ordinary chat: implementation, verification and a normal final reply. Optional compaction does not change that.
 
-### Plan model pairs
+### Choosing who implements
 
-A plan model pair is a Pi virtual model that plans on one model and implements on another, like Claude Code's `opusplan` (which uses Opus in plan mode and Sonnet for everything else; some pairs keep the worker for follow-up work after approval). Select one with `/model` or as your default model. Built-in pairs (registered for each provider whose models are available): `anthropic/fableplan` (Fable plans, Opus builds), `anthropic/fableplan-sonnet` (Fable, Sonnet), `anthropic/opusplan` (Opus, Sonnet), `openai-codex/astraplan` and `openai/astraplan` (Astra, Sol), `openai-codex/astraplan-terra` and `openai/astraplan-terra` (Astra, Terra), `openai-codex/solplan` and `openai/solplan` (Sol, Terra), `google/carbonplan` (Carbon plans, Neon builds), `google/carbonplan-hydrogen` (Carbon, Hydrogen) and `google/neonplan` (Neon plans, Hydrogen builds). The pairs are derived from the shared model-family table (see [Model families](/plugins/pi-model-families/)); provisional families never take part. Each family resolves to the highest available generation on the pair's provider; a pair whose models are unavailable is not offered. Add or replace pairs with `modelPairs` (see [settings](#settings-and-trusted-capabilities)).
+You plan on the model you are on and choose the implementer at approval, as Claude Code's `opusplan` does, without a separate model in `/model`. A premium or strong session model offers workers from the shared model-family table (see [Model families](/plugins/pi-model-families/)): one tier down (the default), two tiers down, then your own model. Fable offers Opus and Sonnet, Opus offers Sonnet and Haiku, Astra offers Sol and Terra, Sol offers Terra and Luna, Carbon offers Neon and Hydrogen. Each family resolves to the newest available generation on your model's provider and route, and a tier with no available model is skipped. Provisional families never take part; Sonnet, Terra and other balanced or fast models implement on themselves.
 
-For `anthropic/fableplan`, `openai/astraplan` and `openai-codex/astraplan`, routing follows this lifecycle independently per pair and branch:
+Approving with a worker switches the session to it for the run that implements the plan. When that run ends, however it ends (finished, stopped with Esc, failed, reloaded), the session is back on your model and its level. Nothing stays on the worker and there is no resume command. Choosing a model yourself with `/model` during a build wins: the build continues on it and nothing switches back. Entering plan mode during a build returns to your model. With pi-status-footer, the model row shows the worker while it builds. The earlier plan model pairs (`opusplan`, `fableplan`, `astraplan`, ...) and the `modelPairs` setting were removed; a session left on one moves to its planner family's newest model.
 
-| State | Next model |
-| --- | --- |
-| Before approval; explicit plan mode | Planner |
-| Approved implementation and later work or chat | Worker |
-| Planner consultation | Planner, then worker |
+Effort: when plan mode starts on a model that offers workers, System 1 judges effort once for your model (skipped if you changed the level since), and at approval each row's effort targets its own model. Consultations use the level you planned at.
 
-Approval persists the handoff for later turns, including chat. Enter plan mode to return temporarily to the planner in the same session; approval hands back to the worker. Leaving plan mode without approval, including **Save for later**, restores the prior route; declining review keeps plan mode and the planner active. Use `/model` to select a physical model explicitly. A replacement definition for one of these identities retains its handoff policy.
+Each switch changes which model reads the conversation, and a provider caches per model, so a build costs one cold read on the worker; the approval defaults to compacting to the plan when a worker implements to keep that small. Nothing rewrites earlier messages of a request.
 
-Other built-in pairs and newly named custom pairs retain planner-first routing: the worker serves an approved implementation until it settles (an aborted run stays on the worker), and the planner serves ordinary work and chat afterward. `ask_planner` is refused when the planner already answers. Approval continues the same agent loop on the worker; the pair remains selected. With pi-status-footer, the model row shows the next physical model. A phase switch re-reads the conversation on the other model without its prompt cache.
+**Consulting the planner.** While a worker builds it has `ask_planner` and `planner_answer`. When the plan does not fit what it finds, the worker calls `ask_planner`; the next requests of the same conversation go to your model, which reads everything, including the worker's changes, may amend the plan file (a dated line under `## Amendments`), asks you with `ask_user_question` when the decision is yours, and finishes with `planner_answer`. If it replies without calling `planner_answer`, its reply is taken as the answer. Both tools are off outside a build.
 
-Effort: when plan mode starts, System 1 judges effort once for the planner (skipped if you changed the level since), and at approval the picker's effort row targets the worker. Consultations use the level recorded at approval.
-
-**Consulting the planner.** While a pair is selected, the implementing agent (or a premium pair's worker on follow-up work) has `ask_planner` and `planner_answer`. When the plan does not fit what it finds, the agent calls `ask_planner`; the next requests of the same conversation go to the planner, which reads everything, including the implementer's changes, may amend the plan file (a dated line under `## Amendments`), asks you with `ask_user_question` when the decision is yours, and finishes with `planner_answer`. If it replies without calling `planner_answer`, its reply is taken as the answer. Both tools refuse outside their phase.
-
-During a consultation, `edit` and `write` are blocked except for the plan file, `bash` is limited to read-only commands (pi-tool-gate's analysis when it is loaded, otherwise the read-only policy and `safeSubcommands`), and `bg_run` is blocked. The first edit or write of each file the plan does not list (paths in backticks) gets a note appended to the tool result: call `ask_planner` if the change departs from the plan. Nothing else is blocked, and a plan that names no paths gets no notes. Idle follow-up work on a handed-off premium pair does not get these notes.
+During a consultation, `edit` and `write` are blocked except for the plan file, `bash` is limited to read-only commands (pi-tool-gate's analysis when it is loaded, otherwise the read-only policy and `safeSubcommands`), and `bg_run` is blocked. During a build, the first edit or write of each file the plan does not list (paths in backticks) gets a note appended to the tool result: call `ask_planner` if the change departs from the plan. Nothing else is blocked, and a plan that names no paths gets no notes.
 
 Exec mode, `finish_plan`, completion review, model handoffs and `/plan-exec` were removed. A session saved with an unfinished exec implementation continues as ordinary work, with a one-time notice.
 
 In Pi's fullscreen terminal mode, **Plan review** scrolls the main chat to the beginning of the plan when the approval picker opens, including for short plans. Scroll the chat to read the rest; ordinary redraws do not move you back. Editing the plan returns to its beginning, and closing review restores following the latest message. Regular terminal mode and RPC keep their usual presentation because Pi does not own their chat scrollback. Once you decide, a plan longer than 12 lines folds in the transcript (`… N more lines (ctrl+o to expand)`). [Compaction plan](/plugins/pi-compact-plan/) draws its compaction focus with the same review card.
 
-Without a pair, your agent plans and implements on the session's model. With a pair, planning runs on the planner and implementation on the worker, each billed as its provider bills.
+Your agent plans on the session's model; a worker build is billed to the worker as its provider bills.
 
 ## Enable, requirements, and costs
 
@@ -128,7 +120,7 @@ The **Write plan M** and **Revise plan M** actions request that synthesis for yo
 
 In the transcript, planner questions show their headers and prompts; results show selected or custom answers and notes, or the cancellation or validation message. Main-agent planner calls show the planner and a short question preview. Merged-plan calls show a line count instead of dumping the plan, and replies distinguish working, waiting for your answers, completed, aborted and failed outcomes. Ctrl+O expands the original question, options, answers or plan prose. These tool-owned presentations also remain in use with pi-cc-render enabled. Only the display changes: tool arguments, JSON results, structured details and transcript checkpoints remain unchanged.
 
-Choose **Implement…** to pick the plan (M first, once there is one), the context and the effort. Implementation uses the main session's current model (with a plan model pair selected, the pair routes it to the worker) regardless of whether M, A or B wrote the plan. Context is **keep conversation** or **compact to plan (same session)**. Either is ordinary chat execution with a normal final reply and no child session. Left/Right adjusts each row; defaults and supported-level normalization match inline approval.
+Choose **Implement…** to pick the plan (M first, once there is one), the context and the effort. Implementation uses the main session's current model regardless of whether M, A or B wrote the plan. Context is **keep conversation** or **compact to plan (same session)**. Either is ordinary chat execution with a normal final reply and no child session. Left/Right adjusts each row; defaults and supported-level normalization match inline approval.
 
 Implementing M, A or B writes the selected plan's current text under `plansDirectory` using the same title-derived names, fallback and collision suffixes as inline approval.
 
@@ -149,24 +141,9 @@ Settings normally live at `~/.pi/agent/pi-plan-mode.json`. Common options are ed
 }
 ```
 
-Choose available models in the UI, or configure `planners`, `scoutModelMap` and `modelPairs` using `provider/modelId` specifications with optional effort suffixes. A configured model of a known family (`claude-fable-5-1`, `gpt-6-sol`) names that family, not a release: it resolves to the family's newest registered generation on the same provider and route, so a new release needs no settings change.
+Choose available models in the UI, or configure `planners` and `scoutModelMap` using `provider/modelId` specifications with optional effort suffixes. A configured model of a known family (`claude-fable-5-1`, `gpt-6-sol`) names that family, not a release: it resolves to the family's newest registered generation on the same provider and route, so a new release needs no settings change.
 
-`modelPairs` defines custom plan model pairs, keyed by the `provider/id` each registers under in `/model`. A key equal to a built-in pair replaces it; other keys are added. `planner` and `worker` are `provider/modelId` specs (no effort suffix, not the same model), and `name` is optional (non-empty, at most 80 characters; default `<planner id> plan, <worker id> build`). An invalid entry or extra key invalidates the whole file. Model IDs are illustrative:
-
-```json
-{
-  "modelPairs": {
-    "anthropic/fableplan": {
-      "planner": "anthropic/claude-fable-5-1",
-      "worker": "anthropic/claude-sonnet-5-1",
-      "name": "Fable plan, Sonnet build"
-    },
-    "openai/reviewplan": { "planner": "openai/gpt-6-astra", "worker": "openai/gpt-6.1-terra" }
-  }
-}
-```
-
-The earlier `implementationModelMap`, `defaultImplementationThinkingLevel`, `completionReview` and `completionMaxRevisions` keys are ignored. `plannerToolsets` groups extension tools, `commandGrants` permits specified extra commands with associated skills, and `providerExtensions` controls helper authentication support. `toggleShortcut` toggles plan mode when pi-tool-gate is absent (with the gate it cycles the gate's modes; do not bind it to the gate's key); it takes effect after `/reload`. `plansDirectory` moves plan mode's plan files.
+The earlier `modelPairs`, `implementationModelMap`, `defaultImplementationThinkingLevel`, `completionReview` and `completionMaxRevisions` keys are ignored. `plannerToolsets` groups extension tools, `commandGrants` permits specified extra commands with associated skills, and `providerExtensions` controls helper authentication support. `toggleShortcut` toggles plan mode when pi-tool-gate is absent (with the gate it cycles the gate's modes; do not bind it to the gate's key); it takes effect after `/reload`. `plansDirectory` moves plan mode's plan files.
 
 Jev defaults to provider `typesafe`, model `jev-latest`, and selection threshold `0.5`. Default `alwaysOffer` names are `web`, `web_search`, `fetch_content`, `context7`, `jev`, and `system1_judge`; this neither installs those tools nor provides their credentials.
 
@@ -192,4 +169,4 @@ Planners and their research scouts offer activity entries to `/tasks` and pills 
 
 With pi-tool-gate, plan approval returns to work without changing approvals. Without the gate, plan mode retains its local work/plan behavior and does not enforce approvals. With pi-subagents, scout-model integration remains optional through `subagents:role-model` (the `explorer` role); its worker is not an implementation fallback. Web tools, MCP servers, classifier selection, and completion hooks are optional. With pi-herdr, planner work emits `herdr:working` holds for background visibility; without it, planning still works. Use pi-diff-review after implementation to inspect the actual changes rather than treating an accepted plan as proof of correct execution.
 
-See [planning and review](/recipes/plan-review/), [activity architecture](/architecture/activity/), and [troubleshooting](/guides/troubleshooting/). [Source and tests](https://github.com/justmytwospence/pi-plugins/tree/main/packages/pi-plan-mode) cover planner flow, shell policy, persistence, and plan model pairs.
+See [planning and review](/recipes/plan-review/), [activity architecture](/architecture/activity/), and [troubleshooting](/guides/troubleshooting/). [Source and tests](https://github.com/justmytwospence/pi-plugins/tree/main/packages/pi-plan-mode) cover planner flow, shell policy, persistence, and worker builds.

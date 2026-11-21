@@ -1,6 +1,6 @@
-// A plan model pair (anthropic/opusplan) routes one agent loop: plan on Opus, build on Sonnet,
-// consult Opus in the same transcript, then build again. Real Pi loader and AgentSession; every
-// model transport is local.
+// A worker build: plan on Opus, approve with Sonnet as the implementer, consult Opus in the same
+// transcript, build again, and return to Opus when the run settles. Real Pi loader and AgentSession;
+// every model transport is local.
 import assert from 'node:assert/strict';
 import { mkdtempSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { findPackageJSON } from 'node:module';
@@ -43,11 +43,11 @@ try {
     resourceLoaderOptions: { noExtensions: true, noSkills: true, noPromptTemplates: true, noThemes: true, noContextFiles: true,
       additionalExtensionPaths: [resolve(root, 'packages/pi-plan-mode/src/index.ts')] } });
   assert.deepEqual(services.resourceLoader.getExtensions().errors, []);
-  const pair = models.getModel('anthropic', 'opusplan');
-  assert(pair, 'the extension registered anthropic/opusplan');
-  assert.equal(pair.api, 'pi-virtual');
+  assert.equal(models.getModel('anthropic', 'opusplan'), undefined, 'plan model pairs are gone');
+  const start = models.getModel('anthropic', opus);
+  assert(start, 'the session starts on a real model');
   const manager = SessionManager.inMemory(dir);
-  const { session } = await createAgentSessionFromServices({ services, sessionManager: manager, model: pair, thinkingLevel: 'off' });
+  const { session } = await createAgentSessionFromServices({ services, sessionManager: manager, model: start, thinkingLevel: 'off' });
   const requested = [];
   const script = [];
   let calls = 0;
@@ -69,15 +69,15 @@ try {
     async select(title, options) {
       if (title === 'Implementation effort') return options[0];
       assert.equal(title.startsWith('Implement this plan?'), true, title);
-      assert.match(title, /With .*Sonnet.*, .*Opus.* answers its questions, then takes over\./u, 'the approval says the planner takes over again');
-      assert(options.some(option => option.startsWith('Yes, implement with') && /Opus/u.test(option)), `the planner row is offered: ${options}`);
+      assert.match(title, /With .*Sonnet.*, .*Opus.* answers its questions; back to .*Opus.* when the build ends\./u, 'the approval says the session returns to the planner');
+      assert(options.some(option => option.startsWith('Yes, implement with') && /Opus/u.test(option)), `your own model is offered: ${options}`);
       assert.match(options[0], /^Yes, compact and implement with .*Sonnet/u, 'the compact worker row is the default');
       return options.find(option => option.startsWith('Yes, implement with') && /Sonnet/u.test(option));
     },
   }, { get(target, key) { return key in target ? target[key] : () => {}; } });
   await session.bindExtensions({ mode: 'rpc', uiContext: ui, onError: error => errors.push(error) });
   const active = () => session.getActiveToolNames();
-  assert(active().includes('ask_planner') && active().includes('planner_answer'), 'a pair selection activates the consultation tools');
+  assert(!active().includes('ask_planner'), 'the consultation tools are off until a worker builds');
 
   await session.prompt('/plan');
   const inline = manager.getBranch().filter(entry => entry.type === 'custom' && entry.customType === 'plan-mode:inline').at(-1)?.data;
@@ -93,15 +93,17 @@ try {
   assert.equal(requested[1], sonnet, 'the request after approval, in the same loop, runs on the worker');
   assert.equal(requested[2], opus, 'a consultation runs on the planner');
   assert.equal(requested[3], sonnet, 'after planner_answer the worker continues');
-  assert.equal(session.model.id, 'opusplan', 'the selection never changes');
-  assert.equal(manager.getBranch().some(entry => entry.type === 'model_change' && entry.modelId !== 'opusplan'), false, 'no setModel happened');
+  await new Promise(resolve => setTimeout(resolve, 0));
+  assert.equal(session.model.id, opus, 'the session is back on your model once the run settles');
+  assert.deepEqual(manager.getBranch().filter(entry => entry.type === 'model_change').map(entry => entry.modelId), [opus, sonnet, opus, sonnet, opus], 'the start, then begin, consult, answer and return');
+  assert(!active().includes('ask_planner'), 'the consultation tools are off again');
   const results = manager.getEntries().filter(entry => entry.type === 'message' && entry.message.role === 'toolResult').map(entry => entry.message);
   const byTool = name => results.find(message => message.toolName === name);
   assert.match(byTool('exit_plan_mode').content[0].text, /call ask_planner/u);
   assert.equal(byTool('exit_plan_mode').details.outcome, 'approved');
   assert.match(byTool('ask_planner').content[0].text, /^The implementer asks the planner \(.*\):\n\nIs src\/b\.ts also needed\?/u);
   assert.match(byTool('planner_answer').content[0].text, /^Planner's answer:\n\nNo, only src\/a\.ts\./u);
-  console.log('PASS plan model pair routes plan, build, consult and build in one agent loop');
+  console.log('PASS a worker build plans, builds, consults and builds in one agent loop, then returns to your model');
 } finally {
   process.chdir(cwd);
   for (const [key, value] of Object.entries(saved)) { if (value === undefined) delete process.env[key]; else process.env[key] = value; }

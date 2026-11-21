@@ -55,12 +55,10 @@ export function pairLabel(workerName: string, compact = false): string {
 export interface ApprovalAlternate {
   model: ModelSpec;
   name: string;
-  /** pair-worker: the worker of a plan model pair the session switches to; planner: a selected pair's planner. */
-  kind?: "pair-worker" | "planner";
-  /** The clause for the Model line while this worker is selected; defaults to the input's note for a pair worker. */
+  /** worker: implements, then the session returns to your model; self: your own model. */
+  kind?: "worker" | "self";
+  /** The clause for the Model line while this worker is selected; defaults to the input's note for a worker. */
   note?: string;
-  /** The pair's key (`provider/id`) to switch to, for a pair worker. */
-  pair?: string;
 }
 
 /** `alternate` is the index into the input's alternates; absent for the first model. */
@@ -91,18 +89,18 @@ export function defaultImplementationContext(
 }
 
 export interface ApprovalInput {
-  /** The model whose effort the approval sets: the session model, or a plan pair's worker. */
+  /** The model whose effort the approval sets: the session model, or the default worker. */
   planning?: ModelSpec;
   /** Its display name (the Model line); without it the model id is shown. */
   planningName?: string;
   recommendations?: ReadonlyMap<string, ModelSpecThinkingLevel>;
   recommendedThinkingLevel?: ModelSpecThinkingLevel;
   effortDefaultKey?: string;
-  /** A short clause about the pair's worker (who answers its questions, who stays on), shown on the Model line while the worker is selected. */
+  /** A short clause about the worker (who answers its questions, what happens after the build), shown on the Model line while a worker is selected. */
   note?: string;
-  /** Names the implementer of the first model (a selected pair's worker); without it the session model is named. */
+  /** Names the implementer of the first model (the default worker); without it the session model is named. */
   implementerName?: string;
-  /** Other models to offer: pair workers (each switching to its pair), or a selected pair's planner. */
+  /** Other models to offer: the other worker, and your own model. */
   alternates?: ApprovalAlternate[];
   /** The conversation and its cache, for the context default. */
   context?: ApprovalContextInfo;
@@ -117,7 +115,7 @@ export interface ApprovalResult {
 /** Keep this object for one approval, including returns from Edit; not across approvals. */
 export interface ApprovalState {
   selectedId: string;
-  /** The model the settings apply to: 0 is the session or the selected pair's worker, then each alternate. */
+  /** The model the settings apply to: 0 is the session or the default worker, then each alternate. */
   modelIndex: number;
   /** A context chosen with `c` or an RPC row; undefined follows the automatic default. */
   context?: ImplementationContextChoice;
@@ -192,7 +190,7 @@ export class ApprovalPicker implements Component {
       (alternate): ModelEntry => ({
         spec: alternate.model,
         name: shortModelName(alternate.name),
-        worker: alternate.kind === "pair-worker",
+        worker: alternate.kind === "worker",
       }),
     );
     this.models = [first, ...rest];

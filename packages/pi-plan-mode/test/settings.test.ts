@@ -9,7 +9,6 @@ import {
   configuredAlwaysOffer,
   configuredImplementationModel,
   configuredImplementationPlanRetention,
-  configuredModelPairs,
   configuredPlanExportPath,
   configuredPlanModeToggleShortcut,
   configuredScoutModel,
@@ -51,76 +50,15 @@ test("scout model maps normalize scalar specs and reject lists and objects", asy
   }
 });
 
-test("modelPairs accepts valid pairs, trims names, and configures pair definitions", () => {
-  const normalized = normalizePlanModeSettings({
-    modelPairs: {
-      "anthropic/mixplan": { planner: "anthropic/claude-opus-5-5", worker: "openai/gpt-6.1-sol", name: "  Mixed  " },
-      "anthropic/opusplan": { planner: "anthropic/claude-opus-5-5", worker: "anthropic/claude-haiku-5" },
-    },
-  });
-  assert.ok(normalized);
-  assert.deepEqual(normalized.modelPairs, {
-    "anthropic/mixplan": {
-      planner: { provider: "anthropic", modelId: "claude-opus-5-5" },
-      worker: { provider: "openai", modelId: "gpt-6.1-sol" },
-      name: "Mixed",
-    },
-    "anthropic/opusplan": {
-      planner: { provider: "anthropic", modelId: "claude-opus-5-5" },
-      worker: { provider: "anthropic", modelId: "claude-haiku-5" },
-    },
-  });
-  const definitions = configuredModelPairs(normalized);
-  const mix = definitions.find((definition) => `${definition.provider}/${definition.id}` === "anthropic/mixplan");
-  assert.equal(mix?.name, "Mixed");
-  assert.deepEqual(mix?.worker, { spec: { provider: "openai", modelId: "gpt-6.1-sol" } });
-  const replaced = definitions.filter(
-    (definition) => `${definition.provider}/${definition.id}` === "anthropic/opusplan",
-  );
-  assert.equal(replaced.length, 1);
-  assert.deepEqual(replaced[0]?.worker, { spec: { provider: "anthropic", modelId: "claude-haiku-5" } });
-  assert.equal(normalizePlanModeSettings({ modelPairs: {} })?.modelPairs !== undefined, true);
-  assert.equal(normalizePlanModeSettings({})?.modelPairs, undefined);
-  assert.ok(configuredModelPairs({ thinkingLevel: "inherit" }).length > 0, "built-in pairs remain without settings");
-});
-
-test("modelPairs rejects invalid shapes", () => {
-  const pair = { planner: "a/planner", worker: "a/worker" };
-  const invalid: [string, unknown][] = [
-    ["a non-object", null],
-    ["an array", []],
-    ["a key without a provider", { plan: pair }],
-    ["a key with a thinking suffix", { "a/pair:high": pair }],
-    ["a planner with a thinking suffix", { "a/pair": { ...pair, planner: "a/planner:high" } }],
-    ["a worker with a thinking suffix", { "a/pair": { ...pair, worker: "a/worker:low" } }],
-    ["the planner equal to the worker", { "a/pair": { planner: "a/same", worker: "a/same" } }],
-    ["an unparseable planner", { "a/pair": { ...pair, planner: "planner" } }],
-    ["a missing worker", { "a/pair": { planner: "a/planner" } }],
-    ["an extra key", { "a/pair": { ...pair, extra: true } }],
-    ["a non-object member", { "a/pair": "a/planner" }],
-    ["an empty name", { "a/pair": { ...pair, name: "" } }],
-    ["a blank name", { "a/pair": { ...pair, name: "   " } }],
-    ["a name over 80 characters", { "a/pair": { ...pair, name: "n".repeat(81) } }],
-    ["a non-string name", { "a/pair": { ...pair, name: 7 } }],
-  ];
-  for (const [label, modelPairs] of invalid) {
-    assert.equal(normalizePlanModeSettings({ modelPairs }), undefined, label);
-  }
-  assert.ok(normalizePlanModeSettings({ modelPairs: { "a/pair": { ...pair, name: "n".repeat(80) } } }));
-});
-
-test("modelPairs invalidates the whole settings file and loads from disk", async () => {
+test("a removed modelPairs key loads fine and is ignored", async () => {
   const directory = await mkdtemp(join(tmpdir(), "pi-plan-mode-pairs-"));
   const settingsPath = join(directory, "pi-plan-mode.json");
   try {
     await writeFile(settingsPath, JSON.stringify({ modelPairs: { "a/pair": { planner: "a/x", worker: "a/x" } } }));
-    assert.equal((await readPlanModeSettings(settingsPath)).kind, "invalid");
-    await writeFile(settingsPath, JSON.stringify({ modelPairs: { "a/pair": { planner: "a/x", worker: "a/y" } } }));
     const loaded = await readPlanModeSettings(settingsPath);
     assert.equal(loaded.kind, "loaded");
-    assert.deepEqual(loaded.kind === "loaded" && loaded.settings.modelPairs, {
-      "a/pair": { planner: { provider: "a", modelId: "x" }, worker: { provider: "a", modelId: "y" } },
-    });
+    assert.equal(loaded.kind === "loaded" && "modelPairs" in loaded.settings, false);
+    assert.ok(normalizePlanModeSettings({ modelPairs: null }));
   } finally {
     await rm(directory, { recursive: true, force: true });
   }

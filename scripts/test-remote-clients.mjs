@@ -240,11 +240,11 @@ async function approvalLines(width, spec = {}) {
   return lines;
 }
 
-// Render the actual approval component, including the live effort key path. With a plan model pair
-// selected the Model line carries a note naming who answers its questions, and tab cycles three models
-// (the worker, the planner and a sibling pair's worker). The settings (Model, Effort,
+// Render the actual approval component, including the live effort key path. With a worker offered
+// the Model line carries a note naming who answers its questions, and tab cycles three models
+// (the default worker, the other worker and your own model). The settings (Model, Effort,
 // Context) are flat question lines; only the four actions are rows.
-const PAIR_NOTE = 'Opus 5.5 answers its questions, then takes over';
+const PAIR_NOTE = 'Opus 5.5 answers its questions; back to Opus 5.5 when the build ends';
 const planLabels = () => [IMPLEMENT, EDIT, SAVE, KEEP];
 const planQuestion = (note, effort) => note
   ? `Implement this plan? Model: Sonnet 5.5 (${note}) · tab 1/3 Effort: ${effort} · ←/→ Context: compact to plan (182k tokens, other model) · c`
@@ -273,8 +273,8 @@ async function selectorLines(width, changed, note, recommendedThinkingLevel, eff
       ? {
         note, implementerName: 'Claude Sonnet 5.5', context: { tokens: 182_000, cold: true, big: true },
         alternates: [
-          { model: { provider: 'anthropic', modelId: 'claude-fable-5-5', thinkingLevel: 'high' }, name: 'Claude Opus 5.5', kind: 'planner' },
-          { model: { provider: 'anthropic', modelId: 'claude-haiku-5-5', thinkingLevel: 'high' }, name: 'Claude Haiku 5.5', kind: 'pair-worker', pair: 'anthropic/opusplan-haiku' },
+          { model: { provider: 'anthropic', modelId: 'claude-fable-5-5', thinkingLevel: 'high' }, name: 'Claude Opus 5.5', kind: 'self' },
+          { model: { provider: 'anthropic', modelId: 'claude-haiku-5-5', thinkingLevel: 'high' }, name: 'Claude Haiku 5.5', kind: 'worker' },
         ],
       }
       : { planningName: 'Claude Fable 5.5' }),
@@ -479,14 +479,14 @@ const DIALOGS = [
     };
   }),
   ...[false, true].flatMap(changed => [undefined, PAIR_NOTE].map(note => ({
-    name: `plan approval (${note ? 'plan model pair' : 'physical model'}${changed ? ', effort changed' : ''})`,
+    name: `plan approval (${note ? 'worker build' : 'physical model'}${changed ? ', effort changed' : ''})`,
     lines: w => selectorLines(w, changed, note),
     question: planQuestion(note, changed ? 'off' : 'high'),
     herdr: { options: 4, multi: false, labels: planLabels() },
     collie: { kind: 'prompt-select', options: 5, labels: planLabels(), wraps: planLabels() },
   }))),
   ...[false, true].flatMap(changed => [undefined, PAIR_NOTE].map(note => ({
-    name: `plan approval (${note ? 'plan model pair' : 'physical model'}, recommended${changed ? ', effort changed' : ''})`,
+    name: `plan approval (${note ? 'worker build' : 'physical model'}, recommended${changed ? ', effort changed' : ''})`,
     lines: w => selectorLines(w, changed, note, 'low', 'recommended-fixture'),
     question: planQuestion(note, changed ? 'medium' : 'low'),
     herdr: { options: 4, multi: false, labels: planLabels() },

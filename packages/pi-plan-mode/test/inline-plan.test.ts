@@ -31,8 +31,6 @@ import { createCustomSelectorHarness, createMockContext, createMockPi } from "./
 
 const opus = { provider: "anthropic", id: "claude-opus-5-5", name: "Claude Opus 5.5", reasoning: true };
 const sonnet = { provider: "anthropic", id: "claude-sonnet-5-5", name: "Claude Sonnet 5.5", reasoning: true };
-const fable = { provider: "anthropic", id: "claude-fable-5-1", name: "Claude Fable 5.1", reasoning: true };
-const fableplan = { provider: "anthropic", id: "fableplan", api: "pi-virtual", name: "Fableplan", reasoning: true };
 
 type Tool = {
   exposure?: string;
@@ -48,27 +46,16 @@ async function setup(
     cycle?: string[];
     plansDirectory?: string;
     cwd?: string;
-    /** Give the session a model (opus) and a registry with opus and sonnet. */
+    /** Give the session a model (opus) and a registry. */
     models?: boolean;
-    pair?: { virtual: typeof fableplan; catalog: (typeof opus)[] };
+    /** The models the registry offers (default: opus alone, which has no implementers). */
+    catalog?: (typeof opus)[];
     approval?: string;
     toggleShortcut?: "alt+p";
     pickImplementationEffort?: typeof pickImplementationEffort;
   } = {},
 ) {
   const mock = createMockPi();
-  const routes = new Map<string, { route(request: unknown, ctx: unknown): { model: { id: string } } }>();
-  if (options.pair) {
-    const raw = mock.rawPi as unknown as Record<string, unknown>;
-    raw.registerVirtualModel = (model: {
-      provider: string;
-      id: string;
-      route(request: unknown, ctx: unknown): { model: { id: string } };
-    }) => {
-      routes.set(`${model.provider}/${model.id}`, model);
-    };
-    raw.unregisterVirtualModel = (provider: string, id: string) => routes.delete(`${provider}/${id}`);
-  }
   const plansDirectory = options.plansDirectory ?? mkdtempSync(join(tmpdir(), "plans-"));
   await planMode(mock.pi, {
     pickImplementationEffort:
@@ -92,15 +79,15 @@ async function setup(
       return title === "Implementation effort" && answers.length === 0 ? "high" : answers.shift();
     },
     input: async () => options.input,
-    ...(options.models || options.pair
+    ...(options.models || options.catalog
       ? {
-          model: options.pair?.virtual ?? opus,
+          model: opus,
           modelRegistry: {
             getApiKeyAndHeaders: async () => ({ ok: false, error: "missing" }),
-            getAvailable: () => options.pair?.catalog ?? [opus, sonnet],
-            getAll: () => options.pair?.catalog ?? [opus, sonnet],
+            getAvailable: () => options.catalog ?? [opus],
+            getAll: () => options.catalog ?? [opus],
             find: (provider: string, id: string) =>
-              (options.pair?.catalog ?? [opus, sonnet]).find((m) => m.provider === provider && m.id === id),
+              (options.catalog ?? [opus]).find((m) => m.provider === provider && m.id === id),
             isUsingOAuth: () => false,
           },
         }
@@ -155,13 +142,6 @@ async function setup(
     return result as any;
   };
   const inline = () => mock.entries.filter((entry) => entry.customType === INLINE_ENTRY).at(-1)?.data as any;
-  const route = (reason = "user") => {
-    assert.ok(options.pair);
-    const { virtual } = options.pair;
-    const registration = routes.get(`${virtual.provider}/${virtual.id}`);
-    assert.ok(registration, "selected virtual pair is registered");
-    return registration.route({ model: virtual, thinkingLevel: "high", reason }, context.ctx).model.id;
-  };
   return {
     mock,
     context,
@@ -174,7 +154,6 @@ async function setup(
     getLeafId,
     newSession,
     projection,
-    route,
   };
 }
 
@@ -1349,85 +1328,54 @@ test("exit_plan_mode needs a written plan, shows it, and implements it here once
   assert.equal(await emit("tool_call", { toolName: "edit", input: { path: "src/a.ts" } }), undefined);
 });
 
-const premiumPair = { virtual: fableplan, catalog: [fable, opus] };
-
-test("premium pair follows real inline approval, settlement, review and workflow exit", async () => {
+test("a worker build follows real approval and returns to your model when the run settles", async () => {
   const h = await setup({
-    pair: premiumPair,
+    catalog: [opus, sonnet],
     gate: true,
-    select: ["Yes, implement with Opus 5.5", "high", "No, keep planning"],
+    select: ["Yes, implement with Sonnet 5.5", "high"],
   });
-  const ctx = h.context.ctx;
-  assert.equal(h.route(), fable.id);
+  const ctx = h.context.ctx as ExtensionContext;
+  const raw = h.mock.rawPi as unknown as Record<string, unknown>;
+  raw.setModel = async (model: unknown) => {
+    h.mock.setModels.push(model);
+    (ctx as unknown as { model: unknown }).model = model;
+    return true;
+  };
   await h.mock.commands.get("plan")?.handler("", ctx);
-  assert.equal(h.route(), fable.id);
   writeFileSync(h.inline().planFile, "# First plan\n");
-  const approved = await h.tool(EXIT_TOOL).execute("approve-pair", {}, undefined, undefined, ctx);
+  const approved = await h.tool(EXIT_TOOL).execute("approve-worker", {}, undefined, undefined, ctx);
   assert.equal(approved.details.outcome, "approved");
-  assert.equal(h.inline().active, false);
-  assert.equal(h.route(), opus.id);
+  assert.deepEqual(h.mock.setModels, [sonnet]);
+  assert.match(approved.content[0]?.text ?? "", /ask_planner/u);
+  assert.ok(
+    h.selects[0]?.title.includes(
+      "With Sonnet 5.5, Opus 5.5 answers its questions; back to Opus 5.5 when the build ends.",
+    ),
+    h.selects[0]?.title,
+  );
+  assert.equal(h.selects[0]?.options[0], "Yes, compact and implement with Sonnet 5.5");
   await h.emit("agent_before_settle", { outcome: "completed" });
+  assert.deepEqual(h.mock.setModels, [sonnet], "the run is not over yet");
   await h.emit("agent_settled", { aborted: false });
-  assert.equal(h.route("user"), opus.id, "follow-up turns remain on the worker");
-  await h.mock.commands.get("plan")?.handler("", ctx);
-  assert.equal(h.route(), fable.id, "explicit replanning uses the planner");
-  writeFileSync(h.inline().planFile, "# Revised plan\n");
-  const declined = await h.tool(EXIT_TOOL).execute("decline-pair", {}, undefined, undefined, ctx);
-  assert.equal(declined.details.outcome, "kept");
-  assert.equal(h.inline().active, true);
-  assert.equal(h.route(), fable.id, "declining review stays on the planner");
-  h.mock.eventBus.emit(MODE_CHANGED, { mode: "work", source: "transition" });
-  assert.equal(h.inline().active, false);
-  assert.equal(h.route(), opus.id, "leaving planning reveals the prior handoff");
+  assert.deepEqual(h.mock.setModels, [sonnet, opus]);
+  assert.equal(ctx.model?.id, opus.id);
 });
 
-test("premium pair saving a later plan restores its previously approved worker", async () => {
-  const h = await setup({
-    pair: premiumPair,
-    select: ["Yes, implement with Opus 5.5", "high", "Save for later", "Enter different name"],
-    input: "deferred",
-  });
-  const ctx = h.context.ctx;
+test("a stopped worker build returns to your model", async () => {
+  const h = await setup({ catalog: [opus, sonnet], select: ["Yes, implement with Sonnet 5.5", "high"] });
+  const ctx = h.context.ctx as ExtensionContext;
+  const raw = h.mock.rawPi as unknown as Record<string, unknown>;
+  raw.setModel = async (model: unknown) => {
+    h.mock.setModels.push(model);
+    (ctx as unknown as { model: unknown }).model = model;
+    return true;
+  };
   await h.mock.commands.get("plan")?.handler("", ctx);
   writeFileSync(h.inline().planFile, "# First plan\n");
-  await h.tool(EXIT_TOOL).execute("approve-pair", {}, undefined, undefined, ctx);
-  await h.emit("agent_settled", { aborted: false });
-  assert.equal(h.route(), opus.id);
-  await h.mock.commands.get("plan")?.handler("", ctx);
-  assert.equal(h.route(), fable.id);
-  writeFileSync(h.inline().planFile, "# Deferred plan\n");
-  await h.tool(EXIT_TOOL).execute("save-pair", {}, undefined, undefined, ctx);
-  assert.equal(h.inline().active, false);
-  assert.equal(h.route(), opus.id);
-});
-
-test("premium pair cancellation before its first approval retains the planner", async () => {
-  const h = await setup({ pair: premiumPair, gate: true });
-  await h.mock.commands.get("plan")?.handler("", h.context.ctx);
-  assert.equal(h.route(), fable.id);
-  h.mock.eventBus.emit(MODE_CHANGED, { mode: "work", source: "transition" });
-  assert.equal(h.inline().active, false);
-  assert.equal(h.route(), fable.id);
-});
-
-test("failed compact approval re-enters planning without losing the premium handoff", async () => {
-  const h = await setup({
-    pair: premiumPair,
-    gate: true,
-    select: ["Yes, compact and implement with Opus 5.5", "high"],
-  });
-  const ctx = h.context.ctx;
-  await h.mock.commands.get("plan")?.handler("", ctx);
-  writeFileSync(h.inline().planFile, "# Compact plan\n");
-  const approved = await h.tool(EXIT_TOOL).execute("compact-pair", {}, undefined, undefined, ctx);
-  assert.equal(approved.details.outcome, "approved");
-  assert.equal(h.route(), opus.id);
-  assert.equal(await h.emit("agent_before_settle", { outcome: "aborted" }), undefined);
-  assert.equal(h.inline().active, true);
-  assert.equal(h.route(), fable.id, "failed compaction returns to planning");
-  h.mock.eventBus.emit(MODE_CHANGED, { mode: "work", source: "transition" });
-  assert.equal(h.inline().active, false);
-  assert.equal(h.route(), opus.id, "the approval's saved handoff survives re-entry");
+  await h.tool(EXIT_TOOL).execute("approve-worker", {}, undefined, undefined, ctx);
+  await h.emit("agent_settled", { aborted: true });
+  assert.deepEqual(h.mock.setModels, [sonnet, opus]);
+  assert.match(String(h.context.notifications.at(-1)?.message ?? ""), /stopped; back on Opus 5\.5/u);
 });
 
 for (const compact of [false, true]) {
@@ -2154,7 +2102,7 @@ test("a host's context info makes compacting the first approval option", async (
   }
 });
 
-test("implementing with an offered pair worker switches to the pair first; a failed switch keeps planning", async () => {
+test("implementing with an offered worker begins the build first; a failed begin keeps planning", async () => {
   for (const switched of [true, false]) {
     const mock = createMockPi();
     const context = createMockContext({ hasUI: true, mode: "rpc" });
@@ -2163,12 +2111,12 @@ test("implementing with an offered pair worker switches to the pair first; a fai
     const plansDirectory = mkdtempSync(join(tmpdir(), "pair-plan-"));
     onTestFinished(() => rmSync(plansDirectory, { recursive: true, force: true }));
     const order: string[] = [];
-    const selectPair = vi.fn(async (_ctx: ExtensionContext, pair: string) => {
-      order.push(`select:${pair}`);
+    const beginBuild = vi.fn(async (_ctx: ExtensionContext, worker: { modelId: string }) => {
+      order.push(`begin:${worker.modelId}`);
       return switched;
     });
-    const implementHere = vi.fn((_ctx: ExtensionContext, approval: { alternate?: string }) => {
-      order.push(`implement:${approval.alternate === "pair-worker"}`);
+    const implementHere = vi.fn((_ctx: ExtensionContext, approval: { implementer?: { modelId: string } }) => {
+      order.push(`implement:${approval.implementer?.modelId}`);
       return "implemented";
     });
     const inline = registerInlinePlanMode(mock.pi, {
@@ -2180,14 +2128,13 @@ test("implementing with an offered pair worker switches to the pair first; a fai
         planningName: "Claude Opus 5.5",
         alternates: [
           {
-            kind: "pair-worker" as const,
+            kind: "worker" as const,
             model: { provider: "anthropic", modelId: "claude-sonnet-5-5" },
             name: "Claude Sonnet 5.5",
-            pair: "anthropic/opusplan",
           },
         ],
       }),
-      selectPair,
+      beginBuild,
       approved: vi.fn(),
       compactHere: vi.fn(),
       implementHere,
@@ -2206,25 +2153,25 @@ test("implementing with an offered pair worker switches to the pair first; a fai
     assert.ok(offered[0]?.includes("Yes, compact and implement with Sonnet 5.5"));
     if (switched) {
       assert.equal(result.details.outcome, "approved");
-      assert.deepEqual(order, ["select:anthropic/opusplan", "implement:true"]);
+      assert.deepEqual(order, ["begin:claude-sonnet-5-5", "implement:claude-sonnet-5-5"]);
       assert.equal(inline.active, false);
     } else {
-      assert.match(result.content[0]?.text ?? "", /Could not switch to the plan model pair for Claude Sonnet 5\.5/u);
-      assert.deepEqual(order, ["select:anthropic/opusplan"]);
+      assert.match(result.content[0]?.text ?? "", /Could not switch to Sonnet 5\.5/u);
+      assert.deepEqual(order, ["begin:claude-sonnet-5-5"]);
       assert.equal(inline.active, true);
     }
   }
 });
 
-test("with a pair selected the default is the compact worker row and the planner row never switches models", async () => {
+test("the default is the compact one-tier-down row and your own model never begins a build", async () => {
   const mock = createMockPi();
   const context = createMockContext({ hasUI: true, mode: "rpc" });
   const ctx = context.ctx as ExtensionContext;
   Object.assign(ctx.sessionManager, { getLeafId: () => null });
   const plansDirectory = mkdtempSync(join(tmpdir(), "pair-planner-"));
   onTestFinished(() => rmSync(plansDirectory, { recursive: true, force: true }));
-  const selectPair = vi.fn(async () => true);
-  const implementHere = vi.fn((_ctx: ExtensionContext, _approval: { alternate?: string }) => "implemented");
+  const beginBuild = vi.fn(async () => true);
+  const implementHere = vi.fn((_ctx: ExtensionContext, _approval: { implementer?: unknown }) => "implemented");
   const inline = registerInlinePlanMode(mock.pi, {
     plansDirectory: () => plansDirectory,
     safeSubcommands: () => undefined,
@@ -2235,19 +2182,18 @@ test("with a pair selected the default is the compact worker row and the planner
       implementerName: "Claude Sonnet 5.5",
       alternates: [
         {
-          kind: "planner" as const,
+          kind: "worker" as const,
+          model: { provider: "anthropic", modelId: "claude-haiku-5-5" },
+          name: "Claude Haiku 5.5",
+        },
+        {
+          kind: "self" as const,
           model: { provider: "anthropic", modelId: "claude-opus-5-5" },
           name: "Claude Opus 5.5",
         },
-        {
-          kind: "pair-worker" as const,
-          model: { provider: "anthropic", modelId: "claude-haiku-5-5" },
-          name: "Claude Haiku 5.5",
-          pair: "anthropic/opusplan-haiku",
-        },
       ],
     }),
-    selectPair,
+    beginBuild,
     approved: vi.fn(),
     compactHere: vi.fn(),
     implementHere,
@@ -2264,8 +2210,8 @@ test("with a pair selected the default is the compact worker row and the planner
   const exit = mock.tools.find((candidate) => candidate.name === EXIT_TOOL) as unknown as Tool;
   const result = await exit.execute("planner", {}, undefined, undefined, ctx);
   assert.equal(offered[0]?.[0], "Yes, compact and implement with Sonnet 5.5");
-  assert.ok(offered[0]?.includes("Yes, implement with Haiku 5.5"), "a sibling pair's worker is offered too");
+  assert.ok(offered[0]?.includes("Yes, implement with Haiku 5.5"), "the two-tier-down worker is offered too");
   assert.equal(result.details.outcome, "approved");
-  assert.equal(selectPair.mock.calls.length, 0);
-  assert.equal(implementHere.mock.calls[0]?.[1].alternate, "planner");
+  assert.equal(beginBuild.mock.calls.length, 0);
+  assert.equal(implementHere.mock.calls[0]?.[1].implementer, undefined);
 });

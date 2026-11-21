@@ -14,7 +14,6 @@ import {
   type ModelSpec,
   parseModelSpec,
 } from "./implementation-models.ts";
-import { pairDefinitions } from "./model-pairs.ts";
 import type { PlannerToolset } from "./planners.ts";
 import type { SafeSubcommands } from "./tool-policy.ts";
 
@@ -107,8 +106,6 @@ export interface PlanModeSettings {
   toggleShortcut?: KeyId;
   /** Where inline plan mode writes plan files (default `~/.pi/agent/plans`). */
   plansDirectory?: string;
-  /** Custom plan model pairs (`provider/id` of the virtual model) with their planner and worker. */
-  modelPairs?: Record<string, { planner: ModelSpec; worker: ModelSpec; name?: string }>;
   /** Whether implementation keeps the planning conversation or starts a fresh session. */
   defaultImplementationContext?: ImplementationContextChoice;
   /** Planners A and B, preselected in /planners. */
@@ -234,11 +231,6 @@ export function normalizePlanModeSettings(value: unknown): PlanModeSettings | un
     if (!safeSubcommands) return undefined;
     settings.safeSubcommands = safeSubcommands;
   }
-  if (Object.hasOwn(value, "modelPairs")) {
-    const modelPairs = normalizeModelPairs(Reflect.get(value, "modelPairs"));
-    if (!modelPairs) return undefined;
-    settings.modelPairs = modelPairs;
-  }
   if (Object.hasOwn(value, "defaultImplementationContext")) {
     const context = Reflect.get(value, "defaultImplementationContext");
     if (!IMPLEMENTATION_CONTEXT_CHOICES.includes(context as ImplementationContextChoice)) return undefined;
@@ -319,27 +311,6 @@ export function normalizePlanModeSettings(value: unknown): PlanModeSettings | un
     settings.planCompleteCommand = command;
   }
   return settings;
-}
-
-function normalizeModelPairs(value: unknown): NonNullable<PlanModeSettings["modelPairs"]> | undefined {
-  if (!isSettingsDocument(value)) return undefined;
-  const pairs: NonNullable<PlanModeSettings["modelPairs"]> = {};
-  for (const [key, entry] of Object.entries(value)) {
-    const identity = parseModelSpec(key);
-    if (!identity || identity.thinkingLevel || !isSettingsDocument(entry)) return undefined;
-    if (Object.keys(entry).some((name) => name !== "planner" && name !== "worker" && name !== "name")) return undefined;
-    const planner = parseModelSpec(entry.planner);
-    const worker = parseModelSpec(entry.worker);
-    if (!planner || !worker || planner.thinkingLevel || worker.thinkingLevel) return undefined;
-    if (planner.provider === worker.provider && planner.modelId === worker.modelId) return undefined;
-    const pair: { planner: ModelSpec; worker: ModelSpec; name?: string } = { planner, worker };
-    if (Object.hasOwn(entry, "name")) {
-      if (typeof entry.name !== "string" || !entry.name.trim() || entry.name.length > 80) return undefined;
-      pair.name = entry.name.trim();
-    }
-    pairs[key] = pair;
-  }
-  return pairs;
 }
 
 function normalizeImplementationModelMap(value: unknown): Record<string, ModelSpec> | undefined {
@@ -817,10 +788,6 @@ export function configuredImplementationPlanRetention(settings: PlanModeSettings
 
 export function configuredImplementationModel(settings: PlanModeSettings): ImplementationModelOverride | undefined {
   return settings.defaultImplementationModel;
-}
-
-export function configuredModelPairs(settings: PlanModeSettings) {
-  return pairDefinitions(settings.modelPairs);
 }
 
 export function configuredImplementationContext(settings: PlanModeSettings): ImplementationContextChoice {

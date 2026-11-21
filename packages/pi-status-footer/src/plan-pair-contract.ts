@@ -1,28 +1,25 @@
 // Package-local contract; optional consumers copy this file, never import a sibling runtime.
-export const PLAN_PAIR_CHANNEL = "pi-plugins.plan-pair.v1";
-/** plan: plan mode; chat: chat workflow; consult: an ask_planner question is open; build: an approved plan is being implemented; work: ordinary work. Chat and work may route to a persistent pair's worker after approval. */
-export type PlanPairPhase = "plan" | "chat" | "consult" | "build" | "work";
+export const PLAN_PAIR_CHANNEL = "pi-plugins.plan-pair.v2";
+/** build: another model implements an approved plan; consult: your model answers its ask_planner question. */
+export type PlanPairPhase = "build" | "consult";
 export interface PlanPairModel {
   provider: string;
   id: string;
 }
 export interface PlanPairSnapshot {
-  version: 1;
-  /** The selected pair, `provider/id` (for example `anthropic/opusplan`). */
-  pair: string;
+  version: 2;
   phase: PlanPairPhase;
-  /** The physical model the next request routes to; persistent pairs may use the worker in work or chat after approval. */
-  next: PlanPairModel;
-  planner: PlanPairModel;
+  /** Your model: it answers consultations and serves again when the build ends. */
+  home: PlanPairModel;
   worker: PlanPairModel;
-  /** The level the next request uses (a consultation uses the level recorded at approval). */
-  thinkingLevel: string;
+  /** The physical model answering now: the worker while building, home while consulting. */
+  next: PlanPairModel;
 }
 export type PlanPairRequest = { kind: "query"; snapshot?: PlanPairSnapshot };
 export interface PlanPairBus {
   emit(channel: string, request: unknown): void;
 }
-/** Synchronous, read-only, detached snapshot of the selected pair; undefined without one. */
+/** Synchronous, read-only, detached snapshot of an active build; undefined without one. */
 export function queryPlanPair(events: PlanPairBus): PlanPairSnapshot | undefined {
   const request: PlanPairRequest = { kind: "query" };
   try {
