@@ -92,7 +92,7 @@ export default function (pi: ExtensionAPI) {
       }
       pi.events.emit(MODEL_FAMILIES_CHANGED, {});
       ctx.ui.notify(
-        `${discovery.name} is now ${outcome} on ${discovery.route}. Subagent picks use it now; plan model pairs update after /reload.`,
+        `${discovery.name} is now ${outcome} on ${discovery.route}. Subagent picks and plan approval use it now.`,
         "info",
       );
     },

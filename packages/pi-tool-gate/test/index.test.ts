@@ -416,7 +416,7 @@ describe("removed Linked flows", () => {
     await s.h.emit("session_start", {}, s.ctx);
     await s.h.emit("session_tree", {}, s.ctx);
     expect(notices(s)).toHaveLength(1);
-    expect(notices(s)[0]!.message).toContain("anthropic/opusplan");
+    expect(notices(s)[0]!.message).toContain("when you approve the plan");
     expect(s.ctx.ui.status.get("tool-gate:flow")).toBeUndefined();
     expect(s.ctx.ui.status.get("workflow-mode")).toContain("work");
     expect(s.h.commands.has("flow")).toBe(false);

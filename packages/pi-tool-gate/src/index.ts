@@ -1343,7 +1343,7 @@ export default function toolGate(pi: ExtensionAPI) {
     const id = ctx.sessionManager.getSessionId?.() ?? "";
     if (!linked || linkedNoticed.has(id)) return;
     linkedNoticed.add(id);
-    ctx.ui.notify("Linked flows were removed. For a planner and worker pair, select a plan model such as anthropic/opusplan with /model.", "warning");
+    ctx.ui.notify("Linked flows were removed. Plan on your model and choose the implementing model when you approve the plan.", "warning");
   };
 
   const restore = async (ctx: ExtensionContext, newSession: boolean) => {
