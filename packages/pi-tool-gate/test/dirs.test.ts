@@ -21,6 +21,15 @@ describe("bashPathAccess", () => {
     expect(access("cat <<'EOF'\n$(( $(touch ~/.config/quoted) ))\nEOF").writes).toEqual([]);
   });
 
+  test("a subshell's cd does not outlive it; wrappers' commands are followed", () => {
+    expect(access("(cd ~/Documents && ls) && ls")).toEqual({ reads: [`${H}/Documents`], writes: [] });
+    expect(access("(cd /tmp && touch x) && touch ./y").writes.sort()).toEqual([`${app}/y`, "/tmp"].sort());
+    expect(access("find ~/Documents -name '*.md' -exec cat {} +")).toEqual({ reads: [`${H}/Documents`], writes: [] });
+    expect(access("find ~/Documents -exec rm {} + -delete").writes).toContain(`${H}/Documents`);
+    expect(access("aac run --domain x -- touch ~/Documents/a")).toEqual({ reads: [], writes: [`${H}/Documents/a`] });
+    expect(access("ls | xargs -I{} cp {} ~/Documents/").writes).toEqual([`${H}/Documents`]);
+  });
+
   test("read-only commands read what they name, relative to the directory they run in", () => {
     expect(access("cat ~/Projects/other/README.md")).toEqual({ reads: [`${P}/other/README.md`], writes: [] });
     expect(access("rg foo ../other src")).toEqual({ reads: [`${P}/other`], writes: [] });

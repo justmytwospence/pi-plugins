@@ -335,6 +335,8 @@ function formsOf(u: BashUnit, blocking: boolean): { argv: string[][]; key?: stri
 function unitMatches(rule: Rule, u: BashUnit, blocking: boolean): boolean {
   const c = rule.command;
   if (!c?.tokens || (!blocking && u.opaque)) return false;
+  // xargs and find -exec add words after these: only a prefix of them says what may run.
+  if (!blocking && u.appended && c.kind !== "prefix") return false;
   if (c.kind === "exact") {
     // Expansion-bearing exact allows name only the whole call. Blocking rules may inspect an
     // identically spelled command inside a compound or nested shell, without losing its source.
@@ -556,6 +558,8 @@ function unitRule(u: BashUnit): { rule: string; exact: boolean } | undefined {
     return rule ? { rule, exact: true } : undefined;
   };
   if (u.opaque) return undefined;
+  // An exact rule cannot allow what xargs or find -exec runs, whose words it does not see.
+  if (u.appended && (EXACT_PROGRAMS.has(name) || u.key?.startsWith("gh api") || runsInlineCode(u))) return undefined;
   if (EXACT_PROGRAMS.has(name) || u.key?.startsWith("gh api") || runsInlineCode(u)) return exact();
   let words = keyWords;
   const typed = normalizeWords([u.invoked ?? name])[0] as string;
@@ -574,9 +578,29 @@ function unitRule(u: BashUnit): { rule: string; exact: boolean } | undefined {
   return parsed.ok && parsed.rule.command?.kind === "prefix" ? { rule, exact: false } : exact();
 }
 
-/** The rules to offer for a shell call: one per key of `bashKeys`, each a prefix or, for risky programs, the exact command. */
+/**
+ * The rules to offer for a shell call: one per command in it that does more than read, each a prefix
+ * or, for risky programs, the exact command; else the call's exact text. Rules that would not open the
+ * call itself (`npm test && ls > out`: the redirecting read needs one too) give way to the exact text.
+ */
 export function suggestBash(command: string, readOnlyCommands: readonly string[] = []): string[] {
   const whole = exactRule(command);
+  const perCommand = suggestPerCommand(command, readOnlyCommands, whole);
+  const scoped = perCommand.map((text) => sessionRule("allow", text)).filter((r): r is ScopedRule => r !== undefined);
+  const opens = scoped.length === perCommand.length && allowing(scoped, { tool: "bash", input: { command }, cwd: "/", readOnlyCommands }) !== undefined;
+  return opens ? perCommand : whole ? [whole] : [];
+}
+
+/**
+ * Whether a rule names one call's exact text with shell syntax in it (`$VAR`, a loop, a pipe): it
+ * opens only that identical text, so it is worth keeping for this session, not saving.
+ */
+export function oneOffRule(text: string): boolean {
+  const parsed = parseRule(text);
+  return parsed.ok && parsed.rule.command?.kind === "exact" && !literalShellArguments(parsed.rule.command.text);
+}
+
+function suggestPerCommand(command: string, readOnlyCommands: readonly string[], whole: string | undefined): string[] {
   const heredoc = /<<-?\s*\\?['"]?[A-Za-z_]/u.test(command);
   const units = bashUnits(command, readOnlyCommands);
   const acting = units.filter((u) => !u.nested && !u.read);

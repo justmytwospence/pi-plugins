@@ -1,5 +1,5 @@
 import { describe, expect, test } from "vitest";
-import { alwaysAskBash, alwaysAskPath, bashKeys, bashUnits, composeCommand, gitCommand, nestedCommands, isReadOnlyBash, READS_KEY, secretGitAdds, sedWrites, splitCommand, writeRedirects } from "../src/bash.ts";
+import { alwaysAskBash, alwaysAskPath, bashKeys, bashUnits, composeCommand, gitCommand, locatedParts, nestedCommands, isReadOnlyBash, READS_KEY, secretGitAdds, sedWrites, splitCommand, writeRedirects } from "../src/bash.ts";
 import { Downloads, downloadedRunReasons, scriptRuns, trackCommand } from "../src/downloads.ts";
 
 const cwd = "/Users/me/Projects/app";
@@ -539,6 +539,46 @@ describe("alwaysAskBash", () => {
     expect(alwaysAskBash("sh -lc 'git push --force origin main'", cwd)).toEqual(["force-pushes main/master"]);
     expect(alwaysAskBash("eval 'cat .env'", cwd)).toEqual(["touches credentials (.env)"]);
     expect(secretGitAdds("git -C /home/me/homelab add homarr/.env", cwd)).toEqual(new Map([[cwd, [`${cwd}/homarr/.env`]]]));
+  });
+  test("what aac run, xargs and find -exec run is held like any command", () => {
+    expect(alwaysAskBash("aac run --domain x -- sudo ls", cwd)).toEqual(["runs as root (sudo)"]);
+    expect(alwaysAskBash("aac run -- git push --force origin main", cwd)).toEqual(["force-pushes main/master"]);
+    expect(alwaysAskBash("op run --env-file .env.tpl -- rm -rf ~", cwd).join()).toMatch(/deletes/u);
+    expect(alwaysAskBash("echo ~ | xargs -0 sudo rm", cwd)).toContain("runs as root (sudo)");
+    expect(alwaysAskBash("find . -name x -exec sudo rm {} +", cwd)).toEqual(["runs as root (sudo)"]);
+    expect(alwaysAskBash("(cd /tmp && rm -rf ~)", cwd).join()).toMatch(/deletes/u);
+  });
+});
+
+describe("subshells and wrappers", () => {
+  test("a subshell's commands are parts of their own, and its cd stays inside it", () => {
+    expect(splitCommand("(cd x && make) && ls")).toEqual([["cd", "x"], ["make"], ["ls"]]);
+    expect(locatedParts("(cd /tmp && ls) && pwd", cwd).map((p) => [p.source, p.dir])).toEqual([["cd /tmp", cwd], ["ls", "/tmp"], ["pwd", cwd]]);
+    expect(locatedParts("cd /a && (cd b && (cd c; ls); ls) && ls", cwd).filter((p) => !p.cd).map((p) => p.dir)).toEqual(["/a/b/c", "/a/b", "/a"]);
+    // Not subshells: $(...), function definitions, case patterns, arithmetic.
+    expect(splitCommand("(echo $(date))")).toEqual([["echo", "$(date)"]]);
+    expect(splitCommand("f() { ls; }")).toEqual([["f()", "{", "ls"], ["}"]]);
+    expect(splitCommand("(case x in a) ls;; esac)").map((t) => t.join(" "))).toEqual(["case x in a) ls", "esac"]);
+    expect(splitCommand("(( i++ ))")).toEqual([["((", "i++", "))"]]);
+  });
+  test("an unclosed subshell is opaque", () => {
+    expect(bashUnits("(cd x && make").every((u) => u.opaque)).toBe(true);
+  });
+  test("a redirect after a subshell is no command of its own", () => {
+    expect(bashUnits("(cd x && make) > log").map((u) => [u.words.join(" "), u.unparsed])).toEqual([["cd x", false], ["make", false], ["> log", false]]);
+  });
+  test("aac run, xargs and find -exec: the wrapper and what it runs are both units", () => {
+    const shape = (c: string) => bashUnits(c).map((u) => [u.words.join(" "), u.key ?? null, u.read, u.appended ?? false]);
+    expect(shape("aac run --domain x -- npm test")).toEqual([["aac run --domain x -- npm test", "aac run", false, false], ["npm test", "npm test", false, false]]);
+    expect(shape("ls | xargs -0 -n 1 rm -f")).toEqual([["ls", "ls", true, false], ["xargs -0 -n 1 rm -f", null, true, false], ["rm -f", "rm", false, true]]);
+    expect(shape("find . -name x -exec rm {} + -exec touch y \\;")).toEqual([
+      ["find . -name x -exec rm {} + -exec touch y ;", "find", true, false], ["rm {}", "rm", false, true], ["touch y", "touch", false, true],
+    ]);
+    expect(shape("find . -delete -exec cat {} +")[0]?.[2]).toBe(false);
+    // Syntax this does not follow keeps the whole call opaque.
+    for (const c of ["aac run --domain x npm test", "xargs --frobnicate rm", "find . -exec rm {}"]) expect(bashUnits(c)[0]?.opaque, c).toBe(true);
+    expect(bashUnits("aac run --help")[0]?.opaque).toBe(false);
+    expect(bashKeys("aac run -- rm x")).toEqual(["aac run", "rm"]);
   });
 });
 

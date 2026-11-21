@@ -57,6 +57,7 @@ import {
   editUserRules,
   editRulesFile,
   editDirectoryGrant,
+  oneOffRule,
   ruleWarning,
   type IgnoredRule,
   loadFileRules,
@@ -1138,16 +1139,20 @@ export default function toolGate(pi: ExtensionAPI) {
       const label = clip(`Allow? ${describeCall(q.tool, q.input)}`.replace(/\s+/gu, " "), 60);
       for (;;) {
         const labels = offer ? choiceLabels(offer.kind, items.length > 1, config.persistence.userWritable) : undefined;
+        // A folder with a wildcard cannot be saved as a literal grant; a rule naming one call's text
+        // with shell syntax in it opens only that identical text again, so it is kept for this session.
+        const oneOff = offer?.kind === "rules" && items.some(oneOffRule);
         const canSaveFolder = offer?.kind !== "dirs" || !items.some((key) => /[*?]/u.test(key));
+        const canSave = canSaveFolder && !oneOff;
         const options = [
           ALLOW_ONCE,
-          ...(labels ? [labels.session, ...(canSaveFolder ? [labels.project, ...(labels.everywhere ? [labels.everywhere] : [])] : []), ...(labels.edit ? [labels.edit] : [])] : []),
+          ...(labels ? [labels.session, ...(canSave ? [labels.project, ...(labels.everywhere ? [labels.everywhere] : [])] : []), ...(labels.edit ? [labels.edit] : [])] : []),
           BLOCK,
         ];
         const shownItems = offer ? items.map((item, i) => clip(offer.kind === "dirs" ? (offer.labels[i] ?? item) : item, 200)) : [];
         const noun = offer?.kind === "dirs" ? "Folder" : "Rule";
         // One flat line per rule or folder: an indented list under a header reads as a dialog Collie cannot read.
-        const grant = shownItems.length ? [...shownItems.map((s) => `${noun}: ${s}`), ...(canSaveFolder ? [`Project saves: ${shown(await destination(ctx.cwd))} (${config.persistence.project})`] : [])] : undefined;
+        const grant = shownItems.length ? [...shownItems.map((s) => `${noun}: ${s}`), ...(canSave ? [`Project saves: ${shown(await destination(ctx.cwd))} (${config.persistence.project})`] : oneOff ? ["Saves: this session only (one-off command)"] : [])] : undefined;
         const title = [
           "Allow this call?",
           `Action: ${describeCallPresentation(q.tool, q.input).action}`,
@@ -1201,7 +1206,7 @@ export default function toolGate(pi: ExtensionAPI) {
           draft = undefined;
           continue;
         }
-        if (offer && labels && (answer.choice === labels.session || (canSaveFolder && (answer.choice === labels.project || answer.choice === labels.everywhere)))) {
+        if (offer && labels && (answer.choice === labels.session || (canSave && (answer.choice === labels.project || answer.choice === labels.everywhere)))) {
           const scope: Scope = answer.choice === labels.session ? "session" : answer.choice === labels.project ? "project" : "user";
           try {
             await grantOffer(offer, items, scope, ctx.cwd);

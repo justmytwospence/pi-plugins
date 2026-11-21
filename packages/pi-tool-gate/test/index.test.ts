@@ -1523,7 +1523,10 @@ test("a rule for a call with substitutions or redirects names that call, and a w
   await h.emit("tool_call", call("bash", { command: reads }), ctx);
   ctx.ui.selectAnswers.push("Allow rule for this session");
   expect(await h.emit("tool_call", call("bash", { command: reads }, "t2"), ctx)).toBeUndefined();
-  expect(ctx.ui.selects[0]?.title).toMatch(/\nRule: Bash\(grep -c Admin \$\(ls cfg\) > \/tmp\/out\.txt\)\nProject saves:/u);
+  // A rule naming one call's text with shell syntax in it is a one-off: kept for this session, never saved.
+  expect(ctx.ui.selects[0]?.title).toMatch(/\nRule: Bash\(grep -c Admin \$\(ls cfg\) > \/tmp\/out\.txt\)\nSaves: this session only \(one-off command\)$/u);
+  expect(ctx.ui.selects[0]?.options).not.toContain("Allow rule in this project");
+  expect(ctx.ui.selects[0]?.options).not.toContain("Allow rule everywhere");
   const judged = jev.calls.length;
   // The same call again runs without a judgment.
   expect(await h.emit("tool_call", call("bash", { command: reads }, "t3"), ctx)).toBeUndefined();

@@ -309,6 +309,8 @@ export interface Part {
   end: number;
   source: string;
   opaque: boolean;
+  /** The subshells (`( ... )`) it runs in, outermost first, each by a number unique in the command. */
+  scopes: number[];
 }
 
 /** `splitCommand`, keeping where each part starts. */
@@ -324,14 +326,26 @@ function splitParts(command: string): Part[] {
   /** Where the last unquoted, unescaped `>` is: only that one makes `>&` and `>|` redirects. */
   let redirectAt = -1;
   let incomplete = false;
+  /** The open subshells, and how many `case` statements are open in each level (their `a)` patterns close nothing). */
+  const subshells: number[] = [];
+  const cases: number[] = [0];
+  let nextScope = 0;
+  /** Parentheses opened inside the current word (`$(...)`, `f()`), which its `)` closes. */
+  let wordParens = 0;
   const endToken = () => {
-    if (inToken) { tokens.push(token); tokenStarts.push(tokenStart); }
+    if (inToken) {
+      tokens.push(token);
+      tokenStarts.push(tokenStart);
+      if (token === "case") cases[cases.length - 1]!++;
+      else if (token === "esac" && cases.at(-1)! > 0) cases[cases.length - 1]!--;
+    }
     token = "";
     inToken = false;
+    wordParens = 0;
   };
   const endPart = (end: number) => {
     endToken();
-    if (tokens.length) parts.push({ tokens, tokenStarts, start, end, source: command.slice(start, end).trim(), opaque: quote !== undefined || incomplete });
+    if (tokens.length) parts.push({ tokens, tokenStarts, start, end, source: command.slice(start, end).trim(), opaque: quote !== undefined || incomplete, scopes: [...subshells] });
     tokens = [];
     tokenStarts = [];
   };
@@ -363,14 +377,29 @@ function splitParts(command: string): Part[] {
       start = i + 1;
     } else if (c === " " || c === "\t") {
       endToken();
+    } else if (c === "(" && !inToken && command[i + 1] !== "(" && tokens.every((t) => LEADING_KEYWORDS.has(t))) {
+      // A subshell, where a command would start: `(cd x && make)`, `if (true); then`. Not `((...))`.
+      endPart(i);
+      subshells.push(++nextScope);
+      cases.push(0);
+      start = i + 1;
+    } else if (c === ")" && wordParens === 0 && subshells.length > 0 && cases.at(-1)! - (inToken && token === "esac" ? 1 : 0) === 0) {
+      endPart(i);
+      subshells.pop();
+      cases.pop();
+      start = i + 1;
     } else {
       if (c === ">") redirectAt = i;
       if (c === "\\") incomplete = true;
+      if (c === "(") wordParens++;
+      else if (c === ")" && wordParens > 0) wordParens--;
       token += c;
       inToken = true;
     }
   }
   endPart(command.length);
+  // An unclosed subshell: what runs in it is not what it seems.
+  if (subshells.length) for (const part of parts) part.opaque = true;
   return parts;
 }
 
@@ -1167,12 +1196,80 @@ export function nestedCommands(p: { name: string; args: string[] }): string[] {
   return script === undefined ? [] : [script];
 }
 
+/** A word as the shell reads it back: bare when it is plain, else single-quoted. */
+export function shellQuote(word: string): string {
+  return /^[A-Za-z0-9_@%+=:,./~-]+$/u.test(word) ? word : `'${word.replace(/'/gu, "'\\''")}'`;
+}
+
+/** A command run by a wrapper: its words, and whether the wrapper adds words this cannot see (xargs input, find's `{}`). */
+export interface Wrapped {
+  words: string[];
+  appended: boolean;
+}
+
+/** CLIs that run the command after `--` with credentials or settings in its environment, by subcommand. */
+const RUN_WRAPPERS: Record<string, string> = { aac: "run", op: "run", doppler: "run", dotenvx: "run", infisical: "run", "aws-vault": "exec" };
+/** xargs options that take their value as the next word. */
+const XARGS_WITH_VALUE = new Set(["-I", "-L", "-n", "-P", "-s", "-E", "-d", "-a", "--arg-file", "--delimiter", "--max-args", "--max-lines", "--max-procs", "--max-chars", "--replace", "--eof", "--process-slot-var"]);
+const XARGS_FLAGS = new Set(["-0", "-r", "-t", "-p", "-x", "-o", "--null", "--no-run-if-empty", "--verbose", "--interactive", "--exit", "--open-tty"]);
+const FIND_EXEC = new Set(["-exec", "-execdir", "-ok", "-okdir"]);
+
+/**
+ * The commands a wrapper runs from its own arguments, and its arguments without them (`own`):
+ * `aac run [options] -- cmd` (and `op run`, `doppler run`, `dotenvx run`, `infisical run`,
+ * `aws-vault exec`), `xargs [options] cmd`, `find ... -exec cmd {} ;`. Undefined for anything else.
+ * `opaque` when the wrapper's syntax is not followed (an unknown xargs option, no `--`).
+ */
+export function wrappedCommands(p: { name: string; args: string[] }): { commands: Wrapped[]; own: string[]; opaque: boolean } | undefined {
+  const { name, args } = p;
+  const sub = RUN_WRAPPERS[name];
+  if (sub !== undefined) {
+    const at = args.findIndex((a) => !a.startsWith("-"));
+    if (args[at] !== sub) return undefined;
+    const dash = args.indexOf("--", at + 1);
+    if (dash < 0) {
+      // `aac run --help` runs nothing; words without `--` cannot be told from option values.
+      const rest = args.slice(at + 1);
+      return { commands: [], own: args, opaque: rest.some((a) => !a.startsWith("-")) };
+    }
+    const words = args.slice(dash + 1);
+    return { commands: words.length ? [{ words, appended: false }] : [], own: args.slice(0, dash), opaque: words.length === 0 };
+  }
+  if (name === "xargs") {
+    let i = 0;
+    for (; i < args.length; i++) {
+      const a = args[i]!;
+      if (a === "--") { i++; break; }
+      if (!a.startsWith("-") || a === "-") break;
+      if (XARGS_WITH_VALUE.has(a)) { i++; continue; }
+      if (XARGS_FLAGS.has(a) || /^-[ILnPsEeda].+/u.test(a) || /^--[a-z-]+=/u.test(a) || /^-[il]$/u.test(a)) continue;
+      return { commands: [], own: args, opaque: true };
+    }
+    const words = args.slice(i);
+    return { commands: [{ words: words.length ? words : ["echo"], appended: true }], own: args.slice(0, i), opaque: i > args.length };
+  }
+  if (name === "find") {
+    const commands: Wrapped[] = [];
+    const own: string[] = [];
+    for (let i = 0; i < args.length; i++) {
+      const a = args[i]!;
+      if (!FIND_EXEC.has(a)) { own.push(a); continue; }
+      const end = args.findIndex((t, j) => j > i && (t === ";" || t === "+"));
+      if (end < 0 || end === i + 1) return { commands, own, opaque: true };
+      commands.push({ words: args.slice(i + 1, end), appended: true });
+      i = end;
+    }
+    return commands.length ? { commands, own, opaque: false } : undefined;
+  }
+  return undefined;
+}
+
 function opaqueProgram(p: { name: string; args: string[] }): boolean {
   if (p.name === "sudo" || p.name === "doas") {
     const inner = unwrapSudo(p.args);
     return inner !== undefined && opaqueProgram(inner);
   }
-  return (SHELLS.has(p.name) && shellCommand(p.args).opaque) ||
+  return (SHELLS.has(p.name) && shellCommand(p.args).opaque) || wrappedCommands(p)?.opaque === true ||
     ((p.name === "docker" || p.name === "podman") && p.args[0] === "compose" && !composeCommand(p.args.slice(1)));
 }
 
@@ -1242,6 +1339,8 @@ export function alwaysAskBash(command: string, cwd: string, branch?: string, ign
       if (force && (mentionsMain || onMain)) reasons.push("force-pushes main/master");
     }
     for (const nested of nestedCommands(p)) reasons.push(...alwaysAskBash(nested, dir, branch, ignored, depth + 1, project));
+    // `aac run -- sudo x`, `xargs rm -rf`, `find -exec`: what the wrapper runs is held the same way.
+    for (const w of wrappedCommands(p)?.commands ?? []) reasons.push(...alwaysAskBash(w.words.map(shellQuote).join(" "), dir, branch, ignored, depth + 1, project));
   }
   for (const { body, at } of bodies) reasons.push(...alwaysAskBash(body, parts.findLast(p => p.start <= at)?.dir ?? cwd, branch, ignored, depth + 1, project));
   for (const { body, at } of expanding) {
@@ -1287,11 +1386,16 @@ const COMPOUND_CLOSERS = new Set(["}", "done", "fi", "esac"]);
  * `cd` along the way, also after a keyword (`then cd x`, `{ cd x`).
  */
 export function locatedParts(command: string, cwd: string): (Part & { dir: string; redirectDir: string; cd: boolean })[] {
-  let dir = cwd;
+  /** The directory in each subshell (0: the call itself). A subshell starts where its parent is; its `cd` stays inside. */
+  const dirs = new Map<number, string>([[0, cwd]]);
   /** Where each open compound command (`{ ...; }`, `if`, a loop, `case`) started. */
   const opened: string[] = [];
   return splitParts(command).map((part) => {
-    const here = dir;
+    part.scopes.forEach((id, k) => {
+      if (!dirs.has(id)) dirs.set(id, dirs.get(part.scopes[k - 1] ?? 0) as string);
+    });
+    const scope = part.scopes.at(-1) ?? 0;
+    const here = dirs.get(scope) as string;
     // A redirect after `}`, `done`, `fi` or `esac` applies to the compound command, from where it started.
     let redirectDir = here;
     for (const t of part.tokens) {
@@ -1302,7 +1406,7 @@ export function locatedParts(command: string, cwd: string): (Part & { dir: strin
     const p = program(withoutKeywords(part.tokens));
     if (p?.name !== "cd") return { ...part, dir: here, redirectDir, cd: false };
     const target = p.args.find((a) => !a.startsWith("-"));
-    dir = target ? path.resolve(dir, expandHome(target)) : homedir();
+    dirs.set(scope, target ? path.resolve(here, expandHome(target)) : homedir());
     return { ...part, dir: here, redirectDir, cd: true };
   });
 }
@@ -1350,6 +1454,7 @@ const SUBCOMMAND_CLIS = new Set([
   ...TWO_LEVEL, "git", "npm", "pnpm", "yarn", "bun", "deno", "npx", "bunx", "uv", "uvx", "pip", "pip3", "poetry", "cargo", "rustup",
   "go", "systemctl", "launchctl", "brew", "apt", "apt-get", "dnf", "snap", "terraform", "tofu", "pulumi", "make", "just", "vercel",
   "wrangler", "fly", "flyctl", "tailscale", "herdr", "tmux", "pi", "claude", "codex", "plugins", "worktree", "bd", "stow", "docker-compose",
+  ...Object.keys(RUN_WRAPPERS),
 ]);
 const WORD = /^[a-z][a-z0-9_:-]*$/u;
 
@@ -1498,6 +1603,18 @@ export interface BashUnit {
   inner?: { name: string; args: string[] };
   /** From the text of `sh -c '...'` or `eval ...`, not the call itself. */
   nested: boolean;
+  /** Run by xargs or `find -exec`, which add words this cannot see: only a prefix rule can allow it. */
+  appended?: boolean;
+}
+
+/** Whether a part is only redirects (`> out` after `)` or `}`): they belong to the compound command before them. */
+function onlyRedirects(words: readonly string[]): boolean {
+  for (let i = 0; i < words.length; i++) {
+    const w = words[i] as string;
+    if (!REDIRECT.test(w)) return false;
+    if (/^[0-9&]*(>>?|<>?|<)\|?&?$/u.test(w)) i++;
+  }
+  return words.length > 0;
 }
 
 /**
@@ -1515,17 +1632,26 @@ export function bashUnits(command: string, extraReadOnly: readonly string[] = []
     const { text: plain, expanding } = heredocs(command);
     const { text, bodies, offsets, opaque: substitutionsOpaque } = extractSubstitutions(plain);
     const heredocOpaque = expanding.some(({ body }) => substitutionCollector(body).opaque);
-    for (const part of splitParts(text)) {
-      const tokens = part.tokens;
-      if (NOT_COMMANDS.has(tokens[0] ?? "")) continue;
-      let i = 0;
-      while (i < tokens.length && tokens[i] !== "time" && LEADING_KEYWORDS.has(tokens[i] as string)) i++;
-      const words = tokens.slice(i);
-      if (!words.length) continue;
-      const info = partInfo(tokens);
+    /**
+     * One simple command, and what a wrapper in it runs (`aac run -- x`, `xargs x`, `find -exec x`)
+     * as commands of their own: an allow rule must cover both the wrapper and what it runs.
+     */
+    const add = (words: string[], source: string, start: number, end: number, partOpaque: boolean, depth: number, wrapped?: { appended: boolean; unsafe: boolean }) => {
+      if (depth >= 32) {
+        units.push({ source, start, end, opaque: true, words, read: false, unparsed: true, unsafe: true, writes: false, nested });
+        return;
+      }
       const p = program(words);
-      const opaque = part.opaque || substitutionsOpaque || heredocOpaque || Boolean(p && opaqueProgram(p));
-      const read = !opaque && isReadOnlyPart(words, extraReadOnly);
+      const wrap = p ? wrappedCommands(p) : undefined;
+      const opaque = partOpaque || Boolean(p && opaqueProgram(p));
+      let info = partInfo(words);
+      let read = !opaque && isReadOnlyPart(words, extraReadOnly);
+      if (p && wrap && !opaque) {
+        // xargs only passes its input on; find reads unless its own options write (`-delete`).
+        const prefix = words.slice(0, words.length - p.args.length);
+        read = !p.unsafe && (p.name === "xargs" || (p.name === "find" && isReadOnlyPart([...prefix, ...wrap.own], extraReadOnly)));
+        if (p.name === "xargs") info = undefined;
+      }
       const g = p?.name === "git" ? gitCommand(p.args) : undefined;
       let runs = p;
       let inner: { name: string; args: string[] } | undefined;
@@ -1533,21 +1659,42 @@ export function bashUnits(command: string, extraReadOnly: readonly string[] = []
         runs = unwrapSudo(p.args);
         if (runs) inner = { name: runs.name, args: runs.args };
       }
-      const start = offsets[part.tokenStarts[i] ?? part.start] ?? 0;
-      const end = offsets[part.end] ?? plain.length;
       units.push({
-        source: plain.slice(start, end).trim(), start, end, opaque,
+        source, start, end, opaque,
         words,
         read,
         ...(info && !opaque ? { key: info.key, invoked: info.invoked } : {}),
         unparsed: opaque || (!read && !info),
-        unsafe: Boolean(p?.unsafe || g?.unsafeGlobal),
+        unsafe: Boolean(p?.unsafe || g?.unsafeGlobal || wrapped?.unsafe),
         writes: writeRedirects(words.join(" ")).length > 0,
         ...(p ? { program: { name: p.name, args: p.args } } : {}),
         ...(inner ? { inner } : {}),
         nested,
+        ...(wrapped?.appended ? { appended: true } : {}),
       });
       for (const script of runs ? nestedCommands(runs) : []) visit(script, true, depth + 1);
+      if (opaque || !p) return;
+      for (const w of wrap?.commands ?? []) {
+        add(w.words, w.words.map(shellQuote).join(" "), start, end, false, depth + 1, { appended: w.appended || Boolean(wrapped?.appended), unsafe: p.unsafe || Boolean(wrapped?.unsafe) });
+      }
+    };
+    for (const part of splitParts(text)) {
+      const tokens = part.tokens;
+      if (NOT_COMMANDS.has(tokens[0] ?? "")) continue;
+      let i = 0;
+      while (i < tokens.length && tokens[i] !== "time" && LEADING_KEYWORDS.has(tokens[i] as string)) i++;
+      const words = tokens.slice(i);
+      if (!words.length) continue;
+      const start = offsets[part.tokenStarts[i] ?? part.start] ?? 0;
+      const end = offsets[part.end] ?? plain.length;
+      const source = plain.slice(start, end).trim();
+      const opaque = part.opaque || substitutionsOpaque || heredocOpaque;
+      // `(cd x && make) > log`: the redirect is the subshell's, a file write the directory policy checks.
+      if (!opaque && onlyRedirects(words)) {
+        units.push({ source, start, end, opaque, words, read: true, unparsed: false, unsafe: false, writes: false, nested });
+        continue;
+      }
+      add(words, source, start, end, opaque, depth);
     }
     for (const { body } of bodies) visit(body, nested, depth + 1);
     for (const { body } of expanding) for (const inner of heredocSubstitutions(body)) visit(inner, nested, depth + 1);
@@ -1900,6 +2047,17 @@ export function bashPathAccess(
     if (tokens.length === 1 && COMPOUND_CLOSERS.has(head as string)) return;
     const p = program(tokens);
     if (!p) return;
+    const wrap = wrappedCommands(p);
+    if (wrap && !wrap.opaque && !isExemptPart(p, exempt)) {
+      // The wrapper's own words (find's start points, `xargs -a list`) are read, or written by `find -delete`;
+      // what it runs is followed like any command, in the same directory.
+      const prefix = tokens.slice(0, tokens.length - p.args.length);
+      const ownReads = p.name !== "find" || isReadOnlyPart([...prefix, ...wrap.own], extra);
+      if (dir !== origin) reads.add(dir);
+      for (const f of pathArgs(wrap.own)) (ownReads ? reads : writes).add(resolve(dir, f));
+      for (const w of wrap.commands) visit(w.words.map(shellQuote).join(" "), dir, origin);
+      return;
+    }
     const readOnly = isReadOnlyPart(tokens, extra);
     if (dir !== origin) (readOnly ? reads : writes).add(dir);
     if (isExemptPart(p, exempt)) return;

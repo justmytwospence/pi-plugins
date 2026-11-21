@@ -9,6 +9,7 @@ import {
   allowing,
   allowsPath,
   blocking,
+  oneOffRule,
   ruleWarning,
   type Call,
   describeOrigin,
@@ -376,6 +377,31 @@ describe("deny, ask and allow", () => {
   });
 });
 
+describe("subshells and wrappers", () => {
+  test("deny rules see commands in subshells, aac run, xargs and find -exec", () => {
+    const deny = rules("deny", "Bash(rm -rf:*)");
+    for (const c of ["(rm -rf x)", "(cd a && rm -rf x)", "aac run --domain d -- rm -rf x", "ls | xargs rm -rf", "find . -exec rm -rf {} +", "op run -- env rm -rf x"]) {
+      expect(blocking(deny, bash(c))?.text, c).toBe("Bash(rm -rf:*)");
+    }
+  });
+  test("a rule for the wrapper does not allow what it runs: both need one", () => {
+    expect(allows(rules("allow", "Bash(aac:*)"), bash("aac run -- rm x"))).toBeUndefined();
+    expect(allows(rules("allow", "Bash(aac run:*)"), bash("aac run -- npm test"))).toBeUndefined();
+    expect(allows(rules("allow", "Bash(aac run:*)", "Bash(npm test:*)"), bash("aac run --domain d -- npm test"))).toEqual(["Bash(aac run:*)", "Bash(npm test:*)"]);
+    expect(allows(rules("allow", "Bash(find:*)"), bash("find . -exec rm {} +"))).toBeUndefined();
+    expect(allows(rules("allow", "Bash(xargs:*)"), bash("ls | xargs rm"))).toBeUndefined();
+    expect(allows(rules("allow", "Bash(git add:*)"), bash("ls | xargs git add"))).toEqual(["Bash(git add:*)"]);
+  });
+  test("what xargs and find -exec run gets words this cannot see: only a prefix rule allows it", () => {
+    expect(allows(rules("allow", "Bash(rm x)"), bash("echo | xargs rm x"))).toBeUndefined();
+    expect(allows(rules("allow", "Bash(rm *.o)"), bash("echo | xargs rm"))).toBeUndefined();
+    expect(allows(rules("allow", "Bash(rm:*)"), bash("echo | xargs rm"))).toEqual(["Bash(rm:*)"]);
+  });
+  test("a subshell's commands are allowed one by one", () => {
+    expect(allows(rules("allow", "Bash(make:*)"), bash("(cd x && make) && ls"))).toEqual(["Bash(make:*)"]);
+  });
+});
+
 describe("calls the gate always holds", () => {
   test("a prefix rule never opens one; the exact command does", () => {
     const command = "git push --force origin main";
@@ -609,11 +635,32 @@ describe("suggested rules", () => {
     expect(s("echo x > f; cat *")).toEqual([]);
   });
 
+  test("wrappers get a rule each for themselves and what they run; subshells by their commands", () => {
+    expect(s("aac run --domain d -- npm test")).toEqual(["Bash(aac run:*)", "Bash(npm test:*)"]);
+    expect(s("ls | xargs git add")).toEqual(["Bash(git add:*)"]);
+    expect(s("(cd x && make build)")).toEqual(["Bash(make build:*)"]);
+    // A risky program run by xargs has no exact rule: only the whole call names it.
+    expect(s("ls | xargs rm")).toEqual(["Bash(ls | xargs rm)"]);
+  });
+
+  test("rules that would not open the call give way to its exact text", () => {
+    expect(s("npm test && ls > out")).toEqual(["Bash(npm test && ls > out)"]);
+  });
+
+  test("an exact rule with shell syntax in it is a one-off", () => {
+    expect(oneOffRule("Bash(echo hi | xargs rm)")).toBe(true);
+    expect(oneOffRule("Bash(cd x && rm -rf $DIR)")).toBe(true);
+    expect(oneOffRule("Bash(rm -rf build)")).toBe(false);
+    expect(oneOffRule("Bash(git push:*)")).toBe(false);
+    expect(oneOffRule("Edit(src/**)")).toBe(false);
+  });
+
   test("every suggestion is a rule that allows the call it was made for", () => {
     for (const command of [
       "git push origin main", "npm test && git push", "rm -rf build", "python3 scripts/x.py --fast", "curl -s https://x.example/api",
       "ssh host 'ls -la'", "bash -c 'git push'", "docker compose -f a.yml up -d", "export A=1 && npm test", "echo hi > f",
       "grep -c Admin $(ls cfg) > /tmp/out.txt", "python3 - <<'EOF'\nprint(1)\nEOF", "node -e \"console.log(1)\"", "bin/homelab status",
+      "aac run --domain d -- npm test", "ls | xargs rm", "(cd x && make build)", "find . -exec rm {} +", "npm test && ls > out",
     ]) {
       const offered = s(command);
       expect(offered.length, command).toBeGreaterThan(0);
