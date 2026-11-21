@@ -28,7 +28,7 @@ import { queryFooterActions, type FooterAction, type FooterActionId } from "./fo
 import { querySystem1State, type System1Status } from "./system1-contract.ts";
 import { settingsCycles, SETTINGS_REASONING_COMMITTED, type SettingCycleSnapshot, type SettingKey } from "./settings-cycle.ts";
 import { createFooterActionController, createFooterComponent, type FooterEditor, type FooterTui, type FooterHit, type FooterLayout } from "./interactions.ts";
-import { ARGON_MODEL, argonQuotaVariant, createProviderUsageCollector, dispatchProviderUsage, isUsageStale, selectGooglePool, type ArgonQuotaVariant, type ProviderUsage, type UsageSource } from "./provider-usage.ts";
+import { ARGON_MODEL, argonQuotaVariant, createProviderUsageCollector, dispatchProviderUsage, isUsageStale, selectGooglePool, type ArgonQuotaVariant, type ExtraUsage, type ProviderUsage, type UsageSource } from "./provider-usage.ts";
 import { isVirtual, routedModel } from "./routed-model.ts";
 import { queryWaterfall } from "./waterfall-contract.ts";
 import { queryPlanPair, type PlanPairPhase } from "./plan-pair-contract.ts";
@@ -396,12 +396,55 @@ function showQuotaWindow(window: { label: string; used?: number; reset?: number 
   return window.used > 70 || (left < 48 * 3600_000 && window.used > (1 - left / (7 * 86400_000)) * 100);
 }
 const money = (n: number): string => `$${n.toFixed(n > 0 && n < 0.01 ? 3 : 2)}`;
-const extraAmount = (extra: { used?: number; limit?: number; currency?: string }): string => {
-  if (extra.used === undefined) return "";
-  const usd = extra.currency === "USD";
-  const limit = extra.limit === undefined ? "" : `/${usd ? "$" : ""}${extra.limit.toFixed(0)}`;
-  return usd ? `${money(extra.used)}${limit}` : `${extra.used.toFixed(2)}${limit} ${extra.currency ?? "?"}`;
+const creditCount = (n: number): string => n.toLocaleString("en-US", { maximumFractionDigits: 2 });
+/** What extra usage has cost and what remains: `$76.73 used`, `$23.27 left` or `no cap`. */
+const extraSpend = (extra: ExtraUsage): string[] => {
+  const amount = (n: number) => extra.currency === "USD" ? money(n) : `${n.toFixed(2)} ${extra.currency ?? "?"}`;
+  const parts: string[] = [];
+  if (extra.used !== undefined) parts.push(`${amount(extra.used)} used`);
+  if (extra.limit !== undefined && extra.used !== undefined) parts.push(`${amount(Math.max(0, extra.limit - extra.used))} left`);
+  else if (extra.limit !== undefined) parts.push(`${amount(extra.limit)} cap`);
+  else if (extra.uncapped) parts.push("no cap");
+  return parts;
 };
+/**
+ * The account's pay-past-the-limit state on its limits row: what it has used, what is
+ * left, and whether requests are drawing on it now (red) or it is only standing by (dim).
+ * Claude: extra usage, billed once a shown window is full. Codex: whether ChatGPT still
+ * serves at the limit, and prepaid credits. Antigravity: Google One AI credits; Pi's
+ * provider may not spend them, and a scoped full window does not block every model, so
+ * the balance is reported without claiming it is in use.
+ */
+function overageSegment(usage: ProviderUsage, full: boolean, theme: Paint): Segment | undefined {
+  const join = (parts: string[]) => parts.filter(Boolean).join(" · ");
+  if (usage.provider === "anthropic") {
+    const extra = usage.extra;
+    if (!extra) return undefined; // Unknown state: the red 100% window says enough without guessing.
+    const spend = extraSpend(extra);
+    if (!extra.enabled) return full ? { text: theme.fg("error", "limit reached · extra usage off"), short: theme.fg("error", "limit reached"), priority: 230 } : undefined;
+    if (full && extra.capReached) return { text: theme.fg("error", join(["extra usage cap reached", spend[0] ?? ""])), short: theme.fg("error", "extra capped"), priority: 230 };
+    if (full) return { text: theme.fg("error", join(["billing extra usage", ...spend])),
+      short: theme.fg("error", extra.used !== undefined && extra.currency === "USD" ? `on extra ${money(extra.used)}` : "on extra"), priority: 230 };
+    return { text: theme.fg("dim", join(["extra usage on", ...spend])), short: theme.fg("dim", "extra on"), priority: 75 };
+  }
+  const credits = usage.access?.credits;
+  const funded = !!credits && (credits.unlimited || credits.balance > 0);
+  if (usage.provider === "openai-codex") {
+    const access = usage.access;
+    const balance = !credits ? "" : credits.unlimited ? "unlimited credits" : credits.balance > 0 ? `${creditCount(credits.balance)} credits left` : "no credits";
+    if (access?.limitReached === true || access?.allowed === false)
+      return { text: theme.fg("error", join(["limit reached", balance])), short: theme.fg("error", "limit reached"), priority: 230 };
+    if (full && funded) return { text: theme.fg("error", join(["on credits", balance])), short: theme.fg("error", "on credits"), priority: 230 };
+    if (full) return { text: theme.fg("warning", join(["still allowed", balance])), short: theme.fg("warning", "still allowed"), priority: 230 };
+    return funded ? { text: theme.fg("dim", balance), priority: 20 } : undefined;
+  }
+  if (usage.provider === "google" && credits) {
+    const balance = credits.balance > 0 ? `${creditCount(credits.balance)} AI credits left` : "no AI credits";
+    return full ? { text: theme.fg("warning", balance), short: theme.fg("warning", credits.balance > 0 ? "AI credits" : "no credits"), priority: 120 }
+      : funded ? { text: theme.fg("dim", balance), priority: 20 } : undefined;
+  }
+  return undefined;
+}
 // Pi's system theme puts accent at the same contrast as muted gray, so the
 // footer's accents (project, model, gauges) read no stronger than its secondary
 // text. Lift accent halfway from its own OKLab lightness to the theme's body
@@ -1090,38 +1133,14 @@ export function layoutFooter(snapshot: Snapshot, width: number, theme: Paint): F
         const priority = 50 + Math.min(100, value ?? 0) + (antigravity && window.scope && window.scope !== "shared" ? 0.5 : 0);
         return { text: `${val}${reset}`, short, priority };
       });
-      const extra = usage.extra;
-      let extraText = "";
-      if (extra?.enabled) {
-        extraText = "extra usage on";
-        if (extra.used !== undefined) extraText += ` ${extraAmount(extra)}`;
-      }
       const full = shown.some((window) => window.used !== undefined && window.used >= 100 && !(window.reset !== undefined && window.reset <= s.now));
-      let over: Segment | undefined;
-      if (usage.provider === "anthropic" && full) {
-        if (extra?.enabled && extra.capReached) over = { text: theme.fg("error", "extra usage cap reached"), short: theme.fg("error", "extra capped"), priority: 230 };
-        else if (extra?.enabled) {
-          const amount = extraAmount(extra);
-          over = { text: theme.fg("error", amount ? `${amount} extra usage` : "on extra usage"),
-            short: theme.fg("error", extra.used !== undefined && extra.currency === "USD" ? `${money(extra.used)} extra` : "on extra"), priority: 230 };
-        } else if (extra) over = { text: theme.fg("error", "limit reached"), short: theme.fg("error", "limit reached"), priority: 230 };
-        // Unknown extra usage state: the red 100% window says enough without guessing.
-      }
-      const access = usage.provider === "openai-codex" ? usage.access : undefined;
-      if (usage.provider === "openai-codex" && (full || access?.limitReached === true || access?.allowed === false)) {
-        const blocked = access?.limitReached === true || access?.allowed === false;
-        const credits = access?.credits ? ` · ${access.credits.unlimited ? "unlimited" : +access.credits.balance.toFixed(2)} credits` : "";
-        over = blocked
-          ? { text: theme.fg("error", `limit reached${credits}`), short: theme.fg("error", "limit reached"), priority: 230 }
-          : { text: theme.fg("warning", `still allowed${credits}`), short: theme.fg("warning", "still allowed"), priority: 230 };
-      }
+      const over = overageSegment(usage, full, theme);
       const billed = usage.provider === "anthropic" && usage.source !== "Claude Code account" ? s.extraBilled : undefined;
       const segments: Segment[] = [
         { text: label(account), separatorAfter: "", priority: 200 },
         { text: stale ? theme.fg("warning", `stale ${duration(age)}${expired ? " · reset due" : ""}`) : "", short: stale ? theme.fg("warning", expired ? (antigravity ? "reset due" : "stale · reset due") : "stale") : "", priority: 210 },
         ...windows,
         over ?? { text: "", priority: 0 },
-        { text: extraText && !over ? theme.fg("warning", extraText) : "", short: extra?.enabled && !over ? "extra on" : "", priority: extra?.enabled ? 75 : 5 },
         { text: billed ? theme.fg("error", `${billed} request${billed === 1 ? "" : "s"} billed to extra usage`) : "", short: billed ? theme.fg("error", `extra x${billed}`) : "", priority: 220 },
         { text: more ? theme.fg("dim", more) : "", priority: 30 },
       ];
@@ -1145,14 +1164,8 @@ export function layoutFooter(snapshot: Snapshot, width: number, theme: Paint): F
     });
     const extra = quota.extra;
     // An exhausted historical extra-usage pool is not an alert if extra is off.
-    let extraText = "";
-    if (extra?.enabled) {
-      extraText = "extra usage on";
-      if (extra.enabled && extra.used !== undefined) {
-        extraText += ` ${extraAmount(extra)}`;
-      }
-    }
-    const extraColor = extra?.enabled ? "warning" : "dim";
+    const extraText = extra?.enabled ? ["extra usage on", ...extraSpend(extra)].join(" · ") : "";
+    const extraColor = "dim";
     const staleText = `stale ${duration(age)}${expired ? " · reset due" : ""}`;
     const billed = quota.source === "Claude acct" ? s.extraBilled : undefined;
     const segments: Segment[] = [

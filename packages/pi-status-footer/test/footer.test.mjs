@@ -2611,40 +2611,59 @@ const claudeReading = (used, extra) => ({ provider: "anthropic", source: "Claude
 const codexReading = (used, access) => ({ provider: "openai-codex", source: "Codex account", state: "ready", observedAt: now,
   windows: [{ label: "week", used, reset: now + 3 * 86400_000 }], access });
 
-test("Claude past a full window shows its extra usage spend", () => {
+test("Claude extra usage shows what is used, what is left and whether it is billing now", () => {
   const spend = { enabled: true, used: 76.73, limit: 100, currency: "USD", capReached: false };
+  const uncapped = { enabled: true, used: 441.5, uncapped: true, currency: "USD", capReached: false };
   for (const width of [46, 120, 180]) {
-    for (const reading of [claudeReading(100, spend), claudeReading(100, { ...spend, capReached: true }), claudeReading(100, { enabled: false }), claudeReading(95, spend)]) {
+    for (const reading of [claudeReading(100, spend), claudeReading(100, uncapped), claudeReading(100, { ...spend, capReached: true }), claudeReading(100, { enabled: false }), claudeReading(95, spend)]) {
       assert.ok(overageRows(reading, width).every((row) => visibleWidth(row) <= width));
     }
   }
   const wide = overageRows(claudeReading(100, spend), 180).at(-1);
-  assert.match(wide, /week 100% used/);
-  assert.match(wide, /100% used.* · \$76\.73\/\$100 extra usage/);
+  assert.match(wide, /week 100% used.* · billing extra usage · \$76\.73 used · \$23\.27 left/);
   assert.doesNotMatch(wide, /extra usage on/);
-  assert.match(overageRows(claudeReading(100, spend), 46).at(-1), /\$76\.73 extra/);
-  assert.match(overageRows(claudeReading(100, { ...spend, capReached: true }), 180).at(-1), /extra usage cap reached/);
-  assert.match(overageRows(claudeReading(100, { enabled: false }), 180).at(-1), /limit reached/);
+  assert.match(overageRows(claudeReading(100, uncapped), 180).at(-1), /billing extra usage · \$441\.50 used · no cap/);
+  assert.match(overageRows(claudeReading(100, spend), 46).at(-1), /on extra \$76\.73/);
+  assert.match(overageRows(claudeReading(100, { ...spend, capReached: true }), 180).at(-1), /extra usage cap reached · \$76\.73 used/);
+  assert.match(overageRows(claudeReading(100, { enabled: false }), 180).at(-1), /limit reached · extra usage off/);
   const unknown = overageRows(claudeReading(100, undefined), 180).at(-1);
   assert.match(unknown, /week 100% used/);
   assert.doesNotMatch(unknown, /limit reached|extra usage/);
   const under = overageRows(claudeReading(95, spend), 180).at(-1);
-  assert.match(under, /extra usage on \$76\.73\/\$100/);
-  assert.doesNotMatch(under, /extra usage cap|\/\$100 extra usage/);
+  assert.match(under, /extra usage on · \$76\.73 used · \$23\.27 left/);
+  assert.doesNotMatch(under, /billing|cap reached/);
+  assert.match(overageRows(claudeReading(95, uncapped), 180).at(-1), /extra usage on · \$441\.50 used · no cap/);
+  // A cap that is not reported is unknown, not unlimited.
+  assert.doesNotMatch(overageRows(claudeReading(95, { enabled: true, used: 5, currency: "USD" }), 180).at(-1), /no cap|left/);
 });
 
-test("Codex past a full window shows whether it still serves", () => {
+test("Codex at its limit shows whether it still serves and its credits", () => {
   for (const width of [46, 120, 180]) {
-    for (const reading of [codexReading(100, { allowed: true, limitReached: false }), codexReading(100, { limitReached: true }), codexReading(50, { allowed: true })]) {
+    for (const reading of [codexReading(100, { allowed: true, limitReached: false }), codexReading(100, { limitReached: true }), codexReading(50, { allowed: true }),
+      codexReading(100, { allowed: true, credits: { balance: 1250, unlimited: false } })]) {
       assert.ok(overageRows(reading, width).every((row) => visibleWidth(row) <= width));
     }
   }
   assert.match(overageRows(codexReading(100, { allowed: true, limitReached: false }), 180).at(-1), /still allowed/);
-  const blocked = overageRows(codexReading(100, { allowed: false, limitReached: true }), 180).at(-1);
-  assert.match(blocked, /limit reached/);
+  const blocked = overageRows(codexReading(100, { allowed: false, limitReached: true, credits: { balance: 0, unlimited: false } }), 180).at(-1);
+  assert.match(blocked, /limit reached · no credits/);
   assert.doesNotMatch(blocked, /still allowed/);
-  assert.match(overageRows(codexReading(100, { allowed: true, credits: { balance: 12.5, unlimited: false } }), 180).at(-1), /12\.5 credits/);
-  assert.doesNotMatch(overageRows(codexReading(50, { allowed: true }), 180).at(-1), /still allowed|limit reached/);
+  assert.match(overageRows(codexReading(100, { allowed: true, credits: { balance: 1250, unlimited: false } }), 180).at(-1), /on credits · 1,250 credits left/);
+  assert.match(overageRows(codexReading(50, { allowed: true, credits: { balance: 12.5, unlimited: false } }), 180).at(-1), /12\.5 credits left/);
+  const idle = overageRows(codexReading(50, { allowed: true, credits: { balance: 0, unlimited: false } }), 180).at(-1);
+  assert.doesNotMatch(idle, /still allowed|limit reached|credits/);
+});
+
+test("Antigravity shows its Google One AI credit balance without claiming it is in use", () => {
+  const reading = (used, balance) => ({ provider: "google", source: "Google Antigravity subscription", state: "ready", observedAt: now,
+    windows: [{ label: "Gemini 5h", used, reset: now + 3600_000, pool: "Gemini", scope: "shared", quotaId: "gemini-5h" }], access: { credits: { balance, unlimited: false } } });
+  for (const width of [46, 120, 180]) assert.ok(overageRows(reading(100, 1200), width).every((row) => visibleWidth(row) <= width));
+  const full = overageRows(reading(100, 1200), 180).at(-1);
+  assert.match(full, /1,200 AI credits left/);
+  assert.doesNotMatch(full, /limit reached|billing|on credits/);
+  assert.match(overageRows(reading(100, 0), 180).at(-1), /no AI credits/);
+  assert.match(overageRows(reading(40, 1200), 180).at(-1), /1,200 AI credits left/);
+  assert.doesNotMatch(overageRows(reading(40, 0), 180).at(-1), /credits/);
 });
 
 test("provider snapshots select Google pools, child sources and invalidate changed identities without render I/O", async () => {

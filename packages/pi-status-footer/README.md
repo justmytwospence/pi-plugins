@@ -248,15 +248,22 @@ labeled.
   same-account reading and otherwise report limits unavailable.
 - **stale:** cache/header snapshot is at least ten minutes old or its reset time
   has passed. Never assume the provider reset a quota to zero without fresh data.
-- **extra:** Claude account extra usage enabled/disabled state and its spend
-  (`extra usage on $X/$Y`). An old spent pool is not an active warning when extra
-  usage is off.
-- **at limit:** when a shown window is at 100%, Claude's row says
-  `$X/$Y extra usage` (or `extra usage cap reached`, or `limit reached`
-  when extra usage is off), and Codex's says `still allowed` while ChatGPT
-  still serves requests, `limit reached` once it stops, plus any prepaid credit balance.
-  Neither provider reports usage past 100%, so the overage is the provider's billing and
-  access state, never an extrapolated percentage.
+- **extra / credits:** what the account can spend past its limits, what it has
+  used, what is left, and whether requests are drawing on it now. Claude:
+  `extra usage on · $X used · $Y left` (or `· no cap` when the account reports
+  no monthly cap; nothing when the cap is unknown), dim while only standing by.
+  An old spent pool is not shown when extra usage is off.
+- **at limit:** when a shown window is at 100%, Claude's row turns that red as
+  `billing extra usage · $X used · $Y left`, or says `extra usage cap reached`, or
+  `limit reached · extra usage off`. Codex's says `still allowed` while ChatGPT
+  still serves requests, `on credits · N credits left` when prepaid credits pay
+  for them, and `limit reached · no credits` (or the balance) once it stops; a
+  positive credit balance shows dimly below the limit too. Antigravity's shows the
+  Google One AI credit balance (`N AI credits left`, `no AI credits`) without
+  claiming it is in use: Pi's Antigravity provider may not spend credits, and a
+  full model-scoped window does not block every model. No provider reports usage
+  past 100%, so the overage is the provider's billing and access state, never an
+  extrapolated percentage.
 
 Ordinary quota windows retain their routine countdowns when a future reset is known. Percentages are **used**, not remaining. The selectively displayed Fable window appears above 70% used, including exhaustion, regardless of days remaining; otherwise it appears only when over its seven-day usage trajectory and less than 48 hours from reset. Fable requires a known percentage and future reset. Unknown or past-reset data does not imply replenishment.
 

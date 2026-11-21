@@ -33,6 +33,7 @@ function sanitizeExtra(value: unknown): ExtraUsage | undefined {
   const out: ExtraUsage = { enabled: item.enabled };
   if (number(item.used) !== undefined) out.used = number(item.used);
   if (number(item.limit) !== undefined) out.limit = number(item.limit);
+  else if (item.uncapped === true) out.uncapped = true;
   if (currency) out.currency = currency;
   if (bool(item.capReached) !== undefined) out.capReached = bool(item.capReached);
   return out;
@@ -94,6 +95,8 @@ export function parseClaudeQuota(raw: unknown, updated: number): Quota & { [inva
     enabled,
     used: usedMinor === undefined ? undefined : usedMinor / 10 ** exponent,
     limit: capMinor === undefined ? undefined : capMinor / 10 ** capExponent,
+    // An explicit null cap means no monthly spending limit; an absent field is unknown.
+    ...(capMinor === undefined && (extra.monthly_limit === null || spend.limit === null) ? { uncapped: true } : {}),
     currency: typeof currency === "string" ? clean(currency) : undefined,
     ...(typeof extra.spend_limit_reached === "boolean" ? { capReached: extra.spend_limit_reached } : {}),
   };
@@ -140,7 +143,9 @@ export function parseCodexUsage(raw: unknown, now: number): Quota {
   const rl = record(data.rate_limit), credits = record(data.credits);
   const balance = typeof credits.balance === "string" && /^\d+(?:\.\d+)?$/.test(credits.balance) ? Number(credits.balance) : number(credits.balance);
   const access = sanitizeAccess({ allowed: rl.allowed, limitReached: rl.limit_reached,
-    credits: credits.has_credits === true ? { balance, unlimited: credits.unlimited === true } : undefined });
+    // No credits is worth showing at the limit: it is why requests stop.
+    credits: credits.has_credits === true ? { balance, unlimited: credits.unlimited === true }
+      : credits.has_credits === false ? { balance: 0, unlimited: false } : undefined });
   return { source: "Codex acct", updated: now, windows, ...(access ? { access } : {}) };
 }
 
@@ -247,8 +252,9 @@ type Identity = { provider: Provider; token: string; digest: string };
 type Flight = { promise: Promise<ProviderUsage>; controller: AbortController; subscribers: number };
 const flights = new Map<string, Flight>();
 const memory = new Map<string, ProviderUsage>();
-/** Version 1 files written with extra usage and access support carry this marker. */
-const CACHE_DETAIL = 2;
+/** Version 1 files written with the current extra usage and access fields (an uncapped
+ * Claude spend, Codex's no-credits state) carry this marker; older ones are refetched. */
+const CACHE_DETAIL = 3;
 const legacy = new WeakSet<ProviderUsage>();
 const digest = (value: string): string => createHash("sha256").update(value).digest("hex");
 const source = (provider: Provider): string => provider === "anthropic" ? "Pi Anthropic subscription" : "Codex account (diagnostic only)";

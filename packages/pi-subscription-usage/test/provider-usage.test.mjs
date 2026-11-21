@@ -3,7 +3,7 @@ import { describe, it, vi, afterEach } from "vitest";
 import {
   antigravityUserAgent, createProviderUsageCollector, dispatchProviderUsage, isUsageStale,
   ARGON_MODEL, argonQuotaIssue, argonQuotaVariant, isArgonQuotaWindow, isArgonVariantQuotaWindow, isSharedGeminiQuotaWindow,
-  parseGoogleModels, parseGoogleSummary, parseMuseUsage, selectGooglePool,
+  parseGoogleCredits, parseGoogleModels, parseGoogleSummary, parseMuseUsage, selectGooglePool,
 } from "../src/provider-usage.ts";
 
 const now = 1_800_000_000_000;
@@ -204,6 +204,20 @@ describe("collector", () => {
       assert.equal(init.signal.aborted, false);
     }
     collector.dispose();
+  });
+
+  it("carries the Google One AI credit balance from project discovery", async () => {
+    // loadCodeAssist omits a zero creditAmount (proto3 default).
+    const paid = credits => json({ cloudaicompanionProject: { id: "synthetic-project" }, paidTier: { id: "g1-pro-tier", availableCredits: [{ creditType: "GOOGLE_ONE_AI", minimumCreditAmountForUsage: "50", ...credits }] } });
+    for (const [credits, balance] of [[{ creditAmount: "1200" }, 1200], [{}, 0]]) {
+      let calls = 0;
+      const collector = createProviderUsageCollector({ now: () => now, fetch: async () => ++calls === 1 ? paid(credits) : summary() });
+      assert.deepEqual((await collector.refresh(google)).access, { credits: { balance, unlimited: false } });
+      collector.dispose();
+    }
+    assert.equal(parseGoogleCredits({ paidTier: { availableCredits: [{ creditType: "OTHER", creditAmount: "5" }] } }), undefined);
+    assert.equal(parseGoogleCredits({ paidTier: { availableCredits: [{ creditType: "GOOGLE_ONE_AI", creditAmount: "-1" }] } }), undefined);
+    assert.equal(parseGoogleCredits({ currentTier: {} }), undefined);
   });
 
   it.each([404, 501])("falls back to model quota only on summary status %s", async status => {

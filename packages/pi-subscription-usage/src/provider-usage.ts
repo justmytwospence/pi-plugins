@@ -4,9 +4,11 @@ import { homedir } from "node:os";
 
 export type UsageState = "ready" | "unavailable" | "not-applicable";
 export type UsageWindow = { label: string; used?: number; reset?: number; pool?: string; model?: string; observedAt?: number; scope?: "shared" | "model" | "variant"; quotaId?: string; variant?: string };
-/** Claude extra usage (billed past plan limits). Amounts in major currency units. */
-export type ExtraUsage = { enabled: boolean; used?: number; limit?: number; currency?: string; capReached?: boolean };
-/** Codex plan access at the limit: whether requests are still served, and prepaid credits. */
+/** Claude extra usage (billed past plan limits). Amounts in major currency units.
+ * `uncapped` is true only when the account reports no spending cap (an explicit null), not when the cap is unknown. */
+export type ExtraUsage = { enabled: boolean; used?: number; limit?: number; uncapped?: boolean; currency?: string; capReached?: boolean };
+/** Plan access at the limit: whether requests are still served (Codex), and the account's
+ * credit balance (Codex prepaid credits, Antigravity Google One AI credits). */
 export type AccountAccess = { allowed?: boolean; limitReached?: boolean; credits?: { balance: number; unlimited: boolean } };
 export type ProviderUsage = { provider: string; source: string; state: UsageState; observedAt?: number; windows: UsageWindow[]; reason?: string; detailsUrl?: string; extra?: ExtraUsage; access?: AccountAccess };
 
@@ -43,6 +45,16 @@ const resetTime = (value: unknown): number | undefined => {
   const time = Date.parse(value);
   return Number.isFinite(time) ? time : undefined;
 };
+/** Google One AI credits from loadCodeAssist (`paidTier.availableCredits`). Zero amounts are omitted from the payload. */
+export function parseGoogleCredits(payload: unknown): AccountAccess | undefined {
+  const credits = object(object(payload)?.paidTier)?.availableCredits;
+  if (!Array.isArray(credits)) return undefined;
+  const entry = credits.map(object).find(item => item?.creditType === "GOOGLE_ONE_AI");
+  if (!entry) return undefined;
+  const raw = entry.creditAmount;
+  const balance = raw === undefined ? 0 : typeof raw === "number" ? raw : typeof raw === "string" && /^\d+(?:\.\d+)?$/.test(raw) ? Number(raw) : NaN;
+  return Number.isFinite(balance) && balance >= 0 ? { credits: { balance, unlimited: false } } : undefined;
+}
 const used = (value: unknown): number | undefined =>
   typeof value === "number" && Number.isFinite(value) && value >= 0 && value <= 1 ? 100 * (1 - value) : undefined;
 
@@ -265,7 +277,10 @@ export function createProviderUsageCollector(options: CollectorOptions = {}) {
     };
     const projectResponse = await post("https://cloudcode-pa.googleapis.com/v1internal:loadCodeAssist", { metadata: { ideType: "ANTIGRAVITY" } });
     if (!projectResponse.ok) return unavailable("google", GOOGLE_SOURCE, "Google project discovery was refused or unavailable.");
-    const rawProject = object(await readJson(projectResponse))?.cloudaicompanionProject;
+    const projectPayload = await readJson(projectResponse);
+    const access = parseGoogleCredits(projectPayload);
+    const withCredits = (usage: ProviderUsage): ProviderUsage => usage.state === "ready" && access ? { ...usage, access } : usage;
+    const rawProject = object(projectPayload)?.cloudaicompanionProject;
     const project = typeof rawProject === "string" ? rawProject : object(rawProject)?.id;
     if (typeof project !== "string" || !project.trim()) return unavailable("google", GOOGLE_SOURCE, "Google did not return a managed project.");
     if (source.model === ARGON_MODEL && isArgonVariant(source.variant)) {
@@ -291,16 +306,16 @@ export function createProviderUsageCollector(options: CollectorOptions = {}) {
       const merged: ProviderUsage = { provider: "google", source: GOOGLE_SOURCE, state: "ready", observedAt: Math.min(summary.observedAt!, model.observedAt!),
         windows: [...selectGooglePool(summary, source.model), ...model.windows] };
       const issue = argonQuotaIssue(merged, source.variant);
-      return issue ? unavailable("google", GOOGLE_SOURCE, issue) : merged;
+      return issue ? unavailable("google", GOOGLE_SOURCE, issue) : withCredits(merged);
     }
     const response = await post("https://daily-cloudcode-pa.googleapis.com/v1internal:retrieveUserQuotaSummary", { project });
     if (response.status === 404 || response.status === 501) {
       const fallback = await post("https://daily-cloudcode-pa.googleapis.com/v1internal:fetchAvailableModels", { project });
       if (!fallback.ok) return unavailable("google", GOOGLE_SOURCE, "Google model quota was refused or unavailable.");
-      return parseGoogleModels(await readJson(fallback, MAX_MODELS_RESPONSE), source.model!, now());
+      return withCredits(parseGoogleModels(await readJson(fallback, MAX_MODELS_RESPONSE), source.model!, now()));
     }
     if (!response.ok) return unavailable("google", GOOGLE_SOURCE, "Google quota was refused or unavailable.");
-    return parseGoogleSummary(await readJson(response), now());
+    return withCredits(parseGoogleSummary(await readJson(response), now()));
   }
 
   async function collect(source: UsageSource, signal: AbortSignal): Promise<ProviderUsage> {

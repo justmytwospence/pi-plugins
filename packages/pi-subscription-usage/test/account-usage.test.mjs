@@ -399,12 +399,21 @@ test("Claude extra usage records whether its spend cap is reached", () => {
   }, now);
   assert.equal(quota.windows[0].used, 100);
   assert.deepEqual(quota.extra, { enabled: true, used: 76.73, limit: 100, currency: "USD", capReached: false });
+  // Shape observed from the live endpoint for an account without a monthly cap.
+  const uncapped = parseClaudeQuota({ seven_day: { utilization: 78, resets_at: "2026-09-30T12:00:00Z" },
+    extra_usage: { is_enabled: true, monthly_limit: null, used_credits: 44150.0, currency: "USD", decimal_places: 2, spend_limit_reached: false },
+    spend: { used: { amount_minor: 44150, currency: "USD", exponent: 2 }, limit: null, enabled: true } }, now);
+  assert.deepEqual(uncapped.extra, { enabled: true, used: 441.5, limit: undefined, uncapped: true, currency: "USD", capReached: false });
+  // A missing cap field is unknown, not unlimited.
+  assert.equal(parseClaudeQuota({ seven_day: { utilization: 1, resets_at: "2026-09-30T12:00:00Z" },
+    extra_usage: { is_enabled: true, used_credits: 5, currency: "USD" } }, now).extra.uncapped, undefined);
 });
 
-test("Codex endpoint records access and only real credit balances", () => {
+test("Codex endpoint records access, credit balances and their absence", () => {
   const window = { used_percent: 100, limit_window_seconds: 604800, reset_at: 1_800_000_000 };
   const rate_limit = { allowed: true, limit_reached: false, primary_window: window };
-  assert.deepEqual(parseCodexUsage({ rate_limit, credits: { has_credits: false, balance: "0", unlimited: false } }, now).access, { allowed: true, limitReached: false });
+  assert.deepEqual(parseCodexUsage({ rate_limit, credits: { has_credits: false, balance: "0", unlimited: false } }, now).access,
+    { allowed: true, limitReached: false, credits: { balance: 0, unlimited: false } });
   assert.deepEqual(parseCodexUsage({ rate_limit, credits: { has_credits: true, balance: "12.5", unlimited: false } }, now).access,
     { allowed: true, limitReached: false, credits: { balance: 12.5, unlimited: false } });
   assert.equal(parseCodexUsage({ rate_limit, credits: { has_credits: true, balance: "abc", unlimited: false } }, now).access.credits, undefined);
