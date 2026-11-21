@@ -279,10 +279,11 @@ export default function (pi) {
             assert(!selectedEffort || options.includes(selectedEffort), `missing effort ${selectedEffort}`);
             return selectedEffort ?? options[0];
           }
-          assert.equal(title, 'Implement this plan?');
+          assert.equal(title.startsWith('Implement this plan?'), true, title);
           approvalCount++;
-          const selected = options.find(option => option === (approvalChoice === 'compact-here'
-            ? 'Yes, compact plan and implement here' : 'Yes, implement here'));
+          // Opus offers workers; the last row implements on the session's own model.
+          const selected = options.find(option => (approvalChoice === 'compact-here'
+            ? /^Yes, compact and implement with Opus/u : /^Yes, implement with Opus/u).test(option));
           assert(selected, `${label}: missing ${approvalChoice} choice in ${options}`);
           return selected;
         },
@@ -540,7 +541,7 @@ export default function (pi) {
         selectedEffort = 'high'; // Effort-only approval stays ordinary work.
         const beforeApproval = effortCalls.length;
         let result = await call('exit_plan_mode');
-        assert.equal(effortCalls.length, beforeApproval + 1, 'one Exec judgment at approval, none at commit or continuation');
+        assert.equal(effortCalls.length, beforeApproval + 3, 'one Exec judgment per offered model (Sonnet, Haiku, Opus) at approval, none at commit or continuation');
         assert.equal(effortCalls.at(-1).context.state.phase, 'exec');
         assert.equal(result.details?.outcome, 'approved', JSON.stringify(result));
         const approvedFile = result.details.planFile;
