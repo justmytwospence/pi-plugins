@@ -9,7 +9,8 @@
     "write": [
       "~/Projects/dotfiles",
       "~/Projects/herdr-web-ui",
-      "~/Projects/collie"
+      "~/Projects/collie",
+      "~/Projects/pi-marimo"
     ]
   }
 }
