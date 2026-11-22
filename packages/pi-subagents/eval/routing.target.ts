@@ -20,7 +20,7 @@ const TASKS = {
 const PARENTS = [
   { family: "anthropic", model: "anthropic/claude-opus-5-5" },
   { family: "openai", model: "openai/gpt-6-astra" },
-  { family: "google", model: "google/antigravity-gemini-4-argon" },
+  { family: "google", model: "google/antigravity-gemini-4-neon" },
   { family: "muse", model: "muse-code/muse-wonder-1.0" },
 ] as const;
 
@@ -57,7 +57,7 @@ const model = (provider: string, id: string): AvailableModel => ({
 export const AVAILABLE: readonly AvailableModel[] = [
   model("anthropic", "claude-haiku-5-5"), model("anthropic", "claude-sonnet-5-5"), model("anthropic", "claude-opus-5-5"), model("anthropic", "claude-fable-5-1"),
   model("openai", "gpt-6-luna"), model("openai", "gpt-6.1-terra"), model("openai", "gpt-6.1-sol"), model("openai", "gpt-6-astra"),
-  model("google", "antigravity-gemini-3.8-flash"), model("google", "antigravity-gemini-4-argon"),
+  model("google", "antigravity-gemini-4-hydrogen"), model("google", "antigravity-gemini-4-neon"), model("google", "antigravity-gemini-4-carbon"),
   model("muse-code", "muse-spark-1.3"), model("muse-code", "muse-wonder-1.0"),
 ];
 

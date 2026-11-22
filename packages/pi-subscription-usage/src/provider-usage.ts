@@ -16,7 +16,7 @@ export type UsageSource = {
   provider: string;
   sourceId: string;
   model?: string;
-  /** Actual Antigravity model variant used by a logical Gemini 4 Argon model. */
+  /** Actual Antigravity model variant used by a logical Gemini 4 Neon model. */
   variant?: string;
   baseUrl?: string;
   auth?: { kind: "local-oauth" | "api-key" | "vault"; token?: string };
@@ -84,48 +84,48 @@ export function parseGoogleSummary(payload: unknown, observedAt: number): Provid
 }
 
 export const ARGON_MODEL = "antigravity-gemini-4-argon";
-export type ArgonQuotaVariant = "gemini-4-argon-low" | "gemini-4-argon-medium" | "gemini-4-argon-high";
-const isArgonVariant = (variant: string | undefined): variant is ArgonQuotaVariant =>
-  variant === "gemini-4-argon-low" || variant === "gemini-4-argon-medium" || variant === "gemini-4-argon-high";
+export const NEON_MODEL = "antigravity-gemini-4-neon";
+export type NeonQuotaVariant = "gemini-4-neon-low" | "gemini-4-neon-medium" | "gemini-4-neon-high" | "gemini-4-neon-xhigh";
+const isNeonVariant = (variant: string | undefined): variant is NeonQuotaVariant =>
+  variant === "gemini-4-neon-low" || variant === "gemini-4-neon-medium" || variant === "gemini-4-neon-high" || variant === "gemini-4-neon-xhigh";
 
 /** Callers first reject non-reasoning models and clamp the physical thinking level. */
-export function argonQuotaVariant(level: string, thinkingLevelMap?: Readonly<Partial<Record<string, string | null>>>): ArgonQuotaVariant | undefined {
+export function neonQuotaVariant(level: string, thinkingLevelMap?: Readonly<Partial<Record<string, string | null>>>): NeonQuotaVariant | undefined {
   const effective = thinkingLevelMap?.[level] === undefined ? level : thinkingLevelMap[level];
-  if (effective === "off" || effective === "minimal" || effective === "low") return "gemini-4-argon-low";
-  if (effective === "medium") return "gemini-4-argon-medium";
-  if (effective === "high" || effective === "xhigh" || effective === "max") return "gemini-4-argon-high";
+  if (effective === "off" || effective === "high") return "gemini-4-neon-high";
+  if (effective === "minimal" || effective === "low") return "gemini-4-neon-low";
+  if (effective === "medium") return "gemini-4-neon-medium";
+  if (effective === "xhigh") return "gemini-4-neon-xhigh";
   return undefined;
 }
 /** The exact per-variant window, independent of its display label. */
-export function isArgonVariantQuotaWindow(window: UsageWindow): boolean {
-  return window.pool === "Gemini" && window.model === ARGON_MODEL && window.scope === "variant" &&
-    isArgonVariant(window.variant) && window.quotaId === `model:${window.variant}`;
+export function isNeonVariantQuotaWindow(window: UsageWindow): boolean {
+  return window.pool === "Gemini" && window.model === NEON_MODEL && window.scope === "variant" &&
+    isNeonVariant(window.variant) && window.quotaId === `model:${window.variant}`;
 }
-/** Argon weekly and exact variant quotas never bind another Gemini model. */
-export function isArgonQuotaWindow(window: UsageWindow): boolean {
-  return window.pool === "Gemini" && window.model === ARGON_MODEL &&
-    ((window.scope === "model" && window.quotaId === "gemini-argon-wtu-weekly" && window.variant === undefined) || isArgonVariantQuotaWindow(window));
+/** Neon model and exact variant quotas never bind another Gemini model. */
+export function isNeonQuotaWindow(window: UsageWindow): boolean {
+  return window.pool === "Gemini" && window.model === NEON_MODEL &&
+    ((window.scope === "model" && window.variant === undefined && Boolean(window.quotaId)) || isNeonVariantQuotaWindow(window));
 }
-/** Shared Gemini buckets bind every Gemini model, Argon included. */
+/** Shared Gemini buckets bind every Gemini model, Neon included. */
 export function isSharedGeminiQuotaWindow(window: UsageWindow): boolean {
   return window.pool === "Gemini" && window.model === undefined && window.variant === undefined && window.scope === "shared" &&
     (window.quotaId === "gemini-5h" || window.quotaId === "gemini-weekly");
 }
 
 /** Identity/completeness only; allowance evaluation owns freshness and numeric validity. */
-export function argonQuotaIssue(usage: ProviderUsage, variant: ArgonQuotaVariant): string | undefined {
+export function neonQuotaIssue(usage: ProviderUsage, variant: NeonQuotaVariant): string | undefined {
   if (usage.state !== "ready") return usage.reason ?? "Antigravity quota is unavailable.";
   for (const [quotaId, label] of [["gemini-5h", "Shared Gemini 5h"], ["gemini-weekly", "Shared Gemini weekly"]]) {
     if (!usage.windows.some(window => isSharedGeminiQuotaWindow(window) && window.quotaId === quotaId)) return `${label} quota is unknown.`;
   }
-  // A separate Argon weekly bucket binds when the plan reports one; plans that
-  // share the Gemini weekly bucket across Gemini 4 models omit it.
-  if (!usage.windows.some(window => isArgonVariantQuotaWindow(window) && window.variant === variant)) return `${argonVariantLabel(variant)} quota is unknown.`;
+  if (!usage.windows.some(window => isNeonVariantQuotaWindow(window) && window.variant === variant)) return `${neonVariantLabel(variant)} quota is unknown.`;
   return undefined;
 }
-const argonVariantLabel = (variant: string | undefined): string => {
-  const suffix = variant?.replace(/^gemini-4-argon-/, "");
-  return suffix && suffix !== variant ? `Argon ${suffix}` : "Argon variant";
+const neonVariantLabel = (variant: string | undefined): string => {
+  const suffix = variant?.replace(/^gemini-4-neon-/, "");
+  return suffix && suffix !== variant ? `Neon ${suffix}` : "Neon variant";
 };
 
 /** Select the active Antigravity model's pool without discarding the detail readings. */
@@ -147,8 +147,8 @@ export function parseGoogleModels(payload: unknown, model: string, observedAt: n
   const quota = object(entry?.quotaInfo);
   const percent = used(quota?.remainingFraction), reset = resetTime(quota?.resetTime);
   if (!quota || (quota.remainingFraction !== undefined && percent === undefined) || (quota.resetTime !== undefined && reset === undefined) || (percent === undefined && reset === undefined)) return unavailable("google", GOOGLE_SOURCE, "Google returned no quota for the active model.");
-  const exactVariant = model === ARGON_MODEL && isArgonVariant(variant) ? variant : undefined;
-  const label = exactVariant ? argonVariantLabel(exactVariant) : "model";
+  const exactVariant = model === NEON_MODEL && isNeonVariant(variant) ? variant : undefined;
+  const label = exactVariant ? neonVariantLabel(exactVariant) : "model";
   return { provider: "google", source: GOOGLE_SOURCE, state: "ready", observedAt, windows: [{ label, model, quotaId: `model:${endpointId}`, scope: exactVariant ? "variant" : "model", ...(exactVariant ? { variant: exactVariant } : {}), pool: id.startsWith("claude-") ? "third-party" : "Gemini", ...(percent === undefined ? {} : { used: percent }), ...(reset === undefined ? {} : { reset }) }] };
 }
 
@@ -208,11 +208,11 @@ export function dispatchProviderUsage(source: UsageSource, _observedAt: number):
   return unavailable(provider, provider, "Subscription limits are unavailable for this provider.");
 }
 
-// CortexKit antigravity-auth-core 3.0.11 fingerprint.js: CLI 1.3.5 / changelist 998863838.
+// CortexKit antigravity-auth-core 3.1.12 fingerprint.js: CLI 1.5.8 / changelist 1020628950.
 export function antigravityUserAgent(): string {
   const platform = process.platform === "win32" ? "windows" : process.platform || "unknown";
   const arch = process.arch === "x64" ? "amd64" : process.arch === "ia32" ? "386" : process.arch || "unknown";
-  return `antigravity/cli/1.3.5 (aidev_client; os_type=${platform}; arch=${arch}; cl=998863838; auth_method=consumer)`;
+  return `antigravity/cli/1.5.8 (aidev_client; os_type=${platform}; arch=${arch}; cl=1020628950; auth_method=consumer)`;
 }
 
 type Exec = (binary: string, args: string[], options: { signal: AbortSignal; timeout: number; maxBuffer: number; env: NodeJS.ProcessEnv }) => Promise<string>;
@@ -264,9 +264,9 @@ export function createProviderUsageCollector(options: CollectorOptions = {}) {
   let disposed = false;
 
   async function google(source: UsageSource, signal: AbortSignal): Promise<ProviderUsage> {
-    if (source.model === ARGON_MODEL) {
-      if (source.variant === undefined) return unavailable("google", GOOGLE_SOURCE, "The exact Argon reasoning variant is unknown.");
-      if (!isArgonVariant(source.variant)) return unavailable("google", GOOGLE_SOURCE, "Unknown Argon model variant.");
+    if (source.model === NEON_MODEL) {
+      if (source.variant === undefined) return unavailable("google", GOOGLE_SOURCE, "The exact Neon reasoning variant is unknown.");
+      if (!isNeonVariant(source.variant)) return unavailable("google", GOOGLE_SOURCE, "Unknown Neon model variant.");
     }
     const headers = { Authorization: `Bearer ${source.auth!.token}`, "Content-Type": "application/json", "User-Agent": antigravityUserAgent() };
     const post = async (url: string, body: unknown) => {
@@ -283,9 +283,9 @@ export function createProviderUsageCollector(options: CollectorOptions = {}) {
     const rawProject = object(projectPayload)?.cloudaicompanionProject;
     const project = typeof rawProject === "string" ? rawProject : object(rawProject)?.id;
     if (typeof project !== "string" || !project.trim()) return unavailable("google", GOOGLE_SOURCE, "Google did not return a managed project.");
-    if (source.model === ARGON_MODEL && isArgonVariant(source.variant)) {
+    if (source.model === NEON_MODEL && isNeonVariant(source.variant)) {
       // A malformed/rejected applicable pool is not proof it is under the cap.
-      // Fetch both endpoints: either can reveal a binding Argon limit.
+      // Fetch both endpoints: either can reveal a binding Neon limit.
       const readQuota = async (endpoint: string, label: string, parse: (payload: unknown) => ProviderUsage, maxBytes = MAX_RESPONSE): Promise<ProviderUsage> => {
         try {
           const response = await post(`https://daily-cloudcode-pa.googleapis.com/v1internal:${endpoint}`, { project });
@@ -298,14 +298,14 @@ export function createProviderUsageCollector(options: CollectorOptions = {}) {
       };
       const variant = source.variant;
       const [summary, model] = await Promise.all([
-        readQuota("retrieveUserQuotaSummary", "Shared Gemini and Argon weekly", payload => parseGoogleSummary(payload, now())),
-        readQuota("fetchAvailableModels", argonVariantLabel(variant), payload => parseGoogleModels(payload, ARGON_MODEL, now(), variant), MAX_MODELS_RESPONSE),
+        readQuota("retrieveUserQuotaSummary", "Shared Gemini", payload => parseGoogleSummary(payload, now())),
+        readQuota("fetchAvailableModels", neonVariantLabel(variant), payload => parseGoogleModels(payload, NEON_MODEL, now(), variant), MAX_MODELS_RESPONSE),
       ]);
       if (summary.state !== "ready") return summary;
       if (model.state !== "ready") return model;
       const merged: ProviderUsage = { provider: "google", source: GOOGLE_SOURCE, state: "ready", observedAt: Math.min(summary.observedAt!, model.observedAt!),
         windows: [...selectGooglePool(summary, source.model), ...model.windows] };
-      const issue = argonQuotaIssue(merged, source.variant);
+      const issue = neonQuotaIssue(merged, source.variant);
       return issue ? unavailable("google", GOOGLE_SOURCE, issue) : withCredits(merged);
     }
     const response = await post("https://daily-cloudcode-pa.googleapis.com/v1internal:retrieveUserQuotaSummary", { project });
@@ -339,7 +339,7 @@ export function createProviderUsageCollector(options: CollectorOptions = {}) {
       if (disposed) return Promise.resolve(unavailable(source.provider, source.provider, "Usage collector is disposed."));
       // Include credential identity without retaining the credential in cache keys.
       const key = createHash("sha256").update(JSON.stringify(source)).update(source.provider === "muse-sdk" || source.provider === "muse-code" ? process.env.PI_MUSE_BINARY ?? "" : "").digest("hex");
-      // The footer can poll a different model while the router reads Argon.
+      // The footer can poll a different model while the router reads Neon.
       // Do not cancel one model's flight just because it shares a provider.
       const slotKey = `${source.provider}\u0000${source.sourceId}\u0000${source.model ?? ""}\u0000${source.variant ?? ""}`;
       let slot = slots.get(slotKey);
@@ -356,9 +356,9 @@ export function createProviderUsageCollector(options: CollectorOptions = {}) {
       current.controller = active;
       const pending = collect(source, active.signal).then(result => {
         if (disposed || slots.get(slotKey) !== current || active.signal.aborted) return unavailable(source.provider, source.provider, "Usage request was cancelled.");
-        // A failed Argon refresh cannot borrow a prior ready allowance for this
+        // A failed Neon refresh cannot borrow a prior ready allowance for this
         // exact variant. Other collectors retain their existing transient fallback.
-        if (source.provider === "google" && source.model === "antigravity-gemini-4-argon" ||
+        if (source.provider === "google" && source.model === NEON_MODEL ||
             result.state === "ready" || !current.last || current.last.state !== "ready") current.last = result;
         return current.last;
       }).finally(() => { if (slots.get(slotKey) === current) current.flight = undefined; });

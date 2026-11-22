@@ -393,17 +393,17 @@ describe("extension factory", () => {
       expect(attachStartupHost(mode).resourceSections?.Context?.tokens).toBeGreaterThan(0);
       // An OAuth provider can be registered after Pi's initial available snapshot was taken.
       // A read-only, provider-scoped availability check must populate the live Google group.
-      const google = { provider: "google", id: "antigravity-gemini-4-argon", contextWindow: 1_048_576 };
+      const google = { provider: "google", id: "antigravity-gemini-4-neon", contextWindow: 1_048_576 };
       session.modelRuntime.getModels = () => [google];
       session.modelRuntime.getAvailable = vi.fn(async () => [google]);
       attachStartupHost(mode).refresh?.();
-      await vi.waitFor(() => expect(lines()).toContain("gemini-4-argon"));
+      await vi.waitFor(() => expect(lines()).toContain("gemini-4-neon"));
       expect(session.modelRuntime.getAvailable).toHaveBeenCalledWith("google");
-      expect(lines()).toContain("gemini-4-argon");
-      expect(lines()).not.toContain("antigravity-gemini-4-argon");
+      expect(lines()).toContain("gemini-4-neon");
+      expect(lines()).not.toContain("antigravity-gemini-4-neon");
       session.modelRuntime.getAvailable.mockResolvedValueOnce([]); // OAuth access disappears
       await vi.advanceTimersByTimeAsync(16_000);
-      expect(lines()).not.toContain("gemini-4-argon");
+      expect(lines()).not.toContain("gemini-4-neon");
       session.model = models[1];
       attachStartupHost(mode).refresh?.();
       expect(lines()).toContain("of 1M");

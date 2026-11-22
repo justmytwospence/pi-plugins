@@ -5,7 +5,7 @@ import { isUsageStale, selectGooglePool, type ProviderUsage, type UsageWindow } 
 export const SUPPORTED_WATERFALL_MODELS = [
   { provider: "anthropic", id: "claude-opus-5-5" },
   { provider: "openai", id: "gpt-6.1-sol" },
-  { provider: "google", id: "antigravity-gemini-4-argon" },
+  { provider: "google", id: "antigravity-gemini-4-neon" },
   { provider: "muse-code", id: "muse-wonder-1.0" },
 ] as const;
 

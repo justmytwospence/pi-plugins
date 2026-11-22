@@ -552,16 +552,16 @@ for (const width of [46, 120, 180]) {
 const editor = new CustomEditor({ ...tui, terminal: { rows: HEIGHT, columns: 180 } }, themeModule.getEditorTheme(), kb, { paddingX: 0 });
 editor.setText('next step');
 const usageReady = { provider: 'google', source: 'Google Antigravity subscription', state: 'ready', observedAt: NOW, windows: [{ label: 'Gemini 5h', pool: 'Gemini', scope: 'shared', quotaId: 'gemini-5h', used: 25, reset: NOW + 3_600_000 }] };
-const scopedArgonUsage = label => ({
+const scopedNeonUsage = label => ({
   ...usageReady,
   windows: [
     usageReady.windows[0],
     { label: 'Gemini weekly', pool: 'Gemini', scope: 'shared', quotaId: 'gemini-weekly', used: 20, reset: NOW + 3 * 86400_000 },
-    { label: 'Argon weekly', pool: 'Gemini', scope: 'model', quotaId: 'gemini-argon-wtu-weekly', model: 'antigravity-gemini-4-argon', used: label === 'Argon weekly' ? 100 : 30, reset: NOW + 3_600_000 },
-    { label: 'Argon high', pool: 'Gemini', scope: 'variant', quotaId: 'model:gemini-4-argon-high', model: 'antigravity-gemini-4-argon', variant: 'gemini-4-argon-high', used: label === 'Argon high' ? 100 : 35, reset: NOW + 3_600_000 },
+    { label: 'Neon weekly', pool: 'Gemini', scope: 'model', quotaId: 'model:antigravity-gemini-4-neon', model: 'antigravity-gemini-4-neon', used: label === 'Neon weekly' ? 100 : 30, reset: NOW + 3_600_000 },
+    { label: 'Neon high', pool: 'Gemini', scope: 'variant', quotaId: 'model:gemini-4-neon-high', model: 'antigravity-gemini-4-neon', variant: 'gemini-4-neon-high', used: label === 'Neon high' ? 100 : 35, reset: NOW + 3_600_000 },
   ],
 });
-const scopedArgonFixtures = ['Argon weekly', 'Argon high'].map(label => ({ label, usage: scopedArgonUsage(label) }));
+const scopedNeonFixtures = ['Neon weekly', 'Neon high'].map(label => ({ label, usage: scopedNeonUsage(label) }));
 const usageFable = used => ({ provider: 'anthropic', source: 'Anthropic subscription', state: 'ready', observedAt: NOW, windows: [{ label: 'Fable', used, reset: NOW + 3 * 86400_000 }] });
 const fable71 = usageFable(71);
 const fable100 = usageFable(100);
@@ -572,10 +572,10 @@ for (const width of [46, 120, 180]) {
   const blocked = statusFooter(width, modeStatuses('plan', 'auto'), { compact: true, providerUsage: [usageReady, usageUnavailable], providerUsageMore: 3 });
   assert.equal(blocked.length, 1);
   assert.doesNotMatch(stripVTControlCharacters(blocked[0]), /Google|Antigravity|OpenAI|\+3 more/u);
-  for (const usage of [fable71, fable100, ...scopedArgonFixtures.map(fixture => fixture.usage)]) {
+  for (const usage of [fable71, fable100, ...scopedNeonFixtures.map(fixture => fixture.usage)]) {
     const usageBlocked = statusFooter(width, modeStatuses('plan', 'auto'), { compact: true, providerUsage: [usage] });
     assert.equal(usageBlocked.length, 1, 'account usage must not add a blocked footer row');
-    assert.doesNotMatch(usageBlocked.map(stripVTControlCharacters).join('\n'), /Antigravity|Argon/u);
+    assert.doesNotMatch(usageBlocked.map(stripVTControlCharacters).join('\n'), /Antigravity|Neon/u);
   }
 }
 // Match the real helper's JSON-only snapshot contract. Rendering is delegated to its
@@ -654,7 +654,7 @@ const FOOTERS = [
   })),
   { name: 'heads-up waiting', statuses: new Map([...modeStatuses('plan', 'auto'), ['sidebar-headsup', '\u2726 heads up (2) \u00b7 risk: Main skipped the failing integration tests and reported green']]) },
   { name: 'provider ready', statuses: modeStatuses('plan', 'auto'), providerUsage: [usageReady] },
-  ...scopedArgonFixtures.flatMap(({ label, usage }) => [false, true].map(highStatus => ({
+  ...scopedNeonFixtures.flatMap(({ label, usage }) => [false, true].map(highStatus => ({
     name: `${label} 100%${highStatus ? ' high status' : ''}`,
     statuses: modeStatuses('plan', 'auto'),
     providerUsage: [usage], scopedQuota: label, highStatus,
@@ -712,7 +712,7 @@ for (const width of [46, 120, 180]) {
         assert.ok(fixture.providerUsage.length <= 2, 'at most two account rows');
         if (fixture.providerUsage.includes(usageReady)) assert.match(rendered, /Antigravity.*Gemini 5h.*25%/u, 'ready usage keeps its account, scoped label and measured percentage');
         if (fixture.scopedQuota) {
-          assert.match(rendered, new RegExp(`Antigravity.*${fixture.scopedQuota} 100%`, 'u'), 'the exhausted Argon scope wins over healthy shared detail, even at 46 columns');
+          assert.match(rendered, new RegExp(`Antigravity.*${fixture.scopedQuota} 100%`, 'u'), 'the exhausted Neon scope wins over healthy shared detail, even at 46 columns');
           assert.equal(footerLines.length + (withActivity ? 2 : 0), fixture.highStatus ? 13 : 6 + (withActivity ? 2 : 0), 'scoped quota stays within the existing row budget');
         }
         if (fixture.providerUsage.includes(usageUnavailable)) assert.match(rendered, /OpenAI.*limits unavailable/u, 'unavailable usage is explicit');
@@ -732,7 +732,7 @@ for (const width of [46, 120, 180]) {
           ...(fixture.history ? { transcript: fixture.history } : {}),
           dock: (w) => editor.render(w), footer: rows, ...options });
         if (fixture.scopedQuota) assert.match(screen.map(stripVTControlCharacters).join('\n'),
-          new RegExp(`Antigravity.*${fixture.scopedQuota} 100%`, 'u'), 'Sidebar and activity rows retain the critical Argon scope');
+          new RegExp(`Antigravity.*${fixture.scopedQuota} 100%`, 'u'), 'Sidebar and activity rows retain the critical Neon scope');
         if (fixture.history) {
           const history = fixture.history.render(width);
           assert.equal(history.length, 1, 'settings history stays a single content row');
@@ -764,13 +764,13 @@ const splashFooterVariants = [
 ];
 const splashModels = [
   { name: 'default' },
-  ...scopedArgonFixtures.map(({ label }) => {
+  ...scopedNeonFixtures.map(({ label }) => {
     // The default automatic order has exactly these three rungs. An installed Muse
     // favorite remains a manual choice, never a numbered automatic fallback.
     const order = [
       { provider: 'anthropic', model: 'claude-opus-5-5' },
       { provider: 'openai', model: 'gpt-6.1-sol' },
-      { provider: 'google', model: 'antigravity-gemini-4-argon' },
+      { provider: 'google', model: 'antigravity-gemini-4-neon' },
     ];
     const manual = { provider: 'muse-code', id: 'muse-wonder-1.0', contextWindow: 200_000 };
     const available = [
@@ -781,7 +781,7 @@ const splashModels = [
       rungs: order.map(rung => rung.provider === 'google' ? {
         ...rung, state: 'exhausted', resetAt: NOW + 3_600_000,
         reason: `${label} allowance is 100% used (95% waterfall threshold).`,
-        blockingQuota: { scope: label === 'Argon weekly' ? 'model' : 'variant', label },
+        blockingQuota: { scope: label === 'Neon weekly' ? 'model' : 'variant', label },
       } : { ...rung, state: 'available' }),
     });
     assert.ok(modelSection, 'the real builder produces scoped Google-blocked models');

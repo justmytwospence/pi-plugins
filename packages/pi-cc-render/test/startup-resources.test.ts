@@ -616,7 +616,7 @@ describe("startup resources", () => {
     expect(coloredModels).not.toContain("\x1b[33m★\x1b[0m");
     expect(buildModelsSection([])).toBeUndefined();
     const google = buildModelsSection([
-      { provider: "google", id: "antigravity-gemini-4-argon" },
+      { provider: "google", id: "antigravity-gemini-4-neon" },
       { provider: "google", id: "antigravity-gemma-3" },
       { provider: "google", id: "antigravity-claude-opus-5-5" },
       { provider: "google", id: "antigravity-gpt-oss-120b-medium" },
@@ -625,26 +625,26 @@ describe("startup resources", () => {
     ], [
       { provider: "google", id: "antigravity-claude-opus-5-5" },
       { provider: "google", id: "antigravity-gpt-oss-120b-medium" },
-      { provider: "google", id: "antigravity-gemini-4-argon", thinkingLevel: "high" },
+      { provider: "google", id: "antigravity-gemini-4-neon", thinkingLevel: "high" },
       { provider: "google", id: "antigravity-gemma-3" },
-      { provider: "google", id: "antigravity-gemini-4-argon-old" }, // stale favorite must not create a ghost action
-    ], { provider: "google", id: "antigravity-gemini-4-argon" })!;
+      { provider: "google", id: "antigravity-gemini-4-neon-old" }, // stale favorite must not create a ghost action
+    ], { provider: "google", id: "antigravity-gemini-4-neon" })!;
     expect(google.groups.map((group) => group.label)).toEqual(["anthropic", "google"]);
-    expect(google.groups[1]!.items).toEqual(["gemini-4-argon:high", "gemma-3"]);
+    expect(google.groups[1]!.items).toEqual(["gemini-4-neon:high", "gemma-3"]);
     expect(google.groups[1]!.prefixes![0]).toEqual(GLYPHS.favorite);
     expect(google.groups[1]!.marks![0]).toEqual({ ...GLYPHS.live, highlight: true });
-    expect(google.groups[1]!.actions![0]).toEqual({ kind: "model", provider: "google", id: "antigravity-gemini-4-argon", thinkingLevel: "high" });
+    expect(google.groups[1]!.actions![0]).toEqual({ kind: "model", provider: "google", id: "antigravity-gemini-4-neon", thinkingLevel: "high" });
     expect(google.groups[1]!.actions![1]).toEqual({ kind: "model", provider: "google", id: "antigravity-gemma-3" });
     const nativeOnly = buildModelsSection([
-      { provider: "google", id: "gemini-4-argon" }, { provider: "google", id: "gemma-4-31b-it" },
+      { provider: "google", id: "gemini-4-neon" }, { provider: "google", id: "gemma-4-31b-it" },
       { provider: "anthropic", id: "claude-opus-5-5" },
-    ], [{ provider: "google", id: "antigravity-gemini-4-argon" }])!;
+    ], [{ provider: "google", id: "antigravity-gemini-4-neon" }])!;
     expect(nativeOnly.groups.map((group) => group.label)).toEqual(["anthropic"]);
-    expect(buildModelsSection([{ provider: "google", id: "gemini-4-argon" }])).toBeUndefined();
+    expect(buildModelsSection([{ provider: "google", id: "gemini-4-neon" }])).toBeUndefined();
     let live = [{ provider: "anthropic", id: "claude-opus-5-5" }];
     const lateMode = { session: { scopedModels: [], modelRuntime: { getAvailableSnapshot: () => live } } };
     expect(collectModelsSection(lateMode)!.groups.map((group) => group.label)).toEqual(["anthropic"]);
-    live = [...live, { provider: "google", id: "antigravity-gemini-4-argon" }];
+    live = [...live, { provider: "google", id: "antigravity-gemini-4-neon" }];
     expect(collectModelsSection(lateMode)!.groups.map((group) => group.label)).toEqual(["anthropic", "google"]);
     const mode = {
       session: {
@@ -671,9 +671,9 @@ describe("startup resources", () => {
       sorted(["gpt-5.6-sol", "gpt-6-sol", "gpt-6.1-sol", "gpt-6-astra", "gpt-5.6-cyber", "gpt-4o", "gpt-4o-2024-05-13", "o3", "o4-mini", "gpt-daybreak-blue-latest", "chat-latest"]),
     ).toEqual(["gpt-6-astra", "gpt-6.1-sol"]);
     // A family new in a later major does not retire a still-current one.
-    expect(sorted(["antigravity-gemini-3.5-flash", "antigravity-gemini-3.8-flash", "antigravity-gemini-4-argon", "antigravity-gpt-oss-120b-medium"])).toEqual([
+    expect(sorted(["antigravity-gemini-3.5-flash", "antigravity-gemini-3.8-flash", "antigravity-gemini-4-neon", "antigravity-gpt-oss-120b-medium"])).toEqual([
       "antigravity-gemini-3.8-flash",
-      "antigravity-gemini-4-argon",
+      "antigravity-gemini-4-neon",
       "antigravity-gpt-oss-120b-medium",
     ]);
     expect(parseModelId("claude-opus-4-5-20251101")).toEqual({ family: "claude-opus", vendor: "claude", version: [4, 5], alias: true });
@@ -1271,32 +1271,32 @@ describe("splash planning", () => {
 });
 
 describe("waterfall-ordered models", () => {
-	test("default three rungs show scoped Argon exhaustion and retain a manual Muse favorite", async () => {
+	test("default three rungs show scoped Neon exhaustion and retain a manual Muse favorite", async () => {
 		const { buildModelsSection } = await import("../src/feature/shell/startup-resources.ts");
 		const now = 1_000_000;
 		const models = [
 			{ provider: "anthropic", id: "claude-opus-5-5" },
 			{ provider: "openai", id: "gpt-6.1-sol" },
-			{ provider: "google", id: "antigravity-gemini-4-argon" },
+			{ provider: "google", id: "antigravity-gemini-4-neon" },
 			{ provider: "muse-code", id: "muse-wonder-1.0" },
 		];
 		const rungs = [
 			{ provider: "anthropic", model: models[0]!.id, state: "available" as const },
 			{ provider: "openai", model: models[1]!.id, state: "available" as const },
-			{ provider: "google", model: models[2]!.id, state: "exhausted" as const, resetAt: now + 3 * 3_600_000, blockingQuota: { scope: "model" as const, label: "Argon weekly" } },
+			{ provider: "google", model: models[2]!.id, state: "exhausted" as const, resetAt: now + 3 * 3_600_000, blockingQuota: { scope: "model" as const, label: "Neon weekly" } },
 		];
 		const section = buildModelsSection(models, [{ provider: "muse-code", id: models[3]!.id }], undefined, { now, rungs })!;
-		expect(section.groups.map((group) => group.label)).toEqual(["1 anthropic", "2 openai", "3 google · Argon weekly · resets 3h", "muse-code"]);
+		expect(section.groups.map((group) => group.label)).toEqual(["1 anthropic", "2 openai", "3 google · Neon weekly · resets 3h", "muse-code"]);
 		expect(section.groups[3]!.items).toEqual(["muse-wonder-1.0"]);
 		const noReset = buildModelsSection(models, [], undefined, { now, rungs: [...rungs.slice(0, 2), { ...rungs[2]!, resetAt: Number.NaN }] })!;
-		expect(noReset.groups.map((group) => group.label)).toEqual(["1 anthropic", "2 openai", "3 google · Argon weekly"]);
+		expect(noReset.groups.map((group) => group.label)).toEqual(["1 anthropic", "2 openai", "3 google · Neon weekly"]);
 		const quotas = buildModelsSection(models, [], undefined, { now, rungs: [
 			{ ...rungs[0]!, tightest: { label: "week", used: 61.6 } },
 			{ ...rungs[1]!, tightest: { label: "5h", used: 0 } },
-			{ ...rungs[2]!, tightest: { label: "Argon weekly", used: 100 } },
+			{ ...rungs[2]!, tightest: { label: "Neon weekly", used: 100 } },
 		] })!;
 		// Available rungs show their most-used window, undimmed; exhausted ones keep why and when.
-		expect(quotas.groups.map((group) => group.label)).toEqual(["1 anthropic · week 62%", "2 openai · 5h 0%", "3 google · Argon weekly · resets 3h"]);
+		expect(quotas.groups.map((group) => group.label)).toEqual(["1 anthropic · week 62%", "2 openai · 5h 0%", "3 google · Neon weekly · resets 3h"]);
 		expect(quotas.groups.map((group) => group.tones)).toEqual([undefined, undefined, ["dim"]]);
 	});
 
@@ -1310,13 +1310,13 @@ describe("waterfall-ordered models", () => {
 			{ provider: "openrouter", id: "anthropic/claude-opus-5-5" },
 			{ provider: "openrouter", id: "openai/gpt-6.1-sol" },
 			{ provider: "muse-code", id: "muse-wonder-1.0" },
-			{ provider: "google", id: "antigravity-gemini-4-argon" },
+			{ provider: "google", id: "antigravity-gemini-4-neon" },
 			{ provider: "openai", id: "gpt-6.1-sol" },
 			{ provider: "anthropic", id: "claude-opus-5-5" },
 		], [{ provider: "waterfall", id: "auto" }, { provider: "lmstudio", id: "qwen3.8-27b" }], { provider: "waterfall", id: "auto" }, { now, rungs: [
 			{ provider: "anthropic", model: "claude-opus-5-5", state: "exhausted", resetAt: now + 3 * 3_600_000 },
 			{ provider: "openai", model: "gpt-6.1-sol", state: "disabled" },
-			{ provider: "google", model: "antigravity-gemini-4-argon", state: "available" },
+			{ provider: "google", model: "antigravity-gemini-4-neon", state: "available" },
 			{ provider: "muse-sdk", model: "muse-wonder-1.0", state: "unknown" },
 		] }, [
 			{ backend: "jev", provider: "typesafe", model: "jev-1", local: "configured" },
@@ -1337,11 +1337,11 @@ describe("waterfall-ordered models", () => {
 		const early = buildModelsSection([
 			{ provider: "waterfall", id: "auto", virtual: true },
 			{ provider: "openrouter", id: "openai/gpt-6.1-sol" },
-			{ provider: "google", id: "antigravity-gemini-4-argon" },
+			{ provider: "google", id: "antigravity-gemini-4-neon" },
 			{ provider: "anthropic", id: "claude-opus-5-5" },
 		], [], undefined, { order: [
 			{ provider: "anthropic", model: "claude-opus-5-5" }, { provider: "openai", model: "gpt-6.1-sol" },
-			{ provider: "google", model: "antigravity-gemini-4-argon" }, { provider: "muse-sdk", model: "muse-wonder-1.0" },
+			{ provider: "google", model: "antigravity-gemini-4-neon" }, { provider: "muse-sdk", model: "muse-wonder-1.0" },
 		] })!;
 		expect(early.groups.map((group) => group.label)).toEqual(["1 anthropic", "3 google"]);
 		// Without a waterfall, providers stay alphabetical and virtual models still stay out.

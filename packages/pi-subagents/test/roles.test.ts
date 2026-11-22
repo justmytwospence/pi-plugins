@@ -106,7 +106,7 @@ test("five concurrent Astra-parent workers independently route mechanical throug
 });
 
 test.each([
-  ["google", "antigravity-gemini-4-argon", ["antigravity-gemini-3.8-flash", "antigravity-gemini-4-argon"], "antigravity-gemini-4-argon"],
+  ["google", "antigravity-gemini-4-neon", ["antigravity-gemini-3.8-flash", "antigravity-gemini-4-neon"], "antigravity-gemini-4-neon"],
   ["muse-code", "muse-wonder-1.0", ["muse-spark-1.3", "muse-wonder-1.0"], "muse-wonder-1.0"],
 ] as const)("%s selection stays within its route, with no fabricated premium candidate", async (provider, parent, ids, strong) => {
   const s = await setup({ ctx: { model: { provider, id: parent } }, answer: () => ({ tier: choice("strong"), effort: choice("high") }) });

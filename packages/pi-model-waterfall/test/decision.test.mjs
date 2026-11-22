@@ -54,16 +54,16 @@ describe("subscription waterfall decision", () => {
   });
   it("excludes unrelated Google pools and model windows", () => {
     const shared = { ...window(10), pool: "Gemini", scope: "shared", quotaId: "gemini-5h" };
-    const argon = { ...window(97), pool: "Gemini", model: "antigravity-gemini-4-argon" };
-    const usage = { ...reading([shared, argon, { ...window(100), pool: "third-party" }, { ...window(100), pool: "Gemini", model: "antigravity-gemini-pro" }]), provider: "google" };
-    assert.deepEqual(forPhysicalModel(usage, argon.model).windows, [shared, argon]);
+    const neon = { ...window(97), pool: "Gemini", model: "antigravity-gemini-4-neon" };
+    const usage = { ...reading([shared, neon, { ...window(100), pool: "third-party" }, { ...window(100), pool: "Gemini", model: "antigravity-gemini-pro" }]), provider: "google" };
+    assert.deepEqual(forPhysicalModel(usage, neon.model).windows, [shared, neon]);
     assert.deepEqual(forPhysicalModel(usage, "antigravity-gemini-flash").windows, [shared]);
   });
   it("inspects every window before claiming exhaustion", () => {
-    const blocked = { ...window(100, "Argon weekly"), scope: "model", reset: now + 120_000 };
-    const valid = window(95, "Argon high");
+    const blocked = { ...window(100, "Neon weekly"), scope: "model", reset: now + 120_000 };
+    const valid = window(95, "Neon high");
     const result = inspectAllowance(reading([blocked, valid]), now);
-    assert.deepEqual(result, { state: "exhausted", reason: "Argon weekly allowance is 100% used (95% waterfall threshold).", resetAt: now + 120_000, blockingQuota: { scope: "model", label: "Argon weekly" }, tightest: { label: "Argon weekly", used: 100 } });
+    assert.deepEqual(result, { state: "exhausted", reason: "Neon weekly allowance is 100% used (95% waterfall threshold).", resetAt: now + 120_000, blockingQuota: { scope: "model", label: "Neon weekly" }, tightest: { label: "Neon weekly", used: 100 } });
     for (const bad of [window(undefined), window(NaN), { ...valid, reset: undefined }, { ...valid, reset: NaN }, { ...valid, reset: now }, { ...valid, observedAt: now - 600_000 }]) {
       const inspected = inspectAllowance(reading([blocked, bad]), now);
       assert.equal(inspected.state, "unknown");
@@ -74,11 +74,11 @@ describe("subscription waterfall decision", () => {
     }
     assert.deepEqual(inspectAllowance(reading([window(94.99)]), now), { state: "available", tightest: { label: "5h", used: 94.99 } });
     assert.deepEqual(inspectAllowance(reading([window(20, "5h"), window(62, "week"), window(62, "Opus")]), now).tightest, { label: "week", used: 62 });
-    assert.deepEqual(inspectAllowance({ ...reading([blocked]), access: { allowed: false, limitReached: true } }, now), { state: "exhausted", reason: "Argon weekly allowance is 100% used (95% waterfall threshold).", resetAt: now + 120_000, blockingQuota: { scope: "model", label: "Argon weekly" }, tightest: { label: "Argon weekly", used: 100 } });
+    assert.deepEqual(inspectAllowance({ ...reading([blocked]), access: { allowed: false, limitReached: true } }, now), { state: "exhausted", reason: "Neon weekly allowance is 100% used (95% waterfall threshold).", resetAt: now + 120_000, blockingQuota: { scope: "model", label: "Neon weekly" }, tightest: { label: "Neon weekly", used: 100 } });
   });
   it("publishes only fresh, valid scoped exhaustion, never stale reset claims", () => {
-    const w = { ...window(95, "Argon high"), scope: "variant" };
-    const checked = { ...candidate("google", [w]), model: "antigravity-gemini-4-argon" };
+    const w = { ...window(95, "Neon high"), scope: "variant" };
+    const checked = { ...candidate("google", [w]), model: "antigravity-gemini-4-neon" };
     assert.deepEqual(rungState(checked, now), { provider: "google", model: checked.model, ...inspectAllowance(checked.reading, now) });
     for (const usage of [reading([w], now - 600_000), reading([{ ...w, reset: now }]), reading([w, window(undefined)])]) {
       const state = rungState({ ...checked, reading: usage }, now);

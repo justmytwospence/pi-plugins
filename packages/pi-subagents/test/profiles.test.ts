@@ -9,15 +9,15 @@ const available = [
   ...registry("anthropic", ["claude-haiku-5", "claude-sonnet-5-5", "claude-opus-5-5", "claude-fable-5-1"]),
   ...registry("openai", ["gpt-6-luna", "gpt-6.1-terra", "gpt-6.1-sol", "gpt-6-astra"]),
   ...registry("openai-codex", ["gpt-6-luna", "gpt-6.1-terra", "gpt-6.1-sol", "gpt-6-astra"]),
-  ...registry("google", ["gemini-3.8-flash-lite", "gemini-3.8-flash", "gemini-4-argon", "antigravity-gemini-3.8-flash", "antigravity-gemini-4-argon", "antigravity-claude-sonnet-5-5", "antigravity-claude-opus-5-5"]),
+  ...registry("google", ["gemini-3.8-flash-lite", "gemini-3.8-flash", "gemini-4-neon", "antigravity-gemini-3.8-flash", "antigravity-gemini-4-neon", "antigravity-claude-sonnet-5-5", "antigravity-claude-opus-5-5"]),
   ...registry("muse-code", ["muse-spark-1.3", "muse-wonder-1.0"]),
 ];
 const parents = [
   ["anthropic/claude-opus-5-5", ["claude-sonnet-5-5", "claude-sonnet-5-5", "claude-opus-5-5", "claude-sonnet-5-5", "claude-sonnet-5-5", "claude-opus-5-5"]],
   ["openai/gpt-6-astra", ["gpt-6-luna", "gpt-6.1-terra", "gpt-6.1-sol", "gpt-6.1-terra", "gpt-6.1-terra", "gpt-6.1-sol"]],
   ["openai-codex/gpt-6-astra", ["gpt-6-luna", "gpt-6.1-terra", "gpt-6.1-sol", "gpt-6.1-terra", "gpt-6.1-terra", "gpt-6.1-sol"]],
-  ["google/gemini-4-argon", ["gemini-3.8-flash", "gemini-3.8-flash", "gemini-4-argon", "gemini-3.8-flash", "gemini-3.8-flash", "gemini-4-argon"]],
-  ["google/antigravity-gemini-4-argon", ["antigravity-gemini-3.8-flash", "antigravity-gemini-3.8-flash", "antigravity-gemini-4-argon", "antigravity-gemini-3.8-flash", "antigravity-gemini-3.8-flash", "antigravity-gemini-4-argon"]],
+  ["google/gemini-4-neon", ["gemini-3.8-flash", "gemini-3.8-flash", "gemini-4-neon", "gemini-3.8-flash", "gemini-3.8-flash", "gemini-4-neon"]],
+  ["google/antigravity-gemini-4-neon", ["antigravity-gemini-3.8-flash", "antigravity-gemini-3.8-flash", "antigravity-gemini-4-neon", "antigravity-gemini-3.8-flash", "antigravity-gemini-3.8-flash", "antigravity-gemini-4-neon"]],
   ["google/antigravity-claude-opus-5-5", ["antigravity-claude-sonnet-5-5", "antigravity-claude-sonnet-5-5", "antigravity-claude-opus-5-5", "antigravity-claude-sonnet-5-5", "antigravity-claude-sonnet-5-5", "antigravity-claude-opus-5-5"]],
   ["muse-code/muse-wonder-1.0", ["muse-spark-1.3", "muse-spark-1.3", "muse-wonder-1.0", "muse-spark-1.3", "muse-spark-1.3", "muse-wonder-1.0"]],
 ] as const;
@@ -87,7 +87,7 @@ test("stale profiles use newest physical model of the exact routed family; missi
   expect(profileModel({ model: "anthropic/claude-custom" }, "anthropic", newer)).toBeUndefined();
   expect(profileModel({ model: "anthropic/claude-sonnet-5-5" }, "anthropic", [])).toEqual({ model: "anthropic/claude-sonnet-5-5" });
   expect(profileModel({ model: "anthropic/claude-sonnet-5-5" }, "anthropic", registry("anthropic", ["claude-sonnet-5-5", "claude-sonnet-6"]))).toEqual({ model: "anthropic/claude-sonnet-6" });
-  const ag = "google/antigravity-gemini-4-argon";
+  const ag = "google/antigravity-gemini-4-neon";
   expect(agentDefaults(role("worker"), ag, registry("google", ["gemini-3.8-flash", "antigravity-gemini-4.1-flash"])))
     .toEqual({ model: "google/antigravity-gemini-4.1-flash", thinking: "medium" });
   expect(agentDefaults(role("worker"), ag, registry("google", ["gemini-3.8-flash"]))).toEqual({ thinking: "medium" });

@@ -98,8 +98,8 @@ test("roleModel gives the role's profile on the parent's provider", () => {
 
 test.each([
   ["openai/gpt-6-astra", ["gpt-6-luna", "gpt-6.1-terra", "gpt-6.1-sol", "gpt-6-astra"], "gpt-6.1-terra", "gpt-6.1-terra", "gpt-6.1-sol"],
-  ["google/gemini-4-argon", ["gemini-3.8-flash", "gemini-4-argon"], "gemini-3.8-flash", "gemini-3.8-flash", "gemini-4-argon"],
-  ["google/antigravity-gemini-4-argon", ["antigravity-gemini-3.8-flash", "antigravity-gemini-4-argon"], "antigravity-gemini-3.8-flash", "antigravity-gemini-3.8-flash", "antigravity-gemini-4-argon"],
+  ["google/gemini-4-neon", ["gemini-3.8-flash", "gemini-4-neon"], "gemini-3.8-flash", "gemini-3.8-flash", "gemini-4-neon"],
+  ["google/antigravity-gemini-4-neon", ["antigravity-gemini-3.8-flash", "antigravity-gemini-4-neon"], "antigravity-gemini-3.8-flash", "antigravity-gemini-3.8-flash", "antigravity-gemini-4-neon"],
   ["google/antigravity-claude-opus-5-5", ["antigravity-claude-sonnet-5-5", "antigravity-claude-opus-5-5"], "antigravity-claude-sonnet-5-5", "antigravity-claude-sonnet-5-5", "antigravity-claude-opus-5-5"],
   ["muse-code/muse-wonder-1.0", ["muse-spark-1.3", "muse-wonder-1.0"], "muse-spark-1.3", "muse-spark-1.3", "muse-wonder-1.0"],
 ] as const)("taskless role discovery on %s returns the route-local baseline", (parentModel, ids, general, worker, planner) => {

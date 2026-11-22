@@ -1,7 +1,7 @@
 import { getAgentDir, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
 import { clampThinkingLevel } from "@earendil-works/pi-ai";
-import { argonQuotaIssue, argonQuotaVariant, createProviderUsageCollector, MUSE_NO_USAGE_REASON, readCodexUsage, readPiAnthropicUsage, type ProviderUsage, type UsageSource } from "@justmytwospence/pi-subscription-usage";
+import { neonQuotaIssue, neonQuotaVariant, createProviderUsageCollector, MUSE_NO_USAGE_REASON, readCodexUsage, readPiAnthropicUsage, type ProviderUsage, type UsageSource } from "@justmytwospence/pi-subscription-usage";
 import { chooseWaterfall, inspectAllowance, forPhysicalModel, DEFAULT_WATERFALL_ORDER, waterfallModels, type WaterfallCandidate } from "./decision.ts";
 import { loadWaterfallConfig } from "./config.ts";
 import { WATERFALL_CHANNEL, type WaterfallRequest, type WaterfallRung, type WaterfallSnapshot } from "./waterfall-contract.ts";
@@ -105,8 +105,8 @@ export default function modelWaterfall(pi: ExtensionAPI): void {
     try {
       if (provider !== "muse-code" && !ctx.modelRegistry.isUsingOAuth(model)) return fail("A local subscription OAuth login is required; API keys are not eligible.");
       const physicalLevel = clampThinkingLevel(model, level) as ThinkingLevel;
-      const variant = provider === "google" && model.reasoning ? argonQuotaVariant(physicalLevel, model.thinkingLevelMap) : undefined;
-      if (provider === "google" && !variant) return fail("The physical Argon reasoning variant cannot be verified.");
+      const variant = provider === "google" && model.reasoning ? neonQuotaVariant(physicalLevel, model.thinkingLevelMap) : undefined;
+      if (provider === "google" && !variant) return fail("The physical Neon reasoning variant cannot be verified.");
       let reading: ProviderUsage;
       let credential: string | undefined;
       if (provider === "anthropic") {
@@ -139,9 +139,9 @@ export default function modelWaterfall(pi: ExtensionAPI): void {
         const source: UsageSource = { provider, sourceId: id, model: id, variant,
           baseUrl: model.baseUrl, auth: { kind: "local-oauth", token: credential } };
         reading = await interruptible(collector.refresh(source), signal);
-        const issue = argonQuotaIssue(reading, variant!);
+        const issue = neonQuotaIssue(reading, variant!);
         if (issue) return fail(issue);
-        // Healthy shared windows never substitute for missing or exhausted Argon quota.
+        // Healthy shared windows never substitute for missing or exhausted Neon quota.
         reading = forPhysicalModel(reading, id);
       }
       if (signal?.aborted) throw cancelled();
@@ -151,7 +151,7 @@ export default function modelWaterfall(pi: ExtensionAPI): void {
       if (!current || current.api === "pi-virtual" || current.api !== model.api || (endpoint && current.baseUrl !== endpoint) ||
           (provider !== "muse-code" && !ctx.modelRegistry.isUsingOAuth(current)) || clampThinkingLevel(current, level) !== physicalLevel ||
           (pi.getThinkingLevel?.() ?? "medium") !== level ||
-          (provider === "google" && (!current.reasoning || argonQuotaVariant(physicalLevel, current.thinkingLevelMap) !== variant ||
+          (provider === "google" && (!current.reasoning || neonQuotaVariant(physicalLevel, current.thinkingLevelMap) !== variant ||
             await interruptible(ctx.modelRegistry.getApiKeyForProvider("google"), signal) !== credential)) ||
           (provider === "muse-code" && await interruptible(ctx.modelRegistry.getApiKeyForProvider("muse-code"), signal) !== credential))
         return fail("The subscription account or physical model changed during the quota read.");

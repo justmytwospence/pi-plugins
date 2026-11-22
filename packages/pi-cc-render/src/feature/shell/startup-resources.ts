@@ -1191,7 +1191,7 @@ function compareVersions(a: [number, number], b: [number, number]): number {
  * The current generation of one provider's models: the newest version of every family, leaving out aliases,
  * dated snapshots, billing lanes, image generators and families a generation behind. A line's generation is the newest major version among its
  * families that have more than one version (else among all of them), so a family new in a later major (Gemini
- * Argon 4 beside Flash 3.8) stays and a family last released a major ago (GPT-5.5 Pro beside GPT-6) goes.
+ * Neon 4 beside Flash 3.8) stays and a family last released a major ago (GPT-5.5 Pro beside GPT-6) goes.
  * Ids without a leading word (o3, o4-mini) count toward the provider's main line.
  */
 export function currentGeneration(ids: string[]): Set<string> {

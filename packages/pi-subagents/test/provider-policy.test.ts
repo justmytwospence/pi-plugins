@@ -28,7 +28,7 @@ test("plain and Antigravity Gemini are distinct stable, numeric-only Google rout
   expect(offered(plain, ids, "balanced")).toEqual(["gemini-4-hydrogen", "gemini-3.8-flash"]);
   expect(offered(plain, ids, "strong")).toEqual(["gemini-4-neon", "gemini-4-argon", "gemini-3.8-pro"]);
   expect(offered(plain, ids, "premium")).toEqual(["gemini-4-carbon"]);
-  const ag = "google/antigravity-gemini-4-argon";
+  const ag = "google/antigravity-gemini-4-neon";
   expect(providerPolicy(ag, table)?.route.id).toBe("google/antigravity-gemini");
   const agIds = ["antigravity-gemini-3.8-flash", "antigravity-gemini-4-hydrogen", "antigravity-gemini-4-argon", "antigravity-gemini-4-neon", "antigravity-gemini-4-carbon", "antigravity-gemini-3.8-pro", "gemini-3.8-flash", "gemini-4-argon", "antigravity-gemini-3.8-flash-lite", "antigravity-gemini-4-argon-preview"];
   expect(offered(ag, agIds, "fast")).toEqual(["antigravity-gemini-4-hydrogen", "antigravity-gemini-3.8-flash"]);
@@ -62,8 +62,8 @@ test("unknown, local, Google unknown and prototype-property providers have no in
 test("built-in role profiles follow the parent's route, keeping its prefix and the role's effort", () => {
   const worker = BUILTIN_AGENTS.find((a) => a.name === "worker")!;
   const available = [...reg("google", ["gemini-4-hydrogen", "antigravity-gemini-4-hydrogen", "antigravity-claude-sonnet-5-5"]), ...reg("openai-codex", ["gpt-6.1-terra"])];
-  expect(agentDefaults(worker, "google/antigravity-gemini-4-argon", available)).toEqual({ model: "google/antigravity-gemini-4-hydrogen", thinking: "medium" });
-  expect(agentDefaults(worker, "google/gemini-4-argon", available)).toEqual({ model: "google/gemini-4-hydrogen", thinking: "medium" });
+  expect(agentDefaults(worker, "google/antigravity-gemini-4-neon", available)).toEqual({ model: "google/antigravity-gemini-4-hydrogen", thinking: "medium" });
+  expect(agentDefaults(worker, "google/gemini-4-neon", available)).toEqual({ model: "google/gemini-4-hydrogen", thinking: "medium" });
   expect(agentDefaults(worker, "google/antigravity-claude-opus-5-5", available)).toEqual({ model: "google/antigravity-claude-sonnet-5-5", thinking: "medium" });
   expect(agentDefaults(worker, "openai-codex/gpt-6-astra", available)).toEqual({ model: "openai-codex/gpt-6.1-terra", thinking: "medium" });
   expect(worker.tiers).toEqual({ anthropic: { tier: "balanced", thinking: "medium" }, openai: { tier: "balanced", thinking: "medium" }, google: { tier: "balanced", thinking: "medium" }, "muse-code": { tier: "balanced", thinking: "medium" } });

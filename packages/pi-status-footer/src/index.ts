@@ -28,7 +28,7 @@ import { queryFooterActions, type FooterAction, type FooterActionId } from "./fo
 import { querySystem1State, type System1Status } from "./system1-contract.ts";
 import { settingsCycles, SETTINGS_REASONING_COMMITTED, type SettingCycleSnapshot, type SettingKey } from "./settings-cycle.ts";
 import { createFooterActionController, createFooterComponent, type FooterEditor, type FooterTui, type FooterHit, type FooterLayout } from "./interactions.ts";
-import { ARGON_MODEL, argonQuotaVariant, createProviderUsageCollector, dispatchProviderUsage, isUsageStale, selectGooglePool, type ArgonQuotaVariant, type ExtraUsage, type ProviderUsage, type UsageSource } from "./provider-usage.ts";
+import { NEON_MODEL, neonQuotaVariant, createProviderUsageCollector, dispatchProviderUsage, isUsageStale, selectGooglePool, type NeonQuotaVariant, type ExtraUsage, type ProviderUsage, type UsageSource } from "./provider-usage.ts";
 import { isVirtual, routedModel } from "./routed-model.ts";
 import { queryWaterfall } from "./waterfall-contract.ts";
 import { queryPlanPair, type PlanPairPhase } from "./plan-pair-contract.ts";
@@ -1290,19 +1290,19 @@ export default function statusFooter(pi: ExtensionAPI): void {
   const providerModels = new Map<string, { id: string; baseUrl?: string }>();
   const providerIdentities = new Map<string, string>();
   const providerVariants = new Map<string, string | undefined>();
-  const googleVariantMaps = new Map<string, Partial<Record<ThinkingLevel, ArgonQuotaVariant>>>();
+  const googleVariantMaps = new Map<string, Partial<Record<ThinkingLevel, NeonQuotaVariant>>>();
   let providerSelectionEpoch = 0;
   const rememberGoogleVariants = (model: Model<any>) => {
-    if (model.provider !== "google" || model.id !== ARGON_MODEL) return;
-    const variants: Partial<Record<ThinkingLevel, ArgonQuotaVariant>> = {};
+    if (model.provider !== "google" || model.id !== NEON_MODEL) return;
+    const variants: Partial<Record<ThinkingLevel, NeonQuotaVariant>> = {};
     if (model.reasoning) for (const level of ["off", "minimal", "low", "medium", "high", "xhigh", "max"] as ThinkingLevel[]) {
-      const variant = argonQuotaVariant(clampThinkingLevel(model, level), model.thinkingLevelMap);
+      const variant = neonQuotaVariant(clampThinkingLevel(model, level), model.thinkingLevelMap);
       if (variant) variants[level] = variant;
     }
     googleVariantMaps.set(model.id, variants);
   };
   const expectedGoogleVariant = (modelId: string | undefined, thinking: string | undefined) =>
-    modelId === ARGON_MODEL && thinking ? googleVariantMaps.get(modelId)?.[thinking as ThinkingLevel] : undefined;
+    modelId === NEON_MODEL && thinking ? googleVariantMaps.get(modelId)?.[thinking as ThinkingLevel] : undefined;
   const invalidateGoogleUsage = () => {
     providerSelectionEpoch++;
     providerReadings.delete("google"); providerVariants.delete("google"); providerIdentities.delete("google");
@@ -1649,7 +1649,7 @@ export default function statusFooter(pi: ExtensionAPI): void {
     return index < 0 ? order.length : index;
   };
   const orderedProviders = () => [...new Set([...providerModels.keys()].map(accountUsageProvider))].sort((a, b) => usageOrder(a) - usageOrder(b) || a.localeCompare(b));
-  const cachedUsage = (provider: string, modelId?: string, expectedVariant?: ArgonQuotaVariant): ProviderUsage => {
+  const cachedUsage = (provider: string, modelId?: string, expectedVariant?: NeonQuotaVariant): ProviderUsage => {
     if (provider === "anthropic") return claude ? {
       provider, source: claudePiAccount ? "Claude subscription" : "Claude Code account", state: "ready", observedAt: claude.updated,
       windows: claude.windows.map((window) => ({ ...window })), ...(claude.extra ? { extra: claude.extra } : {}),
@@ -1657,8 +1657,8 @@ export default function statusFooter(pi: ExtensionAPI): void {
     if (provider === "openai-codex") return codex ??
       { provider, source: "Codex account", state: "unavailable", windows: [], reason: "Codex subscription usage has not been observed." };
     const cached = providerReadings.get(provider);
-    if (provider === "google" && modelId === ARGON_MODEL) {
-      if (!expectedVariant || providerVariants.get(provider) !== expectedVariant) return { provider, source: "Google Antigravity subscription", state: "unavailable", windows: [], reason: "The exact Argon reasoning-variant quota has not been observed." };
+    if (provider === "google" && modelId === NEON_MODEL) {
+      if (!expectedVariant || providerVariants.get(provider) !== expectedVariant) return { provider, source: "Google Antigravity subscription", state: "unavailable", windows: [], reason: "The exact Neon reasoning-variant quota has not been observed." };
     }
     if (cached) return cached;
     if (provider === "google") return { provider, source: "Google Antigravity subscription", state: "unavailable", windows: [], reason: "Google quota has not been observed for the selected model." };
@@ -1694,8 +1694,8 @@ export default function statusFooter(pi: ExtensionAPI): void {
       try { model = routed?.provider === id ? context.modelRegistry.find(id, routed.id) : providerModels.get(id); }
       catch { return; }
       if (!model) return;
-      let variant: ArgonQuotaVariant | undefined;
-      if (id === "google" && model.id === ARGON_MODEL) {
+      let variant: NeonQuotaVariant | undefined;
+      if (id === "google" && model.id === NEON_MODEL) {
         // Resolve physical models outside render. Never assume medium when the
         // exact physical model's reasoning mapping is unavailable.
         let physical;
@@ -1705,7 +1705,7 @@ export default function statusFooter(pi: ExtensionAPI): void {
         if (routed?.provider === id && routed.quotaVariant !== variant) variant = undefined;
         if (!variant) {
           providerReadings.delete(id); providerVariants.delete(id); providerIdentities.delete(id);
-          providerReadings.set(id, { provider: id, source: "Google Antigravity subscription", state: "unavailable", windows: [], reason: "The exact Argon reasoning variant is unknown." });
+          providerReadings.set(id, { provider: id, source: "Google Antigravity subscription", state: "unavailable", windows: [], reason: "The exact Neon reasoning variant is unknown." });
           requestRender?.();
           return;
         }
@@ -1847,7 +1847,7 @@ export default function statusFooter(pi: ExtensionAPI): void {
             rememberGoogleVariants(physical);
             const expected = expectedGoogleVariant(physical.id, thinking);
             if (providerModels.get("google")?.id !== physical.id ||
-                (physical.id === ARGON_MODEL && expected !== undefined && providerVariants.get("google") !== expected)) {
+                (physical.id === NEON_MODEL && expected !== undefined && providerVariants.get("google") !== expected)) {
               void updateProviderUsage();
             }
           }
@@ -2133,7 +2133,7 @@ export default function statusFooter(pi: ExtensionAPI): void {
           "OAuth identifies the authentication method, not guaranteed subscription billing. Git diff covers all uncommitted tracked changes, not just this agent.",
           "Claude acct comes from Anthropic's usage endpoint (as Claude Code /status) using Pi's own Claude login, refreshed every 5m and by each response's limit headers; without a Pi subscription login, from Claude Code's account (which can differ). Values are percent used; stale means >10m old or reset due.",
           "Codex account comes from ChatGPT's usage endpoint using Pi's separate openai-codex login; shared account readings refresh every 5m. OpenAI sessions use this account row without changing the selected inference provider.",
-          "Provider limits: subscription allowance is distinct from API throttles, balances and cost. Google local OAuth reads separate shared Gemini 5h/weekly, Argon weekly and exact reasoning-variant quotas; all bind Argon, the only automatic Google waterfall candidate. Vault custody has no quota capability. Muse CLI usage --json supplies signed-in subscription windows when the validated allowance schema is present.",
+          "Provider limits: subscription allowance is distinct from API throttles, balances and cost. Google local OAuth reads separate shared Gemini 5h/weekly, model-scoped weekly and exact reasoning-variant quotas; all bind Neon, the only automatic Google waterfall candidate. Vault custody has no quota capability. Muse CLI usage --json supplies signed-in subscription windows when the validated allowance schema is present.",
           ...accountDetails,
           `Working row: ${showWorking ? "on" : "off"} (streamed output tokens, estimated as chars/4 until the provider reports a count, and elapsed time after ${SHOW_TIMER_AFTER_MS / 1000}s). MCP chip: ${showMcp ? "on" : "off"} (built-in MCP servers with non-hidden tools over servers enabled in mcp.json; approximate, and absent when another extension publishes an mcp status).`,
           `Controls: ${JSON.stringify({ ...interactions.describe(), ...footerControls?.describe(), settingsCycle: cycles.snapshot() ? { phase: cycles.snapshot()!.phase, keys: cycles.snapshot()!.settings.map(setting => setting.key), input: cycles.inputStatus() } : undefined })}. This in-memory diagnostic records only the last pointer event, not text or account data.`,

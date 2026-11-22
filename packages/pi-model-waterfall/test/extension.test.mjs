@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { afterEach, beforeEach, describe, it, vi } from "vitest";
 import modelWaterfall, { explicitModelArg } from "../src/index.ts";
 import { queryWaterfall, WATERFALL_CHANNEL } from "../src/waterfall-contract.ts";
-import { ARGON_MODEL, parseGoogleModels, parseGoogleSummary } from "@justmytwospence/pi-subscription-usage";
+import { NEON_MODEL, parseGoogleModels, parseGoogleSummary } from "@justmytwospence/pi-subscription-usage";
 import { DEFAULT_WATERFALL_ORDER } from "../src/decision.ts";
 import { loadWaterfallConfig } from "../src/config.ts";
 
@@ -20,7 +20,7 @@ vi.mock("@justmytwospence/pi-subscription-usage", async importOriginal => ({
 const models = [
   { provider: "anthropic", id: "claude-opus-5-5", api: "anthropic-messages", reasoning: true, baseUrl: "https://api.anthropic.com" },
   { provider: "openai", id: "gpt-6.1-sol", api: "openai-responses" },
-  { provider: "google", id: "antigravity-gemini-4-argon", api: "google", reasoning: true, baseUrl: "https://cloudcode-pa.googleapis.com" },
+  { provider: "google", id: "antigravity-gemini-4-neon", api: "google", reasoning: true, baseUrl: "https://cloudcode-pa.googleapis.com" },
   { provider: "muse-code", id: "muse-wonder-1.0", api: "muse", baseUrl: "http://localhost" },
 ];
 const fixtures = [];
@@ -47,10 +47,10 @@ const fixture = (available = structuredClone(models)) => {
   const f = { pi, ctx, handlers, commands, output, start: (reason = "startup") => handlers.get("session_start")({ reason }, ctx) };
   fixtures.push(f); return f;
 };
-const googleQuota = (variant = "gemini-4-argon-medium") => {
+const googleQuota = (variant = "gemini-4-neon-medium") => {
   const resetTime = new Date(now() + 60_000).toISOString();
-  const summary = parseGoogleSummary({ groups: [{ buckets: ["gemini-5h", "gemini-weekly", "gemini-argon-wtu-weekly"].map(bucketId => ({ bucketId, remainingFraction: 0.99, resetTime })) }] }, now());
-  const model = parseGoogleModels({ models: { [variant]: { quotaInfo: { remainingFraction: 0.99, resetTime } } } }, ARGON_MODEL, now(), variant);
+  const summary = parseGoogleSummary({ groups: [{ buckets: ["gemini-5h", "gemini-weekly"].map(bucketId => ({ bucketId, remainingFraction: 0.99, resetTime })) }] }, now());
+  const model = parseGoogleModels({ models: { [variant]: { quotaInfo: { remainingFraction: 0.99, resetTime } } } }, NEON_MODEL, now(), variant);
   return { ...summary, windows: [...summary.windows, ...model.windows] };
 };
 
@@ -138,7 +138,7 @@ describe("session-start waterfall", () => {
     assert.equal(sources.some(source => source.provider === "muse-code"), false);
     assert.equal(f.ctx.modelRegistry.getApiKeyForProvider.mock.calls.some(([provider]) => provider === "muse-code"), false);
     assert.match(f.output[0][0], /no subscription under quota/);
-    assert.match(f.output[0][0], /Argon weekly.*95% waterfall threshold/);
+    assert.match(f.output[0][0], /Neon medium.*95% waterfall threshold/);
   });
   it("keeps direct opted-in Muse verification and allowance behavior", async () => {
     policy = { order: ["muse-code"] };
@@ -161,7 +161,7 @@ describe("session-start waterfall", () => {
     assert.equal(f.pi.setModel.mock.calls.length, 0);
     assert.equal(sources.some(source => source.provider === "muse-code"), false);
   });
-  it.each([0, 1, 2, 3])("skips Google when binding window %s reaches threshold with other scopes healthy", async index => {
+  it.each([0, 1, 2])("skips Google when binding window %s reaches threshold with other scopes healthy", async index => {
     claude = quota("anthropic", 95); codex = codexQuota(95); google.windows[index].used = 95;
     const f = fixture(); await settle(f);
     assert.equal(f.pi.setModel.mock.calls.length, 0);
@@ -172,14 +172,14 @@ describe("session-start waterfall", () => {
     assert.match(rung.reason, /95% used \(95% waterfall threshold\)/);
     assert.equal(rung.resetAt, google.windows[index].reset);
   });
-  it("skips exhausted exact Argon high despite healthy shared and weekly quota", async () => {
+  it("skips exhausted exact Neon high despite healthy shared and weekly quota", async () => {
     claude = quota("anthropic", 100); codex = codexQuota(100);
-    google = googleQuota("gemini-4-argon-high"); google.windows[3].used = 100;
+    google = googleQuota("gemini-4-neon-high"); google.windows[2].used = 100;
     const f = fixture(); f.pi.getThinkingLevel.mockReturnValue("high"); await settle(f);
     assert.equal(f.pi.setModel.mock.calls.length, 0);
-    assert.match(f.output[0][0], /Argon high allowance is 100% used \(95% waterfall threshold\)/);
+    assert.match(f.output[0][0], /Neon high allowance is 100% used \(95% waterfall threshold\)/);
     await vi.waitFor(() => assert.ok(queryWaterfall(f.pi.events).rungs));
-    assert.deepEqual(queryWaterfall(f.pi.events).rungs.at(-1).blockingQuota, { scope: "variant", label: "Argon high" });
+    assert.deepEqual(queryWaterfall(f.pi.events).rungs.at(-1).blockingQuota, { scope: "variant", label: "Neon high" });
   });
   it("publishes the first binding scope and latest exhausted reset, not provider rejection", async () => {
     google.windows[1].used = 96; google.windows[1].reset = now() + 90_000;
@@ -191,37 +191,36 @@ describe("session-start waterfall", () => {
     assert.equal(rung.resetAt, google.windows[2].reset);
     assert.doesNotMatch(rung.reason, /reject|outage/);
   });
-  it.each([[0, "Shared Gemini 5h"], [1, "Shared Gemini weekly"], [3, "Argon medium"]])("reports missing Google scope %s (%s) precisely without substituting another Google model", async (index, label) => {
+  it.each([[0, "Shared Gemini 5h"], [1, "Shared Gemini weekly"], [2, "Neon medium"]])("reports missing Google scope %s (%s) precisely without substituting another Google model", async (index, label) => {
     claude = quota("anthropic", 100); codex = codexQuota(100);
     google.windows.splice(index, 1);
     const available = [...structuredClone(models), { ...models[2], id: "antigravity-gemini-flash" }];
     const f = fixture(available); await settle(f);
     assert.equal(f.pi.setModel.mock.calls.length, 0);
     assert.match(f.output[0][0], new RegExp(label + " quota is unknown"));
-    assert.equal(sources.every(source => source.model === ARGON_MODEL), true);
+    assert.equal(sources.every(source => source.model === NEON_MODEL), true);
   });
-  it("selects exact Argon when the plan has shared Gemini and variant windows without a separate Argon weekly bucket", async () => {
+  it("selects exact Neon when the plan has shared Gemini and variant windows", async () => {
     claude = quota("anthropic", 100); codex = codexQuota(100, { allowed: false, limitReached: true });
-    google.windows.splice(2, 1);
     const f = fixture(); await settle(f);
-    assert.equal(f.pi.setModel.mock.calls[0][0].id, ARGON_MODEL);
+    assert.equal(f.pi.setModel.mock.calls[0][0].id, NEON_MODEL);
     await vi.waitFor(() => assert.ok(queryWaterfall(f.pi.events).rungs));
     assert.deepEqual(queryWaterfall(f.pi.events).rungs.map(r => [r.provider, r.state]), [["anthropic", "exhausted"], ["openai", "exhausted"], ["google", "available"]]);
   });
-  it("selects exact Argon only when all four scopes qualify, regardless of labels", async () => {
+  it("selects exact Neon only when all three scopes qualify, regardless of labels", async () => {
     claude = quota("anthropic", 100); codex = codexQuota(100);
     google.windows.forEach(w => { w.label = "renamed display label"; w.used = 94.99; });
     const f = fixture(); await settle(f);
-    assert.equal(f.pi.setModel.mock.calls[0][0].id, ARGON_MODEL);
-    assert.equal(queryWaterfall(f.pi.events).physical.quotaVariant, "gemini-4-argon-medium");
+    assert.equal(f.pi.setModel.mock.calls[0][0].id, NEON_MODEL);
+    assert.equal(queryWaterfall(f.pi.events).physical.quotaVariant, "gemini-4-neon-medium");
   });
-  it.each(["low", "medium", "high"])("checks the exact physical mapped Argon %s variant", async mapped => {
+  it.each(["low", "medium", "high"])("checks the exact physical mapped Neon %s variant", async mapped => {
     claude = quota("anthropic", 100); codex = codexQuota(100);
-    const variant = `gemini-4-argon-${mapped}`;
+    const variant = `gemini-4-neon-${mapped}`;
     google = googleQuota(variant);
-    const f = fixture(); f.ctx.modelRegistry.find("google", ARGON_MODEL).thinkingLevelMap = { medium: mapped };
+    const f = fixture(); f.ctx.modelRegistry.find("google", NEON_MODEL).thinkingLevelMap = { medium: mapped };
     await settle(f);
-    assert.equal(f.pi.setModel.mock.calls[0][0].id, ARGON_MODEL);
+    assert.equal(f.pi.setModel.mock.calls[0][0].id, NEON_MODEL);
     assert.equal(sources.every(source => source.variant === variant), true);
     assert.equal(queryWaterfall(f.pi.events).physical.thinkingLevel, "medium");
     assert.equal(queryWaterfall(f.pi.events).physical.quotaVariant, variant);
@@ -229,25 +228,25 @@ describe("session-start waterfall", () => {
   it("clamps thinking before mapping and rejects another variant's reading", async () => {
     claude = quota("anthropic", 100); codex = codexQuota(100);
     const f = fixture(); f.pi.getThinkingLevel.mockReturnValue("xhigh");
-    google = googleQuota("gemini-4-argon-high");
+    google = googleQuota("gemini-4-neon-high");
     await settle(f);
     assert.equal(queryWaterfall(f.pi.events).physical.thinkingLevel, "high");
-    assert.equal(sources.every(source => source.variant === "gemini-4-argon-high"), true);
+    assert.equal(sources.every(source => source.variant === "gemini-4-neon-high"), true);
     const mismatch = fixture(); mismatch.pi.getThinkingLevel.mockReturnValue("high");
-    google = googleQuota("gemini-4-argon-medium");
+    google = googleQuota("gemini-4-neon-medium");
     await settle(mismatch);
     assert.equal(mismatch.pi.setModel.mock.calls.length, 0);
-    assert.match(mismatch.output[0][0], /Argon high quota is unknown/);
+    assert.match(mismatch.output[0][0], /Neon high quota is unknown/);
   });
-  it.each(["non-reasoning", "unknown-map", "null-map"])("rejects an unverifiable %s Argon model before quota reads", async problem => {
+  it.each(["non-reasoning", "unknown-map", "null-map"])("rejects an unverifiable %s Neon model before quota reads", async problem => {
     claude = quota("anthropic", 100); codex = codexQuota(100);
-    const f = fixture(); const model = f.ctx.modelRegistry.find("google", ARGON_MODEL);
+    const f = fixture(); const model = f.ctx.modelRegistry.find("google", NEON_MODEL);
     if (problem === "non-reasoning") model.reasoning = false;
     if (problem === "unknown-map") model.thinkingLevelMap = { medium: "unknown" };
     if (problem === "null-map") model.thinkingLevelMap = Object.fromEntries(["off", "minimal", "low", "medium", "high", "xhigh", "max"].map(level => [level, null]));
     await settle(f);
     assert.equal(f.pi.setModel.mock.calls.length, 0); assert.equal(sources.length, 0);
-    assert.match(f.output[0][0], /Argon reasoning variant cannot be verified/);
+    assert.match(f.output[0][0], /Neon reasoning variant cannot be verified/);
   });
   it.each(["account", "model", "map", "thinking"])("rejects a Google %s change during in-flight quota reads", async changed => {
     claude = quota("anthropic", 100); codex = codexQuota(100);
@@ -256,8 +255,8 @@ describe("session-start waterfall", () => {
     const f = fixture(); f.start();
     await vi.waitFor(() => assert.equal(gates.length, 2));
     if (changed === "account") googleCredential = "ya29.new_synthetic_account";
-    if (changed === "model") f.ctx.modelRegistry.find("google", ARGON_MODEL).api = "pi-virtual";
-    if (changed === "map") f.ctx.modelRegistry.find("google", ARGON_MODEL).thinkingLevelMap = { medium: "high" };
+    if (changed === "model") f.ctx.modelRegistry.find("google", NEON_MODEL).api = "pi-virtual";
+    if (changed === "map") f.ctx.modelRegistry.find("google", NEON_MODEL).thinkingLevelMap = { medium: "high" };
     if (changed === "thinking") f.pi.getThinkingLevel.mockReturnValue("high");
     gates.forEach(resolve => resolve(googleQuota()));
     await vi.waitFor(() => assert.ok(queryWaterfall(f.pi.events).rungs));
@@ -265,11 +264,11 @@ describe("session-start waterfall", () => {
     assert.equal(f.pi.setModel.mock.calls.length, 0);
     if (changed !== "thinking") assert.match(f.output[0][0], /changed during the quota read/);
   });
-  it.each(["stale", "reset-due", "invalid"])("publishes unknown without reset claims for %s Argon readings", async failure => {
+  it.each(["stale", "reset-due", "invalid"])("publishes unknown without reset claims for %s Neon readings", async failure => {
     google.windows[2].used = 100;
     if (failure === "stale") google.observedAt = now() - 600_000;
-    if (failure === "reset-due") google.windows[3].reset = now();
-    if (failure === "invalid") google.windows[3].used = undefined;
+    if (failure === "reset-due") google.windows[2].reset = now();
+    if (failure === "invalid") google.windows[2].used = undefined;
     const f = fixture(); f.start("resume");
     await vi.waitFor(() => assert.ok(queryWaterfall(f.pi.events).rungs));
     const rung = queryWaterfall(f.pi.events).rungs.at(-1);
