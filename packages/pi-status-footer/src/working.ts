@@ -1,8 +1,11 @@
 // Working-row statistics: extends pi's working indicator message while the
 // agent runs, keeping pi's own spinner and base label:
 //   Working (↓ 1,234 tokens · 12s)
-// Tokens start as a chars/4 estimate of the streamed text and thinking, and
-// switch to the provider's `usage.output` as soon as the stream carries one.
+// Tokens are a chars/4 estimate of the streamed text, thinking and tool-call
+// arguments, or the provider's `usage.output` when that is larger. Anthropic's
+// message_start reports a placeholder of a few output tokens that is only
+// corrected at message_delta, so a provider count must not replace a larger
+// estimate mid-stream.
 // Elapsed time appears once the run has lasted SHOW_TIMER_AFTER_MS, or as
 // soon as there are tokens to show.
 // Ported from pi-cc-extensions' working-message (MIT, (c) minuque).
@@ -33,7 +36,12 @@ export function workingMessage(tokens: number, elapsedMs: number, base = "Workin
 
 type Partial = Pick<AssistantMessage, "content" | "usage">;
 
-/** Visible text/thinking length per content index; indexes without such a block stay sparse. */
+function argumentsLength(args: unknown): number {
+  if (args === undefined) return 0;
+  try { return JSON.stringify(args)?.length ?? 0; } catch { return 0; }
+}
+
+/** Visible text/thinking/tool-argument length per content index; other indexes stay sparse. */
 function blockLengths(message: Partial | undefined): number[] {
   const lengths: number[] = [];
   const content = message?.content;
@@ -41,6 +49,7 @@ function blockLengths(message: Partial | undefined): number[] {
   content.forEach((block, index) => {
     if (block?.type === "text" && typeof block.text === "string") lengths[index] = block.text.length;
     else if (block?.type === "thinking" && typeof block.thinking === "string") lengths[index] = block.thinking.length;
+    else if (block?.type === "toolCall") lengths[index] = argumentsLength(block.arguments);
   });
   return lengths;
 }
@@ -63,9 +72,9 @@ export class WorkingStats {
     this.providerOutput = outputUsage(message);
   }
 
-  /** Output tokens so far: the provider's count when known, else the chars/4 estimate. */
+  /** Output tokens so far: the chars/4 estimate, or the provider's count when larger. */
   tokens(): number {
-    return this.providerOutput || Math.max(0, Math.round(this.chars / 4));
+    return Math.max(this.providerOutput, Math.round(this.chars / 4), 0);
   }
 
   private setLength(index: number, length: number): void {
@@ -82,17 +91,20 @@ export class WorkingStats {
   apply(event: AssistantMessageEvent): void {
     switch (event.type) {
       case "start": this.reset(event.partial); break;
-      case "text_start": case "thinking_start":
+      case "text_start": case "thinking_start": case "toolcall_start":
         this.setLength(event.contentIndex, 0); this.usage(event.partial); break;
-      case "text_delta": case "thinking_delta":
+      case "text_delta": case "thinking_delta": case "toolcall_delta":
         this.setLength(event.contentIndex, (this.lengths[event.contentIndex] ?? 0) + (typeof event.delta === "string" ? event.delta.length : 0));
         this.usage(event.partial); break;
       case "text_end": case "thinking_end":
         this.setLength(event.contentIndex, typeof event.content === "string" ? event.content.length : 0);
         this.usage(event.partial); break;
+      case "toolcall_end":
+        this.setLength(event.contentIndex, argumentsLength(event.toolCall?.arguments));
+        this.usage(event.partial); break;
       case "done": this.reset(event.message); break;
       case "error": this.reset(event.error); break;
-      default: this.usage(event.partial);
+      default: this.usage((event as { partial?: Partial }).partial);
     }
   }
 }

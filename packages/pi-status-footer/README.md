@@ -148,8 +148,9 @@ counts are available through `/status details`, not crowded into the footer.
 While a run streams, pi's working indicator reads `Working (↓ 1,234 tokens · 12s)`
 (example) instead of `Working`: pi's spinner, color and base label are kept, and
 only the parenthesized statistics are added through `setWorkingMessage`. Tokens
-are the streamed text and thinking at four characters per token until the
-provider's stream reports `usage.output`, which then replaces the estimate.
+are the streamed text, thinking and tool-call arguments at four characters per
+token, or the provider's `usage.output` when that is larger (Anthropic reports
+only a placeholder of a few tokens until the response ends).
 Elapsed time counts from the agent's start, across the run's turns, and shows
 once the run has lasted three seconds or as soon as there are tokens to show;
 before that pi's message is left alone. The message refreshes once a second

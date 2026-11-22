@@ -1779,7 +1779,7 @@ test("working-row text: tokens with thousands separators, elapsed after the thre
   assert.doesNotMatch(mod.workingMessage(5, 12_000), /\(.*\(/, "no nested parentheses");
 });
 
-test("working-row tokens: a chars/4 estimate of text and thinking until the provider reports output", () => {
+test("working-row tokens: a chars/4 estimate of text, thinking and tool arguments, or the provider's count when larger", () => {
   const stats = new mod.WorkingStats();
   const partial = (usage) => ({ content: [], usage });
   assert.equal(stats.tokens(), 0);
@@ -1792,14 +1792,19 @@ test("working-row tokens: a chars/4 estimate of text and thinking until the prov
   assert.equal(stats.tokens(), 3, "a tool call at index 1 leaves a sparse hole");
   stats.apply({ type: "text_end", contentIndex: 2, content: "abcdefgh", partial: partial() });
   assert.equal(stats.tokens(), 4, "the final text replaces the deltas instead of adding to them");
-  stats.apply({ type: "toolcall_delta", contentIndex: 3, delta: "{}", partial: partial({ output: 0 }) });
-  assert.equal(stats.tokens(), 4, "zero or absent usage keeps the estimate");
-  stats.apply({ type: "toolcall_delta", contentIndex: 3, delta: "{}", partial: partial({ output: 1234.4 }) });
-  assert.equal(stats.tokens(), 1234, "the provider's count wins once known");
+  stats.apply({ type: "toolcall_start", contentIndex: 3, partial: partial({ output: 0 }) });
+  stats.apply({ type: "toolcall_delta", contentIndex: 3, delta: "{\"a\":\"", partial: partial({ output: 0 }) });
+  assert.equal(stats.tokens(), 6, "tool arguments count; zero usage keeps the estimate");
+  stats.apply({ type: "toolcall_end", contentIndex: 3, toolCall: { type: "toolCall", id: "t", name: "w", arguments: { a: "1234" } }, partial: partial({ output: 3 }) });
+  assert.equal(stats.tokens(), 7, "the final arguments replace the deltas, and a smaller provider placeholder (Anthropic's message_start) does not hide the estimate");
+  stats.apply({ type: "toolcall_delta", contentIndex: 4, delta: "{}", partial: partial({ output: 1234.4 }) });
+  assert.equal(stats.tokens(), 1234, "a larger provider count wins");
   stats.apply({ type: "text_delta", contentIndex: 2, delta: "more", partial: partial() });
   assert.equal(stats.tokens(), 1234, "and is not lost on an update without usage");
   stats.apply({ type: "done", reason: "stop", message: { content: [{ type: "text", text: "x".repeat(40) }, { type: "thinking", thinking: "y".repeat(8) }], usage: { output: 0 } } });
   assert.equal(stats.tokens(), 12, "done restarts from the final message");
+  stats.apply({ type: "start", partial: { content: [{ type: "toolCall", id: "t", name: "w", arguments: { a: "x".repeat(394) } }], usage: {} } });
+  assert.equal(stats.tokens(), 101, "a resumed tool call counts its arguments");
   stats.apply({ type: "error", reason: "aborted", error: { content: [], usage: {} } });
   assert.equal(stats.tokens(), 0);
   stats.apply({ type: "start", partial: { content: [{ type: "text", text: "12345678" }], usage: { output: 9 } } });
