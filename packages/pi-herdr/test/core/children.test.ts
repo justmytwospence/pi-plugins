@@ -18,7 +18,7 @@ function world(opts: { liveNames?: string[]; startError?: { code: string; messag
   const agent = { agent: "pi", interactive_ready: true, agent_status: "idle", completion_seq: 1 as number | undefined, state_change_seq: 1, agent_session: { kind: "path", value: session } };
   const state = { agent, paneGone: false, agentGone: false };
   const f = fakeCall({
-    "pane.get": (p) => (p.pane_id === "w1:p1" ? { result: { pane: { pane_id: "w1:p1", workspace_id: "w1" } } } : state.paneGone ? { error: { code: "not_found", message: "pane not found" } } : { result: { pane: { pane_id: p.pane_id } } }),
+    "pane.get": (p) => (p.pane_id === "w1:p1" ? { result: { pane: { pane_id: "w1:p1", workspace_id: "w1" } } } : state.paneGone ? { error: { code: "pane_not_found", message: "pane not found" } } : { result: { pane: { pane_id: p.pane_id } } }),
     "agent.list": () => ({ result: { agents: (opts.liveNames ?? []).map((name) => ({ name })) } }),
     "tab.create": () => ({ result: { tab: { tab_id: "w1:t2" }, root_pane: { pane_id: "w1:p2" } } }),
     "pane.layout": () => ({ result: { layout: { panes: [{ pane_id: "w1:p1", rect: { width: 200, height: 50 } }] } } }),
@@ -26,7 +26,7 @@ function world(opts: { liveNames?: string[]; startError?: { code: string; messag
     "worktree.open": () => ({ result: { already_open: false, workspace: { workspace_id: "w9" }, root_pane: { pane_id: "w9:p1" } } }),
     "worktree.create": () => ({ result: { workspace: { workspace_id: "w9" }, root_pane: { pane_id: "w9:p1" } } }),
     "agent.start": () => (opts.startError ? { error: opts.startError } : { result: { agent: { ...agent } } }),
-    "agent.get": () => (state.paneGone || state.agentGone ? { error: { code: "not_found", message: "agent not found" } } : { result: { agent: { ...state.agent } } }),
+    "agent.get": () => (state.paneGone || state.agentGone ? { error: { code: "agent_not_found", message: "agent not found" } } : { result: { agent: { ...state.agent } } }),
     "agent.prompt": () => ({ result: {} }),
     "agent.read": () => ({ result: { read: { text: "working on it" } } }),
   });
@@ -209,10 +209,35 @@ describe("children", () => {
     await expect(w.children.send("c", "more")).rejects.toThrow(/waiting on a dialog/u);
     w.state.paneGone = true;
     await w.children.tick();
+    await w.children.tick();
+    expect(w.delivered).toHaveLength(0);
+    await w.children.tick();
     expect(w.delivered[0]!.text).toContain("was closed before it replied");
     expect(w.children.get("c").closed).toBe(true);
     await expect(w.children.send("c", "more")).rejects.toThrow(/closed/u);
     await expect(w.children.send("nobody", "x")).rejects.toThrow(/No child "nobody"/u);
+  });
+
+  it("does not report a child closed when a loaded herdr drops the connection or detection lags", async () => {
+    const w = world();
+    await w.children.spawn({ task: "t", name: "c", cwd: "/repo" });
+    w.state.agent.agent_status = "working";
+    const call = (w.children as any).deps.call;
+    let dropped = true;
+    (w.children as any).deps.call = async (method: string, params: any) => (dropped && (method === "agent.get" || method === "pane.get") ? { error: { code: "closed", message: "herdr closed the connection" } } : call(method, params));
+    for (let i = 0; i < 5; i++) await w.children.tick();
+    dropped = false;
+    // The agent is briefly undetected (pane still there), then seen again: no notice.
+    w.state.agentGone = true;
+    await w.children.tick();
+    await w.children.tick();
+    w.state.agentGone = false;
+    await w.children.tick();
+    w.state.agentGone = true;
+    await w.children.tick();
+    await w.children.tick();
+    expect(w.delivered).toHaveLength(0);
+    expect(w.children.get("c").closed).toBeFalsy();
   });
 
   it("closes the new pane when pi does not start", async () => {
@@ -371,7 +396,7 @@ describe("peers", () => {
     peer(w);
     await w.children.send("lead", "go", "steer");
     w.state.paneGone = true;
-    await w.children.tick();
+    for (let i = 0; i < 3; i++) await w.children.tick();
     expect(w.delivered[0]!.text).toContain('Agent "lead" (pane w5:p1) was closed before it replied.');
     expect(w.children.records.get("lead")?.closed).toBe(true);
     w.children.acknowledge(w.children.records.get("lead")!);

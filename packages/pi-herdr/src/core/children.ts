@@ -93,6 +93,8 @@ export interface ChildrenDeps {
   readyPollMs?: number;
   /** How often a peer on another machine is polled (default 5 s). */
   remotePollMs?: number;
+  /** Consecutive passes an awaited agent must be missing before it is reported closed or exited (default 3). */
+  missingChecks?: number;
   /** False after runtime shutdown or navigation away from the owning conversation branch. */
   isCurrent?(): boolean;
   /** The herdr API on a saved machine, for peers there. Without it a peer's `machine` is not reachable. */
@@ -499,6 +501,9 @@ export class Children {
     this.deps.deliver(rec, text, reply);
   }
 
+  /** Consecutive passes on which an awaited agent was missing from herdr. */
+  private readonly missing = new Map<ChildRecord, number>();
+
   /** Peers on another machine: polled on their own, slowly (each poll is an ssh round trip). */
   private readonly remote = new Map<ChildRecord, { last: number; busy: boolean; failures: number }>();
 
@@ -563,7 +568,9 @@ export class Children {
     const a = await call<{ agent?: AgentInfo }>("agent.get", { target: rec.paneId });
     const info = a.result?.agent;
     // A machine that cannot be reached for a while is reported, not awaited forever.
-    const transient = (code: string | undefined) => code === "timeout" || code === "socket" || (!!rec.machine && (code === "machine" || code === "closed" || code === "parse"));
+    // A loaded herdr drops connections it could not read in time ("closed") or answers late
+    // ("timeout"): those say nothing about the pane, so they never count as it being gone.
+    const transient = (code: string | undefined) => code === "timeout" || code === "socket" || code === "closed" || code === "parse" || (!!rec.machine && code === "machine");
     if (remote && !info && transient(a.error?.code) && ++remote.failures >= 45) {
       this.finish(rec, `${this.label(rec)} could not be reached for a while (${errorText(a)}), so its reply is not coming back. Use action=read when ${rec.machine} answers again.`, undefined);
       return;
@@ -572,11 +579,18 @@ export class Children {
     if (!info) {
       if (transient(a.error?.code)) return;
       const pane = await call("pane.get", { pane_id: rec.paneId });
-      if (transient(pane.error?.code)) return;
-      const gone = !!pane.error;
+      // Only herdr's own answer that the pane does not exist means it closed; any other error is retried.
+      const gone = pane.error?.code === "pane_not_found";
+      if (pane.error && !gone) return;
+      // Agent detection can lag on a loaded machine, so a missing agent must be seen on consecutive passes.
+      const misses = (this.missing.get(rec) ?? 0) + 1;
+      this.missing.set(rec, misses);
+      if (misses < (this.deps.missingChecks ?? 3)) return;
+      this.missing.delete(rec);
       this.finish(rec, gone ? `${this.label(rec)} was closed before it replied.` : `${rec.peer ? "The agent" : this.deps.agent.kind} exited in ${this.label(rec)}'s pane before it replied.`, undefined, gone);
       return;
     }
+    this.missing.delete(rec);
     if (info.agent_session?.value) rec.session = info.agent_session.value;
     const status = info.agent_status;
     if (status === "working" || status === "blocked") {
