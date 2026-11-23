@@ -54,6 +54,17 @@ const emitWorkflow = async (api, channel, request = {}) => {
 const planningId = 'claude-opus-4-5';
 const implementationId = 'claude-sonnet-4-5';
 let session;
+// The runtime owner emits shutdown; dispose alone leaves extension listeners behind.
+const closeSession = async () => {
+  const closing = session;
+  session = undefined;
+  if (!closing) return;
+  try {
+    await closing.extensionRunner.emit({ type: 'session_shutdown', reason: 'quit' });
+  } finally {
+    await closing.dispose();
+  }
+};
 const withDeadline = async (promise, label) => {
   let timer;
   try {
@@ -540,8 +551,12 @@ export default function (pi) {
         }
         selectedEffort = 'high'; // Effort-only approval stays ordinary work.
         const beforeApproval = effortCalls.length;
+        const decisions = () => manager.getEntries().filter(entry => entry.type === 'custom' && entry.customType === 'system1:decision');
+        const beforeDecisions = decisions().length;
         let result = await call('exit_plan_mode');
-        assert.equal(effortCalls.length, beforeApproval + 3, 'one Exec judgment per offered model (Sonnet, Haiku, Opus) at approval, none at commit or continuation');
+        assert.equal(effortCalls.length, beforeApproval + 1, 'one shared task-level Exec judgment at approval, none at commit or continuation');
+        assert.equal(decisions().length, beforeDecisions + 1, 'approval records one System 1 decision');
+        assert.equal(decisions().at(-1).data.ok, true, 'approval judgment succeeded');
         assert.equal(effortCalls.at(-1).context.state.phase, 'exec');
         assert.equal(result.details?.outcome, 'approved', JSON.stringify(result));
         const approvedFile = result.details.planFile;
@@ -613,21 +628,19 @@ export default function (pi) {
           `${label}: snapshots never become sticky agent context`);
       }
       assert.deepEqual(errors, [], label);
-      await session.dispose();
-      session = undefined;
+      await closeSession();
       console.log(`PASS actual Pi mode flow: ${label}, branch restore and reload`);
     } catch (error) {
       failures.push(error);
       console.error(`FAIL actual Pi mode flow: ${label}: ${error.message}`);
     } finally {
-      await session?.dispose();
-      session = undefined;
+      await closeSession();
     }
   }
   assert.deepEqual(networkAttempts, [], 'all model transports remain local');
   if (failures.length) throw new AggregateError(failures, `${failures.length} mode-flow scenarios failed`);
 } finally {
-  await session?.dispose();
+  await closeSession();
   process.chdir(cwd);
   for (const [key, value] of Object.entries(originalEnv)) {
     if (value === undefined) delete process.env[key]; else process.env[key] = value;
