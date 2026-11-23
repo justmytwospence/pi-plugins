@@ -19,6 +19,8 @@ plugin: pi-model-families
 
 Each route (plain Gemini, Antigravity Gemini, Antigravity Claude, Anthropic, OpenAI, Muse Code) lists its families in preference order with the tiers each fills. A new generation of a known family is picked up with no change. Provider route and ID shape are part of the table, so an Antigravity model never becomes a direct API pick.
 
+Within the chosen family, the newest registered numeric generation wins regardless of the parent model's generation, on the same provider and route. Older registered candidates remain available as fallbacks. This plugin does not change Pi's main enabled-model scope.
+
 ## Discovery
 
 A family the table does not rank, whose newest generation is at least the route's newest ranked generation, is a discovery. It is placed provisionally like the most expensive ranked family priced at or below it in the registry (`cost.input + cost.output`; Antigravity models take the price of their API twin). A discovery is never premium, a family without a price is left unrouted, and provisional families never become plan-pair planners or workers. It is announced once; `/families` confirms the placement, chooses other tiers or ignores it.

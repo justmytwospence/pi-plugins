@@ -36,7 +36,6 @@ export interface RouteDef {
   format: string;
   /** Route id whose models price this route's (Antigravity to API). */
   priceFrom?: string;
-  preferParentGeneration?: boolean;
   derivePairs: boolean;
   /** Preference order. */
   families: FamilyDef[];
@@ -106,7 +105,6 @@ export const BUILTIN_ROUTES: readonly RouteDef[] = [
     match: String.raw`^gpt-(?<gen>\d+(?:\.\d+)*)-(?<family>[a-z]+)$`,
     genSeparator: ".",
     format: "gpt-{gen}-{family}",
-    preferParentGeneration: true,
     derivePairs: true,
     families: [
       { id: "astra", tiers: ["premium"] },
@@ -484,17 +482,6 @@ export function tierModels(
     (a, b) =>
       a.rank - b.rank || compareGeneration(b.generation, a.generation) || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0),
   );
-  const parent = route.preferParentGeneration ? parseId(route, parentId) : undefined;
-  const top = candidates[0];
-  if (parent && top) {
-    const sibling = candidates.find(
-      (candidate) => candidate.rank === top.rank && compareGeneration(candidate.generation, parent.generation) === 0,
-    );
-    if (sibling && sibling !== top) {
-      candidates.splice(candidates.indexOf(sibling), 1);
-      candidates.unshift(sibling);
-    }
-  }
   return candidates.map((candidate) => `${provider}/${candidate.id}`);
 }
 

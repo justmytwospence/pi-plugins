@@ -5,7 +5,6 @@ export function bestFamily(
   available: readonly AvailableImplementationModel[],
   provider: string,
   family: string,
-  prefer?: number[],
   routeId?: string,
 ): ModelSpec | undefined {
   const table = loadFamilyTable([]);
@@ -15,16 +14,10 @@ export function bestFamily(
     if (!recognized || recognized.family.id !== family || (routeId && recognized.route.id !== routeId)) return [];
     return [{ id: model.id, generation: recognized.generation }];
   });
-  siblings.sort((left, right) => {
-    if (prefer) {
-      const leftSame = compareGeneration(left.generation, prefer) === 0;
-      const rightSame = compareGeneration(right.generation, prefer) === 0;
-      if (leftSame !== rightSame) return Number(rightSame) - Number(leftSame);
-    }
-    return (
-      compareGeneration(right.generation, left.generation) || (left.id < right.id ? -1 : left.id > right.id ? 1 : 0)
-    );
-  });
+  siblings.sort(
+    (left, right) =>
+      compareGeneration(right.generation, left.generation) || (left.id < right.id ? -1 : left.id > right.id ? 1 : 0),
+  );
   const best = siblings[0];
   return best ? { provider, modelId: best.id } : undefined;
 }
@@ -75,7 +68,7 @@ export function implementersFor(
         ? ranked.filter((family) => family.id === override)
         : ranked.filter((family) => family.tiers.includes(tier) && !used.has(family.id));
     for (const family of candidates) {
-      const found = bestFamily(available, session.provider, family.id, own.generation, own.route.id);
+      const found = bestFamily(available, session.provider, family.id, own.route.id);
       if (!found || (found.provider === session.provider && found.modelId === session.modelId)) continue;
       out.push(found);
       used.add(family.id);
@@ -93,7 +86,7 @@ export function legacyPlanner(
 ): ModelSpec | undefined {
   for (const route of loadFamilyTable([]).routes) {
     if (!route.providers.includes(provider) || !route.families.some((candidate) => candidate.id === family)) continue;
-    const found = bestFamily(available, provider, family, undefined, route.id);
+    const found = bestFamily(available, provider, family, route.id);
     if (found) return found;
   }
   return undefined;

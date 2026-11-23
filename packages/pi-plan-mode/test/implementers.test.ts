@@ -54,10 +54,32 @@ test("Astra and Sol offer their workers on both OpenAI routes", () => {
   }
 });
 
-test("a worker prefers the session model's generation", () => {
+test("workers use the newest generation regardless of the session model", () => {
+  for (const provider of ["openai", "openai-codex"]) {
+    assert.deepEqual(
+      ids(
+        `${provider}/gpt-6.1-sol`,
+        catalog(
+          `${provider}/gpt-6.1-terra`,
+          `${provider}/gpt-6.2-terra`,
+          `${provider}/gpt-6.10-terra`,
+          `${provider}/gpt-6.9-terra`,
+        ),
+      ),
+      [`${provider}/gpt-6.10-terra`],
+    );
+  }
   assert.deepEqual(
-    ids("openai/gpt-6.1-sol", catalog("openai/gpt-6.1-sol", "openai/gpt-6-terra", "openai/gpt-6.1-terra")),
-    ["openai/gpt-6.1-terra"],
+    ids(
+      "anthropic/claude-opus-5-5",
+      catalog(
+        "anthropic/claude-sonnet-5-5",
+        "anthropic/claude-sonnet-5-6",
+        "anthropic/claude-haiku-5-5",
+        "anthropic/claude-haiku-6",
+      ),
+    ),
+    ["anthropic/claude-sonnet-5-6", "anthropic/claude-haiku-6"],
   );
 });
 

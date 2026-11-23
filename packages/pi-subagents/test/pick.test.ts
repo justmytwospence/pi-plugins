@@ -79,9 +79,10 @@ test("one threshold rule picks the highest option reaching the bar", () => {
 });
 
 test("numeric-aware newest and OpenAI generation siblings, premium newest registered, no fabricated IDs", () => {
-  const codex = registry("openai-codex", ["gpt-5.6-luna", "gpt-6-luna", "gpt-6-terra", "gpt-6-sol", "gpt-6.1-sol", "gpt-6.2-terra", "gpt-6.2-sol", "gpt-6-astra"]);
-  expect(providerTiers("openai-codex/gpt-6-sol", {}, {}, codex)).toEqual({ fast: "openai-codex/gpt-6-luna", balanced: "openai-codex/gpt-6-terra", strong: "openai-codex/gpt-6-sol", premium: "openai-codex/gpt-6-astra" });
-  expect(providerTiers("openai-codex/gpt-6.1-sol", {}, {}, codex)).toEqual({ fast: "openai-codex/gpt-6-luna", balanced: "openai-codex/gpt-6.2-terra", strong: "openai-codex/gpt-6.1-sol", premium: "openai-codex/gpt-6-astra" });
+  const codex = registry("openai-codex", ["gpt-5.6-luna", "gpt-6-luna", "gpt-6-terra", "gpt-6-sol", "gpt-6.1-sol", "gpt-6.2-terra", "gpt-6.2-sol", "gpt-6-astra", "gpt-6.2-astra"]);
+  for (const parent of ["openai-codex/gpt-6-sol", "openai-codex/gpt-6.1-sol"]) {
+    expect(providerTiers(parent, {}, {}, codex)).toEqual({ fast: "openai-codex/gpt-6-luna", balanced: "openai-codex/gpt-6.2-terra", strong: "openai-codex/gpt-6.2-sol", premium: "openai-codex/gpt-6.2-astra" });
+  }
   expect(providerTiers("openai/gpt-6.1-sol", {}, {}, codex)).toEqual({});
   expect(providerTiers("anthropic/claude-opus-5-5", {}, {}, registry("anthropic", ["claude-haiku-5", "claude-sonnet-5-5", "claude-opus-5-5"])))
     .toEqual({ fast: "anthropic/claude-haiku-5", balanced: "anthropic/claude-sonnet-5-5", strong: "anthropic/claude-opus-5-5" });

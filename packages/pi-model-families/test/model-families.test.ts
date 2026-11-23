@@ -116,9 +116,13 @@ describe("tiers and pairs", () => {
     expect(tierModels(table, "anthropic/claude-opus-5-5", anthropic, "balanced")).toEqual(["anthropic/claude-sonnet-5-5"]);
     expect(tierModels(table, "lmstudio/qwen", anthropic, "fast")).toEqual([]);
   });
-  it("prefers the parent's generation within a family", () => {
-    expect(tierModels(table, "openai/gpt-6-sol", openai, "strong")).toEqual(["openai/gpt-6-sol", "openai/gpt-6.1-sol"]);
-    expect(tierModels(table, "openai/gpt-6.1-sol", openai, "strong")[0]).toBe("openai/gpt-6.1-sol");
+  it("orders numeric generations newest first regardless of parent, without crossing providers", () => {
+    const siblings = [...openai, m("openai", "gpt-6.2-sol"), m("openai", "gpt-6.9-sol"), m("openai", "gpt-6.10-sol"), m("openai-codex", "gpt-7-sol")];
+    const expected = ["openai/gpt-6.10-sol", "openai/gpt-6.9-sol", "openai/gpt-6.2-sol", "openai/gpt-6.1-sol", "openai/gpt-6-sol"];
+    for (const parent of ["openai/gpt-6-sol", "openai/gpt-6.1-sol"]) {
+      expect(tierModels(table, parent, siblings, "strong")).toEqual(expected);
+    }
+    expect(tierModels(table, "openai-codex/gpt-6-sol", siblings, "strong")).toEqual(["openai-codex/gpt-7-sol"]);
   });
   it("derives today's plan pairs", () => {
     expect(derivePairs(table).map((p) => [`${p.provider}/${p.id}`, p.name, p.routes])).toEqual([
