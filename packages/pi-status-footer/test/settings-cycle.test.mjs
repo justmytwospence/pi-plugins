@@ -468,9 +468,10 @@ describe("settings cycle coordinator", () => {
     expect(anchors(h)).toHaveLength(1);
     expect(c.value).toBe("low");
     c.apply = undefined;
+    // An effort change from elsewhere draws nothing below the row, so the next batch still reuses it.
     await h.emit("thinking_level_select", { level: "high" });
     void cycles.stage(h.ctx, c.change);
-    expect(anchors(h)).toHaveLength(2);
+    expect(anchors(h)).toHaveLength(1);
   });
   it("shows only the latest batch, including unchanged round trips, without reusing an old baseline", async () => {
     const h = host(), cycles = settingsCycles(h.pi), calls = [], workflow = control("workflow", "work", ["work", "plan"], calls), reasoning = control("reasoning", "low", ["low", "high"], calls);
@@ -490,7 +491,14 @@ describe("settings cycle coordinator", () => {
     await vi.advanceTimersByTimeAsync(I); expect(await next).toBe(true);
     expect(workflow.value).toBe("work"); expect(anchors(h)).toHaveLength(1);
   });
-  it.each(["input", "ui_prompt_start", "session_before_switch", "session_before_fork", "session_before_tree", "session_before_compact", "before_agent_start", "message_start", "session_tree"])("seals an already settled row on %s", async event => {
+  it.each(["ui_prompt_start", "session_before_switch", "session_before_fork", "session_before_tree", "session_before_compact", "model_select", "thinking_level_select"])("keeps reusing a settled row after %s alone", async event => {
+    const h = host(), cycles = settingsCycles(h.pi), c = control("workflow", "work", ["work", "plan"]);
+    const first = cycles.stage(h.ctx, c.change); await vi.advanceTimersByTimeAsync(I); expect(await first).toBe(true);
+    await h.emit(event, { source: "interactive" });
+    const next = cycles.stage(h.ctx, c.change); await vi.advanceTimersByTimeAsync(I); expect(await next).toBe(true);
+    expect(anchors(h)).toHaveLength(1);
+  });
+  it.each(["input", "before_agent_start", "message_start", "session_tree"])("seals an already settled row on %s", async event => {
     const h = host(), cycles = settingsCycles(h.pi), c = control("workflow", "work", ["work", "plan"]);
     const first = cycles.stage(h.ctx, c.change); await vi.advanceTimersByTimeAsync(I); expect(await first).toBe(true);
     const oldId = last(h).id;
@@ -507,10 +515,17 @@ describe("settings cycle coordinator", () => {
     await vi.advanceTimersByTimeAsync(I);
     expect(await p).toBe(false); expect(calls).toEqual([]); expect(h.entries).toEqual([]);
   });
-  it("seals explicit cancellation even with no pending transaction", async () => {
+  it("keeps reusing the row after a cancellation with nothing staged", async () => {
     const h = host(), cycles = settingsCycles(h.pi), c = control("workflow", "work", ["work", "plan"]);
     const p = cycles.stage(h.ctx, c.change); await vi.advanceTimersByTimeAsync(I); expect(await p).toBe(true);
     cycles.cancel("explicit selection");
+    const next = cycles.stage(h.ctx, c.change); await vi.advanceTimersByTimeAsync(I); expect(await next).toBe(true);
+    expect(anchors(h)).toHaveLength(1);
+  });
+  it("seals a row whose pending batch was cancelled", async () => {
+    const h = host(), cycles = settingsCycles(h.pi), c = control("workflow", "work", ["work", "plan"]);
+    const p = cycles.stage(h.ctx, c.change);
+    cycles.cancel("explicit selection"); expect(await p).toBe(false);
     const next = cycles.stage(h.ctx, c.change); await vi.advanceTimersByTimeAsync(I); expect(await next).toBe(true);
     expect(anchors(h)).toHaveLength(2);
   });
@@ -527,7 +542,7 @@ describe("settings cycle coordinator", () => {
     const second = cycles.stage(h.ctx, c.change); await vi.advanceTimersByTimeAsync(I); expect(await second).toBe(true);
     expect(anchors(h)).toHaveLength(1);
   });
-  it.each(["model_change", "thinking_level_change"])("allows native %s records inside a setter only", async type => {
+  it.each(["model_change", "thinking_level_change"])("allows native %s records inside a setter and between batches", async type => {
     const h = host(), cycles = settingsCycles(h.pi), c = control("workflow", "work", ["work", "plan"]);
     c.apply = async value => {
       h.entries.push({ type, id: String(h.entries.length + 1) });
@@ -541,7 +556,7 @@ describe("settings cycle coordinator", () => {
     const remove = cycles.addGuard(() => { h.entries.push({ type, id: String(h.entries.length + 1) }); });
     p = cycles.stage(h.ctx, c.change); await vi.advanceTimersByTimeAsync(I); expect(await p).toBe(true); remove();
     p = cycles.stage(h.ctx, c.change); await vi.advanceTimersByTimeAsync(I); expect(await p).toBe(true);
-    expect(anchors(h)).toHaveLength(2);
+    expect(anchors(h)).toHaveLength(1);
   });
   it.each(["custom", "message", "custom_message", "compaction"])("seals on unrelated %s records inside asynchronous application", async type => {
     const h = host(), cycles = settingsCycles(h.pi), c = control("workflow", "work", ["work", "plan"]);
@@ -574,12 +589,24 @@ describe("settings cycle coordinator", () => {
     const next = cycles.stage(h.ctx, c.change); await vi.advanceTimersByTimeAsync(I); expect(await next).toBe(true);
     expect(anchors(h)).toHaveLength(2);
   });
-  it.each(["custom", "message", "model_change", "thinking_level_change"])("requires the exact checkpoint when an external %s arrives between batches", async type => {
+  it.each([
+    [{ type: "custom", customType: "other:output" }, 2],
+    [{ type: "custom", customType: "workflow:row" }, 2],
+    [{ type: "message" }, 2],
+    [{ type: "custom_message", customType: "other:notice" }, 2],
+    [{ type: "custom_message", customType: "other:notice", display: false }, 1],
+    [{ type: "custom", customType: "tool-gate:workflow" }, 1],
+    [{ type: "custom", customType: "pi-stash.state" }, 1],
+    [{ type: "custom", customType: "recap-name" }, 1],
+    [{ type: "session_info" }, 1],
+    [{ type: "model_change" }, 1],
+    [{ type: "thinking_level_change" }, 1],
+  ])("reuses the row across invisible records between batches: %o", async (record, rows) => {
     const h = host(), cycles = settingsCycles(h.pi), c = control("workflow", "work", ["work", "plan"]);
     const first = cycles.stage(h.ctx, c.change); await vi.advanceTimersByTimeAsync(I); expect(await first).toBe(true);
-    h.entries.push({ type, customType: "tool-gate:workflow", id: String(h.entries.length + 1) });
+    h.entries.push({ ...record, id: String(h.entries.length + 1) });
     const next = cycles.stage(h.ctx, c.change); await vi.advanceTimersByTimeAsync(I); expect(await next).toBe(true);
-    expect(anchors(h)).toHaveLength(2);
+    expect(anchors(h)).toHaveLength(rows);
   });
   it("seals a failed reused row before a successful retry", async () => {
     const h = host(), cycles = settingsCycles(h.pi), c = control("workflow", "work", ["work", "plan"]);

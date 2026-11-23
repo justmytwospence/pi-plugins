@@ -120,6 +120,46 @@ type Burst = {
   active?: SettingKey;
 };
 
+/**
+ * Custom entries draw nothing unless an extension registered a renderer for them, and Pi
+ * does not expose that registry. These are the suite's bookkeeping records (setting state,
+ * session names, checkpoints, decisions) that draw nothing, so they must not split one
+ * settings row into two. Any other custom entry may draw a row and ends reuse.
+ */
+const hiddenCustomEntries = new Set([
+  "tool-gate:workflow",
+  "tool-gate:approvals",
+  "tool-gate:chat-notice",
+  "tool-gate:decision",
+  "tool-gate:guidance-anchor",
+  "plan-mode:inline",
+  "workflow:row-state",
+  "pi-stash.state",
+  "recap-name",
+  "sidebar:family",
+  "rewind-checkpoint",
+  "compact-thinking-duration",
+  "system1:decision",
+  "switchyard-human-input",
+]);
+
+/** Whether an entry appended after the row puts something visible below it. */
+function visibleEntry(entry: { type: string; customType?: string; display?: boolean }): boolean {
+  switch (entry.type) {
+    case "custom":
+      return !hiddenCustomEntries.has(entry.customType ?? "");
+    case "custom_message":
+      return entry.display !== false;
+    case "session_info":
+    case "label":
+    case "model_change":
+    case "thinking_level_change":
+      return false;
+    default:
+      return true;
+  }
+}
+
 function copySnapshot(snapshot: SettingCycleSnapshot): SettingCycleSnapshot {
   return { ...snapshot, settings: snapshot.settings.map((item) => ({ ...item })) };
 }
@@ -172,6 +212,14 @@ export function settingsCycles(pi: ExtensionAPI, options: SettingsCycleOptions =
   const modelIdentity = (ctx: ExtensionContext) => (ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : "");
   const leaf = (ctx: ExtensionContext) =>
     ctx.sessionManager.getLeafId?.() ?? ctx.sessionManager.getBranch().at(-1)?.id ?? null;
+  /** Whether the row is still the last thing drawn: only invisible entries follow `checkpoint`. */
+  const lastVisible = (ctx: ExtensionContext, checkpoint: string | null) => {
+    if (leaf(ctx) === checkpoint) return true;
+    const branch = ctx.sessionManager.getBranch();
+    const start = checkpoint === null ? -1 : branch.findIndex((entry) => entry.id === checkpoint);
+    if (checkpoint !== null && start < 0) return false;
+    return branch.slice(start + 1).every((entry) => !visibleEntry(entry as Parameters<typeof visibleEntry>[0]));
+  };
   const seal = () => {
     if (liveRow) liveRow.reusable = false;
   };
@@ -192,6 +240,7 @@ export function settingsCycles(pi: ExtensionAPI, options: SettingsCycleOptions =
         if (b.ownEntries.has(entry.id)) continue;
         if (b.committing && entry.type === "custom" && settingRecords.has(entry.customType)) continue;
         if (b.active && (entry.type === "model_change" || entry.type === "thinking_level_change")) continue;
+        if (!visibleEntry(entry as Parameters<typeof visibleEntry>[0])) continue;
         b.row.reusable = false;
       }
       b.checkpoint = leaf(b.ctx);
@@ -291,11 +340,13 @@ export function settingsCycles(pi: ExtensionAPI, options: SettingsCycleOptions =
     }
   };
   const cancel = (reason: string) => {
-    seal();
     const b = burst;
-    if (b) b.stopped = true;
     input.close();
+    // With nothing staged there is no row to retire: a dialog or session event alone draws
+    // nothing below it, and anything it does append is caught by the branch checkpoint.
     if (!b) return;
+    seal();
+    b.stopped = true;
     const canWrite = inBranch(b);
     try {
       if (canWrite) publish(b, b.phase === "applying" ? "interrupted" : "cancelled", reason);
@@ -466,7 +517,7 @@ export function settingsCycles(pi: ExtensionAPI, options: SettingsCycleOptions =
               liveRow.session !== session ||
               liveRow.anchor === null ||
               !branch.some((entry) => entry.id === liveRow?.anchor) ||
-              leaf(ctx) !== liveRow.checkpoint ||
+              !lastVisible(ctx, liveRow.checkpoint) ||
               (owner && owner.owner !== change.owner))
           )
             seal();
@@ -688,7 +739,7 @@ export function settingsCycles(pi: ExtensionAPI, options: SettingsCycleOptions =
   });
   pi.on("model_select", (_event, ctx) => {
     // Shortcut contexts snapshot their model. Event contexts report the live one.
-    if (!burst) seal();
+    // With nothing staged, a model change draws nothing below the row: keep reusing it.
     if (burst?.phase === "pending" && modelIdentity(ctx) !== burst.model) cancel("model changed");
   });
   pi.on("thinking_level_select", (event) => {
@@ -697,7 +748,6 @@ export function settingsCycles(pi: ExtensionAPI, options: SettingsCycleOptions =
       echoes.splice(echo, 1);
       return;
     }
-    if (!burst) seal();
     const item = burst?.items.reasoning;
     if (burst?.phase === "pending" && item && item.change.read() !== item.baseline) cancel("reasoning changed");
   });
