@@ -593,9 +593,10 @@ export default function piBg(pi: ExtensionAPI) {
     }
   };
 
-  /** Hands an ended or ready task to a waiter; true when one took it. */
+  /** Hands an ended or ready task to all matching waiters; true when any took it. */
   const toWaiter = (t: Task, kind: "end" | "ready"): boolean => {
-    for (const w of waiters) {
+    let matched = false;
+    for (const w of [...waiters]) {
       const targeted = w.targets.has(t.id) || (w.any && kind === "end" && t.kind === "job" && t.origin === "agent");
       if (!targeted) continue;
       if (kind === "end") {
@@ -605,9 +606,10 @@ export default function piBg(pi: ExtensionAPI) {
         t.readyDelivered = true;
         w.readied.push(t);
       }
+      matched = true;
       w.resolve("done");
-      return true;
     }
+    if (matched) return true;
     const open = [...waiters].find((w) => !w.silent);
     if (!open) return false;
     if (kind === "end") t.delivered = true;
@@ -1147,15 +1149,11 @@ export default function piBg(pi: ExtensionAPI) {
         }
         any = true;
       }
+      const candidates = any ? agentJobs().map((t) => t.id) : [...targets].filter((target) => reg.tasks.has(target));
       if (c.hasPendingMessages()) {
         return text("Not waiting: messages are queued for you and arrive when your turn ends. End your turn to read them; running jobs keep going and wake you when they end.");
       }
       const names = () => (any ? agentJobs() : [...targets].map((id) => reg.tasks.get(id)).filter((t): t is Task => !!t));
-      const label = () => {
-        const ts = names();
-        if (!ts.length) return [...targets].map((id) => externals.get(id)?.label ?? id).join(" · ") || "outside work";
-        return ts.map(waitLabel).join(" · ");
-      };
       const what = () => {
         const ts = names();
         if (!ts.length) return [...targets].map((id) => externals.get(id)?.label ?? id).join(" · ") || "outside work";
@@ -1173,43 +1171,65 @@ export default function piBg(pi: ExtensionAPI) {
       let reason: Reason;
       let waiter: Waiter;
       let cancelWait: (() => void) | undefined;
+      const reconcile = () => {
+        if (!attached || generation !== sessionGeneration) return false;
+        for (const taskId of candidates) {
+          const t = reg.tasks.get(taskId);
+          if (!t || t.sessionId !== sessionId) continue;
+          if (t.status !== "running") {
+            t.delivered = true;
+            waiter.readied = waiter.readied.filter((ready) => ready.id !== t.id);
+            if (!waiter.finished.some((finished) => finished.id === t.id)) waiter.finished.push(t);
+          } else if (t.kind === "service" && t.ready) {
+            t.readyDelivered = true;
+            if (!waiter.finished.some((finished) => finished.id === t.id) && !waiter.readied.some((ready) => ready.id === t.id)) waiter.readied.push(t);
+          }
+        }
+        return waiter.finished.length > 0 || waiter.readied.length > 0;
+      };
       try {
-        working.set();
         const waiting = waitFor({ targets, any, silent: false }, timeoutS * 1000, () => {
+          if (reconcile()) return "done";
           if (!attached || generation !== sessionGeneration || signal?.aborted) return "aborted";
           if (c.hasPendingMessages()) return "message";
           if (++ticks % 4 === 0) working.set();
           return undefined;
         });
         waiter = waiting.waiter;
+        if (reconcile()) waiter.resolve("done");
         cancelWait = () => waiter.resolve("aborted");
+        guarded(() => working.set());
         try {
           onUpdate?.({ content: [{ type: "text", text: `Waiting on ${what()}` }], details: { waiting: true } });
         } catch {
           // No live row: the working message still says what it waits on.
         }
-        refresh();
+        guarded(refresh);
         reason = await waiting.done;
+        if (reconcile()) reason = "done";
       } finally {
         cancelWait?.();
-        working.release();
+        guarded(() => working.release());
         waitRows.delete(id);
       }
-      refresh();
+      guarded(refresh);
       const out: Block[] = [];
       for (const t of waiter.finished) out.push(completedReport(report(t)));
       for (const t of waiter.readied) out.push({ text: report(t) });
       for (const x of waiter.externals) out.push(...consumeExternal(x));
       if (reason !== "done") {
-        const still = names().filter((t) => t.status === "running");
-        const what = still.length ? still.map((t) => `${t.name} (${[t.id, runtime(t), progressText(t)].filter(Boolean).join(", ")})`).join(", ") : label();
+        const still = names().filter((t) => t.status === "running").map((t) => `${t.name} (${[t.id, runtime(t), progressText(t)].filter(Boolean).join(", ")})`);
+        if (!any) for (const target of targets) {
+          const x = externals.get(target);
+          if (x?.state === "running") still.push(x.label);
+        }
         const why =
           reason === "message"
             ? "Stopped waiting: the user sent a message."
             : reason === "aborted"
               ? "Stopped waiting: interrupted."
               : `Stopped waiting after ${elapsed(Date.now() - started)} (the timeout).`;
-        out.push({ text: `${why} Still running: ${what}. It wakes you when it ends; call bg_wait again to keep waiting.` });
+        out.push({ text: still.length ? `${why} Still running: ${still.join(", ")}. It wakes you when it ends; call bg_wait again to keep waiting.` : `${why} Nothing is still running.` });
       }
       if (waiter.extras.length) out.push({ text: `Also while you waited:\n${waiter.extras.map((e) => `- ${e.text}`).join("\n")}`, checkpoint: waiter.extras.find((e) => e.checkpoint)?.checkpoint });
       // One block per item for the renderer; plain ones are merged so the model reads them as before.

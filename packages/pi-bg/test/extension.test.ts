@@ -95,6 +95,17 @@ describe("pi-bg", () => {
     await x.shutdown();
   });
 
+  (process.env.PI_TEST_FULL ? it : it.skip)("same tick real process delivers failure to startup and wait", async () => {
+    const x = await load();
+    const run = x.tools.get("bg_run").execute("run-concurrent", { command: "echo concurrent-failure; exit 2", kind: "job", name: "concurrent" }, undefined, undefined, x.ctx);
+    const wait = x.tools.get("bg_wait").execute("wait-concurrent", { id: "concurrent", timeout: 1 }, undefined, undefined, x.ctx);
+    const [started, waited] = await Promise.all([run, wait]);
+    expect(x.textOf(started)).toMatch(/ended at once/);
+    expect(x.textOf(waited)).toMatch(/exit 2[\s\S]*concurrent-failure/);
+    expect(x.textOf(waited)).not.toMatch(/Still running/);
+    expect(x.sent).toEqual([]);
+  }, 5_000);
+
   it("reports a command that fails at once in bg_run's own result", async () => {
     const x = await load();
     const r = x.textOf(await x.call("bg_run", { command: "echo nope; exit 2", kind: "job", name: "bad" }));
