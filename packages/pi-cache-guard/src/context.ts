@@ -241,8 +241,9 @@ export function leanContext(pi: ExtensionAPI): Lean {
   });
 
   pi.on("session_before_compact", async (event, ctx) => {
-    // Plan-mode owns this deterministic compaction; preserve quick-compaction state too.
-    if (/^plan-mode-direct:[\da-fA-F]{8}-[\da-fA-F]{4}-[\da-fA-F]{4}-[\da-fA-F]{4}-[\da-fA-F]{12}(?![\s\S])/u.test(event.customInstructions ?? "")) return undefined;
+    // Plan-mode (and pi-compact-plan, for a summary it writes from the prompt cache) owns this
+    // compaction; preserve quick-compaction state too.
+    if (/^(?:plan-mode|compact-plan)-direct:[\da-fA-F]{8}-[\da-fA-F]{4}-[\da-fA-F]{4}-[\da-fA-F]{4}-[\da-fA-F]{12}(?![\s\S])/u.test(event.customInstructions ?? "")) return undefined;
     reload(ctx);
     const request = armed;
     armed = undefined;

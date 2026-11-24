@@ -213,15 +213,16 @@ test("compaction audit records the classifier's actual resolved model", async ()
 });
 
 const directMarker = "plan-mode-direct:550e8400-e29b-41d4-a716-446655440000";
+const compactPlanMarker = "compact-plan-direct:550e8400-e29b-41d4-a716-446655440000";
 
 test.each(["manual", "threshold", "overflow"])("direct plan compaction bypasses %s filtering without consuming an armed request", async (reason) => {
-  for (const armed of [false, true]) {
+  for (const [armed, marker] of [[false, directMarker], [true, directMarker], [false, compactPlanMarker]] as const) {
     const { lean, reg, emit, entries, notes } = setup(keepFirstDropSecond);
     await emit("session_start", {});
     if (armed) lean.armJevCompaction({ goal: "reserved quick goal", strict: true });
     vi.mocked(compact).mockClear();
 
-    expect(await emit("session_before_compact", compaction(reason, directMarker))).toBeUndefined();
+    expect(await emit("session_before_compact", compaction(reason, marker))).toBeUndefined();
     expect(reg.calls).toHaveLength(0);
     expect(compact).not.toHaveBeenCalled();
     expect(entries).toHaveLength(0);
@@ -266,6 +267,8 @@ test.each([
   `${directMarker}\n`,
   `${directMarker}\nextra`,
   `prefix:${directMarker}`,
+  "compact-plan-direct:not-a-uuid",
+  `${compactPlanMarker}\n`,
   directMarker.replace("plan-mode-direct", "PLAN-MODE-DIRECT"),
 ])("ordinary or malformed instructions retain compaction behavior: %j", async (instructions) => {
   for (const armed of [false, true]) {
