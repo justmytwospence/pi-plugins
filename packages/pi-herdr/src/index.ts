@@ -38,7 +38,7 @@ import { existsSync, realpathSync } from "node:fs";
 import { hostname } from "node:os";
 import { resolve as resolvePath } from "node:path";
 import { matchesKey } from "@earendil-works/pi-tui";
-import { getAgentDir, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { getAgentDir, SettingsManager, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import { messageView } from "./transcript-style.ts";
 import { transcriptCheckpoint } from "./transcript-contract.ts";
@@ -129,7 +129,7 @@ const Params = Type.Object({
   branch: Type.Optional(Type.String({ description: "spawn with where=worktree: the user-requested independent branch (checked out if it exists, else created from origin's default branch); do not create a worktree without the user's request" })),
   fork: Type.Optional(Type.Boolean({ description: "spawn with where=worktree: carry this conversation into the child, which continues it in the worktree; its replies come back here and this session stays in the main checkout" })),
   model: Type.Optional(Type.String({ description: "spawn: provider/model; omit to use Pi's configured default model (fork=true keeps this session's). Set only for a deliberate reason" })),
-  thinking: Type.Optional(Type.String({ description: "spawn: off|minimal|low|medium|high|xhigh|max; omit to use Pi's configured default effort, normally medium (fork=true keeps this session's). Choose it for the child's task, not this session's: raise it only for genuinely hard work" })),
+  thinking: Type.Optional(Type.String({ description: "spawn: off|minimal|low|medium|high|xhigh|max; omit to use Pi's configured default effort, normally medium (fork=true also starts at the default). Choose it for the child's task, not this session's: raise it only for genuinely hard work" })),
   focus: Type.Optional(Type.Boolean({ description: "spawn: switch to the child's pane (default false)" })),
   message: Type.Optional(Type.String({ description: "send: the message" })),
   delivery: Type.Optional(
@@ -155,6 +155,14 @@ export interface HerdrDependencies {
   subscribeLocation?: LocationDependencies["subscribe"];
   exec?: Exec;
   pollMs?: number;
+  /** Tests: Pi's configured default thinking level for a model (per-model override, else the global default). */
+  defaultThinking?: (cwd: string, provider: string, modelId: string) => string | undefined;
+}
+
+/** Pi's configured default thinking level for a model, as a fresh session would pick it. */
+function configuredThinking(cwd: string, provider: string, modelId: string): string {
+  const settings = SettingsManager.create(cwd, getAgentDir());
+  return settings.getModelThinkingLevel(provider, modelId) ?? settings.getDefaultThinkingLevel() ?? "medium";
 }
 
 export default function piHerdr(pi: ExtensionAPI, dependencies: HerdrDependencies = {}) {
@@ -1243,10 +1251,12 @@ export default function piHerdr(pi: ExtensionAPI, dependencies: HerdrDependencie
               name: params.name,
               where,
               branch: params.branch,
-              // A fresh child starts on Pi's configured defaults unless the caller chose otherwise;
-              // only a fork, which continues this conversation, keeps this session's model and effort.
+              // A child starts on Pi's configured default effort unless the caller chose otherwise. A fresh
+              // child also gets the default model; a fork keeps this session's model so it reuses the
+              // cached conversation, but is given the default effort explicitly, since a forked session
+              // would otherwise restore this session's thinking level from its copied history.
               model: params.model ?? (params.fork && ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : undefined),
-              thinking: params.thinking ?? (params.fork ? pi.getThinkingLevel() : undefined),
+              thinking: params.thinking ?? (params.fork && ctx.model ? (dependencies.defaultThinking ?? configuredThinking)(ctx.cwd, ctx.model.provider, ctx.model.id) : undefined),
               focus: params.focus,
               cwd: ctx.cwd,
               ...(onCheckout ? { onCheckout } : {}),

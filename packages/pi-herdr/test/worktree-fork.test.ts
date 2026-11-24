@@ -46,7 +46,7 @@ function fakePi() {
     sendMessage: (message: unknown, options: unknown) => void messages.push({ message, options }),
     getActiveTools: () => [],
     setActiveTools: () => undefined,
-    getThinkingLevel: () => "medium",
+    getThinkingLevel: () => "xhigh",
     getSessionName: () => undefined,
   };
   const emit = async (event: string, payload: any, ctx: any) => {
@@ -105,7 +105,7 @@ function world() {
   let onEvent: ((e: HerdrEvent) => void) | undefined;
   let closed = 0;
   const watch = (cb: (e: HerdrEvent) => void) => { onEvent = cb; return { close: () => { closed++; } }; };
-  piHerdr(p.pi, { call: x.f.call, subscribeLocation: x.subscribe, subscribeWorktrees: watch, exec: git(execs) });
+  piHerdr(p.pi, { call: x.f.call, subscribeLocation: x.subscribe, subscribeWorktrees: watch, exec: git(execs), defaultThinking: () => "low" });
   return { x, p, c, execs, event: (e: HerdrEvent) => onEvent?.(e), closed: () => closed };
 }
 
@@ -133,7 +133,7 @@ test("fork=true creates the checkout from origin's default branch and continues 
     const args: string[] = w.x.f.of("agent.start")[0]!.params.args;
     const file = args[args.indexOf("--session") + 1]!;
     expect(file).toBeTruthy();
-    expect(args.slice(args.indexOf("--model"), args.indexOf("--model") + 4)).toEqual(["--model", "p/m", "--thinking", "medium"]);
+    expect(args.slice(args.indexOf("--model"), args.indexOf("--model") + 4)).toEqual(["--model", "p/m", "--thinking", "low"]);
     const forked = SessionManager.open(file);
     expect(forked.getHeader()).toMatchObject({ cwd: "/repo/.worktrees/retry" });
     const text = readFileSync(file, "utf8");

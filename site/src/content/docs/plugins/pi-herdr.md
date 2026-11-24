@@ -149,7 +149,7 @@ For a requested interactive handoff in the same checkout:
 
 The default location is a new tab; `split` places it beside the parent. Both share the checkout. `worktree` requires `branch`: Herdr creates `<repo>/.worktrees/<branch>` (slashes as dashes) and opens it in its grouped space, reusing an existing checkout or space when available. Closing that child does not remove its checkout or branch.
 
-Without `model` or `thinking`, a child starts on Pi's configured default model and thinking level (`defaultModel`, `defaultThinkingLevel`), not the parent's; set them only when the child's task calls for it. A `fork=true` child continues the parent's conversation and keeps its model and thinking level. Focus defaults to false. Give a complete task: the child cannot see the parent conversation, unless it was forked.
+Without `model` or `thinking`, a child starts on Pi's configured default model and thinking level (`defaultModel`, `defaultThinkingLevel`), not the parent's; set them only when the child's task calls for it. A `fork=true` child continues the parent's conversation and keeps its model, so it can reuse the cached conversation, but it also starts at the configured default thinking level (a `modelThinkingLevels` entry for that model takes precedence) unless `thinking` is given. Focus defaults to false. Give a complete task: the child cannot see the parent conversation, unless it was forked.
 
 ### Continuing this conversation in a worktree
 
