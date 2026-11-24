@@ -618,18 +618,19 @@ async function journalCheckpoint() {
       assert.match(anchor.render(120).map(plain).join('\n'), /Settings unchanged/u);
       assert.deepEqual(api.applied, [{ key: 'workflow', value: 'plan' }, { key: 'approvals', value: 'yolo' }], 'unchanged batches invoke no setter');
     }
-    api.cycles.cancel('explicit fixture selection'); // boundary even with no pending transaction
+    api.cycles.cancel('explicit fixture selection'); // nothing staged: draws nothing below the row
     const selected = stage(f, 'workflow');
     assert.equal(await selected, true);
-    assert.equal(cycleAnchors(f).length, 2, 'explicit selection seals reuse even after settlement');
-    assert.notEqual(api.cycles.snapshot().id, originalRow);
-    assert.match(anchor.render(120).map(plain).join('\n'), /Settings unchanged/u, 'a sealed old native component never changes again');
-    const selectedRow = api.cycles.snapshot().id;
+    assert.equal(cycleAnchors(f).length, 1, 'a cancellation with nothing staged keeps reusing the settled row');
+    assert.equal(api.cycles.snapshot().id, originalRow);
+    assert.match(anchor.render(120).map(plain).join('\n'), /Settings · Workflow work/u, 'the reused row shows the new change');
+    const sealedRender = anchor.render(120).map(plain).join('\n');
     api.pi.appendEntry('fixture:unrelated-output', { visible: false });
     const separated = stage(f, 'workflow');
     assert.equal(await separated, true);
-    assert.equal(cycleAnchors(f).length, 3, 'an unknown branch record is a conservative row boundary');
-    assert.notEqual(api.cycles.snapshot().id, selectedRow);
+    assert.equal(cycleAnchors(f).length, 2, 'an unknown branch record is a conservative row boundary');
+    assert.notEqual(api.cycles.snapshot().id, originalRow);
+    assert.equal(anchor.render(120).map(plain).join('\n'), sealedRender, 'a sealed old native component never changes again');
     assert.deepEqual(f.runtime.session.sessionManager.buildSessionContext().messages, beforeContext);
 
     // A genuine local AgentSession stream drives InteractiveMode's streaming component.
