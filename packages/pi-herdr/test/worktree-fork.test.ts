@@ -133,6 +133,7 @@ test("fork=true creates the checkout from origin's default branch and continues 
     const args: string[] = w.x.f.of("agent.start")[0]!.params.args;
     const file = args[args.indexOf("--session") + 1]!;
     expect(file).toBeTruthy();
+    expect(args.slice(args.indexOf("--model"), args.indexOf("--model") + 4)).toEqual(["--model", "p/m", "--thinking", "medium"]);
     const forked = SessionManager.open(file);
     expect(forked.getHeader()).toMatchObject({ cwd: "/repo/.worktrees/retry" });
     const text = readFileSync(file, "utf8");
@@ -155,6 +156,8 @@ test("a plain worktree spawn starts no fork and a new checkout still starts from
     await w.p.tool().execute("1", { action: "spawn", task: "Do it", where: "worktree", branch: "plain" }, undefined, undefined, w.c.ctx);
     expect(w.x.f.of("worktree.create")[0]!.params).toMatchObject({ base: "origin/dev" });
     expect(w.x.f.of("agent.start")[0]!.params.args).not.toContain("--session");
+    expect(w.x.f.of("agent.start")[0]!.params.args).not.toContain("--model");
+    expect(w.x.f.of("agent.start")[0]!.params.args).not.toContain("--thinking");
     expect(w.x.f.of("agent.prompt").at(-1)!.params.text).not.toContain("continues the parent's conversation");
   } finally {
     await w.p.emit("session_shutdown", {}, w.c.ctx);

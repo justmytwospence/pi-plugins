@@ -128,8 +128,8 @@ const Params = Type.Object({
   ),
   branch: Type.Optional(Type.String({ description: "spawn with where=worktree: the user-requested independent branch (checked out if it exists, else created from origin's default branch); do not create a worktree without the user's request" })),
   fork: Type.Optional(Type.Boolean({ description: "spawn with where=worktree: carry this conversation into the child, which continues it in the worktree; its replies come back here and this session stays in the main checkout" })),
-  model: Type.Optional(Type.String({ description: "spawn: provider/model; default this session's" })),
-  thinking: Type.Optional(Type.String({ description: "spawn: off|minimal|low|medium|high|xhigh|max; default this session's" })),
+  model: Type.Optional(Type.String({ description: "spawn: provider/model; omit to use Pi's configured default model (fork=true keeps this session's). Set only for a deliberate reason" })),
+  thinking: Type.Optional(Type.String({ description: "spawn: off|minimal|low|medium|high|xhigh|max; omit to use Pi's configured default effort, normally medium (fork=true keeps this session's). Choose it for the child's task, not this session's: raise it only for genuinely hard work" })),
   focus: Type.Optional(Type.Boolean({ description: "spawn: switch to the child's pane (default false)" })),
   message: Type.Optional(Type.String({ description: "send: the message" })),
   delivery: Type.Optional(
@@ -1243,8 +1243,10 @@ export default function piHerdr(pi: ExtensionAPI, dependencies: HerdrDependencie
               name: params.name,
               where,
               branch: params.branch,
-              model: params.model ?? (ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : undefined),
-              thinking: params.thinking ?? pi.getThinkingLevel(),
+              // A fresh child starts on Pi's configured defaults unless the caller chose otherwise;
+              // only a fork, which continues this conversation, keeps this session's model and effort.
+              model: params.model ?? (params.fork && ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : undefined),
+              thinking: params.thinking ?? (params.fork ? pi.getThinkingLevel() : undefined),
               focus: params.focus,
               cwd: ctx.cwd,
               ...(onCheckout ? { onCheckout } : {}),
