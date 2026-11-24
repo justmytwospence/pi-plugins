@@ -127,7 +127,7 @@ import { GUIDANCE_ANCHOR_ENTRY, placeGuidance, restoreAnchors, type GuidanceAnch
 import { answerSubagentEnv, inheritedModes, SUBAGENT_ENV_CHANNEL, subagentEnv, subagentEnvHonored } from "./subagent-env.ts";
 import { effectiveDenyInsteadOfPrompting, PROMPTING_CONTINUE, PROMPTING_DISABLED, PROMPTING_ENTRY, PROMPTING_STATUS_KEY, promptingDenied, restorePromptingOverride, type PromptingOverride } from "./prompting.ts";
 import { loadRules } from "./rules.ts";
-import { agentBeforeLatestUser, approvedPlanOf, callerText, clip, clipTail, recentTexts, recentUserMessages } from "./transcript.ts";
+import { agentBeforeLatestUser, approvedPlanOf, callerText, clip, clipTail, recentRequests, recentTexts } from "./transcript.ts";
 import { offerUserWords, resultText } from "./user-words.ts";
 import { callView, describeCallPresentation } from "./view.ts";
 import { registerWorkflowRenderer, sendWorkflowTransition } from "./workflow-ui.ts";
@@ -494,11 +494,11 @@ export function scriptOfCall(tool: string, input: Record<string, unknown>, cwd: 
 
 /**
  * The state the judge sees for a call, from the branch as it stands when the call is made: the
- * user's last five messages, the agent message the newest one replies to, and the agent's recent text.
+ * user's last five messages (with requests the user's other Pi sessions relayed), the agent message the newest one replies to, and the agent's recent text.
  */
 export function judgeStateOf(branch: readonly unknown[], call: Omit<JudgeInput, "userRequest" | "agentBefore" | "recentIntent">): Record<string, unknown> {
   return judgeState({
-    userRequest: recentUserMessages(branch, 5).map((text, i, all) => clip(text, i === all.length - 1 ? 3_000 : 1_000)),
+    userRequest: recentRequests(branch, 5).map((text, i, all) => clip(text, i === all.length - 1 ? 3_000 : 1_000)),
     agentBefore: clipTail(agentBeforeLatestUser(branch), 1_500),
     recentIntent: clipTail(recentTexts(branch).assistant, 2_000),
     approvedPlan: approvedPlanOf(branch),

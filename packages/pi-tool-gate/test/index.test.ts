@@ -1292,6 +1292,17 @@ test("judge context uses stored branch snapshots with later user withdrawal", ()
   expect(judgeStateOf([userEntry("Different branch")], input)).not.toHaveProperty("approved_plan");
 });
 
+test("judge context counts requests relayed by the user's other Pi sessions, in branch order", () => {
+  const relayed = { type: "custom_message", customType: "herdr-message", content: "[Message from the pi session in herdr pane w:p1]\n\nOpen a pull request when it is ready.", display: true, details: { from: { pane: "w:p1" } } };
+  const other = { type: "custom_message", customType: "plan-mode-notice", content: "not a request" };
+  const input = { cwd: "/project", tool: "bash", args: "gh pr create", rules: [] };
+  const state = judgeStateOf([userEntry("Start issue 76"), relayed, other], input) as { user_requests: string[] };
+  expect(state.user_requests).toEqual([
+    "Start issue 76",
+    "Relayed to this session by another of the user's own Pi sessions, on the user's behalf:\n[Message from the pi session in herdr pane w:p1]\n\nOpen a pull request when it is ready.",
+  ]);
+});
+
 test("classifier-failure retry approval resets on branch switches", async () => {
   const { h, ctx } = setup({});
   const event = call("bash", { command: "npm test" });

@@ -92,6 +92,33 @@ export function recentUserMessages(entries: readonly unknown[], count: number): 
   return out;
 }
 
+/**
+ * Marks a request another of the user's own Pi sessions relayed to this one through herdr (a herdr
+ * child's task from the session that started it, a coordinator's message): pi-herdr delivers those as
+ * `herdr-message` custom messages, matched here by shape with no import.
+ */
+export const RELAYED_PREFIX = "Relayed to this session by another of the user's own Pi sessions, on the user's behalf:\n";
+const RELAYED_TYPE = "herdr-message";
+
+/**
+ * The latest `count` requests on the branch, oldest first: the user's own messages, and requests
+ * relayed by the user's other Pi sessions (prefixed with RELAYED_PREFIX), in branch order.
+ */
+export function recentRequests(entries: readonly unknown[], count: number): string[] {
+  const out: string[] = [];
+  for (let i = entries.length - 1; i >= 0 && out.length < count; i--) {
+    const entry = entries[i] as EntryLike;
+    if (entry?.type === "message" && entry.message?.role === "user") {
+      const text = messageText(entry.message.content).trim();
+      if (text) out.unshift(text);
+    } else if (entry?.type === "custom_message" && entry.customType === RELAYED_TYPE) {
+      const text = messageText(entry.content).trim();
+      if (text) out.unshift(RELAYED_PREFIX + text);
+    }
+  }
+  return out;
+}
+
 /** Readable thinking in a message's content blocks (redacted or encrypted-only blocks give nothing). */
 export function thinkingText(content: unknown): string {
   if (!Array.isArray(content)) return "";
