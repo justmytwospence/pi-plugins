@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { draftPrompt, MAX_QUESTIONS, outlineContext, parsePlan, redraftPrompt, refinePrompt, replyText } from "../src/protocol.ts";
+import { draftPrompt, MAX_QUESTIONS, outlineContext, parsePlan, refinePrompt, replyText, summaryPrompt } from "../src/protocol.ts";
 
 describe("parsePlan", () => {
   it("reads the JSON reply", () => {
@@ -33,25 +33,20 @@ describe("parsePlan", () => {
 });
 
 describe("prompts", () => {
-  it("states the goal, or asks the model to infer it", () => {
-    expect(draftPrompt("wire the retry into the CLI")).toContain("wire the retry into the CLI");
-    expect(draftPrompt("  ")).toContain("infer the most likely next step");
+  it("states the next prompt, or keeps what the current work needs", () => {
+    expect(draftPrompt("wire the retry into the CLI")).toContain("their next prompt, sent unchanged once the summary is written): wire the retry into the CLI");
+    expect(draftPrompt("  ")).toContain("keep what is needed to continue the current work");
   });
 
-  it("prohibits questions in automatic mode while retaining the goal and draft structure", () => {
-    const prompt = draftPrompt("ship it\nthen verify", true);
+  it("asks for a focus, not a plan for the next task", () => {
+    const prompt = draftPrompt("ship it\nthen verify");
     expect(prompt).toContain("ship it\nthen verify");
-    expect(prompt).toContain('{"questions": [], "draft": "..."}');
-    expect(prompt).toContain("questions: must be []");
-    expect(prompt).toContain("No questions will be asked");
-    expect(prompt).toContain("make reasonable assumptions from the session context");
-    for (const heading of ["Next task", "Preserve verbatim", "Preserve briefly", "Drop"]) {
-      expect(prompt).toContain(`**${heading}:**`);
-    }
+    expect(prompt).toContain("Do not plan the next task");
+    for (const heading of ["Keep verbatim", "Keep briefly", "Drop"]) expect(prompt).toContain(`**${heading}:**`);
+    expect(prompt).not.toContain("Next task");
     expect(prompt).toContain("Be specific to this session, never generic");
-    expect(prompt).not.toContain("If you ask questions");
-    expect(draftPrompt("ship it")).toContain(`questions: 0 to ${MAX_QUESTIONS}`);
-    expect(draftPrompt("ship it")).toContain("If you ask questions, still write your best draft.");
+    expect(prompt).toContain(`questions: 0 to ${MAX_QUESTIONS}`);
+    expect(prompt).toContain("If you ask questions, still write your best draft.");
   });
 
   it("lists the answers and their notes", () => {
@@ -80,10 +75,15 @@ describe("outline prompts", () => {
     expect(text).toContain("[user]\nhi");
   });
 
-  it("asks to check a draft against the full conversation", () => {
-    const text = redraftPrompt("ship it", "- Next task: x");
-    expect(text).toContain("ship it");
-    expect(text).toContain("- Next task: x");
-    expect(text).toContain('"questions": []');
+});
+
+describe("summaryPrompt", () => {
+  it("names the focus, where the kept part starts, and Pi's format", () => {
+    const text = summaryPrompt("- **Drop:** the tangent", { role: "user", excerpt: "now wire it", splitTurn: false });
+    expect(text).toContain("- **Drop:** the tangent");
+    expect(text).toContain('starts with the user message that begins: "now wire it"');
+    expect(text).not.toContain("middle of a turn");
+    for (const heading of ["## Goal", "## Constraints & Preferences", "## Progress", "## Key Decisions", "## Next Steps", "## Critical Context"]) expect(text).toContain(heading);
+    expect(summaryPrompt("f", { role: "assistant", excerpt: "x", splitTurn: true })).toContain("middle of a turn");
   });
 });

@@ -13,21 +13,24 @@ const theme: any = {
 
 describe("DraftView", () => {
   it("draws the review card, then the outcome, as plan mode draws a plan", () => {
-    const state: DraftState = { goal: "ship it", draft: "- **Next task:** ship", status: "pending" };
+    const state: DraftState = { goal: "ship it", draft: "- **Keep verbatim:** ship", status: "pending" };
     const view = new DraftView(() => state, theme);
     let raw = view.render(80);
     let lines = raw.map((l) => strip(l).trimEnd());
     expect(lines[0]).toBe("");
-    expect(lines[1]).toBe(" ? Compaction plan review");
-    expect(lines[2]).toMatch(/^ • Next task: ship|^ - Next task: ship/u);
+    expect(lines[1]).toBe(" ? Compaction focus review");
+    expect(lines[2]).toMatch(/^ • Keep verbatim: ship|^ - Keep verbatim: ship/u);
     expect(lines.at(-2)).toBe(" Waiting for approval · next: ship it");
     expect(bgs(raw)).toEqual(new Set(["\x1b[48;5;1m"]));
     Object.assign(state, { draft: "- edited", status: "compacted", edited: true, tokens: 12345, cached: 97 });
     raw = view.render(120);
     lines = raw.map((l) => strip(l).trimEnd());
-    expect(lines[1]).toBe(" ✓ Compaction plan");
+    expect(lines[1]).toBe(" ✓ Compaction focus");
     expect(lines.at(-2)).toBe(" ✓ Compacted with this focus (edited) · next: ship it · drafting read 12,345 tokens, 97% cached");
     expect(bgs(raw)).toEqual(new Set(["\x1b[48;5;2m"]));
+    Object.assign(state, { summary: "cache", edited: false, continued: true });
+    lines = view.render(160).map((l) => strip(l).trimEnd());
+    expect(lines.at(-2)).toBe(" ✓ Compacted with this focus, continuing · next: ship it · drafting and summary read 12,345 tokens, 97% cached");
   });
 
   it("folds a long decided focus until expanded", () => {

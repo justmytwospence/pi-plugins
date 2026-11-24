@@ -1,64 +1,82 @@
-// pi-compact-plan: /compact-plan [what you will do next]. A small plan for a compaction: you say
-// what comes next, the session asks a question or two only if the answer changes what the summary
-// must keep, then drafts focus instructions. The draft is shown in the transcript like a plan
-// waiting for approval, with Pi's select under it: compact with it, edit it (in the suite's editor,
-// so pi-vim works), tell the session what to change, or cancel.
+// pi-compact-plan: /compact-plan [next prompt]. Work out the focus of a compaction with the session
+// (what the summary keeps verbatim, keeps briefly and drops), then compact and either stop or
+// continue with the next prompt. The session asks a question or two only when an answer changes
+// what the summary must keep. The focus is shown in the transcript on the review card pi-plan-mode
+// draws plans with, with the review under it: compact and stop, compact and continue, edit it (in
+// the suite's editor, so pi-vim works), tell the session what to change, or cancel.
 //
 // The drafting is a side request to the session's model, outside the session: nothing is added to
 // the model's context, and the session's extensions never see it. It reuses the session's last
 // provider request byte for byte (splice.ts), so the conversation comes from the prompt cache; when
 // that is not possible (another API, no request since /tree or a compaction) it sends the session's
-// context as an ordinary request. When the conversation is large and not (or probably not) in the
-// prompt cache, it asks whether to draft from an outline of the session instead (outline.ts), which
-// costs a few percent of the tokens; the summary itself still reads the whole conversation. Escape
-// stops a request in flight.
+// context as an ordinary request. Only when the conversation is large and not (or probably not) in
+// the prompt cache does it ask what to draft from: an outline of the session (outline.ts, a few
+// percent of the tokens) or the full conversation (one uncached read that refills the cache).
+//
+// The summary: when the drafting read the conversation from the prompt cache and it is still warm,
+// this extension writes it the same way, on the session's last request (session_before_compact),
+// so it costs a cache read instead of Pi's uncached summarization request. Otherwise Pi's own
+// summarizer writes it with the focus as its instructions. Escape stops a request in flight.
+import { randomUUID } from "node:crypto";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
-import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { convertToLlm, sessionEntryToContextMessages } from "@earendil-works/pi-coding-agent";
+import type { CompactionResult, ExtensionAPI, ExtensionCommandContext, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { compact, convertToLlm, sessionEntryToContextMessages } from "@earendil-works/pi-coding-agent";
 import { matchesKey } from "@earendil-works/pi-tui";
 import { isAnswer, requestAsk, type ServiceQuestion } from "./ask-service.ts";
 import { holdBlocked, holdWorking } from "./herdr-blocked.ts";
 import { payloadModel, routedModel } from "./routed-model.ts";
 import { outlineOf, outlineTokens } from "./outline.ts";
-import { type Answer, draftPrompt, OUTLINE_SYSTEM, outlineContext, parsePlan, type Plan, redraftPrompt, refinePrompt, replyText, revisePrompt } from "./protocol.ts";
+import { type Answer, draftPrompt, type KeptStart, OUTLINE_SYSTEM, outlineContext, parsePlan, type Plan, refinePrompt, replyText, revisePrompt, summaryPrompt } from "./protocol.ts";
 import { entryText, isConversationRequest, SUPPORTED_APIS, splicePayload } from "./splice.ts";
 import { askText } from "./text-input.ts";
 import { type DraftEntry, type DraftState, DraftView, ENTRY, OUTCOME_ENTRY, type OutcomeEntry, type Source } from "./view.ts";
 
 export const COMMAND = "compact-plan";
-export const PROMPT_COMMAND = "compact-prompt";
 export const WIDGET = "compact-plan";
 export const WRITE_OWN = "Type your own answer";
 export const SKIP = "Skip this question";
-export const APPROVE = "Yes, compact with it";
-export const CONTINUE = "Yes, compact and continue";
-/** Sent after compacting when the user chose to continue without stating a goal. */
-export const CONTINUE_PROMPT = "Continue with the next step.";
+export const STOP = "Compact and stop";
+export const CONTINUE = "Compact and continue";
+/** Sent after compacting when the user chose to continue without a next prompt. */
+export const CONTINUE_PROMPT = "Continue with the current work.";
 
 /**
  * The message sent after compacting. The note says compaction already ran, so the model does not
  * mistake a prompt that mentions compacting for a request to compact (or think the command failed).
  */
-export function continuation(command: string, prompt: string): string {
-  return `[/${command} compacted this session; the summary above is the result. Do not compact again. Continue with the following.]\n\n${prompt}`;
+export function continuation(prompt: string): string {
+  return `[/${COMMAND} compacted this session; the summary above is the result. Do not compact again. Continue with the following.]\n\n${prompt}`;
 }
 export const EDIT = "Edit the focus";
 export const CHANGE = "No, change it";
 export const CANCEL = "Cancel";
 export const REVIEW_QUESTION = "Compact with this focus?";
-export const REDRAFT = "Redraft from the full conversation";
-export const SOURCE_QUESTION = "Draft the plan from?";
+export const SOURCE_QUESTION = "Draft the focus from?";
 export const SOURCE_OUTLINE = "An outline of the session";
 export const SOURCE_FULL = "The full conversation";
 /** pi-cache-guard's event (optional): `{ cold: boolean, tokens?: number, model?: string }`. */
 export const CACHE_STATE = "cache:state";
 /** Below this many context tokens, an outline saves too little to be worth a question. */
 export const OUTLINE_MIN_TOKENS = 50_000;
+/**
+ * The instructions of a compaction whose summary this extension writes: a marker, so other
+ * extensions that customize compaction (pi-cache-guard) leave it alone. Followed by a UUID.
+ */
+export const DIRECT_PREFIX = "compact-plan-direct:";
+/** How long after a cached request the summary still counts on the cache (Anthropic keeps it 5 minutes). */
+export const SUMMARY_WARM_MS = 4 * 60_000;
 
 type Review =
-  | { action: "approve" | "continue" | "edit"; note?: string }
+  | { action: "stop" | "continue" | "edit"; note?: string }
   | { action: "change"; feedback: string }
-  | { action: "cancel" | "none" | "redraft" };
+  | { action: "cancel" | "none" };
+
+/** A compaction whose summary this extension writes; the hook fills in what happened. */
+interface SummaryJob {
+  focus: string;
+  usage?: Usage;
+  error?: string;
+}
 const TIMEOUT_MS = 180_000;
 const FALLBACK_MAX_TOKENS = 4_000;
 const SPINNER = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏";
@@ -86,6 +104,34 @@ interface Reply {
 
 class Cancelled extends Error {}
 
+/** Pi's read and modified file lists (core/compaction/utils.ts, which the package does not export). */
+function fileLists(ops: { read: Set<string>; written: Set<string>; edited: Set<string> } | undefined): { readFiles: string[]; modifiedFiles: string[] } {
+  if (!ops) return { readFiles: [], modifiedFiles: [] };
+  const modified = new Set([...ops.edited, ...ops.written]);
+  return { readFiles: [...ops.read].filter((f) => !modified.has(f)).sort(), modifiedFiles: [...modified].sort() };
+}
+
+function formatFiles(readFiles: string[], modifiedFiles: string[]): string {
+  const sections: string[] = [];
+  if (readFiles.length) sections.push(`<read-files>\n${readFiles.join("\n")}\n</read-files>`);
+  if (modifiedFiles.length) sections.push(`<modified-files>\n${modifiedFiles.join("\n")}\n</modified-files>`);
+  return sections.length ? `\n\n${sections.join("\n\n")}` : "";
+}
+
+/** Where compaction's kept part starts, described so the summary can stop there. */
+export function keptStart(branch: readonly any[], firstKeptEntryId: string, splitTurn: boolean): KeptStart | undefined {
+  const entry = branch.find((e) => e?.id === firstKeptEntryId);
+  if (!entry) return undefined;
+  const role = typeof entry.message?.role === "string" ? entry.message.role : String(entry.type ?? "message");
+  let excerpt = entryText(entry).replace(/\s+/gu, " ").trim();
+  if (!excerpt && Array.isArray(entry.message?.content)) {
+    const calls = entry.message.content.filter((b: any) => b?.type === "toolCall").map((b: any) => String(b.name ?? "tool"));
+    if (calls.length) excerpt = `[tool calls: ${calls.join(", ")}]`;
+  }
+  if (!excerpt) return undefined;
+  return { role, excerpt: excerpt.length > 160 ? `${excerpt.slice(0, 159)}…` : excerpt, splitTurn };
+}
+
 const userText = (text: string): AgentMessage => ({ role: "user", content: [{ type: "text", text }], timestamp: Date.now() }) as AgentMessage;
 
 /** The session's messages after its last request: normally the final reply. Undefined when they cannot be told apart. */
@@ -100,6 +146,10 @@ export function messagesSince(branch: readonly any[], leafId: string | null): Ag
 export default function piCompactPlan(pi: ExtensionAPI) {
   let last: LastRequest | undefined;
   let drafting = false;
+  /** The last drafting request spliced onto the session's: when, and whether the cache served or stored it. */
+  let lastSplice: { at: number; cached: boolean } | undefined;
+  /** Compactions whose summary this extension writes, by their marker instructions. */
+  const summaries = new Map<string, SummaryJob>();
   /** pi-cache-guard's latest view of the prompt cache, when it is loaded. */
   let cacheState: { cold: boolean; tokens?: number } | undefined;
   /** Drafts of this process and recorded outcomes, by entry id, for the transcript renderer. */
@@ -125,6 +175,7 @@ export default function piCompactPlan(pi: ExtensionAPI) {
 
   pi.on("session_start", (_event, ctx) => {
     last = undefined;
+    lastSplice = undefined;
     try {
       for (const e of ctx.sessionManager.getEntries() as any[]) {
         if (e?.type !== "custom" || e.customType !== OUTCOME_ENTRY || !e.data?.id) continue;
@@ -137,9 +188,11 @@ export default function piCompactPlan(pi: ExtensionAPI) {
   });
   pi.on("session_tree", () => {
     last = undefined;
+    lastSplice = undefined;
   });
   pi.on("session_compact", () => {
     last = undefined;
+    lastSplice = undefined;
   });
   pi.on("before_provider_request", (event, ctx) => {
     // Under a virtual selection (a plan model pair) the payload names the physical model.
@@ -160,8 +213,8 @@ export default function piCompactPlan(pi: ExtensionAPI) {
     return model;
   }
 
-  /** One drafting request: spliced onto the session's last request when possible, else plain. */
-  async function request(ctx: ExtensionContext, side: AgentMessage[], signal: AbortSignal, source: Source = "full"): Promise<{ reply: Reply; usage: Usage }> {
+  /** One drafting request: spliced onto the session's last request when possible, else plain (unless `spliceOnly`). */
+  async function request(ctx: ExtensionContext, side: AgentMessage[], signal: AbortSignal, source: Source = "full", spliceOnly = false): Promise<{ reply: Reply; usage: Usage }> {
     const registry = ctx.modelRegistry as any;
     const usageOf = (r: Reply): Usage => ({ input: r.usage?.input ?? 0, cacheRead: r.usage?.cacheRead ?? 0, cacheWrite: r.usage?.cacheWrite ?? 0 });
     const failed = (r: Reply) => r.stopReason === "error" || r.stopReason === "aborted";
@@ -208,7 +261,13 @@ export default function piCompactPlan(pi: ExtensionAPI) {
           },
         );
         if (signal.aborted) throw new Cancelled();
-        if (!failed(reply)) return { reply, usage: usageOf(reply) };
+        if (!failed(reply)) {
+          const usage = usageOf(reply);
+          const total = usage.input + usage.cacheRead + usage.cacheWrite;
+          // Cached when the provider read or stored most of it (a provider without caching stays uncached).
+          lastSplice = { at: Date.now(), cached: total > 0 && (usage.cacheRead + usage.cacheWrite) * 2 >= total };
+          return { reply, usage };
+        }
         if (!spliceError) throw new Error(reply.errorMessage ?? "the model request failed");
       } catch (error) {
         if (signal.aborted) throw new Cancelled();
@@ -216,6 +275,7 @@ export default function piCompactPlan(pi: ExtensionAPI) {
       }
     }
 
+    if (spliceOnly) throw new Error("the session's last request cannot be reused");
     const fallbackModel = physicalModel(ctx);
     const context = ctx.sessionManager.buildSessionProjection().messages as AgentMessage[];
     const reply: Reply = await registry.complete(
@@ -247,6 +307,12 @@ export default function piCompactPlan(pi: ExtensionAPI) {
     return { cold: false, why: "in the prompt cache" };
   }
 
+  /** Whether the summary can be written from the prompt cache: a recent drafting request was served or stored by it. */
+  function summaryWarm(ctx: ExtensionContext): boolean {
+    const s = lastSplice;
+    return !!s && s.cached && Date.now() - s.at < SUMMARY_WARM_MS && spliceable(ctx);
+  }
+
   function contextTokens(ctx: ExtensionContext): number | undefined {
     try {
       const tokens = ctx.getContextUsage?.()?.tokens;
@@ -259,10 +325,15 @@ export default function piCompactPlan(pi: ExtensionAPI) {
 
   const fmtTokens = (n: number) => (n >= 1000 ? `${Math.round(n / 1000)}k` : String(n));
 
-  /** What to draft from: the full conversation, or an outline when that is cheaper and the cache is cold. Undefined: cancelled. */
-  async function chooseSource(ctx: ExtensionContext, automatic: boolean): Promise<{ source: Source; outline?: string } | undefined> {
+  /**
+   * What to draft from. The full conversation unless it is large and not (or probably not) in the
+   * prompt cache and its outline is much smaller: then the user picks. Undefined: cancelled.
+   */
+  async function chooseSource(ctx: ExtensionContext): Promise<{ source: Source; outline?: string } | undefined> {
     const tokens = contextTokens(ctx);
     if (tokens === undefined || tokens < OUTLINE_MIN_TOKENS) return { source: "full" };
+    const guess = cacheGuess(ctx);
+    if (!guess.cold) return { source: "full" };
     let outline: string;
     try {
       outline = outlineOf(convertToLlm(ctx.sessionManager.buildSessionProjection().messages as AgentMessage[]));
@@ -271,22 +342,22 @@ export default function piCompactPlan(pi: ExtensionAPI) {
     }
     const small = outlineTokens(outline);
     if (!outline || small * 4 > tokens) return { source: "full" };
-    const guess = cacheGuess(ctx);
-    if (automatic) return guess.cold ? { source: "outline", outline } : { source: "full" };
 
     const question = `The conversation (${fmtTokens(tokens)} tokens) is ${guess.why}. ${SOURCE_QUESTION}`;
     const descriptions: Record<string, string> = {
-      [SOURCE_OUTLINE]: `~${fmtTokens(small)} tokens: prompts, replies, tool calls and error lines. The summary still reads everything.`,
-      [SOURCE_FULL]: guess.cold ? `Re-reads all ${fmtTokens(tokens)} tokens uncached; the most thorough draft.` : "Reads it from the prompt cache; the most thorough draft.",
+      [SOURCE_OUTLINE]: `~${fmtTokens(small)} tokens: prompts, replies, tool calls and error lines. Pi's summarizer still reads everything.`,
+      [SOURCE_FULL]: spliceable(ctx)
+        ? `Re-reads all ${fmtTokens(tokens)} tokens once and refills the cache, so revisions and the summary read it cheaply.`
+        : `Re-reads all ${fmtTokens(tokens)} tokens uncached; the most thorough draft.`,
     };
-    const labels = guess.cold ? [SOURCE_OUTLINE, SOURCE_FULL] : [SOURCE_FULL, SOURCE_OUTLINE];
+    const labels = [SOURCE_OUTLINE, SOURCE_FULL];
     const pick = (label: string | null | undefined) => ({ source: (label ?? labels[0]) === SOURCE_OUTLINE ? ("outline" as const) : ("full" as const), outline });
     const service = requestAsk(pi.events);
     if (service) {
       const result = await service(
         ctx,
         { questions: [{ question, header: "Draft from", options: labels.map((label) => ({ label, description: descriptions[label] as string })) }] },
-        { label: "Compaction plan" },
+        { label: "Compaction focus" },
       ).catch(() => undefined);
       if (isAnswer(result)) {
         const a = result.answers[0];
@@ -366,7 +437,7 @@ export default function piCompactPlan(pi: ExtensionAPI) {
     const service = requestAsk(pi.events);
     if (service) {
       const questions: ServiceQuestion[] = plan.questions.map((q) => ({ question: q.question, header: q.header, options: q.options, multiSelect: false }));
-      const result = await service(ctx, { questions }, { label: "Compaction plan" }).catch(() => undefined);
+      const result = await service(ctx, { questions }, { label: "Compaction focus" }).catch(() => undefined);
       if (isAnswer(result)) {
         if (result.cancelled) return undefined;
         const answers: Answer[] = [];
@@ -397,39 +468,36 @@ export default function piCompactPlan(pi: ExtensionAPI) {
   }
 
   /** What to do with the draft: in pi-ask-user-question's dialog when loaded, else Pi's select. */
-  async function reviewChoice(ctx: ExtensionContext, fromOutline: boolean): Promise<Review> {
+  async function reviewChoice(ctx: ExtensionContext, hasPrompt: boolean): Promise<Review> {
     const service = requestAsk(pi.events);
     if (service) {
       const question: ServiceQuestion = {
         question: `${REVIEW_QUESTION} Or type what should change.`,
         header: "Compaction",
         options: [
-          { label: APPROVE, description: "Compact now. A note on this option is added to the focus." },
-          { label: CONTINUE, description: "Compact, then send the next step so the session keeps working. A note is added to the focus." },
-          { label: EDIT, description: "Open the draft in the editor. A note on this option is added to it first." },
-          ...(fromOutline ? [{ label: REDRAFT, description: "Read the whole conversation and revise this draft with it; keeps your answers and edits." }] : []),
+          { label: STOP, description: hasPrompt ? "Compact; your next prompt waits in the editor." : "Compact, then wait for you." },
+          { label: CONTINUE, description: hasPrompt ? "Compact, then send your next prompt." : "Compact, then continue the current work." },
+          { label: EDIT, description: "Open the focus in the editor." },
           { label: CANCEL, description: "Leave the session as it is." },
         ],
       };
-      const result = await service(ctx, { questions: [question] }, { label: "Compact with this focus?" }).catch(() => undefined);
+      const result = await service(ctx, { questions: [question] }, { label: REVIEW_QUESTION }).catch(() => undefined);
       if (isAnswer(result)) {
         const a = result.answers[0];
         if (result.cancelled || !a) return { action: "cancel" };
         const note = a.notes?.trim() || undefined;
         if (a.kind === "custom" && a.answer) return { action: "change", feedback: note ? `${a.answer}\n${note}` : a.answer };
-        if (a.answer === APPROVE) return { action: "approve", note };
+        if (a.answer === STOP) return { action: "stop", note };
         if (a.answer === CONTINUE) return { action: "continue", note };
         if (a.answer === EDIT) return { action: "edit", note };
-        if (a.answer === REDRAFT) return { action: "redraft" };
         if (a.kind === "unanswered" && note) return { action: "change", feedback: note };
         return { action: "cancel" };
       }
     }
-    const choice = await waiting(REVIEW_QUESTION, () => ctx.ui.select(REVIEW_QUESTION, [APPROVE, CONTINUE, EDIT, CHANGE, ...(fromOutline ? [REDRAFT] : []), CANCEL]));
-    if (choice === APPROVE) return { action: "approve" };
+    const choice = await waiting(REVIEW_QUESTION, () => ctx.ui.select(REVIEW_QUESTION, [STOP, CONTINUE, EDIT, CHANGE, CANCEL]));
+    if (choice === STOP) return { action: "stop" };
     if (choice === CONTINUE) return { action: "continue" };
     if (choice === EDIT) return { action: "edit" };
-    if (choice === REDRAFT) return { action: "redraft" };
     if (choice === CHANGE) {
       const feedback = (await waiting("What should change?", () => askText(pi, ctx, "What should change?")))?.trim();
       return feedback ? { action: "change", feedback } : { action: "none" };
@@ -437,48 +505,91 @@ export default function piCompactPlan(pi: ExtensionAPI) {
     return { action: "cancel" };
   }
 
-  async function handle(args: string, ctx: ExtensionCommandContext, automatic = false) {
-    if (!ctx.hasUI) return;
-    const command = automatic ? PROMPT_COMMAND : COMMAND;
-    let goal = (args ?? "").trim();
-    if (automatic && !goal) {
-      ctx.ui.notify("Usage: /compact-prompt <prompt>", "error");
-      return;
+  /** The summary, written on the session's last request so the conversation is read from the prompt cache. */
+  async function cachedSummary(ctx: ExtensionContext, event: { preparation: any; branchEntries: readonly any[]; signal: AbortSignal }, focus: string): Promise<{ result: CompactionResult; usage: Usage }> {
+    const prep = event.preparation;
+    const kept = keptStart(event.branchEntries, prep.firstKeptEntryId, prep.isSplitTurn === true);
+    if (!kept) throw new Error("the kept part of the conversation was not found");
+    drafting = true;
+    try {
+      const { reply, usage } = await request(ctx, [userText(summaryPrompt(focus, kept))], event.signal, "full", true);
+      if (Array.isArray(reply.content) && reply.content.some((b: any) => b?.type === "toolCall")) throw new Error("the model called a tool instead");
+      if (reply.stopReason === "length") throw new Error("the summary hit the token cap");
+      const text = replyText(reply as { content?: unknown }).trim();
+      if (!text) throw new Error("the model sent an empty summary");
+      const { readFiles, modifiedFiles } = fileLists(prep.fileOps);
+      return {
+        result: {
+          summary: text + formatFiles(readFiles, modifiedFiles),
+          firstKeptEntryId: prep.firstKeptEntryId,
+          tokensBefore: prep.tokensBefore,
+          ...(reply.usage ? { usage: reply.usage as never } : {}),
+          details: { readFiles, modifiedFiles },
+        },
+        usage,
+      };
+    } finally {
+      drafting = false;
     }
-    await ctx.waitForIdle();
-    if (!goal) {
-      const typed = await waiting("What will you do after compacting?", () =>
-        askText(pi, ctx, "What will you do after compacting?", {
-          hint: "enter submit (empty: let the session infer it) · esc then esc (or :q) cancel",
-          placeholder: "leave empty to let the session infer it",
-        }),
-      );
-      if (typed === undefined) return;
-      goal = typed.trim();
-    }
+  }
 
-    const chosen = await chooseSource(ctx, automatic);
+  /** Pi's own summarizer with the focus, as `/compact <focus>` runs it. */
+  async function defaultSummary(ctx: ExtensionContext, event: { preparation: any; signal: AbortSignal }, focus: string): Promise<CompactionResult> {
+    const model = physicalModel(ctx);
+    const auth = (await (ctx.modelRegistry as any).getApiKeyAndHeaders(model)) as { ok: boolean; apiKey?: string; headers?: Record<string, string>; env?: Record<string, string>; error?: string };
+    if (!auth?.ok) throw new Error(auth?.error ?? `no credentials for ${model.provider}`);
+    return compact(event.preparation, model as never, auth.apiKey, auth.headers, focus, event.signal, undefined, undefined, auth.env);
+  }
+
+  pi.on("session_before_compact", async (event, ctx) => {
+    const job = event.customInstructions ? summaries.get(event.customInstructions) : undefined;
+    if (!job) return undefined;
+    try {
+      const { result, usage } = await cachedSummary(ctx, event, job.focus);
+      job.usage = usage;
+      return { compaction: result };
+    } catch {
+      if (event.signal.aborted) return { cancel: true };
+    }
+    // The cache could not serve it: Pi's summarizer, with the focus rather than the marker.
+    try {
+      return { compaction: await defaultSummary(ctx, event, job.focus) };
+    } catch (error) {
+      job.error = event.signal.aborted ? undefined : error instanceof Error ? error.message : String(error);
+      return { cancel: true };
+    }
+  });
+
+  async function handle(args: string, ctx: ExtensionCommandContext) {
+    if (!ctx.hasUI) return;
+    const goal = (args ?? "").trim();
+    await ctx.waitForIdle();
+
+    const chosen = await chooseSource(ctx);
     if (!chosen) {
       ctx.ui.notify("Compaction cancelled", "info");
       return;
     }
-    let source: Source = chosen.source;
+    const source: Source = chosen.source;
 
     const usage: Usage = { input: 0, cacheRead: 0, cacheWrite: 0 };
-    const ask = async (side: AgentMessage[], label: string, from: Source = source) => {
-      const result = await working(ctx, label, (signal) => request(ctx, side, signal, from));
-      usage.input += result.usage.input;
-      usage.cacheRead += result.usage.cacheRead;
-      usage.cacheWrite += result.usage.cacheWrite;
+    const addUsage = (u: Usage) => {
+      usage.input += u.input;
+      usage.cacheRead += u.cacheRead;
+      usage.cacheWrite += u.cacheWrite;
+    };
+    const ask = async (side: AgentMessage[], label: string) => {
+      const result = await working(ctx, label, (signal) => request(ctx, side, signal, source));
+      addUsage(result.usage);
       return result.reply;
     };
     const failure = (error: unknown) => {
-      if (error instanceof Cancelled) ctx.ui.notify(`${command}: ${error.message === "stopped" ? "stopped" : "drafting timed out"}`, "info");
-      else ctx.ui.notify(`${command}: drafting failed (${error instanceof Error ? error.message : String(error)})`, "error");
+      if (error instanceof Cancelled) ctx.ui.notify(`${COMMAND}: ${error.message === "stopped" ? "stopped" : "drafting timed out"}`, "info");
+      else ctx.ui.notify(`${COMMAND}: drafting failed (${error instanceof Error ? error.message : String(error)})`, "error");
     };
 
     // The side conversation so far; each revision continues it.
-    const firstPrompt = draftPrompt(goal, automatic);
+    const firstPrompt = draftPrompt(goal);
     const side: AgentMessage[] = [userText(source === "outline" ? `${outlineContext(chosen.outline ?? "")}\n\n${firstPrompt}` : firstPrompt)];
     let plan: Plan;
     try {
@@ -487,7 +598,7 @@ export default function piCompactPlan(pi: ExtensionAPI) {
       const parsed = parsePlan(replyText(first));
       if (!parsed) throw new Error("the model sent an empty reply");
       plan = parsed;
-      if (!automatic && plan.questions.length) {
+      if (plan.questions.length) {
         const answers = await askQuestions(ctx, plan);
         if (answers === undefined) {
           ctx.ui.notify("Compaction cancelled", "info");
@@ -495,7 +606,7 @@ export default function piCompactPlan(pi: ExtensionAPI) {
         }
         if (answers.length) {
           side.push(userText(refinePrompt(answers)));
-          const second = await ask(side, "Revising the draft with your answers…");
+          const second = await ask(side, "Revising the focus with your answers…");
           side.push(second as AgentMessage);
           plan = parsePlan(replyText(second)) ?? plan;
         }
@@ -506,37 +617,20 @@ export default function piCompactPlan(pi: ExtensionAPI) {
     }
 
     const id = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
-    const state: DraftState = { goal, draft: plan.draft, status: "pending", ...(source === "outline" ? { source } : {}), ...(automatic ? { continued: true } : {}) };
+    const state: DraftState = { goal, draft: plan.draft, status: "pending", ...(source === "outline" ? { source } : {}) };
     states.set(id, state);
     pi.appendEntry<DraftEntry>(ENTRY, { id, goal, draft: plan.draft });
     const record = () => pi.appendEntry<OutcomeEntry>(OUTCOME_ENTRY, { id, ...state });
 
-    while (!automatic) {
+    for (;;) {
       state.status = "pending";
-      const review = await reviewChoice(ctx, source === "outline");
+      const review = await reviewChoice(ctx, !!goal);
       if (review.action === "none") continue;
-      if (review.action === "redraft") {
-        state.status = "drafting";
-        try {
-          const fresh = [userText(redraftPrompt(goal, state.draft))];
-          const reply = await ask(fresh, "Redrafting from the full conversation…", "full");
-          const next = parsePlan(replyText(reply));
-          if (!next) throw new Error("the model sent an empty reply");
-          side.splice(0, side.length, ...fresh, reply as AgentMessage);
-          source = "full";
-          delete state.source;
-          state.draft = next.draft;
-          state.edited = false;
-        } catch (error) {
-          failure(error);
-        }
-        continue;
-      }
-      if ((review.action === "approve" || review.action === "continue" || review.action === "edit") && review.note) {
+      if ((review.action === "stop" || review.action === "continue" || review.action === "edit") && review.note) {
         state.draft = `${state.draft}\n- **Also:** ${review.note.replace(/\s*\n\s*/gu, " ")}`;
         state.edited = true;
       }
-      if (review.action === "approve") break;
+      if (review.action === "stop") break;
       if (review.action === "continue") {
         state.continued = true;
         break;
@@ -556,7 +650,7 @@ export default function piCompactPlan(pi: ExtensionAPI) {
         state.status = "drafting";
         try {
           side.push(userText(revisePrompt(state.draft, feedback)));
-          const revised = await ask(side, "Revising the draft…");
+          const revised = await ask(side, "Revising the focus…");
           side.push(revised as AgentMessage);
           const next = parsePlan(replyText(revised));
           if (!next) throw new Error("the model sent an empty reply");
@@ -576,23 +670,40 @@ export default function piCompactPlan(pi: ExtensionAPI) {
       return;
     }
 
-    const total = usage.input + usage.cacheRead + usage.cacheWrite;
-    state.tokens = total;
-    state.cached = total ? Math.round((usage.cacheRead / total) * 100) : 0;
+    // From the prompt cache when the drafting just read it from there; else Pi's summarizer.
+    const job: SummaryJob = { focus: state.draft };
+    const marker = summaryWarm(ctx) ? `${DIRECT_PREFIX}${randomUUID()}` : undefined;
+    if (marker) summaries.set(marker, job);
     state.status = "compacting";
+    const settle = () => {
+      if (marker) summaries.delete(marker);
+      if (job.usage) {
+        addUsage(job.usage);
+        state.summary = "cache";
+      }
+      const total = usage.input + usage.cacheRead + usage.cacheWrite;
+      state.tokens = total;
+      state.cached = total ? Math.round((usage.cacheRead / total) * 100) : 0;
+    };
     ctx.compact({
-      customInstructions: state.draft,
+      customInstructions: marker ?? state.draft,
       onComplete: () => {
         if (state.status !== "compacting") return;
+        settle();
         state.status = "compacted";
         record();
-        if (state.continued) pi.sendUserMessage(continuation(command, goal || CONTINUE_PROMPT));
+        if (state.continued) pi.sendUserMessage(continuation(goal || CONTINUE_PROMPT));
         else if (goal && !ctx.ui.getEditorText().trim()) ctx.ui.setEditorText(goal);
       },
       onError: (error) => {
         if (state.status !== "compacting") return;
-        state.status = "failed";
-        state.error = error.message;
+        settle();
+        if (!job.error && /^compaction cancelled$/iu.test(error.message)) {
+          state.status = "cancelled";
+        } else {
+          state.status = "failed";
+          state.error = job.error ?? error.message;
+        }
         // Pi reports the error itself; the draft's status line records it.
         record();
       },
@@ -600,12 +711,7 @@ export default function piCompactPlan(pi: ExtensionAPI) {
   }
 
   pi.registerCommand(COMMAND, {
-    description: "Plan a compaction: say what comes next, answer any question, then approve the focus it drafts",
+    description: "Work out a compaction focus with the session, then compact and stop, or continue with [next prompt]",
     handler: (args, ctx) => handle(args, ctx),
-  });
-  pi.registerCommand(PROMPT_COMMAND, {
-    description:
-      "Compact without dialogs, then send <prompt> as the next message. <prompt> is the task to do after compacting, not instructions for the summary",
-    handler: (args, ctx) => handle(args, ctx, true),
   });
 }

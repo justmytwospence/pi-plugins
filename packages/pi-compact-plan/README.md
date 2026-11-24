@@ -1,24 +1,23 @@
 # pi-compact-plan
 
-A Pi extension that turns compaction into a small plan. Run `/compact-plan <what you will do next>`: the session asks a question or two only when an answer changes what the summary must keep, then drafts focus instructions. The draft is shown in the transcript on the same review card pi-plan-mode draws plans with, with the review under it: compact with it, compact and keep going (it sends your goal as the next prompt), edit it (in the suite's editor, so pi-vim works there), tell the session what to change, or cancel. With pi-ask-user-question loaded, the questions and the review are its dialog, with typed answers and notes; otherwise Pi's selects.
+A Pi extension for compacting with a focus you work out with the session. Run `/compact-plan [next prompt]`: the session drafts focus instructions for the summary (what to keep verbatim, what to keep briefly, what to drop), asking a question or two first only when an answer changes what the summary must keep. The focus is shown in the transcript on the same review card pi-plan-mode draws plans with, with the review under it: compact and stop, compact and continue, edit it (in the suite's editor, so pi-vim works there), tell the session what to change, or cancel. With pi-ask-user-question loaded, the questions and the review are its dialog, with typed answers and notes; otherwise Pi's selects.
 
-For an automatic flow, run `/compact-prompt <prompt>`. It drafts the focus without questions or approval, compacts, then sends the prompt as the next message, after a one-line note saying the session was just compacted. The prompt is the task to do afterwards, not instructions for the summary. The focus and outcome remain visible in the transcript. The prompt is required; Escape stops drafting, and a drafting or compaction failure does not send it.
+The focus is for the summary, before compacting; the next prompt is what happens after. **Compact and stop** leaves your next prompt in the editor; **Compact and continue** sends it (or `Continue with the current work.` without one), after a one-line note saying the session was just compacted.
 
-Example draft (illustration, not a screenshot):
+Example focus (illustration, not a screenshot):
 
 ```
- Compaction plan review
- - Next task: wire retry() from src/net/retry.ts into the CLI's fetch command
- - Preserve verbatim: backoff is 2^n * 250ms capped at 8s; ...
- - Preserve briefly: why the old wrapper was removed
+ Compaction focus review
+ - Keep verbatim: retry() in src/net/retry.ts; backoff is 2^n * 250ms capped at 8s; ...
+ - Keep briefly: why the old wrapper was removed
  - Drop: the caching tangent, the passing test runs
 
  Waiting for approval · next: wire the retry into the CLI
 ```
 
-The drafting is a side request to the session's model, outside the session. Where the API allows, it reuses the session's last provider request byte for byte, so the conversation is read from the prompt cache.
+The drafting is a side request to the session's model, outside the session. Where the API allows, it reuses the session's last provider request byte for byte, so the conversation is read from the prompt cache. When the drafting was read from the cache and you approve within a few minutes, the summary is written the same way, so it costs a cache read instead of Pi's uncached summarization request; otherwise Pi's summarizer writes it with the focus.
 
-When the conversation is large and not (or probably not) in the prompt cache, it first asks whether to draft from the full conversation or from an outline of the session (prompts, replies, tool calls, error lines), listing the cheaper fit first; with pi-cache-guard loaded it uses its cache clock for that guess. `/compact-prompt` takes the guess without asking. The summary itself always reads the whole conversation; a plan drafted from an outline can be redrafted from the full conversation in the review.
+Only when the conversation is large and not (or probably not) in the prompt cache does it ask what to draft from: an outline of the session (prompts, replies, tool calls, error lines; a few percent of the tokens), after which Pi's summarizer reads the whole conversation once, or the full conversation, which re-reads it once and refills the cache so revisions and the summary are cheap. With pi-cache-guard loaded it uses its cache clock for that guess.
 
 Part of [Pi Plugins](https://github.com/justmytwospence/pi-plugins). Reference: <https://pi-plugins.vercel.app/plugins/pi-compact-plan/>.
 

@@ -42,7 +42,7 @@ All 35 references include activation, controls, defaults, requirements, costs an
 | [pi-status-footer](https://pi-plugins.vercel.app/plugins/pi-status-footer/) | Read Git, context and provider usage at a glance. |
 | [pi-model-waterfall](https://pi-plugins.vercel.app/plugins/pi-model-waterfall/) | Optionally route verified subscription-only models, failing closed without a paid-API fallback. |
 | [pi-context](https://pi-plugins.vercel.app/plugins/pi-context/) | Inspect what fills the context window, with previews. |
-| [pi-compact-plan](https://pi-plugins.vercel.app/plugins/pi-compact-plan/) | Plan a compaction: say what is next, review the focus it drafts. |
+| [pi-compact-plan](https://pi-plugins.vercel.app/plugins/pi-compact-plan/) | Work out a compaction focus with the session, then compact and stop or continue. |
 | [pi-trends](https://pi-plugins.vercel.app/plugins/pi-trends/) | Chart context %, effort, tokens and cost per model call. |
 | [pi-pressure](https://pi-plugins.vercel.app/plugins/pi-pressure/) | See CPU, memory and thermal pressure, only while the machine is constrained. |
 

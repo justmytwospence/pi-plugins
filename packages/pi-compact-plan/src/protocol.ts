@@ -31,26 +31,27 @@ export interface Answer {
 
 const TAG = "compact-plan";
 
-/** The first request: the user's goal, and what to send back. */
-export function draftPrompt(goal: string, automatic = false): string {
-  const stated = goal.trim() || "(not stated: infer the most likely next step from the conversation, and say in the draft that you inferred it)";
+/** The first request: the user's next prompt, and what to send back. */
+export function draftPrompt(next: string): string {
+  const stated = next.trim()
+    ? `What the user will do right after compacting (their next prompt, sent unchanged once the summary is written): ${next.trim()}`
+    : "The user did not say what comes next: keep what is needed to continue the current work.";
   return `<${TAG}>
-The user is about to run /compact on this session. Compaction replaces the conversation so far with a summary written by another request; you are helping write the focus instructions that steer that summary. Do not call tools and do not continue the work.
+The user is about to compact this session. Compaction replaces the conversation so far with a summary written by another request; you are helping write the focus instructions that steer that summary: what it keeps and what it drops. Do not plan the next task, do not call tools, and do not continue the work.
 
-What the user will do after compacting: ${stated}
+${stated}
 
 Reply with only a JSON object, no code fence and no other text:
-${automatic ? '{"questions": [], "draft": "..."}' : '{"questions": [{"question": "...", "header": "...", "options": [{"label": "...", "description": "..."}]}], "draft": "..."}'}
+{"questions": [{"question": "...", "header": "...", "options": [{"label": "...", "description": "..."}]}], "draft": "..."}
 
-${automatic ? 'questions: must be []. No questions will be asked. Do not ask for clarification; make reasonable assumptions from the session context.' : `questions: 0 to ${MAX_QUESTIONS}, asked only when the answer would change what the summary must keep (for example whether an abandoned approach still matters, or whether some side issue is in scope). Usually []. Each has a header of 12 characters or fewer, and 2 to ${MAX_OPTIONS} options with a short label (1-5 words) and a one-line description of what choosing it means for the summary. The user can also answer in their own words or add a note to an option, so never add an "Other" option.`}
+questions: 0 to ${MAX_QUESTIONS}, asked only when the answer would change what the summary must keep (for example whether an abandoned approach still matters, or whether some side issue is in scope). Usually []. Each has a header of 12 characters or fewer, and 2 to ${MAX_OPTIONS} options with a short label (1-5 words) and a one-line description of what choosing it means for the summary. The user can also answer in their own words or add a note to an option, so never add an "Other" option.
 
 draft: the focus instructions, a Markdown list in this shape:
-- **Next task:** <the goal, sharpened with specifics from this session>
-- **Preserve verbatim:** <exact paths, commands, identifiers, decisions with their reasons, open bugs, constraints the user stated>
-- **Preserve briefly:** <background that is still relevant>
+- **Keep verbatim:** <exact paths, commands, identifiers, decisions with their reasons, open bugs, constraints the user stated>
+- **Keep briefly:** <background that is still relevant>
 - **Drop:** <dead ends, finished subtasks, noisy tool output>
 Nested items are fine where a part has several points.
-Be specific to this session, never generic. Under 250 words.${automatic ? "" : " If you ask questions, still write your best draft."}
+Be specific to this session, never generic. Under 250 words. If you ask questions, still write your best draft.
 </${TAG}>`;
 }
 
@@ -64,19 +65,6 @@ An outline of the session so far, instead of the full transcript: every user pro
 
 ${outline}
 </session-outline>`;
-}
-
-/** A request on the full conversation that checks a draft written from an outline. */
-export function redraftPrompt(goal: string, draft: string): string {
-  return `${draftPrompt(goal, true)}
-
-<${TAG}>
-A draft written earlier from an abbreviated outline of this session, including the user's answers and edits:
-
-${draft}
-
-Check it against the full conversation: add what the outline hid, correct what it got wrong, and keep every point the user's answers and edits put in it. Reply with only the JSON object, with "questions": [].
-</${TAG}>`;
 }
 
 /** The follow-up request: the user's answers, and a revised draft. */
@@ -102,6 +90,61 @@ The user wants this changed: ${feedback}
 
 Revise the draft accordingly. Reply with only the JSON object, with "questions": [].
 </${TAG}>`;
+}
+
+/** Where the summary stops: the start of the part compaction keeps verbatim. */
+export interface KeptStart {
+  role: string;
+  /** The first words of that message, or a description of it (its tool calls). */
+  excerpt: string;
+  /** The cut falls inside a turn: the turn's request is before it and must be summarized. */
+  splitTurn: boolean;
+}
+
+/**
+ * The summary request, appended to the session's own conversation (so it is read from the prompt
+ * cache). Its format follows Pi's compaction summary (core/compaction/compaction.ts), so the session
+ * continues from it as from Pi's own.
+ */
+export function summaryPrompt(focus: string, kept: KeptStart): string {
+  return `<${TAG}-summary>
+This session is being compacted now: the conversation so far will be replaced by the summary you write. Do not call tools, do not continue the work, and do not answer anything in the conversation. Reply with only the summary.
+
+The most recent part of the conversation is kept verbatim after your summary. It starts with the ${kept.role} message that begins: "${kept.excerpt}". Summarize everything before that message; do not restate the kept part.${kept.splitTurn ? " That message is in the middle of a turn: include the user's request that started the turn and the progress made before the kept part." : ""} If the conversation begins with the summary of an earlier compaction, carry over everything in it that is still relevant.
+
+The user's focus for this summary (it decides what to keep and what to drop):
+
+${focus}
+
+Use this format:
+
+## Goal
+[What is the user trying to accomplish? Can be multiple items if the session covers different tasks.]
+
+## Constraints & Preferences
+- [Any constraints, preferences, or requirements mentioned by user, or "(none)"]
+
+## Progress
+### Done
+- [x] [Completed tasks/changes]
+
+### In Progress
+- [ ] [Current work]
+
+### Blocked
+- [Issues preventing progress, if any]
+
+## Key Decisions
+- **[Decision]**: [Brief rationale]
+
+## Next Steps
+1. [Ordered list of what should happen next]
+
+## Critical Context
+- [Any data, examples, or references needed to continue, or "(none)"]
+
+Keep each section concise. Preserve exact file paths, function names, and error messages.
+</${TAG}-summary>`;
 }
 
 function isObject(value: unknown): value is Record<string, unknown> {

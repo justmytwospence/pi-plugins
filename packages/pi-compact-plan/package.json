@@ -1,7 +1,7 @@
 {
   "name": "@justmytwospence/pi-compact-plan",
   "version": "0.1.106",
-  "description": "/compact-plan: say what you will do next, answer any question the session has, then review and approve the compaction focus it drafts.",
+  "description": "/compact-plan [next prompt]: work out a compaction focus with the session, then compact and stop or continue.",
   "type": "module",
   "license": "MIT",
   "private": true,

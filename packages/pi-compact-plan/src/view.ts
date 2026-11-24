@@ -1,9 +1,9 @@
-// The draft in the transcript, drawn with the suite's review card (review-card.ts, shared with
-// pi-plan-mode), so it looks like a plan waiting for approval: "Compaction plan review" on the
-// tool background, the focus as Markdown, then the status ("Waiting for approval", "✓ Compacted
-// with this focus", "Cancelled"). The entry is a custom session entry (never sent to the model)
-// appended once per /compact-plan run; edits and revisions update it in memory while you review,
-// and the outcome entry records the final text and status so a reloaded session draws the same.
+// The focus in the transcript, drawn with the suite's review card (review-card.ts, shared with
+// pi-plan-mode): "Compaction focus review" on the tool background, the focus as Markdown, then the
+// status ("Waiting for approval", "✓ Compacted with this focus", "Cancelled"). The entry is a custom
+// session entry (never sent to the model) appended once per /compact-plan run; edits and revisions
+// update it in memory while you review, and the outcome entry records the final text and status so
+// a reloaded session draws the same.
 import { getMarkdownTheme, type Theme } from "@earendil-works/pi-coding-agent";
 import { type Component, Markdown } from "@earendil-works/pi-tui";
 import { type ReviewStatus, reviewBody, reviewCard } from "./review-card.ts";
@@ -23,9 +23,11 @@ export interface DraftState {
   /** What the draft was written from; absent means the full conversation. */
   source?: Source;
   edited?: boolean;
-  /** Approved with "compact and continue": the next step is sent once compacted. */
+  /** Approved with "compact and continue": the next prompt is sent once compacted. */
   continued?: boolean;
-  /** Drafting input tokens, and the share read from the prompt cache (0-100). */
+  /** "cache": this extension wrote the summary from the prompt cache; absent: Pi's summarizer did. */
+  summary?: "cache";
+  /** Input tokens of the drafting (and a cached summary), and the share read from the prompt cache (0-100). */
   tokens?: number;
   cached?: number;
   error?: string;
@@ -41,11 +43,11 @@ export interface OutcomeEntry extends DraftState {
   id: string;
 }
 
-/** The card's status line: what happened, then the goal and (once compacted) the drafting cost. */
+/** The card's status line: what happened, then the next prompt and (once compacted) the cost. */
 export function reviewStatus(state: DraftState): ReviewStatus {
   const parts = [state.goal ? `next: ${state.goal.replace(/\s+/gu, " ")}` : "", state.source === "outline" ? "drafted from an outline" : ""];
   if (state.status === "compacted" && state.tokens) {
-    parts.push(`drafting read ${state.tokens.toLocaleString("en-US")} tokens, ${state.cached ?? 0}% cached`);
+    parts.push(`${state.summary === "cache" ? "drafting and summary" : "drafting"} read ${state.tokens.toLocaleString("en-US")} tokens, ${state.cached ?? 0}% cached`);
   }
   const context = parts.filter(Boolean).join(" · ") || undefined;
   switch (state.status) {
@@ -81,7 +83,7 @@ export class DraftView implements Component {
     const key = JSON.stringify([width, state.draft, status, expanded]);
     if (this.cache?.key !== key) {
       const body = reviewBody(this.theme, state.draft, status, { expanded }, (text) => new Markdown(text, 0, 0, getMarkdownTheme()));
-      const title = status.tone === "pending" ? "Compaction plan review" : "Compaction plan";
+      const title = status.tone === "pending" ? "Compaction focus review" : "Compaction focus";
       this.cache = { key, lines: reviewCard(this.theme, title, body, status.tone, { expanded }).render(width) };
     }
     return this.cache.lines;
