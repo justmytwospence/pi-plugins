@@ -117,7 +117,7 @@ The `agents` locations are meant to be shared with the opencode and Claude Code 
   "enabled": true,
   "acceptKeys": ["tab", "right"],
   "maxChars": 0,
-  "jev": { "enabled": true, "provider": "typesafe", "model": "jev-latest", "timeoutMs": 1500, "threshold": 0.6 }
+  "jev": { "enabled": true, "provider": "typesafe", "model": "jev-latest", "timeoutMs": 2500, "threshold": 0.6 }
 }
 ```
 

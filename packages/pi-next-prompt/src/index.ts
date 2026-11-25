@@ -24,7 +24,7 @@ export const DEFAULT_CONFIG: NextPromptConfig = {
   enabled: true,
   acceptKeys: ["tab", "right"],
   maxChars: 0,
-  jev: { enabled: true, provider: "typesafe", model: "jev-latest", timeoutMs: 1_500, threshold: 0.6 },
+  jev: { enabled: true, provider: "typesafe", model: "jev-latest", timeoutMs: 2_500, threshold: 0.6 },
 };
 
 export const SECTION = "next_prompt";

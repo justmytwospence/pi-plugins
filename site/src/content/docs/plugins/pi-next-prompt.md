@@ -9,7 +9,7 @@ plugin: pi-next-prompt
 - **Use it for:** Offer one automatic next step or a verified requested prompt/slash-command handoff, without a separate generation request.
 - **Enable:** Select `packages/pi-next-prompt/src/index.ts` with [`pi config`](/guides/install/#enable-an-explicit-subset).
 - **Controls:** `/next-prompt` status/on/off and `trace [page]`; Tab/Right accept into an empty focused main editor, never submit.
-- **Settings:** `next-prompt.json` shared/user/project layers; enabled, Tab/Right, no length limit (`maxChars`, 0); Jev timeout 1500 ms, threshold 0.6.
+- **Settings:** `next-prompt.json` shared/user/project layers; enabled, Tab/Right, no length limit (`maxChars`, 0); Jev timeout 2500 ms, threshold 0.6.
 - **Requirements, cost & privacy:** Pi 1.0+ TUI; normal input/output tokens for suggestion instruction; the optional classifier sees suggestion/request/answer excerpts.
 - **Integrations & limits:** Optional Vim/select-nav and interactive-shell inspection. Model-only `offer_prompt`/`offer_terminal` return successful queued retention behind drafts or acknowledge actual rendered suggestions; prompt offers need no shell support, and ordinary tags retain optional classifier vetting. Missing classifier shows unvetted tags; failed/aborted runs clear still-unaccepted offers. Suggestions are not authorization.
 
