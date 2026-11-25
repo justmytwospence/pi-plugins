@@ -7,6 +7,7 @@ export const groups = [
     { name: "pi-subagents", label: "Subagents", description: "Separate Pi processes, parallel tasks and conversations you can inspect." },
     { name: "pi-herdr", label: "Herdr", description: "Pane metadata, interactive children and a shared event-bus bridge." },
     { name: "pi-issues", label: "GitHub issues", description: "Start issues in linked-branch worktrees; statuses through GitHub's own links." },
+    { name: "pi-ship", label: "Ship", description: "Watches CI after pushes and runs /ship: checks, review, publish." },
     { name: "pi-recap", label: "Recap", description: "One line on where the session stands when you come back, matching the notification." },
     { name: "pi-sidebar", label: "Sidebar", description: "A live, read-only side chat beside the main session, served from its prompt cache." },
     { name: "pi-reload-all", label: "Reload all", description: "Reload every Pi session on every Herdr machine, each when its turn ends and its editor is empty." },

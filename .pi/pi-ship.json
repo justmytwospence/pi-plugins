@@ -1,0 +1,8 @@
+{
+  "check": "npm run -s check:changed",
+  "review": {
+    "paths": ["packages/pi-tool-gate/**", "packages/*/src/system1.ts", "scripts/test-cache-prefix.mjs", "packages/pi-cache-guard/**"]
+  },
+  "humanPaths": ["scripts/release.mjs", ".pi/settings.json"],
+  "ci": { "ignore": ["Docs"] }
+}

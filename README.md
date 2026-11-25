@@ -1,6 +1,6 @@
 # Pi Plugins
 
-A modular suite of 37 extensions for [Pi](https://pi.dev): background work, subagents, planning, review, context awareness and terminal ergonomics. Every component can be enabled on its own; one Git ref versions the whole suite. It is not a fork of Pi.
+A modular suite of 38 extensions for [Pi](https://pi.dev): background work, subagents, planning, review, context awareness and terminal ergonomics. Every component can be enabled on its own; one Git ref versions the whole suite. It is not a fork of Pi.
 
 **[Documentation](https://pi-plugins.vercel.app)** · **[Keymap & focus](https://pi-plugins.vercel.app/guides/keyboard/)** · **[Requirements, cost & privacy](https://pi-plugins.vercel.app/guides/requirements/)** · **[Development & testing](https://pi-plugins.vercel.app/development/)**
 
@@ -18,6 +18,7 @@ All 35 references include activation, controls, defaults, requirements, costs an
 | [pi-subagents](https://pi-plugins.vercel.app/plugins/pi-subagents/) | Delegate bounded tasks to headless Pi workers. |
 | [pi-herdr](https://pi-plugins.vercel.app/plugins/pi-herdr/) | Coordinate interactive handoffs and Herdr pane metadata. |
 | [pi-issues](https://pi-plugins.vercel.app/plugins/pi-issues/) | Start GitHub issues in linked-branch worktrees and set issue statuses. |
+| [pi-ship](https://pi-plugins.vercel.app/plugins/pi-ship/) | Watch CI after pushes and run `/ship`: checks, review, publish. |
 | [pi-recap](https://pi-plugins.vercel.app/plugins/pi-recap/) | See where a session stands when you come back to it. |
 | [pi-sidebar](https://pi-plugins.vercel.app/plugins/pi-sidebar/) | Chat read-only beside a working session, on its prompt cache. |
 | [pi-reload-all](https://pi-plugins.vercel.app/plugins/pi-reload-all/) | Reload every Pi session, here and on Herdr's machines, once each is idle. |
