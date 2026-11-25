@@ -97,6 +97,8 @@ Settings live in `~/.pi/agent/diff-review.json` by default, or under `PI_CODING_
 
 With pi-rewind, the reviewer reuses its turn checkpoints rather than recording duplicates. This does not require using rewind's restore actions. With pi-herdr, the viewer can temporarily zoom the pane and `o` opens the selected file and line in `$EDITOR` in a split. Without that bridge, review still works and the editor action reports its missing requirement.
 
+Other extensions can add draft comments on the `pi-plugins.diff-review-comments.v1` channel (`src/diff-review-contract.ts`, copied into [pi-ship](/plugins/pi-ship/)): they emit `{ version: 1, ctx, scope, comments: [{ path, line, body }] }`; in the TUI the comments become drafts on the new side of `path`, `/diff <scope>` opens, and `result` resolves with `{ sent, opened }` when the viewer closes. Outside the TUI the request stays unanswered and the caller falls back.
+
 ## Limits and further reading
 
 Patches over 32 MB are refused rather than rendered. A historical snapshot may become unavailable after Git garbage collection; session metadata is not a permanent backup of every Git object. Large-file folding improves navigation but does not override the total patch limit.

@@ -61,3 +61,43 @@ test("index persists the displayed mark before custom UI closes; close never add
 	expect(closed).toBe(true);
 	expect(entries.filter((entry) => entry.customType === MARK_ENTRY)).toHaveLength(1);
 });
+
+test("another extension adds draft comments over the bus and the viewer opens on its scope", async () => {
+	const repo = gitRepo();
+	repo.write("file.txt", "one\ntwo\nthree\n");
+	repo.run("add", "-A");
+	repo.run("commit", "-qm", "test: initialize fixture");
+	repo.write("file.txt", "one\nTWO\nthree\n");
+	repo.run("commit", "-qam", "test: change two");
+	const entries: Entry[] = [];
+	const handlers = new Map<string, (event: unknown, ctx: ExtensionCommandContext) => unknown>();
+	const bus = new Map<string, (data: unknown) => void>();
+	const api = {
+		on: (name: string, handler: (event: unknown, ctx: ExtensionCommandContext) => unknown) => handlers.set(name, handler),
+		registerCommand: () => {},
+		getCommands: () => [{ name: "rewind-undo" }],
+		appendEntry: (customType: string, data: unknown) => entries.push({ id: String(entries.length), type: "custom", customType, data }),
+		events: { emit: (channel: string, data: unknown) => bus.get(channel)?.(data), on: (channel: string, handler: (data: unknown) => void) => { bus.set(channel, handler); return () => {}; } },
+	};
+	extension(api as unknown as ExtensionAPI);
+	const custom = vi.fn((factory: (tui: TUI, theme: Theme, keys: KeybindingsManager, done: () => void) => DiffViewer) => new Promise<void>((resolve) => {
+		const viewer = factory(fakeTui(), makeTheme("dark"), {} as KeybindingsManager, resolve);
+		viewer.handleInput("q");
+	}));
+	const ctx = { cwd: repo.root, mode: "tui", hasUI: true, sessionManager: { getBranch: () => entries }, ui: { notify: vi.fn(), custom } } as unknown as ExtensionCommandContext;
+	await handlers.get("session_start")!({}, ctx);
+	const request: { version: 1; ctx: unknown; scope: string; comments: unknown[]; result?: Promise<{ sent: number; opened: boolean }> } = {
+		version: 1, ctx, scope: "HEAD~1", comments: [{ path: "file.txt", line: 2, body: "[ship] why uppercase?" }],
+	};
+	api.events.emit("pi-plugins.diff-review-comments.v1", request);
+	expect(request.result).toBeInstanceOf(Promise);
+	expect(await request.result).toEqual({ sent: 0, opened: true });
+	expect(custom).toHaveBeenCalledTimes(1);
+	const saved = entries.filter((e) => e.customType === "diff-review-threads").at(-1)?.data as { threads: Array<Record<string, unknown>> } | undefined;
+	expect(saved?.threads).toHaveLength(1);
+	expect(saved?.threads[0]).toMatchObject({ file: "file.txt", side: "new", start: 2, end: 2, body: "[ship] why uppercase?", status: "draft", excerpt: ["+ TWO"] });
+
+	const outside: { version: 1; ctx: unknown; scope: string; comments: unknown[]; result?: unknown } = { version: 1, ctx: { ...ctx, mode: "rpc" }, scope: "HEAD~1", comments: [{ path: "file.txt", line: 2, body: "x" }] };
+	api.events.emit("pi-plugins.diff-review-comments.v1", outside);
+	expect(outside.result).toBeUndefined();
+});

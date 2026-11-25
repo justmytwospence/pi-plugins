@@ -156,6 +156,7 @@ The file is re-read at session start and each time `/diff` opens.
 
 - **pi-rewind**: when loaded, its checkpoints provide the turn boundaries and this extension stops writing its own.
 - **Herdr with pi-herdr**: while the review is open it emits `herdr:zoom` (`{ active: true }`, then `{ active: false }`) so pi-herdr zooms Pi's pane (unless `zoom` is `false`). `o` sends `herdr:split` with the editor command; pi-herdr opens it beside Pi's pane when the pane is wide enough, otherwise below, and lifts the zoom while you edit. Whether pi-herdr is present is checked with `herdr:probe`; without it the review does not zoom and `o` says what it needs.
+- **Other extensions (for example [pi-ship](https://pi-plugins.vercel.app/plugins/pi-ship/))**: on `pi-plugins.diff-review-comments.v1` (`src/diff-review-contract.ts`, copied into pi-ship) an extension emits `{ version: 1, ctx, scope, comments: [{ path, line, body }] }`. In the TUI, pi-diff-review stores the comments as drafts on the new side of `path`, opens `/diff <scope>` and sets `result` to a Promise of `{ sent, opened }` that resolves when the viewer closes (`sent`: how many of those drafts you sent to the agent). Outside the TUI the request stays unanswered, so the caller falls back.
 
 ## Limitations
 

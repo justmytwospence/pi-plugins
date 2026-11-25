@@ -8,9 +8,12 @@
  * per-comment replies show up under each comment.
  */
 
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { copyToClipboard } from "@earendil-works/pi-coding-agent";
 import { type Config, loadConfig } from "./config.ts";
+import { DIFF_REVIEW_COMMENTS_CHANNEL, type DiffReviewCommentsRequest } from "./diff-review-contract.ts";
 import { embeddedEditorFactory } from "./editor.ts";
 import { diffTrees, repoRoot, snapshot } from "./git.ts";
 import { openInSplit, withZoom } from "./herdr.ts";
@@ -34,7 +37,7 @@ import {
 	THREADS_ENTRY,
 	turnsOnBranch,
 } from "./session.ts";
-import { buildPrompt, parseReplies, type Thread } from "./threads.ts";
+import { buildPrompt, newThreadId, parseReplies, type Thread } from "./threads.ts";
 import { DiffViewer, type ReviewData } from "./viewer.ts";
 
 const SCOPE_COMPLETIONS = [
@@ -312,6 +315,37 @@ export default function (pi: ExtensionAPI) {
 			body: section(undefined, children),
 			actions: kinds.filter((k) => k !== req.kind).map((k) => ({ label: k[0]!.toUpperCase() + k.slice(1), command: `/diff ${k}` })),
 		};
+	});
+
+	// Other extensions (pi-ship) add draft comments and open the viewer on them (diff-review-contract.ts).
+	pi.events?.on?.(DIFF_REVIEW_COMMENTS_CHANNEL, (data: unknown) => {
+		const request = data as Partial<DiffReviewCommentsRequest> | undefined;
+		const ctx = request?.ctx as ExtensionCommandContext | undefined;
+		if (!request || request.version !== 1 || !ctx || ctx.mode !== "tui" || typeof request.scope !== "string") return;
+		const comments = request.comments;
+		if (!Array.isArray(comments) || !comments.length) return;
+		if (comments.some((c) => !c || typeof c.path !== "string" || !Number.isInteger(c.line) || c.line < 1 || typeof c.body !== "string")) return;
+		request.result = (async () => {
+			const r = await getRoot(ctx.cwd);
+			if (!r) return { sent: 0, opened: false };
+			const ids: string[] = [];
+			for (const c of comments) {
+				let line = "";
+				try {
+					line = readFileSync(join(r, c.path), "utf8").split("\n")[c.line - 1] ?? "";
+				} catch {
+					// Not readable (deleted or binary): an empty excerpt.
+				}
+				const id = newThreadId(threads.map((t) => t.id));
+				ids.push(id);
+				threads.push({ id, file: c.path, side: "new", start: c.line, end: c.line, excerpt: [`+ ${line}`], body: c.body, status: "draft", createdAt: Date.now() });
+			}
+			persist();
+			viewer?.refreshThreads();
+			if (viewer) return { sent: 0, opened: false };
+			await open(request.scope!, ctx);
+			return { sent: threads.filter((t) => ids.includes(t.id) && t.status !== "draft").length, opened: true };
+		})();
 	});
 
 	pi.registerCommand("diff", {
