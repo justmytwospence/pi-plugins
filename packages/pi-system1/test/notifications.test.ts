@@ -335,6 +335,45 @@ describe("notification traversal and single-sink ownership", () => {
       "warning",
     );
   });
+
+  it("does not warn people about timeouts but still tells observers", async () => {
+    select(["jev", "openai-decisions"]);
+    const fake = fakeRegistry(async () => failure("Request timed out"));
+    const ctx = context(fake.registry);
+    const sink = host();
+    await sink.emit("session_start", ctx);
+    const events: System1Event[] = [];
+    releases.push(subscribeSystem1Events((event) => events.push(event)));
+    expect(await askSystem1(fake.registry, config, {}, questions)).toMatchObject({ ok: false, code: "exhausted" });
+    expect(ctx.ui.notify).not.toHaveBeenCalled();
+    expect(ctx.stderr).not.toHaveBeenCalled();
+    const kinds = events.flatMap((e) => (e.type === "notice" ? [e.notice.kind] : []));
+    expect(kinds).toContain("provider_failed");
+    expect(kinds).toContain("exhausted");
+  });
+
+  it("still warns when a timeout is mixed with a real failure", async () => {
+    select(["jev", "openai-decisions"]);
+    const fake = fakeRegistry(async (model) =>
+      (model as { provider: string }).provider === "typesafe" ? failure("Request timed out") : failure(),
+    );
+    const ctx = context(fake.registry);
+    const sink = host();
+    await sink.emit("session_start", ctx);
+    await askSystem1(fake.registry, config, {}, questions);
+    expect(ctx.ui.notify).toHaveBeenCalledExactlyOnceWith(
+      "System 1: Jev unavailable (timed out); OpenAI Decisions unavailable (quota or credits exhausted); no configured providers remain.",
+      "warning",
+    );
+  });
+
+  it("a quiet timeout does not suppress the next real failure", () => {
+    const ctx = context({});
+    notifySystem1Notice(ctx, notice({ code: "timeout" }));
+    notifySystem1Notice(ctx, notice());
+    expect(ctx.ui.notify).toHaveBeenCalledTimes(1);
+    expect(ctx.ui.notify.mock.calls[0]![0]).toContain("quota or credits exhausted");
+  });
 });
 
 describe("deduplication and recovery", () => {

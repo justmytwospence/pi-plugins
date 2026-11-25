@@ -88,7 +88,10 @@ export async function inspectSystem1Status(registry: unknown): Promise<System1St
   const start = getSystem1SessionStart(registry);
   const status: System1Status["status"] = !eligible.length
     ? "unavailable"
-    : runtime.lastOutcome && !runtime.lastOutcome.ok && runtime.lastOutcome.code === "exhausted"
+    : runtime.lastOutcome &&
+      !runtime.lastOutcome.ok &&
+      runtime.lastOutcome.code === "exhausted" &&
+      runtime.lastOutcome.attempts.some((a) => a.code !== undefined && a.code !== "timeout")
       ? "unavailable"
       : lastUsed?.fallback
         ? "fallback"

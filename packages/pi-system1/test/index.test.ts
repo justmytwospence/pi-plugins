@@ -761,6 +761,14 @@ describe("retry, cached runtime state and notification ownership", () => {
     expect(h.notify.mock.calls.at(-1)![0]).toContain("Last main-registry route: unknown");
   });
 
+  it("does not report unavailable after a timeout-only exhaustion", async () => {
+    writeOrder(["jev", "openai-decisions"]);
+    const h = await harness(); await h.start();
+    h.registry.classify.mockResolvedValue({ stopReason: "error", model: "configured-model", answers: {}, usage: reportedUsage, errorMessage: "Request timed out" } as never);
+    await judge(h); await flush();
+    expect(querySystem1State(h.events)!.status).toBe("ready");
+  });
+
   it("observes child outcomes globally but isolates main route, state and registry observers", async () => {
     writeOrder(["jev", "openai-decisions"]);
     const h = await harness(); await h.start();

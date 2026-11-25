@@ -85,7 +85,7 @@ test("RPC notices queued during reload flush only to the adopter, bounded to the
   const now = Date.now();
   // Distinct wire-valid codes exercise the queue bound independently of user-notice
   // deduplication; varying retry timestamps must not create twelve duplicate toasts.
-  const codes = ["disabled", "cancelled", "selection_changed", "invalid_input", "refused", "missing_credentials", "invalid_credentials", "quota_exhausted", "rate_limited", "unavailable_model", "timeout", "invalid_answers"] as const;
+  const codes = ["disabled", "cancelled", "selection_changed", "invalid_input", "refused", "missing_credentials", "invalid_credentials", "quota_exhausted", "rate_limited", "unavailable_model", "provider_error", "invalid_answers"] as const;
   for (const code of codes) childNotice(s.children[0]!, { ...healthNotice(now - 100), kind: "provider_failed", backend: "jev", code });
   expect(first.ui.notes).toEqual([]);
   const second = await s.runtime();

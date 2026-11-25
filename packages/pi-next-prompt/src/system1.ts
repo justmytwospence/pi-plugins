@@ -564,6 +564,13 @@ function noticeKey(notice: System1Notice, origin?: string): string {
   }
   return JSON.stringify([origin ?? "", identity]);
 }
+/** Timeouts are the caller's deadline, not provider health: observers see them, people are not warned. */
+function quietNotice(notice: System1Notice): boolean {
+  if (notice.kind === "provider_failed") return notice.code === "timeout";
+  if (notice.kind === "exhausted")
+    return notice.failures.length > 0 && notice.failures.every((f) => f.code === "timeout");
+  return false;
+}
 function deliverNotice(
   h: Hub,
   ctx: System1NotificationContext,
@@ -571,6 +578,7 @@ function deliverNotice(
   origin?: string,
   suppressUntil = 0,
 ): void {
+  if (quietNotice(notice)) return;
   const key = noticeKey(notice, origin);
   const now = Date.now();
   if ((h.notices.get(key) ?? 0) > now) return;
