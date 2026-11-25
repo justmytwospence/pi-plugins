@@ -14,7 +14,7 @@
 import { randomUUID } from "node:crypto";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
-import { type AgentBeforeSettleEvent, type BoundaryResult, type ExtensionAPI, type ExtensionContext, getMarkdownTheme } from "@earendil-works/pi-coding-agent";
+import { type AgentBeforeSettleEvent, type BoundaryResult, type ExtensionAPI, type ExtensionContext, defineTool, getMarkdownTheme } from "@earendil-works/pi-coding-agent";
 import { type Component, Markdown, Text, truncateToWidth, visibleWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import { ACTIVITY_CHANGED, ACTIVITY_GONE, ACTIVITY_HOST, ACTIVITY_SECTION, type ActivityEntry, type ActivitySection, FLEET_HOST_PRIORITY, hostOutranks, readHost } from "./activity.ts";
@@ -41,6 +41,7 @@ import { Block, Row as RowLine, appendReport, glyph, messageView, registerReport
 import { transcriptCheckpoint } from "./transcript-contract.ts";
 import { WORKING_MESSAGE_EVENT } from "./working-message.ts";
 import { declareReadOnlyCalls } from "./read-only-call.ts";
+import { SUBAGENTS_RUN_CHANNEL, type SubagentsRunRequest } from "./subagents-run-contract.ts";
 import { onWebCommand, section, table as webTable, text as webText } from "./switchyard-web.ts";
 import { routedModel } from "./routed-model.ts";
 
@@ -1429,9 +1430,11 @@ export default function subagents(pi: ExtensionAPI) {
 
   const delegationOf = (c: SubagentsConfig): Delegation => (DELEGATIONS.includes(c.delegation) ? c.delegation : DEFAULT_CONFIG.delegation);
   let registeredDelegation: Delegation | undefined;
+  /** The `subagent` tool's execute, for requests over the event bus (SUBAGENTS_RUN_CHANNEL). */
+  let runTool: ((id: string, params: any, signal: AbortSignal | undefined, onUpdate: undefined, ctx: any) => Promise<{ content: Array<{ type: string; text?: string }>; details?: unknown; isError?: boolean }>) | undefined;
   const registerSubagentTool = (delegation: Delegation) => {
     registeredDelegation = delegation;
-    pi.registerTool({
+    const subagentTool = defineTool({
       name: "subagent",
       label: "Subagent",
       description:
@@ -1823,6 +1826,8 @@ export default function subagents(pi: ExtensionAPI) {
         return new Block(theme, () => ({ tone: runsTone(d.runs), title: "Subagent", body, expanded: true }));
       },
     });
+    runTool = subagentTool.execute;
+    pi.registerTool(subagentTool);
   };
   registerSubagentTool(delegationOf(config));
   registerReportRenderer(pi);
@@ -1834,6 +1839,27 @@ export default function subagents(pi: ExtensionAPI) {
   });
   // status and result only read run records; run, steer, stop and resume start or control agents.
   declareReadOnlyCalls(pi.events, "subagent", subagentCallReadOnly);
+  // Other extensions start foreground runs over the bus (subagents-run-contract.ts): the answer is a Promise on the request.
+  pi.events.on(SUBAGENTS_RUN_CHANNEL, (data) => {
+    const request = data as Partial<SubagentsRunRequest> | undefined;
+    const tasks = request?.tasks;
+    if (!request || request.version !== 1 || !request.ctx || !runTool) return;
+    if (!Array.isArray(tasks) || !tasks.length || tasks.length > config.maxParallel || tasks.some((t) => !t || typeof t.task !== "string" || !t.task.trim())) return;
+    const ctx = request.ctx as ExtensionContext;
+    const call = runTool;
+    request.result = (async () => {
+      try {
+        const result = await call(randomUUID(), { action: "run", tasks }, request.signal, undefined, ctx);
+        const shown = (result.details as Details | undefined)?.runs ?? [];
+        return {
+          runs: shown.map((v) => ({ label: v.label ?? v.id, status: v.status, output: findRun(v.id, ctx) ? savedOutput(findRun(v.id, ctx)!.run) : v.output ?? "", ...(v.error ? { error: v.error } : {}) })),
+          isError: Boolean(result.isError),
+        };
+      } catch (error) {
+        return { runs: [{ label: "subagents", status: "failed", output: "", error: error instanceof Error ? error.message : String(error) }], isError: true };
+      }
+    })();
+  });
 
   // Switchyard's web app shows the runs and stats as views instead of the TUI list.
   onWebCommand(pi, ["subagents"], (_n, args) => args === "" || /^stats(\s+(all|--all))?$/u.test(args), (_n, args, ctx) => {

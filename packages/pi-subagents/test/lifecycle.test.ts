@@ -1018,3 +1018,28 @@ test.each(["aborted", "timeout"])("a %s bg_wait does not consume a later result"
   expect(x.h.messages).toHaveLength(1);
   await x.shutdown();
 });
+
+test("an extension starts runs over the bus and gets their output as a Promise", async () => {
+  const x = await setup();
+  const request: any = { version: 1, ctx: x.ctx, tasks: [{ task: "look", label: "bus run", agent: "general" }] };
+  x.h.pi.events.emit("pi-plugins.subagents-run.v1", request);
+  expect(request.result).toBeInstanceOf(Promise);
+  await x.spawned.promise;
+  x.children[0]!.state.output = "full findings";
+  x.finish();
+  const result = await request.result;
+  expect(result.isError).toBe(false);
+  expect(result.runs).toHaveLength(1);
+  expect(result.runs[0]).toMatchObject({ label: "bus run", status: "done", output: "full findings" });
+  await x.shutdown();
+});
+
+test("an invalid bus request is left unanswered", async () => {
+  const x = await setup();
+  for (const bad of [{ version: 2, ctx: x.ctx, tasks: [{ task: "a" }] }, { version: 1, tasks: [{ task: "a" }] }, { version: 1, ctx: x.ctx, tasks: [] }, { version: 1, ctx: x.ctx, tasks: [{ task: " " }] }]) {
+    const request: any = { ...bad };
+    x.h.pi.events.emit("pi-plugins.subagents-run.v1", request);
+    expect(request.result).toBeUndefined();
+  }
+  await x.shutdown();
+});
