@@ -1,64 +1,36 @@
 /**
  * Switchyard adapter for @justmytwospence/pi-plan-mode. Self-contained: the host loads this file with
- * Node's native type stripping, so it imports nothing and uses erasable TypeScript only. The
- * local types are structurally compatible with Switchyard's UINode and AdapterContext.
+ * Node's native type stripping, so it uses erasable TypeScript only and imports nothing but the
+ * types of its contract copy (`contract.ts`, erased on load).
  *
  * The plan reaches the web through `exit_plan_mode`'s tool updates (`details.plan`). It is shown in
- * the approval card ("Implement this plan?"), in the finished tool card and in the `plan` panel.
+ * the approval ("Implement this plan?", a plan dialog). On contract v2 hosts the plan tools get
+ * one-line rows that open to the plan, and a Plan tracker stands for planning while it is live;
+ * older hosts get the finished tool card and the `plan` panel and pill.
  */
 
-export type UINode =
-  | { t: "text"; text: string; tone?: "default" | "muted" | "success" | "warning" | "danger" }
-  | { t: "markdown"; text: string }
-  | { t: "list"; items: UINode[]; ordered?: boolean }
-  | { t: "table"; columns: string[]; rows: string[][] }
-  | { t: "section"; title?: string; collapsible?: boolean; children: UINode[] }
-  | { t: "progress"; label: string; value?: number; status?: "running" | "ok" | "error" }
-  | { t: "actions"; actions: { id: string; label: string; tone?: "default" | "primary" | "danger" }[] };
-type Contribution = {
-  placement: "session.panel" | "composer.pill";
-  title: string;
-  node: UINode;
-  mobileFallback: string;
-  state?: unknown;
-};
-type PanelOptions = { title?: string; mobileFallback?: string | null; state?: unknown };
-export type AdapterContext = {
-  readonly state: {
-    get<T = unknown>(key: string): T | undefined;
-    set(key: string, value: unknown): void;
-    delete(key: string): void;
-    keys(): string[];
-  };
-  setPanel(slot: string, node: UINode | null, opts?: PanelOptions): void;
-  setContribution?(id: string, contribution: Contribution | null): void;
-};
-export type PiUiRequest =
-  | { id: string; method: "select"; title: string; options: string[]; timeout?: number }
-  | { id: string; method: "confirm"; title: string; message: string; timeout?: number }
-  | { id: string; method: "input"; title: string; placeholder?: string; timeout?: number }
-  | { id: string; method: "editor"; title: string; prefill?: string };
-export type PiUiResponse = { value: string } | { confirmed: boolean } | { cancelled: true };
-export type InteractionResponse =
-  | { kind: "form"; values: Record<string, unknown> }
-  | { kind: "confirm"; confirmed: boolean }
-  | { kind: "action"; actionId: string }
-  | { kind: "cancel" };
-export type Claim = {
-  title: string;
-  presentation: UINode;
-  toPiResponse(resp: InteractionResponse): PiUiResponse;
-  ownerToolCallId?: string;
-};
-export type ToolInfo = {
-  toolCallId: string;
-  name: string;
-  args: unknown;
-  result?: unknown;
-  isError?: boolean;
-  details?: unknown;
-};
-export type ToolUpdate = { toolCallId: string; name: string; args: unknown; partialResult: unknown; details?: unknown };
+import type {
+  AdapterFeature,
+  Claim as HostClaim,
+  AdapterContext as HostContext,
+  InteractionResponse,
+  PiUiRequest,
+  PiUiResponse,
+  ToolInfo,
+  ToolUpdateEvent,
+  ToolViewData,
+  UINode,
+} from "./contract.ts";
+
+/** What the adapter uses of its context; `setContribution` is missing on the oldest hosts. */
+export type AdapterContext = Pick<HostContext, "state" | "setPanel" | "features"> &
+  Partial<Pick<HostContext, "setContribution">>;
+export type Claim = Omit<HostClaim, "toPiResponse"> & { toPiResponse(resp: InteractionResponse): PiUiResponse };
+export type ToolUpdate = ToolUpdateEvent;
+
+/** Contract v2 feature guard: `ctx.features` is undefined on a host from before v2. */
+const supports = (ctx: { readonly features?: readonly string[] }, feature: AdapterFeature): boolean =>
+  ctx.features?.includes(feature) === true;
 
 export class InteractionResponseError extends Error {
   readonly code = "invalid_request";
@@ -69,11 +41,21 @@ export class InteractionResponseError extends Error {
 }
 
 export const EXIT_TOOL = "exit_plan_mode";
+export const ENTER_TOOL = "enter_plan_mode";
+/** How a finished exit_plan_mode row reads its outcome (src/inline-plan.ts ExitDetails). */
+const OUTCOME_WORDS: Record<string, string> = {
+  approved: "approved",
+  handoff: "approved",
+  fresh: "approved",
+  kept: "revising",
+  saved: "saved for later",
+};
 export const APPROVAL_QUESTION = "Implement this plan?";
 export const STATUS_KEYS = ["workflow-mode", "plan", "plan-exec"] as const;
 const PLAN_KEY = "plan:";
 
-type DisplayPlan = { plan: string; changes?: string[] };
+/** `outcome`: how its exit_plan_mode call ended (approved, kept, saved), once it has. */
+type DisplayPlan = { plan: string; changes?: string[]; outcome?: string };
 type PendingPlan = DisplayPlan & { toolCallId: string; at: number };
 
 function planNode(plan: DisplayPlan): UINode {
@@ -93,8 +75,69 @@ function planNode(plan: DisplayPlan): UINode {
     : markdown;
 }
 
+/** The plan's first heading, as a row's target. */
+export function planTitle(plan: string): string {
+  return /^\s*#{1,6}\s+(.+?)\s*$/m.exec(plan)?.[1]?.slice(0, 120) ?? "";
+}
+
+/** The plan for a row's detail or the tracker: changes in a section that starts closed. */
+function planDetail(plan: DisplayPlan): UINode {
+  const markdown: UINode = { t: "markdown", text: plan.plan };
+  if (!plan.changes?.length) return markdown;
+  return {
+    t: "section",
+    children: [
+      markdown,
+      {
+        t: "section",
+        title: "Changes since the last version",
+        collapsible: true,
+        open: false,
+        children: [{ t: "list", items: plan.changes.map((text) => ({ t: "text", text })) }],
+      },
+    ],
+  };
+}
+
+/** Plans whose call ended this way are finished business, not live planning. */
+const FINAL_OUTCOMES = new Set(["approved", "saved", "handoff", "fresh"]);
+
+/**
+ * Contract v2: one Plan tracker while planning is live (the plan workflow, a planner run, or a
+ * plan waiting for your answer), opening to the plan. The legacy panel and pill are cleared.
+ */
+function renderTracker(ctx: AdapterContext & Required<Pick<AdapterContext, "setContribution">>): void {
+  ctx.setPanel("plan", null);
+  ctx.setPanel("plan-status", null);
+  ctx.setContribution("plan", null);
+  ctx.setContribution("plan-pill", null);
+  const stored = ctx.state.get<DisplayPlan>("display-plan");
+  const plan = stored && !FINAL_OUTCOMES.has(stored.outcome ?? "") ? stored : undefined;
+  const statuses = ctx.state.get<Record<string, string>>("status") ?? {};
+  const workflow = /^workflow: (\w+)/.exec(statuses["workflow-mode"] ?? "")?.[1];
+  const run = statuses.plan?.replace(/^plan:\s*/, "").replace(/\s*\(\/planners\)$/, "");
+  const waiting = pendingPlans(ctx).length > 0;
+  if (!waiting && workflow !== "plan" && !run) {
+    ctx.setContribution("plan-tracker", null);
+    return;
+  }
+  const step = waiting ? "waiting for your answer" : run || (plan ? "drafted" : "planning");
+  ctx.setContribution("plan-tracker", {
+    placement: "composer.tracker",
+    title: "Plan",
+    node: plan ? planDetail(plan) : { t: "text", text: run ? `Planners: ${run}` : "No plan yet.", tone: "muted" },
+    mobileFallback: (plan?.plan ?? step).slice(0, 2000),
+    tracker: { status: waiting ? "attention" : "running", step: step.slice(0, 120) },
+    order: -5,
+  });
+}
+
 /** Plan text is display evidence, never evidence of approval or execution. */
 export function renderPlan(ctx: AdapterContext): void {
+  if (ctx.setContribution && supports(ctx, "adapter.trackers.v1")) {
+    renderTracker(ctx as AdapterContext & Required<Pick<AdapterContext, "setContribution">>);
+    return;
+  }
   const plan = ctx.state.get<DisplayPlan>("display-plan");
   const statuses = ctx.state.get<Record<string, string>>("status") ?? {};
   const rows = STATUS_KEYS.filter((k) => statuses[k] !== undefined).map((k) => [k, statuses[k] as string]);
@@ -174,6 +217,8 @@ export default {
     return {
       title: req.title.split("\n")[0] ?? APPROVAL_QUESTION,
       ownerToolCallId: pending.toolCallId,
+      // A plan: read first, answered in the dock; its tool row stays.
+      kind: "plan",
       presentation: {
         t: "section",
         children: [
@@ -219,14 +264,51 @@ export default {
       const changes = Array.isArray(d.changes)
         ? d.changes.filter((c): c is string => typeof c === "string")
         : pending?.changes;
-      ctx.state.set("display-plan", { plan: d.plan, ...(changes?.length ? { changes } : {}) });
+      ctx.state.set("display-plan", {
+        plan: d.plan,
+        ...(changes?.length ? { changes } : {}),
+        ...(typeof d.outcome === "string" ? { outcome: d.outcome } : {}),
+      });
     }
     ctx.state.delete(PLAN_KEY + e.toolCallId);
     renderPlan(ctx);
   },
 
+  /** Contract v2: the plan tools' rows; the plan opens from the exit_plan_mode row. */
+  toolView(tool: ToolInfo, ctx: AdapterContext): ToolViewData | undefined {
+    if (tool.name === ENTER_TOOL) {
+      return { kind: "other", verb: "Entered plan mode", activeVerb: "Entering plan mode", target: "" };
+    }
+    if (tool.name !== EXIT_TOOL) return undefined;
+    const d = detailsOf(tool.details);
+    const kept = ctx.state.get<PendingPlan>(PLAN_KEY + tool.toolCallId);
+    const text = typeof d?.plan === "string" ? d.plan : kept?.plan;
+    const changes = Array.isArray(d?.changes)
+      ? d.changes.filter((c): c is string => typeof c === "string")
+      : kept?.changes;
+    const outcome = typeof d?.outcome === "string" ? d.outcome : undefined;
+    const meta =
+      tool.result === undefined
+        ? []
+        : tool.isError
+          ? ["failed"]
+          : outcome && outcome !== "pending"
+            ? [OUTCOME_WORDS[outcome] ?? outcome]
+            : [];
+    return {
+      kind: "other",
+      verb: "Proposed plan",
+      activeVerb: "Proposing plan",
+      target: text ? planTitle(text) : "",
+      meta,
+      ...(text ? { detail: planDetail({ plan: text, ...(changes?.length ? { changes } : {}) }) } : {}),
+    };
+  },
+
   toolCard(tool: ToolInfo, ctx: AdapterContext): UINode | undefined {
     if (tool.name !== EXIT_TOOL || tool.result === undefined) return undefined;
+    // A row with a detail stands for the card where the host draws tool views.
+    if (supports(ctx, "tool.views.v1")) return undefined;
     const d = detailsOf(tool.details);
     const kept = ctx.state.get<PendingPlan>(PLAN_KEY + tool.toolCallId);
     const plan = typeof d?.plan === "string" ? d.plan : kept?.plan;

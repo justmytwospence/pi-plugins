@@ -5,11 +5,12 @@ type Ctx = Parameters<NonNullable<typeof adapter.onStatus>>[2];
 type UINode = Parameters<Ctx["setPanel"]>[1];
 type PanelOptions = Parameters<Ctx["setPanel"]>[2];
 
-function makeCtx(modern = false) {
+function makeCtx(modern = false, features?: string[]) {
   const store = new Map<string, unknown>();
   const panels: { slot: string; node: UINode | null; opts?: PanelOptions }[] = [];
   const contributions: { id: string; value: Parameters<NonNullable<Ctx["setContribution"]>>[1] }[] = [];
   const ctx: Ctx = {
+    ...(features ? { features } : {}),
     state: {
       get: <T = unknown>(key: string) => store.get(key) as T | undefined,
       set: (key: string, value: unknown) => void store.set(key, structuredClone(value)),
@@ -142,5 +143,107 @@ describe("plan-mode switchyard adapter", () => {
     await adapter.onStatus("workflow-mode", undefined, ctx);
     expect(await adapter.onStatus("unrelated", "x", ctx)).toBe(false);
     expect(panels.at(-1)).toMatchObject({ slot: "plan-status", node: { t: "table", rows: [["plan", "3 steps"]] } });
+  });
+});
+
+describe("contract v2", () => {
+  const V2 = ["tool.views.v1", "ui.nodes.v2", "adapter.trackers.v1", "interaction.kinds.v1"];
+  const update = (details: Record<string, unknown>) => ({
+    toolCallId: "t1",
+    name: "exit_plan_mode",
+    args: {},
+    partialResult: {},
+    details: { plan: "# Ship the tracker\n1. Do it", outcome: "pending", ...details },
+  });
+  const approval = { id: "r1", method: "select" as const, title: "Implement this plan?", options: ["Yes", "No"] };
+  const latest = (contributions: { id: string; value: unknown }[], id: string) =>
+    contributions.filter((c) => c.id === id).at(-1)?.value;
+
+  it("says the approval is a plan", () => {
+    const { ctx } = makeCtx(true, V2);
+    adapter.onToolUpdate(update({}), ctx);
+    expect(adapter.claimInteraction(approval, ctx)).toMatchObject({ kind: "plan", ownerToolCallId: "t1" });
+  });
+
+  it("a Plan tracker stands for live planning and clears the legacy panel and pill", () => {
+    const { ctx, contributions, panels } = makeCtx(true, V2);
+    adapter.onStatus("workflow-mode", "workflow: plan (shift+tab to cycle)", ctx);
+    expect(latest(contributions, "plan-tracker")).toMatchObject({
+      placement: "composer.tracker",
+      title: "Plan",
+      node: { t: "text", text: "No plan yet." },
+      tracker: { status: "running", step: "planning" },
+    });
+    adapter.onStatus("plan", "plan: a ready · b working (/planners)", ctx);
+    expect(latest(contributions, "plan-tracker")).toMatchObject({ tracker: { step: "a ready · b working" } });
+    adapter.onToolUpdate(update({ changes: ["Dropped step 3"] }), ctx);
+    expect(latest(contributions, "plan-tracker")).toMatchObject({
+      node: {
+        t: "section",
+        children: [
+          { t: "markdown", text: "# Ship the tracker\n1. Do it" },
+          { t: "section", title: "Changes since the last version", open: false },
+        ],
+      },
+      tracker: { status: "attention", step: "waiting for your answer" },
+    });
+    expect(contributions.some((c) => c.id === "plan" && c.value !== null)).toBe(false);
+    expect(contributions.some((c) => c.id === "plan-pill" && c.value !== null)).toBe(false);
+    expect(panels.every((p) => p.node === null)).toBe(true);
+    // Approved and back to work: nothing live, so no tracker.
+    adapter.onToolEnd(
+      {
+        toolCallId: "t1",
+        name: "exit_plan_mode",
+        args: {},
+        result: {},
+        isError: false,
+        details: { plan: "# Ship the tracker\n1. Do it", outcome: "approved" },
+      },
+      ctx,
+    );
+    adapter.onStatus("plan", undefined, ctx);
+    adapter.onStatus("workflow-mode", "workflow: work (shift+tab to cycle)", ctx);
+    expect(latest(contributions, "plan-tracker")).toBeNull();
+    // Back in plan mode, the approved plan is not shown as the current one.
+    adapter.onStatus("workflow-mode", "workflow: plan", ctx);
+    expect(latest(contributions, "plan-tracker")).toMatchObject({ node: { t: "text" }, tracker: { step: "planning" } });
+  });
+
+  it("plan tools get rows that open to the plan, and no card under them", () => {
+    const { ctx } = makeCtx(true, V2);
+    expect(adapter.toolView({ toolCallId: "e", name: "enter_plan_mode", args: {} }, ctx)).toMatchObject({
+      verb: "Entered plan mode",
+      target: "",
+    });
+    expect(adapter.toolView({ toolCallId: "t1", name: "exit_plan_mode", args: {} }, ctx)).toEqual({
+      kind: "other",
+      verb: "Proposed plan",
+      activeVerb: "Proposing plan",
+      target: "",
+      meta: [],
+    });
+    const done = {
+      toolCallId: "t1",
+      name: "exit_plan_mode",
+      args: {},
+      result: {},
+      details: { plan: "# Ship the tracker\n1. Do it", outcome: "approved" },
+    };
+    expect(adapter.toolView(done, ctx)).toEqual({
+      kind: "other",
+      verb: "Proposed plan",
+      activeVerb: "Proposing plan",
+      target: "Ship the tracker",
+      meta: ["approved"],
+      detail: { t: "markdown", text: "# Ship the tracker\n1. Do it" },
+    });
+    expect(adapter.toolView({ ...done, details: { plan: "x", outcome: "kept" } }, ctx)).toMatchObject({
+      target: "",
+      meta: ["revising"],
+    });
+    expect(adapter.toolView({ ...done, isError: true }, ctx)).toMatchObject({ meta: ["failed"] });
+    expect(adapter.toolView({ toolCallId: "x", name: "read", args: {} }, ctx)).toBeUndefined();
+    expect(adapter.toolCard(done, ctx)).toBeUndefined();
   });
 });

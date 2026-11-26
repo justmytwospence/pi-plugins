@@ -8,9 +8,9 @@ The global [System 1](/plugins/pi-system1/) configuration (`/system1`) sets an o
 
 ## Switchyard
 
-The optional package-local adapter shows the latest reviewed plan in a **Plan** session panel: a desktop panel tab and portable phone Details content. The original plan text and supplied changes-since-last-version remain visible. A noninteractive composer pill reflects Pi's published workflow status; plan text by itself never implies approval or execution.
+The optional package-local adapter marks "Implement this plan?" as a plan dialog: Switchyard shows the plan in its reader and the answers docked above the input, with the original plan text and any changes since the last version. On hosts with adapter contract v2, a **Plan** tracker above the input stands for planning while it is live (the plan workflow, a planner run, or a plan waiting for your answer) and opens to the current plan; `enter_plan_mode` and `exit_plan_mode` are one-line rows (`Proposed plan <title> · approved`) that open to the plan. Older hosts show the latest plan in a **Plan** session panel and the workflow status in a composer pill. Plan text by itself never implies approval or execution.
 
-Approval stays in the existing Pi interaction, including revision, saving for later, cancellation and acceptance. The terminal and remote dialog race uses the first answer and closes both owners on completion or failure; a failed dialog is not silently reopened. Reloading adapters restores only persisted display state, not historical approvals, notifications or tool execution. Older Switchyard hosts retain the legacy plan/status panels, without duplicate panels on newer hosts. The terminal layout and footer geometry are unchanged.
+Approval stays in the existing Pi interaction, including revision, saving for later, cancellation and acceptance. The terminal and remote dialog race uses the first answer and closes both owners on completion or failure; a failed dialog is not silently reopened. Reloading adapters restores only persisted display state, not historical approvals, notifications or tool execution. Older Switchyard hosts retain the legacy plan/status panels, without duplicate panels on newer hosts; contract v2 hosts get only the tracker. The terminal layout and footer geometry are unchanged.
 
 See the [Switchyard integration contract](/architecture/switchyard/).
 
