@@ -91,7 +91,8 @@ describe("pi-bg", () => {
     render();
     await until(() => redraws > 0, 3_000);
     await new Promise((resolve) => setTimeout(resolve, 50));
-    expect(redraws).toBe(1);
+    // The elapsed clock may cross a second boundary meanwhile, so a second redraw is legitimate; a runaway is not.
+    expect(redraws).toBeLessThanOrEqual(2);
     await x.shutdown();
   });
 
