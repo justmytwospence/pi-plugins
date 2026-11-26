@@ -288,3 +288,35 @@ describe("pill cleanup", () => {
     pill.dispose();
   });
 });
+
+describe("task entries", () => {
+  it("records start, ready and end, and progress only when it reaches another tenth", async () => {
+    const entries: { customType: string; data: any }[] = [];
+    (f.pi as any).appendEntry = (customType: string, data: unknown) => entries.push({ customType, data });
+    const s = session();
+    await event("session_start", "startup", s.ctx);
+    const t = job();
+    reg.tasks.set(t.id, t);
+    const fire = (type: TaskEvent["type"]) => {
+      for (const fn of reg.listeners) fn({ type, task: t });
+    };
+    fire("start");
+    for (const fraction of [0.31, 0.35, 0.41]) {
+      t.progress = { fraction, count: `${fraction * 100}/100`, source: "declared", at: 0, since: { fraction: 0, at: 0 } };
+      fire("change");
+    }
+    Object.assign(t, { status: "done", endedAt: t.startedAt + 5_000, exitCode: 0, delivered: true });
+    fire("end");
+    expect(entries.every((e) => e.customType === "pi-bg:task")).toBe(true);
+    expect(entries.map((e) => [e.data.status, e.data.progress?.fraction])).toEqual([
+      ["running", undefined],
+      ["running", 0.31],
+      ["running", 0.41],
+      ["done", 0.41],
+    ]);
+    expect(entries.at(-1)!.data).toMatchObject({
+      version: 1, id: "job", name: "build", kind: "job", command: "make", startedAt: t.startedAt, endedAt: t.startedAt + 5_000, exitCode: 0,
+    });
+    expect(entries.at(-1)!.data).not.toHaveProperty("sessionId");
+  });
+});

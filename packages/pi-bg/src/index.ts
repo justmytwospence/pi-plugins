@@ -82,6 +82,7 @@ import { MARIMO_READY, marimoName, marimoServer } from "./marimo.ts";
 import { type Block, blocks, blocksView } from "./result-view.ts";
 import { reportResultView, runResultView, taskState, type WakeDetails, waitResultView, wakeView } from "./rows.ts";
 import { transcriptCheckpoint } from "./transcript-contract.ts";
+import { TASK_ENTRY, progressTenth, taskRecord } from "./task-entry.ts";
 
 const STARTUP_WAIT_MS = 1_500;
 
@@ -617,8 +618,23 @@ export default function piBg(pi: ExtensionAPI) {
     emit("herdr:notify", { title: `${t.name} ${ok ? "finished" : outcome(t)}`, body: `ran ${runtime(t)}`, sound: "done", unlessFocused: true });
   };
 
+  /** The progress tenth last recorded per task (task-entry.ts). */
+  const recordedTenth = new Map<string, number | undefined>();
+  const record = (e: TaskEvent) => {
+    const t = e.task;
+    const tenth = progressTenth(t);
+    if (e.type === "change" && recordedTenth.get(t.id) === tenth) return;
+    recordedTenth.set(t.id, tenth);
+    try {
+      pi.appendEntry(TASK_ENTRY, taskRecord(t));
+    } catch {
+      // No session to record in: remote hosts just miss this change.
+    }
+  };
+
   const onTask = (e: TaskEvent) => {
     const t = e.task;
+    record(e);
     if (e.type === "ready" && t.origin === "agent" && !t.readyDelivered) {
       if (!toWaiter(t, "ready")) wake(t, "ready");
     }

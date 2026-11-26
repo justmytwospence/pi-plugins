@@ -6,9 +6,11 @@ plugin: pi-bg
 
 ## Switchyard
 
-The optional adapter publishes a **Background** session panel and a noninteractive composer pill from Pi's current background status. Desktop keeps the existing custom task-list renderer; phones use the portable text/list/progress content in Details. Fractions and percentages become progress values; unmeasured progress remains text, never an invented percentage.
+pi-bg records each task's state as a `pi-bg:task` session entry when it starts, becomes ready, ends, and when its measured progress reaches another tenth (id, name, kind, state, origin, the command clipped to 500 characters, working directory, log path, start and end times, exit code, progress). It never reads them back; they exist so remote hosts get the tasks as data.
 
-Adapter reload reconstructs only persisted status/widget display. It does not poll processes, restart jobs, infer completion when a status disappears, or manage host services. An absent status clears the pill; remaining widget lines stay visible until Pi clears them. Older hosts keep the legacy Background panel, and newer hosts remove its duplicate. Terminal activity rows and footer geometry are unchanged.
+On hosts with adapter contract v2 the optional adapter turns those entries into a **Background** tracker above the input (`Background 2 running · train 42%`) that opens to one row per task: its name, state (`42%`, `ready`, `done`, `failed (exit 2)`, `stopped`), and kind and time. Ended tasks stay listed until nothing has run for five minutes. `bg_run`, `bg_wait`, `bg_logs` and `bg_kill` are one-line rows (`Started train · job`, `Waited on train · done`). Older hosts get a **Background** session panel and a noninteractive composer pill from Pi's current background status, with the existing custom task-list renderer on desktop; there, fractions and percentages in the status become progress values and unmeasured progress remains text, never an invented percentage.
+
+Adapter reload reconstructs only persisted display. It does not poll processes, restart jobs, infer completion when a status disappears, or manage host services. Terminal activity rows and footer geometry are unchanged.
 
 See the [Switchyard integration contract](/architecture/switchyard/).
 
