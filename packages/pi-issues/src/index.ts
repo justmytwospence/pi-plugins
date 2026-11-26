@@ -11,10 +11,13 @@ import { suggestBranch } from "./branch.ts";
 import type { Exec } from "./exec.ts";
 import { fetchIssues, fetchStatuses, type IssueSummary, listOpenIssues, setStatus } from "./github.ts";
 import { startIssues, startReport } from "./start.ts";
+import { ghTitles, type TitleSource, titledMessage } from "./titles.ts";
 import { resolveWorkflow } from "./workflow.ts";
 
 const TOOL = "issue";
 const COMPLETION_TTL_MS = 60_000;
+/** Title lookups hold up the finished message, so they give up quickly. */
+const TITLE_TIMEOUT_MS = 5_000;
 
 const PARAMS = Type.Object({
   action: Type.Union([Type.Literal("start"), Type.Literal("status")], {
@@ -31,9 +34,21 @@ export function startMessage(numbers: number[], branch: string): string {
   return `Start GitHub issue${s} ${numbers.map((n) => `#${n}`).join(" ")} on branch \`${branch}\` with the issue tool (action=start), then start its worktree session as the result says.`;
 }
 
-export default function piIssues(pi: ExtensionAPI, deps: { exec?: Exec; inHerdr?: () => boolean } = {}) {
+export default function piIssues(pi: ExtensionAPI, deps: { exec?: Exec; inHerdr?: () => boolean; titles?: TitleSource } = {}) {
   const exec: Exec = deps.exec ?? ((cmd, args, cwd) => pi.exec(cmd, args, { cwd, timeout: 60_000 }));
   const inHerdr = deps.inHerdr ?? (() => process.env.HERDR_ENV === "1");
+  const titles = deps.titles ?? ghTitles(deps.exec ?? ((cmd, args, cwd) => pi.exec(cmd, args, { cwd, timeout: TITLE_TIMEOUT_MS })));
+
+  // Issue and pull request numbers in the agent's replies get their titles (titles.ts). The message
+  // is replaced before it is saved or sent, so requests stay append-only.
+  pi.on("message_end", async (event, ctx) => {
+    try {
+      const message = await titledMessage(event.message, ctx.cwd, titles);
+      return message ? { message } : undefined;
+    } catch {
+      return undefined;
+    }
+  });
 
   pi.registerTool({
     name: TOOL,

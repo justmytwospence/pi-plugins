@@ -27,6 +27,10 @@ Alternatively, `pi install git:github.com/justmytwospence/pi-plugins` loads ever
 
 The branch is the one given, else the issue's linked branch (or its open pull request's), else one the issue body's first lines name (``Branch `trip-day` ``), else a short slug of the title.
 
+### Titles
+
+Issue and pull request numbers in the agent's replies get their titles. When a reply finishes, the first mention of each reference is followed by its title: `#76` becomes `#76 (Library panel)`. It covers bare `#N` (this checkout's repository), `owner/repo#N` and bare github.com issue and pull request URLs, and skips code, `<next>` tags, mentions whose title is already nearby, and numbers GitHub does not know. Titles come from one batched GraphQL query through `gh` (5-second limit) and are cached for the session. The message is rewritten before Pi saves or sends it, so the model sees the titled text too and the prompt cache is unaffected. While a reply streams, numbers show without titles.
+
 ## Configure
 
 Each repository's workflow comes from GitHub: new work starts from the default branch, and lands with `gh pr merge` using the first allowed method of rebase, merge and squash. A checkout's optional `.pi/issues.json` overrides it:

@@ -7,6 +7,7 @@ function harness(exec = fakeExec(repo(), github([{ number: 76, title: "Library p
   const commands = new Map<string, any>();
   const sent: { text: string; opts?: unknown }[] = [];
   const pi = {
+    on: () => undefined,
     registerTool: (tool: any) => tools.push(tool),
     registerCommand: (name: string, options: any) => commands.set(name, options),
     sendUserMessage: (text: string, opts?: unknown) => sent.push({ text, ...(opts ? { opts } : {}) }),
