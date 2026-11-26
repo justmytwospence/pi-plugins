@@ -331,6 +331,18 @@ describe("the gate", () => {
     expect(await h.emit("tool_call", call("read", { path: "~/Projects/other/a.ts" }, "t2"), ctx)).toBeUndefined();
     expect(ctx.ui.selects[0]?.options).toEqual(["Allow once", "Allow folder for this session", "Allow folder in this project", "Allow folder everywhere", "Block", "Block with a message"]);
     expect(ctx.ui.selects[0]?.title).toMatch(/\nFolder: reads in ~\/Projects\/other\nProject saves:/u);
+    // The same facts as data, for Switchyard's adapter, matched by the dialog's exact title.
+    const requests = h.entries.filter((e) => e.customType === "tool-gate:approval-request");
+    expect(requests).toHaveLength(1);
+    expect(requests[0]!.data).toMatchObject({
+      version: 1,
+      title: ctx.ui.selects[0]!.title,
+      tool: "read",
+      target: "~/Projects/other/a.ts",
+      cwd: ctx.cwd,
+      offer: { kind: "dirs", items: ["reads in ~/Projects/other"], saves: expect.any(String) },
+    });
+    expect(requests[0]!.data).not.toHaveProperty("command");
     // The folder is granted for the session: no more asking, no Jev.
     expect(await h.emit("tool_call", call("bash", { command: "rg foo ~/Projects/other" }, "t3"), ctx)).toBeUndefined();
     expect(ctx.ui.selects).toHaveLength(1);

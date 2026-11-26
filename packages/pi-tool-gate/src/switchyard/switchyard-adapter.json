@@ -1,6 +1,6 @@
 {
   "id": "tool-gate",
-  "version": "0.1.1",
+  "version": "0.2.0",
   "target": {
     "entrypoints": ["src/index.ts"],
     "extension": "@justmytwospence/pi-tool-gate",
@@ -10,5 +10,5 @@
   "protocolVersion": 1,
   "server": "adapter.ts",
   "webRenderer": null,
-  "capabilities": ["interactions"]
+  "capabilities": ["interactions", "state"]
 }

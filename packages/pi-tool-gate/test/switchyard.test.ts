@@ -1,5 +1,8 @@
 import { describe, expect, it } from "vitest";
-import adapter, { type Claim, type InteractionResponse, type PiUiRequest } from "../src/switchyard/adapter.ts";
+import { approvalRequest } from "../src/approval-entry.ts";
+import { MODE_LABELS, modeStatus, workflowStatus } from "../src/modes.ts";
+import adapter, { type AdapterContext, type Claim, modesOf } from "../src/switchyard/adapter.ts";
+import type { AdapterContribution, InteractionResponse, PiUiRequest } from "../src/switchyard/contract.ts";
 
 export const gateSelect: PiUiRequest = {
   id: "tg-1",
@@ -175,3 +178,143 @@ describe("gate Switchyard contract", () => {
     expect(claim.toPiResponse({ kind: "action", actionId: "option:1" })).toEqual({ value: "Block" });
   });
 });
+
+const V2 = ["tool.views.v1", "ui.nodes.v2", "adapter.trackers.v1", "interaction.kinds.v1"];
+function makeCtx(features?: string[]) {
+  const store = new Map<string, unknown>();
+  const contributions = new Map<string, AdapterContribution>();
+  const ctx: AdapterContext = {
+    ...(features ? { features } : {}),
+    state: {
+      get: <T = unknown>(key: string) => store.get(key) as T | undefined,
+      set: (key: string, value: unknown) => void store.set(key, structuredClone(value)),
+      delete: (key: string) => void store.delete(key),
+      keys: () => [...store.keys()],
+    },
+    setContribution: (id, c) => void (c ? contributions.set(id, c) : contributions.delete(id)),
+  };
+  return { ctx, contributions };
+}
+
+describe("contract v2", () => {
+  const bashTitle = "Allow this call?\nAction: bash\nTarget: npm publish\nHeld: matches the ask rule Bash(npm publish:*)\nAgent: release it\nRule: Bash(npm publish:*)\nProject saves: ~/.pi/tool-gate (local)";
+  const bash: PiUiRequest = { id: "b1", method: "select", title: bashTitle, options: ["Allow once", "Allow rule for this session", "Block"] };
+  const entry = {
+    type: "custom",
+    customType: "tool-gate:approval-request",
+    data: approvalRequest({
+      title: bashTitle, tool: "bash", action: "bash", target: "npm publish", cwd: "/work/app",
+      command: "npm publish --access public", held: "matches the ask rule Bash(npm publish:*)", agent: "release it",
+      offer: { kind: "rules", items: ["Bash(npm publish:*)"], saves: "~/.pi/tool-gate (local)" },
+    }),
+  };
+
+  it("an approval keeps its row: kind approval on every host (a v1 host ignores it)", () => {
+    expect(adapter.claimInteraction(request)?.kind).toBe("approval");
+  });
+
+  it("shows the published request as facts plus the command, matched by the exact title", () => {
+    const { ctx } = makeCtx(V2);
+    adapter.onEntry(entry, ctx);
+    const c = adapter.claimInteraction(bash, ctx)!;
+    expect(c.title).toBe("Allow this call? bash");
+    expect(c.presentation).toEqual({
+      t: "section",
+      title: "Allow this call?",
+      children: [
+        {
+          t: "facts",
+          items: [
+            { label: "Tool", value: "bash", mono: true },
+            { label: "Action", value: "bash" },
+            { label: "Directory", value: "/work/app", mono: true },
+            { label: "Held", value: "matches the ask rule Bash(npm publish:*)" },
+            { label: "Agent", value: "release it" },
+            { label: "Rule", value: "Bash(npm publish:*)", mono: true },
+            { label: "Saves to", value: "~/.pi/tool-gate (local)" },
+          ],
+        },
+        { t: "code", text: "npm publish --access public", lang: "bash" },
+        {
+          t: "actions",
+          actions: [
+            { id: "option:0", label: "Allow once", tone: "primary" },
+            { id: "option:1", label: "Allow rule for this session", tone: "default" },
+            { id: "option:2", label: "Block", tone: "danger" },
+          ],
+        },
+      ],
+    });
+    expect(c.toPiResponse({ kind: "action", actionId: "option:2" })).toEqual({ value: "Block" });
+  });
+
+  it("falls back to the title's fields as facts without a matching entry, and ignores malformed entries", () => {
+    const { ctx } = makeCtx(V2);
+    adapter.onEntry({ ...entry, data: { ...entry.data, version: 2 } }, ctx);
+    adapter.onEntry({ ...entry, data: { ...entry.data, title: "Allow this call?\nAction: other" } }, ctx);
+    const children = (adapter.claimInteraction(bash, ctx)!.presentation as { children: { t: string; items?: unknown[] }[] }).children;
+    expect(children[0]).toMatchObject({ t: "facts", items: expect.arrayContaining([{ label: "Target", value: "npm publish" }]) });
+    expect(children.some((n) => n.t === "code")).toBe(false);
+  });
+
+  it("before v2 keeps the exact legacy table even when an entry was published", () => {
+    const { ctx } = makeCtx();
+    adapter.onEntry(entry, ctx);
+    const legacy = adapter.claimInteraction(bash)!.presentation;
+    expect(adapter.claimInteraction(bash, ctx)!.presentation).toEqual(legacy);
+    expect(JSON.stringify(legacy)).toContain('"t":"table"');
+  });
+
+  it("reads every mode the gate's own status formatters show", () => {
+    for (const mode of Object.keys(MODE_LABELS) as (keyof typeof MODE_LABELS)[]) {
+      expect(modesOf({ approvals: modeStatus(mode, "alt+a") }).approvals).toBeDefined();
+      expect(modesOf({ approvals: modeStatus(mode, undefined) }).approvals).toBeDefined();
+    }
+    for (const w of ["work", "chat", "plan"] as const) {
+      expect(modesOf({ workflow: workflowStatus(w, "shift+tab") }).workflow).toBe(w);
+    }
+    expect(modesOf({ approvals: modeStatus("bypassPermissions", undefined) }).approvals).toBe("yolo");
+    expect(modesOf({ workflow: "something else" })).toEqual({});
+  });
+
+  it("v2: the statuses become a Mode tracker and a badge away from work and auto", () => {
+    const { ctx, contributions } = makeCtx(V2);
+    expect(adapter.onStatus("workflow-mode", workflowStatus("work", "shift+tab"), ctx)).toBe(true);
+    expect(adapter.onStatus("permission-mode", modeStatus("auto", "alt+a"), ctx)).toBe(true);
+    expect(adapter.onStatus("permission-prompting", "permission prompts: on", ctx)).toBe(true);
+    expect(adapter.onStatus("tool-gate", "gate: 3 auto · 0 pushed back · 1 asked", ctx)).toBe(true);
+    expect(adapter.onStatus("other", "x", ctx)).toBe(false);
+    expect(contributions.get("mode")).toEqual({
+      placement: "composer.tracker",
+      title: "Mode",
+      node: {
+        t: "facts",
+        items: [
+          { label: "Workflow", value: "work" },
+          { label: "Approvals", value: "auto" },
+          { label: "Permission prompts", value: "on" },
+          { label: "Gate", value: "3 auto · 0 pushed back · 1 asked" },
+        ],
+      },
+      mobileFallback: "Workflow: work\nApprovals: auto\nPermission prompts: on\nGate: 3 auto · 0 pushed back · 1 asked",
+      tracker: { count: "work · auto" },
+      order: -10,
+    });
+    expect(contributions.has("mode-badge")).toBe(false);
+    adapter.onStatus("workflow-mode", workflowStatus("plan", undefined), ctx);
+    adapter.onStatus("permission-mode", modeStatus("bypassPermissions", undefined), ctx);
+    adapter.onStatus("permission-prompting", "permission prompts: off", ctx);
+    expect(contributions.get("mode")?.tracker).toEqual({ count: "plan · yolo", status: "attention", step: "prompts off" });
+    expect(contributions.get("mode-badge")).toMatchObject({ placement: "session.badge", node: { t: "badge", text: "plan · yolo", tone: "warning" } });
+    for (const key of ["workflow-mode", "permission-mode", "permission-prompting", "tool-gate"]) adapter.onStatus(key, undefined, ctx);
+    expect(contributions.size).toBe(0);
+  });
+
+  it("before v2 leaves the statuses to the generic Status panel and publishes nothing", () => {
+    const { ctx, contributions } = makeCtx();
+    expect(adapter.onStatus("workflow-mode", workflowStatus("work", undefined), ctx)).toBe(false);
+    adapter.onRestore(ctx);
+    expect(contributions.size).toBe(0);
+  });
+});
+

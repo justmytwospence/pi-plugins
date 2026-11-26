@@ -130,6 +130,7 @@ import { loadRules } from "./rules.ts";
 import { agentBeforeLatestUser, approvedPlanOf, callerText, clip, clipTail, recentRequests, recentTexts } from "./transcript.ts";
 import { offerUserWords, resultText } from "./user-words.ts";
 import { callView, describeCallPresentation } from "./view.ts";
+import { APPROVAL_REQUEST_ENTRY, approvalRequest } from "./approval-entry.ts";
 import { registerWorkflowRenderer, sendWorkflowTransition } from "./workflow-ui.ts";
 import { FOOTER_ACTIONS_CHANNEL, queryFooterActions, type FooterActionsRequest } from "./footer-actions.ts";
 import { askReadOnlyCall } from "./read-only-call.ts";
@@ -1152,21 +1153,36 @@ export default function toolGate(pi: ExtensionAPI) {
         const shownItems = offer ? items.map((item, i) => clip(offer.kind === "dirs" ? (offer.labels[i] ?? item) : item, 200)) : [];
         const noun = offer?.kind === "dirs" ? "Folder" : "Rule";
         // One flat line per rule or folder: an indented list under a header reads as a dialog Collie cannot read.
-        const grant = shownItems.length ? [...shownItems.map((s) => `${noun}: ${s}`), ...(canSave ? [`Project saves: ${shown(await destination(ctx.cwd))} (${config.persistence.project})`] : oneOff ? ["Saves: this session only (one-off command)"] : [])] : undefined;
+        const saves = canSave ? `${shown(await destination(ctx.cwd))} (${config.persistence.project})` : oneOff ? "this session only (one-off command)" : undefined;
+        const grant = shownItems.length ? [...shownItems.map((s) => `${noun}: ${s}`), ...(saves ? [canSave ? `Project saves: ${saves}` : `Saves: ${saves}`] : [])] : undefined;
+        const presented = describeCallPresentation(q.tool, q.input);
+        const agent = q.held !== undefined || q.agentCase !== undefined
+          ? (q.agentCase ? clip(q.agentCase.replace(/\s+/gu, " "), 600) : "(gave no reason)")
+          : undefined;
         const title = [
           "Allow this call?",
-          `Action: ${describeCallPresentation(q.tool, q.input).action}`,
-          `Target: ${describeCallPresentation(q.tool, q.input).target}`,
+          `Action: ${presented.action}`,
+          `Target: ${presented.target}`,
           ...(q.held !== undefined ? [`Held: ${q.held}`] : []),
-          ...(q.held !== undefined || q.agentCase !== undefined
-            ? [`Agent: ${q.agentCase ? clip(q.agentCase.replace(/\s+/gu, " "), 600) : "(gave no reason)"}`]
-            : []),
+          ...(agent !== undefined ? [`Agent: ${agent}`] : []),
           ...(q.note ? [`(${q.note})`] : []),
           ...(grant ?? []),
           ...(problem ? [problem] : []),
         ].join("\n");
         if (decisionStale(epoch)) return staleResult();
         if (denyInsteadOfPrompting()) return promptingDenied(q.tool, q.held);
+        // The same facts as data, for remote hosts that would otherwise parse the title (approval-entry.ts).
+        try {
+          pi.appendEntry(APPROVAL_REQUEST_ENTRY, approvalRequest({
+            title, tool: q.tool, action: presented.action, target: presented.target, cwd: ctx.cwd,
+            ...(SHELL_TOOLS.has(q.tool) && typeof q.input.command === "string" ? { command: q.input.command } : {}),
+            ...(q.held !== undefined ? { held: q.held } : {}),
+            ...(agent !== undefined ? { agent } : {}),
+            ...(q.note ? { note: q.note } : {}),
+            ...(offer ? { offer: { kind: offer.kind, items: shownItems, ...(saves ? { saves } : {}) } } : {}),
+            ...(problem ? { problem } : {}),
+          }));
+        } catch { /* No session: the dialog still opens. */ }
         const answer = await whileBlocked(pi.events, label, () =>
           askApproval(
             ctx,

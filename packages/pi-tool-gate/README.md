@@ -298,7 +298,7 @@ This is a heuristic over arguments. Paths a program builds at runtime are not se
 - `/gate on`, `/gate off`: auto mode, or yolo mode.
 - `/gate prompts [on|off|default]`: report or override permission prompting for this branch. Off denies calls needing approval; default restores inherited/config policy, not necessarily on.
 
-Separate `workflow-mode` and `permission-mode` statuses show the axes and their keys; `permission-prompting` publishes `permission prompts: on` or `permission prompts: off`. Under auto approvals the gate also reports `gate: N auto · P pushed back · M asked`. Every call the classifier judges is recorded in the session as a `tool-gate:decision` custom entry (tool, clipped arguments, scores, failures, action, latency, input tokens), for tuning thresholds. The classifier's token usage is added to the gated tool's result.
+Separate `workflow-mode` and `permission-mode` statuses show the axes and their keys; `permission-prompting` publishes `permission prompts: on` or `permission prompts: off`. Under auto approvals the gate also reports `gate: N auto · P pushed back · M asked`. Every call the classifier judges is recorded in the session as a `tool-gate:decision` custom entry (tool, clipped arguments, scores, failures, action, latency, input tokens), for tuning thresholds. The classifier's token usage is added to the gated tool's result. Just before an approval dialog opens, a `tool-gate:approval-request` entry records what it asks about (its exact title, tool, action, target, working directory, a shell command clipped to 4,000 characters, the hold, the agent's case, the rules or folders an allow would save and where): remote hosts such as Switchyard show those facts without parsing the title. The gate never reads it back.
 
 ## Project rules
 
@@ -380,7 +380,7 @@ The `agents` locations are shared with the opencode and Claude Code ports of thi
 
 - The classifier runs through Pi's classifier models (`ctx.modelRegistry.classify`), which needs Pi 0.99 or newer, and Pi's credentials for the provider (`TYPESAFE_API_KEY` for the default `typesafe` provider). Without them calls requiring classification are blocked.
 - Each gray-zone call makes one classifier request; each held call makes one more for the workaround (also for always-held calls). These requests can be billed by the provider.
-- It runs `git branch --show-current`, `git status --porcelain`, `git check-ignore` and `git rev-parse --show-toplevel --git-common-dir` in the working directory, reads the target file of an edit or write to show a diff, and reads a local script a judged shell call runs (up to 64 KB) to send its content to the classifier. It also writes `tool-gate:decision` entries in the Pi session and saves rules or folder grants when selected.
+- It runs `git branch --show-current`, `git status --porcelain`, `git check-ignore` and `git rev-parse --show-toplevel --git-common-dir` in the working directory, reads the target file of an edit or write to show a diff, and reads a local script a judged shell call runs (up to 64 KB) to send its content to the classifier. It also writes `tool-gate:decision` and `tool-gate:approval-request` entries in the Pi session and saves rules or folder grants when selected.
 
 ## Optional integrations
 

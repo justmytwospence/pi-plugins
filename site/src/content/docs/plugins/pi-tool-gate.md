@@ -4,6 +4,12 @@ description: Choose a work, chat or plan workflow and tool approvals separately,
 plugin: pi-tool-gate
 ---
 
+## Switchyard
+
+The optional adapter shows an approval docked above Switchyard's input, with one action per option (Allow once first, Block in red). On hosts with adapter contract v2 it is marked as an approval, so the tool row it holds stays in the transcript and no number key answers it; the dialog shows the facts the gate records in its `tool-gate:approval-request` entry (tool, action, directory, hold, the agent's case, the rules or folders an allow would save) with a shell command in full below them. The gate's statuses become one **Mode** tracker above the input (`work · auto`, opening to workflow, approvals, permission prompts and the gate's counts), and a session badge such as `plan` or `yolo` when either axis is away from the default. Older hosts keep the field table and the generic Status panel. Approval decisions and policy stay in the gate.
+
+See the [Switchyard integration contract](/architecture/switchyard/).
+
 ## Quick reference
 
 - **Use it for:** Choose an approval policy for tool calls, escalating risky operations without treating the gate as a sandbox.
@@ -176,7 +182,7 @@ Project rules apply to classifier-judged calls, not to every bypassed read-only 
 
 ## Privacy, classifier failures and optional integrations
 
-The selected classifier receives clipped recent user messages, the assistant message preceding the latest request, recent assistant intent, working directory, Git branch/dirty state, tool name and arguments, the content of a local script a shell call runs (up to 6,000 characters), and applicable rules. Arguments and scripts can include source code or private text. A hold's reasons accompany the workaround request. Local `tool-gate:decision` session entries include abbreviated arguments and scores but do not enter model context.
+The selected classifier receives clipped recent user messages, the assistant message preceding the latest request, recent assistant intent, working directory, Git branch/dirty state, tool name and arguments, the content of a local script a shell call runs (up to 6,000 characters), and applicable rules. Arguments and scripts can include source code or private text. A hold's reasons accompany the workaround request. Local `tool-gate:decision` session entries include abbreviated arguments and scores, and `tool-gate:approval-request` entries the facts of each approval dialog; neither enters model context.
 
 When the selected classifier is unavailable or returns an incomplete or invalid verdict, calls routed to classification are blocked and do not run. An identical retry may offer Allow once in the UI, without suggesting a persistent rule solely for the failure; headless retries remain blocked. Read-only and explicitly allowed calls remain subject to their ordinary checks and can run without classification. The gate is not an OS sandbox or a fail-closed security boundary.
 
