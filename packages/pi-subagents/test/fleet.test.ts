@@ -552,6 +552,41 @@ test("a success leaves at once with a note for 30 s; a failure stays until x; di
   fleet.dispose();
 });
 
+test("a tick redraws the list only when what it shows changed", () => {
+  vi.useFakeTimers({ now: 1_000 });
+  const ui = fakeUI();
+  let label = "2 tasks";
+  const tasks = { id: "bg", title: "tasks", entries: () => [], open: async () => undefined, pill: () => ({ label }), openDialog: async () => undefined };
+  const fleet = new FleetView({ runs: () => [], enabled: () => true, actions: () => ({}), sections: () => [tasks] });
+  fleet.setUI(ui);
+  fleet.update();
+  ui.render("subagents-fleet");
+  const before = ui.tui.renders;
+  vi.advanceTimersByTime(2_000);
+  expect(ui.tui.renders).toBe(before);
+  label = "3 tasks";
+  vi.advanceTimersByTime(250);
+  expect(ui.tui.renders).toBe(before + 1);
+  ui.render("subagents-fleet");
+  vi.advanceTimersByTime(1_000);
+  expect(ui.tui.renders).toBe(before + 1);
+  fleet.dispose();
+});
+
+test("a running run's clock keeps redrawing the list", () => {
+  vi.useFakeTimers({ now: 1_000 });
+  const ui = fakeUI();
+  const runs = [fakeRun({ agent: "scout", child: {} as never, state: { startedAt: 1_000 } })];
+  const fleet = new FleetView({ runs: () => runs, enabled: () => true, actions: () => ({}) });
+  fleet.setUI(ui);
+  fleet.update();
+  ui.render("subagents-fleet");
+  const before = ui.tui.renders;
+  vi.advanceTimersByTime(1_000);
+  expect(ui.tui.renders).toBeGreaterThan(before);
+  fleet.dispose();
+});
+
 test("a pill: ↓ selects it when there are no runs; Enter opens its dialog, which owns the keys", async () => {
   const ui = fakeUI();
   let opened = 0;

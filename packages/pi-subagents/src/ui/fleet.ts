@@ -27,6 +27,8 @@ const TICK_MS = 250;
 /** How long the hint after a subagent succeeds stays, as in Claude Code. */
 export const SUCCESS_HINT_MS = 30_000;
 
+const sameLines = (a: readonly string[], b: readonly string[]) => a.length === b.length && a.every((line, i) => line === b[i]);
+
 export type FleetEntry =
   | { kind: "main" }
   | { kind: "run"; run: Run }
@@ -242,6 +244,8 @@ export class FleetView {
   private unsubscribeInput: (() => void) | undefined;
   private registered = false;
   private timer: ReturnType<typeof setInterval> | undefined;
+  /** The panel as Pi last painted it, so a tick can tell whether anything changed. */
+  private painted: { width: number; theme: FleetFrame["theme"]; lines: string[] } | undefined;
   private active = false;
   private selectedMode: string | undefined;
   private selected = 0;
@@ -266,6 +270,7 @@ export class FleetView {
     this.active = false;
     this.ui = ui;
     this.registered = false;
+    this.painted = undefined;
     this.tui = undefined;
     this.mainEditor = undefined;
     // Capture the actual main editor at binding, never a later focused dialog.
@@ -286,6 +291,16 @@ export class FleetView {
       this.scheduleAvailability();
       return this.handleKey(data);
     });
+  }
+
+  private panel(roster: readonly FleetEntry[], width: number, theme: FleetFrame["theme"]) {
+    const entry = roster[this.selected];
+    const canBackground = entry?.kind === "run" && Boolean(this.source.actions(entry.run).canBackground?.());
+    const now = Date.now();
+    const stopArmed = this.stopArmed && (entry?.kind === "run" || entry?.kind === "row") && entryKey(entry) === this.armedKey && targetOf(entry) === this.armedTarget;
+    // Below the main prompt, main is the session shown.
+    const current = roster[0]?.kind === "main" ? 0 : undefined;
+    return renderFleetRows({ roster, selected: this.selected, current, active: this.active, stopArmed, canBackground, normalKeys: readEditorMode(this.focused())?.state === "normal", note: this.source.note?.(now), now, width, theme });
   }
 
   private roster() {
@@ -338,7 +353,7 @@ export class FleetView {
     });
   }
 
-  update(): void {
+  update(tick = false): void {
     if (!this.ui) return;
     this.prompts.reconcile();
     const roster = this.roster();
@@ -347,6 +362,7 @@ export class FleetView {
     if (!this.source.enabled() || this.prompts.blocked || (!roster.length && !note)) {
       if (this.registered) this.ui.setWidget(FLEET_KEY, undefined);
       this.registered = false;
+      this.painted = undefined;
       if (this.timer) clearInterval(this.timer);
       this.timer = undefined;
       this.active = false;
@@ -357,12 +373,15 @@ export class FleetView {
     if (!roster.length) this.active = false;
     if (!this.timer) {
       this.timer = setInterval(() => {
-        this.update();
+        this.update(true);
         this.source.onAvailability?.();
       }, TICK_MS);
       this.timer.unref?.();
     }
     if (this.registered) {
+      // A tick redraws only what changed: an unchanged list must not re-render the whole transcript.
+      const painted = this.painted;
+      if (tick && painted && sameLines(this.panel(roster, painted.width, painted.theme).lines, painted.lines)) return;
       this.tui?.requestRender();
       return;
     }
@@ -377,13 +396,9 @@ export class FleetView {
           render: (width: number) => {
             const roster = this.roster();
             this.reselect(roster);
-            const entry = roster[this.selected];
-            const canBackground = entry?.kind === "run" && Boolean(this.source.actions(entry.run).canBackground?.());
-            const now = Date.now();
-            const stopArmed = this.stopArmed && (entry?.kind === "run" || entry?.kind === "row") && entryKey(entry) === this.armedKey && targetOf(entry) === this.armedTarget;
-            // Below the main prompt, main is the session shown.
-            const current = roster[0]?.kind === "main" ? 0 : undefined;
-            const panel = renderFleetRows({ roster, selected: this.selected, current, active: this.active, stopArmed, canBackground, normalKeys: readEditorMode(this.focused())?.state === "normal", note: this.source.note?.(now), now, width, theme: ui.theme ?? factoryTheme });
+            const theme = ui.theme ?? factoryTheme;
+            const panel = this.panel(roster, width, theme);
+            this.painted = { width, theme, lines: panel.lines };
             targets = panel.targets.map((i) => (i === undefined || !roster[i] ? undefined : entryKey(roster[i] as FleetEntry)));
             return panel.lines;
           },
@@ -711,6 +726,7 @@ export class FleetView {
       if (this.registered) this.ui?.setWidget(FLEET_KEY, undefined);
     } finally {
       this.registered = false;
+      this.painted = undefined;
       this.tui = undefined;
       this.mainEditor = undefined;
       this.active = false;
