@@ -4,6 +4,12 @@ description: Ask structured multiple-choice questions with optional previews, fr
 plugin: pi-ask-user-question
 ---
 
+## Switchyard
+
+The optional adapter shows every question of a call in one form, docked above Switchyard's input, with step chips and number keys for the options. On hosts with adapter contract v2 the dialog is marked as a question, so the `ask_user_question` row stays out of the transcript while the dock owns it; once answered, the transcript keeps one outcome line, and where no dialog stands for the call (answered in the terminal) the row reads `Asked <headers>` with the answers, opening to each question and its answer. Older hosts show the same form without the row changes. Answers are mapped back onto Pi's own dialog sequence; nothing is answered automatically.
+
+See the [Switchyard integration contract](/architecture/switchyard/).
+
 ## Quick reference
 
 - **Use it for:** Ask about a preference or trade-off that cannot be established from project files.

@@ -1,12 +1,6 @@
 import { describe, expect, it } from "vitest";
-import adapter, {
-  type AdapterContext,
-  type Claim,
-  type InteractionResponse,
-  type PiUiRequest,
-  type PiUiResponse,
-  type QueuedStep,
-} from "../src/switchyard/adapter.ts";
+import adapter, { type AdapterContext, type Claim, type QueuedStep } from "../src/switchyard/adapter.ts";
+import type { InteractionResponse, PiUiRequest, PiUiResponse, ToolInfo } from "../src/switchyard/contract.ts";
 
 /**
  * Request payloads in the shape pi-ask-user-question and pi-tool-gate send over RPC
@@ -419,5 +413,67 @@ describe("question Switchyard contract", () => {
     expect(first.response(request)).toEqual({ value: "1. TS" });
     adapter.onToolUpdate({ toolCallId: "planner", name: "ask_planner" }, ctx);
     expect(ctx.state.keys()).toEqual([]);
+  });
+});
+
+describe("contract v2", () => {
+  const v2 = () => {
+    const { ctx } = makeCtx();
+    return { ...ctx, features: ["tool.views.v1", "ui.nodes.v2", "adapter.trackers.v1", "interaction.kinds.v1"] };
+  };
+  const done = (details: unknown, extra: Partial<ToolInfo> = {}): ToolInfo => ({
+    toolCallId: "t1", name: "ask_user_question", args, result: { content: [] }, details, ...extra,
+  });
+  const answered = {
+    questions: args.questions,
+    cancelled: false,
+    note: "Keep it small",
+    answers: [
+      { index: 0, header: "Language", question: "Which language?", kind: "option", answer: "TS" },
+      { index: 1, header: "Checks", question: "Which checks?", kind: "multi", answer: "Unit, Types", selected: ["Unit", "Types"] },
+    ],
+  };
+
+  it("says the dialog is a question owned by its tool call", () => {
+    const { ctx } = makeCtx();
+    adapter.onToolStart({ toolCallId: "t1", name: "ask_user_question", args }, ctx);
+    expect(adapter.claimInteraction(request, ctx)).toMatchObject({ kind: "question", ownerToolCallId: "t1" });
+  });
+
+  it("hides the running row while the dock owns the questions, unless the arguments are unknown", () => {
+    expect(adapter.toolView({ toolCallId: "t1", name: "ask_user_question", args }, v2())).toEqual({ hide: true });
+    expect(adapter.toolView({ toolCallId: "t1", name: "ask_user_question", args: {} }, v2())).toBeUndefined();
+    expect(adapter.toolView({ toolCallId: "t1", name: "read", args: {} }, v2())).toBeUndefined();
+  });
+
+  it("leaves a compact outcome once answered: headers, answers and a facts detail", () => {
+    expect(adapter.toolView(done(answered), v2())).toEqual({
+      kind: "other",
+      verb: "Asked",
+      activeVerb: "Asking",
+      target: "Language · Checks",
+      meta: ["TS", "Unit, Types"],
+      detail: {
+        t: "facts",
+        items: [
+          { label: "Which language?", value: "TS" },
+          { label: "Which checks?", value: "Unit, Types" },
+          { label: "Note", value: "Keep it small" },
+        ],
+      },
+    });
+  });
+
+  it("says declined or failed, skips unmet follow-ups, and draws a table without v2 nodes", () => {
+    expect(adapter.toolView(done({ ...answered, cancelled: true, answers: [] }), v2())).toMatchObject({
+      target: "Language · Checks", meta: ["declined"],
+    });
+    expect(adapter.toolView(done({ answers: [] }, { isError: true }), v2())).toMatchObject({ meta: ["failed"] });
+    const skipped = { ...answered, note: undefined, answers: [answered.answers[0], { ...answered.answers[1], kind: "skipped", answer: null }] };
+    expect(adapter.toolView(done(skipped), makeCtx().ctx)).toMatchObject({
+      target: "Language",
+      meta: ["TS"],
+      detail: { t: "table", columns: ["Question", "Answer"], rows: [["Which language?", "TS"]] },
+    });
   });
 });

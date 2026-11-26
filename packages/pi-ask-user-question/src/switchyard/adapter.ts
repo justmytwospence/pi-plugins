@@ -2,72 +2,39 @@
  * Switchyard adapter for @justmytwospence/pi-ask-user-question.
  *
  * Self-contained on purpose: the Switchyard host loads this file directly with Node's native
- * type stripping, so it imports nothing and uses erasable TypeScript only. The local types below
- * are structurally compatible with Switchyard's UINode/Field/Claim/AdapterContext.
+ * type stripping, so it uses erasable TypeScript only and imports nothing but the types of its
+ * contract copy (`contract.ts`, erased on load).
  */
 
-type ShowIf = { field: string; values: string[] };
-type FieldOption = { value: string; label: string; description?: string; preview?: string };
-export type Field =
-  | {
-      kind: "select";
-      name: string;
-      label: string;
-      options: FieldOption[];
-      allowOther?: { label: string; placeholder?: string };
-      showIf?: ShowIf;
-    }
-  | {
-      kind: "multiselect";
-      name: string;
-      label: string;
-      options: FieldOption[];
-      allowOther?: { label: string; placeholder?: string };
-      min?: number;
-      max?: number;
-      showIf?: ShowIf;
-    };
-export type FormValue = string | string[] | { other: string };
-export type UINode = {
-  t: "form";
-  formId: string;
-  fields: Field[];
-  submitLabel: string;
-  cancelLabel?: string;
-};
+import type {
+  AdapterContext as HostContext,
+  AdapterFeature,
+  Claim as HostClaim,
+  Field,
+  FormValue,
+  InteractionResponse,
+  PiUiRequest,
+  PiUiResponse,
+  ToolInfo,
+  ToolViewData,
+  UINode,
+} from "./contract.ts";
 
-export type PiUiRequest =
-  | { id: string; method: "select"; title: string; options: string[]; timeout?: number }
-  | { id: string; method: "confirm"; title: string; message: string; timeout?: number }
-  | { id: string; method: "input"; title: string; placeholder?: string; timeout?: number }
-  | { id: string; method: "editor"; title: string; prefill?: string };
-export type PiUiResponse = { value: string } | { confirmed: boolean } | { cancelled: true };
+/** What the adapter uses of its context; a host from before contract v2 has no `features`. */
+export type AdapterContext = Pick<HostContext, "state" | "log" | "features">;
+/** The queued steps this adapter builds: always a predicate and a response. */
 export type QueuedStep = {
   match: (req: PiUiRequest) => boolean;
   response: PiUiResponse | ((req: PiUiRequest) => PiUiResponse | undefined);
 };
-export type InteractionResponse =
-  | { kind: "form"; values: Record<string, FormValue> }
-  | { kind: "confirm"; confirmed: boolean }
-  | { kind: "action"; actionId: string }
-  | { kind: "cancel" };
-export type Claim = {
-  title: string;
-  presentation: UINode;
-  toPiResponse(
-    resp: InteractionResponse,
-  ): PiUiResponse | { sequence: (PiUiResponse | QueuedStep)[] };
-  ownerToolCallId?: string;
+export type Claim = Omit<HostClaim, "toPiResponse" | "presentation"> & {
+  presentation: Extract<UINode, { t: "form" }>;
+  toPiResponse(resp: InteractionResponse): PiUiResponse | { sequence: (PiUiResponse | QueuedStep)[] };
 };
-export type AdapterContext = {
-  readonly state: {
-    get<T = unknown>(key: string): T | undefined;
-    set(key: string, value: unknown): void;
-    delete(key: string): void;
-    keys(): string[];
-  };
-  log(level: "debug" | "info" | "warning" | "error", message: string): void;
-};
+
+/** Contract v2 feature guard: `ctx.features` is undefined on a host from before v2. */
+const supports = (ctx: { readonly features?: readonly string[] }, feature: AdapterFeature): boolean =>
+  ctx.features?.includes(feature) === true;
 
 /** Client sent an answer the claim cannot map; the host keeps the interaction open. */
 export class InteractionResponseError extends Error {
@@ -299,6 +266,8 @@ export function buildClaim(pending: Pending): Claim {
     title:
       n === 1 ? first.question : `${first.header} and ${n - 1} more question${n > 2 ? "s" : ""}`,
     ownerToolCallId: toolCallId,
+    // A question: the dock shows it with number keys and step chips, and its tool row is hidden.
+    kind: "question",
     presentation: {
       t: "form",
       formId: `ask-user-question:${toolCallId}`,
@@ -316,7 +285,82 @@ export function buildClaim(pending: Pending): Claim {
   };
 }
 
+/** The answered questionnaire as the plugin's result `details` carry it (src/result.ts). */
+interface ResultAnswer {
+  header: string;
+  question: string;
+  kind: string;
+  answer: string | null;
+  notes?: string;
+}
+interface ResultDetails {
+  answers: ResultAnswer[];
+  cancelled?: boolean;
+  error?: string;
+  note?: string;
+}
+
+function resultDetails(tool: ToolInfo): ResultDetails | undefined {
+  const d = (tool.details ?? (tool.result as { details?: unknown } | null | undefined)?.details) as
+    | Partial<ResultDetails>
+    | null
+    | undefined;
+  if (!d || typeof d !== "object" || !Array.isArray(d.answers)) return undefined;
+  const answers = d.answers.filter(
+    (a): a is ResultAnswer =>
+      !!a && typeof a === "object" && isStr(a.header) && isStr(a.question) && isStr(a.kind),
+  );
+  return {
+    answers,
+    ...(d.cancelled === true ? { cancelled: true } : {}),
+    ...(isStr(d.error) ? { error: d.error } : {}),
+    ...(isStr(d.note) ? { note: d.note } : {}),
+  };
+}
+
+const clip = (s: string, n: number) => (s.length > n ? `${s.slice(0, n - 1)}…` : s);
+const answerOf = (a: ResultAnswer) => (a.kind === "unanswered" ? "Unanswered" : (a.answer ?? ""));
+
+/**
+ * The tool's one-line row (contract v2; only a host with `tool.views.v1` calls it). While the
+ * questions are open the dock owns them, so the row is hidden; Switchyard also hides it while the
+ * question's interaction stands for the call. Once answered the row is the compact outcome
+ * (headers, then the answers), shown where no interaction stands for the call, such as a session
+ * whose dialogs were answered in the terminal.
+ */
+export function questionView(tool: ToolInfo, ctx: AdapterContext): ToolViewData | undefined {
+  if (tool.name !== TOOL_NAME) return undefined;
+  const args = parseAskArgs(tool.args);
+  if (tool.result === undefined) return args ? { hide: true } : undefined;
+  const details = resultDetails(tool);
+  const shown = details?.answers.filter((a) => a.kind !== "skipped") ?? [];
+  const headers = (shown.length ? shown.map((a) => a.header) : (args?.questions.map((q) => q.header) ?? []))
+    .join(" · ");
+  const meta = tool.isError || details?.error
+    ? ["failed"]
+    : details?.cancelled
+      ? ["declined"]
+      : shown.slice(0, 6).map((a) => clip(answerOf(a), 80));
+  const rows = shown.map((a) => ({ label: a.question, value: answerOf(a) }));
+  if (details?.note) rows.push({ label: "Note", value: details.note });
+  const detail: UINode | undefined = !rows.length
+    ? undefined
+    : supports(ctx, "ui.nodes.v2")
+      ? { t: "facts", items: rows }
+      : { t: "table", columns: ["Question", "Answer"], rows: rows.map((r) => [r.label, r.value]) };
+  return {
+    kind: "other",
+    verb: "Asked",
+    activeVerb: "Asking",
+    target: clip(headers, 500),
+    meta,
+    ...(detail ? { detail } : {}),
+  };
+}
+
 export default {
+  toolView: questionView,
+
   onToolStart(e: { toolCallId: string; name: string; args: unknown }, ctx: AdapterContext): void {
     if (e.name !== TOOL_NAME) return;
     const args = parseAskArgs(e.args);
