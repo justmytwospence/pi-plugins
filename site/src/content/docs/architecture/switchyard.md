@@ -10,3 +10,10 @@ For example, Pi planning and todo items remain plugin workflows, distinct from S
 When changing an integration, identify the authoritative state and behavior without the plugin or adapter, preserve a portable fallback, and test relevant compatibility across both repositories. Generalize a primitive only when two independent integrations need it, not a whole workflow.
 
 Switchyard's structured adapter and remote-UI contract is separate from the terminal screen-reading contract used by Ovis and Collie. Passing one does not verify the other. Custom terminal UI is not universally converted. Adapter inspection, safe reload and portable preview depend on the Switchyard version: use its adapter-development capability and documented authoring tools when available, and keep legacy portable panels working when they are not.
+
+## Adapter contract v2
+
+Switchyard's adapter contract is one dependency-free type file, `packages/adapter-sdk/src/contract.ts` in Switchyard. Every adapter directory here keeps an identical copy as `src/switchyard/contract.ts`, with the Switchyard commit it came from in its header, and imports it with `import type` only; `scripts/test-contracts.mjs` checks the copies match and that nothing else is imported. Refresh all copies together from a Switchyard release.
+
+Contract v2 adds tool views (one transcript line per tool call, with a verb, target, short facts and a detail node), dialog kinds (question, approval, plan), composer trackers, session badges and the `checklist`, `facts`, `rows` and `badge` nodes. A host from before v2 rejects those nodes and placements and disables the adapter, so every adapter guards them with the same `supports(ctx, feature)` check on `ctx.features` (undefined before v2) and keeps its v1 panels and pills as the fallback. A v1 host never calls `toolView` and ignores `Claim.kind`, so those need no guard. Adapters still read only what their plugin publishes (tool arguments and results, `details`, session entries, statuses); a plugin publishes a structured session entry when an adapter would otherwise have to parse display text.
+

@@ -113,6 +113,10 @@ for (const name of components) {
   }
 }
 // Adapters ship with the independently selectable component, not a runtime sibling or host SDK.
+// Each keeps an identical copy of Switchyard's contract type file and the same feature guard.
+const SUPPORTS = `const supports = (ctx: { readonly features?: readonly string[] }, feature: AdapterFeature): boolean =>
+  ctx.features?.includes(feature) === true;`;
+const contracts = [];
 for (const entry of manifest.switchyard.adapter) {
   const dir = resolve(root,entry);
   const componentName = relative(resolve(root,'packages'),dir).split(sep)[0];
@@ -133,12 +137,19 @@ for (const entry of manifest.switchyard.adapter) {
     `adapter has a package-owned test: ${entry}`);
   const server = resolve(dir,adapter.server);
   assert(!relative(dir,server).startsWith('..'),`adapter entry stays inside its directory: ${entry}`);
-  const code = readFileSync(server,'utf8');
+  // The only import an adapter may have is the type-only one of its own contract copy: Node erases
+  // it, so the host still imports exactly one self-contained module.
+  const code = readFileSync(server,'utf8').replace(/^import type \{[^}]*\} from "\.\/contract\.ts";$/gm,'');
   assert(!/^\s*(?:import\b|export\s+(?:type\s+)?(?:\*|\{))|\bimport\s*\(/m.test(code),`adapter is self-contained: ${entry}`);
+  if (/\bfeatures\b/.test(code)) assert(code.includes(SUPPORTS),`adapter guards contract v2 features with the shared supports(): ${entry}`);
+  contracts.push(relative(root,resolve(dir,'contract.ts')));
   const loaded = spawnSync(process.execPath,['--experimental-strip-types','--input-type=module','-e',
     `const m = await import(${JSON.stringify(pathToFileURL(server).href)}); if (!m.default) process.exit(1);`],
     { cwd: component, encoding: 'utf8', timeout: 10000 });
   assert.equal(loaded.status,0,`adapter independently loads: ${entry}\n${loaded.stderr}`);
+}
+for (const file of contracts.slice(1)) {
+  assert.equal(readFileSync(resolve(root,file),'utf8'),readFileSync(resolve(root,contracts[0]),'utf8'),`Switchyard contract copy drift: ${file}`);
 }
 const { plugins } = await import('../site/src/data/plugins.mjs');
 const names = plugins.map(p => p.id ?? p.name ?? p.slug);

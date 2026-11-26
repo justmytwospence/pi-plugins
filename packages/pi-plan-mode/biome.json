@@ -6,7 +6,7 @@
     "useIgnoreFile": true
   },
   "files": {
-    "includes": ["**", "!package-lock.json"]
+    "includes": ["**", "!package-lock.json", "!src/switchyard/contract.ts"]
   },
   "formatter": {
     "indentStyle": "space",
