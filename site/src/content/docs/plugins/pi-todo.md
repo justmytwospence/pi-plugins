@@ -6,7 +6,7 @@ plugin: pi-todo
 
 ## Switchyard
 
-The optional adapter presents tool-provided, non-deleted items in a **Todo** session panel (desktop tab or portable phone Details) and a noninteractive **Todo: N of M complete** composer pill. Empty lists clear both. Adapter reload restores the saved normalized display without running the todo tool again.
+The optional adapter presents tool-provided, non-deleted items. On hosts with adapter contract v2 they are a **Todo** tracker above the input (`Todo 2/5 · writing tests`: done of total, then the item in progress by its `activeForm`), opening to a checklist, plus a `Todo 2/5` badge on the session while items are open; each `todo` call is one transcript row (`Completed todo Write the tests · 3/5`) that opens to the list after the call. Older hosts get a **Todo** session panel (desktop tab or portable phone Details) and a noninteractive **Todo: N of M complete** composer pill. Empty lists clear them. Adapter reload restores the saved normalized display without running the todo tool again.
 
 This is read-only presentation, not a second task reducer: it does not edit Pi todos, infer dependencies from text or create Switchyard board tasks. Pi owns all mutations. Older hosts use the legacy Todo panel; newer hosts remove that duplicate when publishing the portable slots. Terminal widget and footer geometry are unchanged.
 

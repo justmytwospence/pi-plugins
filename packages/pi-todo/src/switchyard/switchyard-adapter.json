@@ -1,6 +1,6 @@
 {
   "id": "todo",
-  "version": "0.1.1",
+  "version": "0.2.0",
   "target": {
     "entrypoints": ["index.ts"],
     "extension": "@justmytwospence/pi-todo",
@@ -10,5 +10,5 @@
   "protocolVersion": 1,
   "server": "adapter.ts",
   "webRenderer": null,
-  "capabilities": ["panels", "state"]
+  "capabilities": ["panels", "toolCards", "state"]
 }
