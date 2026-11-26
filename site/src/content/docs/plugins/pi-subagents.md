@@ -4,6 +4,12 @@ description: Delegate bounded tasks to separate Pi processes, inspect their conv
 plugin: pi-subagents
 ---
 
+## Switchyard
+
+The optional adapter links each run (from `subagents:run` entries and `subagent` results) to a read-only view of its session in Switchyard. On hosts with adapter contract v2 the runs are also a **Subagents** tracker above the input (`Subagents 2 running · Fix tests: running vitest`) that opens to one row per run (label, state, agent, model, time, and its activity or error), updated from the tool's live progress; ended runs stay listed until nothing has run for five minutes. A `subagent` call is one transcript row (`Delegated Fix the tests · worker · done`) that opens to its runs. Older hosts get a **Subagents** panel and a running-count pill. Runs are view only: Switchyard does not steer or stop them.
+
+See the [Switchyard integration contract](/architecture/switchyard/).
+
 The global [System 1](/plugins/pi-system1/) configuration (`/system1`) sets an ordered chain of Jev and native OpenAI Decisions (Jev only by default). The legacy `jev` settings still control this feature, including its enabled flag and timeout; provider/model overrides apply only to Jev. Decisions requires pi-system1 and its isolated API credential; it uses API billing, not subscription OAuth. Pi does not verify credit funding. Operational failures can advance to the next configured backend with a notification; valid judgments and safety refusals do not trigger failover.
 
 ## Quick reference
