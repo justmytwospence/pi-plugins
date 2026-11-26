@@ -1,6 +1,6 @@
 {
   "name": "@justmytwospence/pi-compact-plan",
-  "version": "0.1.112",
+  "version": "0.1.113",
   "description": "/compact-plan [next prompt]: work out a compaction focus with the session, then compact and stop or continue.",
   "type": "module",
   "license": "MIT",
