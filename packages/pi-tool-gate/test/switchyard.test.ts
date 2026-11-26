@@ -227,6 +227,7 @@ describe("contract v2", () => {
           items: [
             { label: "Tool", value: "bash", mono: true },
             { label: "Action", value: "bash" },
+            { label: "Target", value: "npm publish", mono: true },
             { label: "Directory", value: "/work/app", mono: true },
             { label: "Held", value: "matches the ask rule Bash(npm publish:*)" },
             { label: "Agent", value: "release it" },
@@ -246,6 +247,13 @@ describe("contract v2", () => {
       ],
     });
     expect(c.toPiResponse({ kind: "action", actionId: "option:2" })).toEqual({ value: "Block" });
+  });
+
+  it("a short one-line command is the Target fact alone", () => {
+    const { ctx } = makeCtx(V2);
+    adapter.onEntry({ ...entry, data: { ...entry.data, command: "npm publish" } }, ctx);
+    const children = (adapter.claimInteraction(bash, ctx)!.presentation as { children: { t: string }[] }).children;
+    expect(children.map((n) => n.t)).toEqual(["facts", "actions"]);
   });
 
   it("falls back to the title's fields as facts without a matching entry, and ignores malformed entries", () => {

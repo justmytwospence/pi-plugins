@@ -110,16 +110,20 @@ export function requestFacts(r: ApprovalRequest): { label: string; value: string
   const facts: { label: string; value: string; mono?: boolean }[] = [
     { label: "Tool", value: r.tool, mono: true },
     { label: "Action", value: r.action },
+    { label: "Target", value: r.target, mono: true },
+    { label: "Directory", value: r.cwd, mono: true },
   ];
-  // A shell command is shown whole below; the target would repeat it.
-  if (!r.command) facts.push({ label: "Target", value: r.target, mono: true });
-  facts.push({ label: "Directory", value: r.cwd, mono: true });
   if (r.held !== undefined) facts.push({ label: "Held", value: r.held });
   if (r.agent !== undefined) facts.push({ label: "Agent", value: r.agent });
   const noun = r.offer?.kind === "dirs" ? "Folder" : "Rule";
   for (const item of r.offer?.items ?? []) facts.push({ label: noun, value: item, mono: true });
   if (r.offer?.saves) facts.push({ label: "Saves to", value: r.offer.saves });
   return facts;
+}
+
+/** A short one-line command reads fine as the Target fact; anything longer gets a code block. */
+export function commandNeedsBlock(r: ApprovalRequest): boolean {
+  return !!r.command && (r.command.includes("\n") || r.command.length > 120 || r.command.trim() !== r.target);
 }
 
 /**
@@ -134,7 +138,7 @@ function presentation(req: Extract<PiUiRequest, { method: "select" }>, r: Approv
   const children: UINode[] = [];
   if (r && v2) {
     children.push({ t: "facts", items: requestFacts(r) });
-    if (r.command) children.push({ t: "code", text: r.command, lang: "bash" });
+    if (r.command && commandNeedsBlock(r)) children.push({ t: "code", text: r.command, lang: "bash" });
     const note = [r.note ? `(${r.note})` : "", r.problem ?? ""].filter(Boolean).join("\n\n");
     if (note) children.push({ t: "markdown", text: note });
   } else {
