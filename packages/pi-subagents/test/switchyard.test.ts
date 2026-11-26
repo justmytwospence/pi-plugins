@@ -156,7 +156,13 @@ describe("contract v2", () => {
     expect(links).toHaveLength(2);
     adapter.onToolEnd({ toolCallId: "c1", name: "subagent", args: {}, result: {}, isError: false, details: { runs: [run({ status: "done", seconds: 95 }), run({ id: "r2", label: "Review", status: "failed", error: "boom" })] } }, ctx);
     expect(latest(contributions, "subagents-tracker")).toMatchObject({
-      node: { rows: [{ title: "Fix tests", status: "done", tone: "success" }, { title: "Review", status: "failed", tone: "danger", meta: expect.stringContaining("boom") }] },
+      // Ended runs are newest first; both ended in this call, so either may be.
+      node: {
+        rows: expect.arrayContaining([
+          expect.objectContaining({ title: "Fix tests", status: "done", tone: "success" }),
+          expect.objectContaining({ title: "Review", status: "failed", tone: "danger", meta: expect.stringContaining("boom") }),
+        ]),
+      },
       tracker: { status: "error" },
     });
   });
