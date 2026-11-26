@@ -76,6 +76,7 @@ import { type DialogResult, TasksDialog } from "./dialog.ts";
 import { onWebCommand, section as webSection, table as webTable, text as webText } from "./switchyard-web.ts";
 import { FULL_SCREEN } from "./frame.ts";
 import { PillView } from "./pill.ts";
+import { LiveRows } from "./live-rows.ts";
 import { LogViewer } from "./viewer.ts";
 import { MARIMO_READY, marimoName, marimoServer } from "./marimo.ts";
 import { type Block, blocks, blocksView } from "./result-view.ts";
@@ -510,25 +511,15 @@ export default function piBg(pi: ExtensionAPI) {
   };
 
   /**
-   * Redraws for bg_run rows whose task is running, one per row (keyed by tool call): an ended task's
-   * rows redraw once more, then drop. Pi hands each render a fresh invalidate that re-renders at once,
-   * so a redraw re-registers its row; keying by row and walking a snapshot keeps a tick finite.
+   * Redraws for bg_run rows whose task is running, one per row (keyed by tool call), only when the
+   * line a row shows changed: an ended task's rows redraw once more, then drop. Pi hands each render a
+   * fresh invalidate that re-renders at once, so a redraw re-registers its row.
    */
-  const liveRows = new Map<string, Map<string, () => void>>();
+  const liveRows = new LiveRows();
   /** Running bg_wait calls by tool call: the tasks they wait on and their live row line. */
   const waitRows = new Map<string, { tasks: () => Task[]; line: () => string }>();
   const redrawRows = () => {
-    for (const [id, redraws] of [...liveRows]) {
-      const running = reg.tasks.get(id)?.status === "running";
-      for (const [row, redraw] of [...redraws]) {
-        try {
-          redraw();
-        } catch {
-          redraws.delete(row);
-        }
-      }
-      if (!running) liveRows.delete(id);
-    }
+    liveRows.tick((id) => reg.tasks.get(id)?.status === "running");
   };
   const refresh = () => {
     redrawRows();
@@ -1026,9 +1017,10 @@ export default function piBg(pi: ExtensionAPI) {
     renderResult(result, { expanded, isPartial }, theme, context) {
       const id = (result.details as { id?: string } | undefined)?.id;
       if (id && !isPartial && reg.tasks.get(id)?.status === "running" && context?.invalidate) {
-        const redraws = liveRows.get(id) ?? new Map<string, () => void>();
-        redraws.set((context as { toolCallId?: string }).toolCallId ?? id, context.invalidate);
-        liveRows.set(id, redraws);
+        liveRows.track(id, (context as { toolCallId?: string }).toolCallId ?? id, context.invalidate, () => {
+          const t = reg.tasks.get(id);
+          return t ? `${t.status}\0${taskState(t)}` : "";
+        });
       }
       return runResultView(result as never, expanded, theme, () => (id ? reg.tasks.get(id) : undefined));
     },
@@ -1094,9 +1086,7 @@ export default function piBg(pi: ExtensionAPI) {
         if (c?.invalidate) {
           for (const t of live.tasks()) {
             if (t.status !== "running") continue;
-            const redraws = liveRows.get(t.id) ?? new Map<string, () => void>();
-            redraws.set(`wait:${c.toolCallId}`, c.invalidate);
-            liveRows.set(t.id, redraws);
+            liveRows.track(t.id, `wait:${c.toolCallId}`, c.invalidate, live.line);
           }
         }
         return waitResultView(theme, live.line);
