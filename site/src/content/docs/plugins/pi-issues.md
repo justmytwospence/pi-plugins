@@ -4,6 +4,12 @@ description: Start GitHub issues in linked-branch worktrees and set issue status
 plugin: pi-issues
 ---
 
+## Switchyard
+
+On hosts with Switchyard adapter contract v2, the optional adapter makes each `issue` call one transcript row: `Started issue #12 · login-retry` or `Set issue status #12 · Done`. Older hosts show their generic tool row.
+
+See the [Switchyard integration contract](/architecture/switchyard/).
+
 ## Quick reference
 
 - **Use it for:** Seeing issue and pull request titles next to their numbers in the agent's replies; picking up a GitHub issue in its own branch and worktree, with the branch linked to the issue on GitHub and the issue marked In progress, and setting issue statuses without Projects field IDs.

@@ -4,6 +4,12 @@ description: Offer one concrete follow-up as editable ghost text, with optional 
 plugin: pi-next-prompt
 ---
 
+## Switchyard
+
+On hosts with Switchyard adapter contract v2, the optional adapter makes each `offer_prompt` and `offer_terminal` call one transcript row, `Offered prompt /reload · displayed` (or `queued behind a draft`, `blocked`), opening to the whole text when it spans several lines. Older hosts show their generic tool row.
+
+See the [Switchyard integration contract](/architecture/switchyard/).
+
 ## Quick reference
 
 - **Use it for:** Offer one automatic next step or a verified requested prompt/slash-command handoff, without a separate generation request.

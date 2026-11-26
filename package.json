@@ -69,7 +69,11 @@
       "./packages/pi-plan-mode/src/switchyard",
       "./packages/pi-subagents/src/switchyard",
       "./packages/pi-todo/src/switchyard",
-      "./packages/pi-bg/src/switchyard"
+      "./packages/pi-bg/src/switchyard",
+      "./packages/pi-next-prompt/src/switchyard",
+      "./packages/pi-issues/src/switchyard",
+      "./packages/pi-herdr/src/switchyard",
+      "./packages/pi-system1/src/switchyard"
     ]
   },
   "peerDependencies": {

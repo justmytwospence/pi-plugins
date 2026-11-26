@@ -1,0 +1,14 @@
+{
+  "id": "system1",
+  "version": "0.1.0",
+  "target": {
+    "entrypoints": ["src/index.ts"],
+    "extension": "@justmytwospence/pi-system1",
+    "versionRange": ">=0.1.0 <1.0.0",
+    "testedVersions": ["0.1.112"]
+  },
+  "protocolVersion": 1,
+  "server": "adapter.ts",
+  "webRenderer": null,
+  "capabilities": ["toolCards"]
+}

@@ -4,6 +4,12 @@ description: Connect interactive Pi sessions to Herdr metadata, notifications, p
 plugin: pi-herdr
 ---
 
+## Switchyard
+
+On hosts with Switchyard adapter contract v2, the optional adapter makes each `herdr` call one transcript row naming the action and the agent (`Messaged reviewer · queue · awaiting reply`, `Spawned fix-login · worktree · fix-login`), opening to the message or task. Older hosts show their generic tool row.
+
+See the [Switchyard integration contract](/architecture/switchyard/).
+
 ## Quick reference
 
 - **Use it for:** Add pane metadata, message any agent in Herdr without touching its draft, and start deliberate human-accessible child sessions.

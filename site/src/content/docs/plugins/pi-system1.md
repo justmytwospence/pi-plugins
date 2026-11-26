@@ -4,6 +4,12 @@ description: Configure a shared native classifier waterfall and request typed ju
 plugin: pi-system1
 ---
 
+## Switchyard
+
+On hosts with Switchyard adapter contract v2, the optional adapter makes each `system1_judge` call one transcript row, `Judged only_reads, risky · jev · 0.8s`, opening to each question's answer (a probability, choice or score) or the failure's reason. Older hosts show their generic tool row.
+
+See the [Switchyard integration contract](/architecture/switchyard/).
+
 ## Quick reference
 
 - **Use it for:** Ordering the suite's classifier backends and making ad-hoc typed judgments.
