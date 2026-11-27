@@ -1,6 +1,7 @@
 import { existsSync, readFileSync } from "node:fs";
+import { runInNewContext } from "node:vm";
 import { describe, expect, it } from "vitest";
-import adapter, { duration, LINGER_MS, progressValue, type TaskRecord } from "../src/switchyard/adapter.ts";
+import adapter, { duration, LINGER_MS, listed, progressValue, taskRow, type TaskRecord } from "../src/switchyard/adapter.ts";
 
 type Ctx = Parameters<NonNullable<typeof adapter.onStatus>>[2];
 type UINode = Parameters<Ctx["setPanel"]>[1];
@@ -52,6 +53,35 @@ describe("bg switchyard adapter", () => {
     const { ctx, panels } = makeCtx();
     await adapter.onStatus("bg", "build 40%", ctx);
     expect(panels[0]?.node).toMatchObject({ t: "progress", value: 0.4 });
+  });
+
+  it("shows a queued reason in the portable panel and iframe without treating it as progress", () => {
+    const { ctx, panels } = makeCtx();
+    const status = "bg: suite queued (12s; CPU 91%)";
+    adapter.onStatus("bg", status, ctx);
+    expect(panels.at(-1)).toMatchObject({ node: { t: "text", text: status }, opts: { mobileFallback: status } });
+    adapter.onStatus("bg", `${status} · build 40% 0:20`, ctx);
+    adapter.onWidget("bg", ["build running"], ctx);
+    expect(panels.at(-1)?.node).toMatchObject({ t: "section", children: [{ t: "progress", value: 0.4 }, { t: "list" }] });
+
+    const element = () => ({ className: "", textContent: "", style: { width: "" }, children: [] as unknown[], appendChild(child: unknown) { this.children.push(child); } });
+    const render = (panel: (typeof panels)[number]) => {
+      const root = element();
+      const parent = { postMessage() {} };
+      const html = readFileSync(new URL("bg-renderer.html", dir), "utf8");
+      runInNewContext(html.split("<script>")[1]!.split("</script>")[0]!, {
+        document: { getElementById: () => root, createElement: element, documentElement: {} },
+        parent,
+        window: { addEventListener: (_: string, handle: (event: unknown) => void) => handle({ source: parent, data: { type: "render", node: panel.node, state: panel.opts?.state } }) },
+      });
+      return root.children;
+    };
+    expect(render(panels[0]!)).toMatchObject([{ className: "status", textContent: status }]);
+    expect(render(panels.at(-1)!)).toMatchObject([
+      { className: "status", textContent: `${status} · build 40% 0:20` },
+      { className: "bar", children: [{ style: { width: "40%" } }] },
+      { children: [{ textContent: "build running" }] },
+    ]);
   });
 
   it("ships a manifest that points at its adapter and web renderer", () => {
@@ -156,9 +186,44 @@ describe("contract v2", () => {
     expect((latest(contributions, "bg-tracker") as { tracker: object }).tracker).not.toHaveProperty("count");
   });
 
+  it("restores queued work as active and separates admission wait from execution", () => {
+    const { ctx, contributions, snapshot } = makeCtx(true, {}, V2);
+    const queued = task({ status: "queued", startedAt: 0, requestedAt: now - 12_000, queueReason: "CPU 91%" });
+    adapter.onEntry(entry(queued), ctx);
+    expect(latest(contributions, "bg-tracker")).toMatchObject({
+      node: { t: "rows", rows: [{ title: "train", status: "queued", meta: expect.stringContaining("in queue · CPU 91%") }] },
+      tracker: { count: "1 queued", status: "running", step: "train queued" },
+      mobileFallback: expect.stringContaining("train: queued"),
+    });
+    expect(taskRow(queued, now)).toEqual({ title: "train", status: "queued", meta: "12s in queue · CPU 91%" });
+    const restored = makeCtx(true, snapshot(), ["adapter.trackers.v1"]);
+    adapter.onRestore(restored.ctx);
+    expect(latest(restored.contributions, "bg-tracker")).toMatchObject({
+      node: { t: "table", rows: [["train", "queued", expect.stringContaining("in queue · CPU 91%")]] },
+    });
+    const killed = { ...queued, status: "killed" as const, endedAt: now };
+    expect(taskRow(killed, now + 180_000)).toMatchObject({ status: "stopped", meta: "12s in queue" });
+
+    const running = { ...queued, status: "running" as const, startedAt: now, queueReason: undefined };
+    expect(taskRow(running, now + 2000)).toMatchObject({ status: "running", meta: "for 2s · waited 12s" });
+    expect(taskRow({ ...running, status: "done", endedAt: now + 3500 }, now + 180_000)).toMatchObject({ status: "done", meta: "after 4s · waited 12s" });
+    adapter.onEntry(entry(running), ctx);
+    expect(latest(contributions, "bg-tracker")).toMatchObject({ tracker: { count: "1 running", status: "running", step: "train" } });
+  });
+
+  it("orders active entries by request time and retains every queued job", () => {
+    const backlog = Array.from({ length: 10 }, (_, i) => task({ id: `q${i}`, status: "queued", startedAt: 0, requestedAt: now + i + 1 }));
+    const running = task({ startedAt: now });
+    const ended = task({ id: "done", status: "done", endedAt: now });
+    expect(listed([ended, ...backlog.toReversed(), running]).map((t) => t.id)).toEqual([running.id, ...backlog.map((t) => t.id)]);
+  });
+
   it("an old ended list lingers no longer than LINGER_MS, and malformed entries are ignored", () => {
     const { ctx, contributions } = makeCtx(true, {}, V2);
     adapter.onEntry(entry(task({ version: 2 } as unknown as Partial<TaskRecord>)), ctx);
+    adapter.onEntry(entry(task({ status: "queued" })), ctx);
+    adapter.onEntry(entry(task({ requestedAt: NaN, status: "queued", startedAt: 0 })), ctx);
+    adapter.onEntry(entry(task({ queueReason: 91 } as unknown as Partial<TaskRecord>)), ctx);
     adapter.onEntry({ type: "custom", customType: "other", data: task({}) }, ctx);
     expect(contributions).toEqual([]);
     adapter.onEntry(entry(task({ status: "done", endedAt: now - LINGER_MS - 1000 })), ctx);
@@ -171,6 +236,15 @@ describe("contract v2", () => {
     expect(contributions.filter((c) => c.id === "bg-tracker")).toEqual([]);
     adapter.onStatus("bg", "2/4 jobs", ctx);
     expect(latest(contributions, "bg-pill")).toMatchObject({ placement: "composer.pill" });
+  });
+
+  it("gives queued submissions a queued verb in the transcript", () => {
+    const { ctx } = makeCtx(true, {}, V2);
+    const submitted = { toolCallId: "1", name: "bg_run", args: { command: "python train.py", heavy: true }, details: { id: "a1", status: "queued" }, result: {} };
+    adapter.onEntry(entry(task({ status: "queued", startedAt: 0, requestedAt: now, queueReason: "CPU 91%" })), ctx);
+    expect(adapter.toolView(submitted, ctx)).toMatchObject({ verb: "Queued", activeVerb: "Queueing", target: "train", meta: ["job", "CPU 91%"] });
+    adapter.onEntry(entry(task({ status: "done", requestedAt: now, startedAt: now + 1000, endedAt: now + 2000 })), ctx);
+    expect(adapter.toolView(submitted, ctx)).toMatchObject({ verb: "Queued", target: "train", meta: ["job"] });
   });
 
   it("the bg tools get rows, naming the task", () => {

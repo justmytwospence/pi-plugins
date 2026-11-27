@@ -1,7 +1,8 @@
 // A task's state as data, for remote hosts. Switchyard's adapter gets only the footer status text in
 // RPC mode (and nothing at all from a terminal session); a `pi-bg:task` session entry at each change
-// that matters (start, ready, end, and progress moving to another tenth) lets it list the tasks with
-// their state and times without parsing that text. pi-bg never reads these entries back.
+// that matters (queue, admission reason, start, ready, end, and progress moving to another tenth)
+// lets it list the tasks with their state and times without parsing that text. pi-bg never reads
+// these entries back.
 import type { Task } from "./registry.ts";
 
 export const TASK_ENTRY = "pi-bg:task";
@@ -17,6 +18,9 @@ export interface TaskRecord {
   command: string;
   cwd: string;
   logPath: string;
+  requestedAt?: number;
+  queueReason?: string;
+  /** 0 until the task spawns. */
   startedAt: number;
   endedAt?: number;
   exitCode?: number | null;
@@ -40,6 +44,8 @@ export function taskRecord(t: Task): TaskRecord {
     command: t.command.length > COMMAND_LIMIT ? `${t.command.slice(0, COMMAND_LIMIT - 1)}…` : t.command,
     cwd: t.cwd,
     logPath: t.logPath,
+    ...(t.requestedAt !== undefined ? { requestedAt: t.requestedAt } : {}),
+    ...(t.status === "queued" && t.queueReason ? { queueReason: t.queueReason } : {}),
     startedAt: t.startedAt,
     ...(t.endedAt !== undefined ? { endedAt: t.endedAt } : {}),
     ...(t.exitCode !== undefined ? { exitCode: t.exitCode } : {}),

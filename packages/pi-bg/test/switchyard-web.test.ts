@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import piBg from "../src/index.ts";
-import type { Task } from "../src/registry.ts";
+import { isActive, type Task } from "../src/registry.ts";
 import { fakeCtx, fakePi } from "./fake.ts";
 
 const { registryMock } = vi.hoisted(() => ({ registryMock: vi.fn() }));
@@ -12,7 +12,7 @@ vi.mock("../src/registry.ts", async (importOriginal) => ({
 function task(id: string, status: Task["status"]): Task {
   return {
     id, name: id, kind: "job", command: "make " + id, cwd: "/tmp", logPath: "/tmp/x.log", sessionId: "test-session",
-    startedAt: Date.now(), endedAt: status === "running" ? undefined : Date.now(), status, ready: false, keep: false, origin: "agent",
+    startedAt: status === "queued" ? 0 : Date.now(), endedAt: isActive({ status }) ? undefined : Date.now(), status, ready: false, keep: false, origin: "agent",
     delivered: false, readyDelivered: false,
   } as Task;
 }
@@ -28,6 +28,7 @@ beforeEach(async () => {
     cleared: new Set<string>(),
     list: () => [...tasks.values()],
     running: () => [...tasks.values()].filter((t) => t.status === "running"),
+    active: () => [...tasks.values()].filter(isActive),
     forgetEnded: vi.fn(), attach: vi.fn(), detach: vi.fn(), sweep: vi.fn(() => []),
     subscribe: vi.fn(() => () => {}),
     killAll: vi.fn(async () => undefined), release: vi.fn(),
@@ -66,6 +67,30 @@ describe("tasks web view", () => {
     expect(view.actions).toEqual([
       { label: "Stop a", command: "/tasks kill a", tone: "danger" },
       { label: "Clear ended", command: "/tasks clear", tone: "danger" },
+    ]);
+  });
+
+  it("sorts by request time while queued and never shows it as runtime", async () => {
+    vi.setSystemTime(102_000);
+    tasks.set("fit", { ...task("fit", "queued"), requestedAt: 95_000 });
+    tasks.set("suite", { ...task("suite", "queued"), requestedAt: 90_000, queueReason: "CPU 91%" });
+    tasks.set("build", { ...task("build", "running"), startedAt: 101_000, requestedAt: 89_000 });
+    const { view } = await ask("tasks", "", false);
+    expect(view.body).toMatchObject({
+      t: "section",
+      children: [
+        { t: "text", text: "1 running · 2 queued · 0 ended" },
+        { t: "table", rows: [
+          ["build", "build", "running", "0:01", "waited 12s", "make build"],
+          ["suite", "suite", "queued · CPU 91%", "—", "12s", "make suite"],
+          ["fit", "fit", "queued · waiting for host capacity", "—", "7s", "make fit"],
+        ] },
+      ],
+    });
+    expect(view.actions).toEqual([
+      { label: "Stop build", command: "/tasks kill build", tone: "danger" },
+      { label: "Stop suite", command: "/tasks kill suite", tone: "danger" },
+      { label: "Stop fit", command: "/tasks kill fit", tone: "danger" },
     ]);
   });
 

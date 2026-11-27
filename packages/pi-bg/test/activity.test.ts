@@ -375,6 +375,25 @@ it("scrolls shell logs a half page with Ctrl-U/D and a full page with Page keys"
   } finally { view.dispose(); fs.rmSync(dir, { recursive: true, force: true }); }
 });
 
+it("shows queued log state and lets the user stop it without a running PID", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-bg-view-"));
+  const logPath = path.join(dir, "log");
+  fs.writeFileSync(logPath, "");
+  const task = { id: "one", name: "suite", kind: "job", command: "true", cwd: dir, logPath, status: "queued", requestedAt: Date.now() - 12_000, startedAt: 0, queueReason: "CPU 91%" } as Task;
+  const stop = vi.fn(() => { task.status = "killed"; task.endedAt = Date.now(); });
+  const view = new LogViewer(tui as any, theme, task, stop, () => {});
+  try {
+    expect(view.render(100)[1]).toMatch(/queued · CPU 91% · \d+s in queue/u);
+    view.handleInput("x");
+    expect(view.render(100).join("\n")).toContain("x again to stop");
+    expect(stop).not.toHaveBeenCalled();
+    view.handleInput("x");
+    expect(stop).toHaveBeenCalledTimes(1);
+    expect(view.render(100)[1]).toMatch(/stopped · \d+s in queue/u);
+    expect(view.render(100).join("\n")).not.toContain("x stop");
+  } finally { view.dispose(); fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
 it("Tab can select a background pill with a draft, cycle safely and return with Esc", () => {
   const editor = nativeEditor();
   editor.setText("keep this draft");

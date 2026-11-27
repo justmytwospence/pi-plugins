@@ -40,6 +40,12 @@ async function load(session?: { id: string; hasUI?: boolean }) {
 }
 
 describe("pi-bg", () => {
+  it("rejects heavy services before starting a task", async () => {
+    const x = await load();
+    await expect(x.call("bg_run", { command: "true", kind: "service", heavy: true })).rejects.toThrow(/finite jobs/);
+    await x.shutdown();
+  });
+
   it("draws bg_run as a background Bash row whose result line follows the task live, and wake-ups as one row", async () => {
     const x = await load();
     const run = x.tools.get("bg_run");

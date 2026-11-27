@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import piBg from "../src/index.ts";
+import { isActive, type Task } from "../src/registry.ts";
 import { WORKING_MESSAGE_EVENT } from "../src/working-message.ts";
 import { fakeCtx, fakePi } from "./fake.ts";
 
@@ -9,11 +10,14 @@ vi.mock("../src/registry.ts", async (importOriginal) => ({
 }));
 
 let cleanup: (() => Promise<void>) | undefined;
+const tasks = new Map<string, Task>();
 beforeEach(() => {
   vi.useFakeTimers();
   vi.setSystemTime(100_000);
+  tasks.clear();
   registryMock.mockReturnValue({
-    tasks: new Map(), list: () => [], running: () => [], sweep: () => [],
+    tasks, list: () => [...tasks.values()], running: () => [...tasks.values()].filter((t) => t.status === "running"),
+    active: () => [...tasks.values()].filter(isActive), sweep: () => [],
     subscribe: () => () => {}, forgetEnded() {}, attach() {}, detach() {}, release() {}, killAll: async () => {},
   });
 });
@@ -120,6 +124,22 @@ it.each(["timeout", "abort", "message", "reload"])("releases ownership on %s", a
   await h.event("turn_start");
   await vi.advanceTimersByTimeAsync(4_000);
   expect(h.working.at(-1)).toMatch(/^Working/);
+});
+
+it("the turn-end working message shows queue time, then a separate execution time", async () => {
+  const h = await setup();
+  const task = { id: "build", name: "build", kind: "job", origin: "agent", status: "queued", command: "make", startedAt: 0, requestedAt: 88_000, queueReason: "CPU 91%" } as Task;
+  tasks.set(task.id, task);
+  const before = h.handlers.get("agent_before_settle")![0]!;
+  const pending = before({ type: "agent_before_settle", outcome: "completed", entries: [], continue: false, context: { canContinue: false } }, h.ctx);
+  expect(h.working.at(-1)).toBe("Waiting on build queued · CPU 91% · 12s in queue…");
+  task.status = "running";
+  task.startedAt = Date.now();
+  await vi.advanceTimersByTimeAsync(1000);
+  expect(h.working.at(-1)).toMatch(/^Waiting on build.*0:01 · waited 12s…$/u);
+  h.state.pending = true;
+  await vi.advanceTimersByTimeAsync(250);
+  await pending;
 });
 
 it("the turn-end wait has no timeout", async () => {

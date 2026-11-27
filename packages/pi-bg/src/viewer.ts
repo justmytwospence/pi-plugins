@@ -1,11 +1,11 @@
 // A task's log, full screen (frame.ts): it follows the log as it grows. ↑↓ (or j/k), PgUp/PgDn, Home/End scroll
-// (scrolling to the end follows again); `x` twice stops a running task; Esc or q closes.
+// (scrolling to the end follows again); `x` twice stops a queued or running task; Esc or q closes.
 import { type Component, type TUI, matchesKey, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import { INPUT_CONTEXT } from "./activity.ts";
 import { header } from "./format.ts";
 import { banner, bottom, row as frameRow, rule as frameRule } from "./frame.ts";
 import { tail } from "./log.ts";
-import type { Task } from "./registry.ts";
+import { isActive, type Task } from "./registry.ts";
 
 /** Banner, two header lines, two rules, hints, bottom border. */
 const CHROME = 7;
@@ -65,7 +65,7 @@ export class LogViewer implements Component {
       return;
     }
     if (matchesKey(data, "x")) {
-      if (this.task.status === "running" && this.stop) {
+      if (isActive(this.task) && this.stop) {
         if (this.stopArmed) {
           this.stopArmed = false;
           this.stop();
@@ -104,7 +104,7 @@ export class LogViewer implements Component {
     const rule = frameRule(width, th);
     const t = this.task;
     const out = [banner(`Log of ${t.name}`, width, th)];
-    const mark = t.status === "running" ? th.fg("accent", "●") : t.status === "done" ? th.fg("success", "✓") : th.fg("error", "✗");
+    const mark = isActive(t) ? th.fg("accent", "●") : t.status === "done" ? th.fg("success", "✓") : th.fg("error", "✗");
     out.push(row(`${mark} ${th.bold(header(t))}`));
     out.push(row(th.fg("dim", `$ ${t.command.replace(/\s+/gu, " ")}`)));
     out.push(rule);
@@ -115,7 +115,7 @@ export class LogViewer implements Component {
     for (let i = 0; i < page; i++) out.push(row(this.lines[start + i] ?? (i === 0 && !this.lines.length ? th.fg("dim", "(no output yet)") : "")));
     out.push(rule);
     const actions: string[] = [];
-    if (t.status === "running" && this.stop) actions.push(this.stopArmed ? th.fg("error", "x again to stop") : th.fg("dim", "x stop"));
+    if (isActive(t) && this.stop) actions.push(this.stopArmed ? th.fg("error", "x again to stop") : th.fg("dim", "x stop"));
     const position = this.lines.length <= page ? "all" : `${Math.round(((start + page) / this.lines.length) * 100)}%`;
     actions.push(th.fg("dim", `${this.lines.length} lines · ${position}${this.follow && t.status === "running" ? " · following" : ""}`));
     const left = actions.join(th.fg("dim", " · "));

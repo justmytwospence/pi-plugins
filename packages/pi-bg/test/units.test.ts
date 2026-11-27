@@ -2,11 +2,12 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
-import { elapsed, footerStatus, marimoNote, nameFromCommand } from "../src/format.ts";
+import { elapsed, footerStatus, header, marimoNote, nameFromCommand, runtime, taskLine } from "../src/format.ts";
 import { LogFollower, bounded, cleanLine, grep, head, tail } from "../src/log.ts";
 import { type Task, parsePattern } from "../src/registry.ts";
 import { MARIMO_READY, marimoName, marimoServer } from "../src/marimo.ts";
 import { blocks } from "../src/result-view.ts";
+import { taskRecord } from "../src/task-entry.ts";
 import { readTranscriptCheckpoint } from "../src/transcript-contract.ts";
 
 const task = (over: Partial<Task>): Task => ({
@@ -62,6 +63,33 @@ describe("format", () => {
     );
     expect(s).toBe("bg: tests 2:14 · vite ready · lint ✗");
     expect(footerStatus([], now)).toBeUndefined();
+  });
+
+  it("keeps queue time, run time, and unspawned cancellation distinct", () => {
+    const queued = task({ status: "queued", startedAt: 0, requestedAt: 100_000, queueReason: "CPU 91%" });
+    expect(runtime(queued, 112_000)).toBe("—");
+    expect(header(queued, 112_000)).toBe("tests (job abc12) · queued · CPU 91% · 12s in queue · cwd /tmp");
+    expect(taskLine(queued, 112_000)).toContain("queued · CPU 91% · 12s in queue");
+    expect(footerStatus([queued], 112_000)).toBe("bg: tests queued (12s; CPU 91%)");
+
+    const running = { ...queued, status: "running" as const, startedAt: 112_000, queueReason: undefined };
+    expect(header(running, 124_000)).toContain("running for 0:12 · waited 12s");
+    expect(footerStatus([running], 124_000)).toBe("bg: tests 0:12 (waited 12s)");
+    expect(header({ ...running, status: "done", endedAt: 130_000, exitCode: 0 }, 200_000)).toContain("exit 0 after 0:18 · waited 12s");
+    expect(header({ ...queued, status: "killed", endedAt: 118_000 }, 200_000)).toContain("stopped · 18s in queue");
+  });
+
+  it("publishes optional admission metadata without changing task record version", () => {
+    const old = taskRecord(task({ startedAt: 100_000 }));
+    expect(old).toMatchObject({ version: 1, status: "running", startedAt: 100_000 });
+    expect(old).not.toHaveProperty("requestedAt");
+    expect(old).not.toHaveProperty("queueReason");
+
+    const queued = task({ status: "queued", requestedAt: 100_000, queueReason: "CPU 91%" });
+    expect(taskRecord(queued)).toMatchObject({ version: 1, status: "queued", startedAt: 0, requestedAt: 100_000, queueReason: "CPU 91%" });
+    const started = taskRecord({ ...queued, status: "running", startedAt: 112_000 });
+    expect(started).toMatchObject({ version: 1, status: "running", startedAt: 112_000, requestedAt: 100_000 });
+    expect(started).not.toHaveProperty("queueReason");
   });
 
   it("marimo note only for marimo-pair commands", () => {

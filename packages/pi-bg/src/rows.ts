@@ -4,20 +4,20 @@
 // full report expanded; a wake-up is one `✓ …` row that expands to the report.
 import type { Theme } from "@earendil-works/pi-coding-agent";
 import { type Component, Text, truncateToWidth } from "@earendil-works/pi-tui";
-import { outcome, runtime } from "./format.ts";
+import { outcome, runtime, timedOutcome, waitedText } from "./format.ts";
 import { bar, percent } from "./progress.ts";
-import type { Task } from "./registry.ts";
+import { isActive, type Task } from "./registry.ts";
 import { blocksView } from "./result-view.ts";
 import { Block, expandHint, rowLine, type Tone } from "./transcript-style.ts";
 
 type Content = { type: string; text?: string };
 type Result = { content: Content[]; details?: unknown };
 
-/** `fit running · 45% ████░░░░ · 2:14`, or `fit exit 0 after 3:02` once it ended. */
+/** Live transcript state: queued reason/time, then progress and runtime after spawn. */
 export function taskState(t: Task, now = Date.now()): string {
-  if (t.status !== "running") return `${t.name} ${outcome(t)} after ${runtime(t, now)}`;
+  if (t.status !== "running") return `${t.name} ${timedOutcome(t, now)}`;
   const p = t.progress;
-  return [`${t.name} ${outcome(t)}`, p ? `${percent(p)} ${bar(p.fraction, 8)}` : undefined, runtime(t, now)].filter(Boolean).join(" · ");
+  return [`${t.name} ${outcome(t)}`, p ? `${percent(p)} ${bar(p.fraction, 8)}` : undefined, runtime(t, now), waitedText(t)].filter(Boolean).join(" · ");
 }
 
 /** Kept for callers that pass Pi's key hint; the shared expand hint reads the key itself. */
@@ -56,7 +56,7 @@ export function runResultView(result: Result, expanded: boolean, theme: Theme, t
   };
   return new Block(theme, () => {
     const t = task();
-    const tone: Tone = !t ? "done" : t.status === "running" ? "running" : t.status === "failed" || t.status === "timeout" ? "failed" : t.status === "killed" ? "stopped" : "done";
+    const tone: Tone = !t ? "done" : isActive(t) ? "running" : t.status === "failed" || t.status === "timeout" ? "failed" : t.status === "killed" ? "stopped" : "done";
     return { tone, title: "Background job", body: inner, expanded: true };
   });
 }

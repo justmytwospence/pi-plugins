@@ -174,6 +174,83 @@ describe("registry", () => {
   });
 });
 
+describe("heavy job admission", () => {
+  it("cancels a queued acquisition and waits for its abort cleanup", async () => {
+    let finishCleanup!: () => void;
+    let aborted = false;
+    const reg = new Registry({ acquire: (signal) => new Promise((_resolve, reject) => {
+      signal.addEventListener("abort", () => {
+        aborted = true;
+        finishCleanup = () => reject(signal.reason);
+      });
+    }) });
+    const sentinel = path.join(dir, "cancelled-sentinel");
+    const task = reg.start({ ...base, command: `touch '${sentinel}'`, name: "queued", kind: "job", cwd: dir, heavy: true });
+    expect(task.status).toBe("queued");
+    expect(task.pid).toBeUndefined();
+    expect(reg.active()).toContain(task);
+    let returned = false;
+    const killing = reg.kill(task.id, "agent").then(() => { returned = true; });
+    expect(aborted).toBe(true);
+    await Promise.resolve();
+    expect(returned).toBe(false);
+    finishCleanup();
+    await killing;
+    expect(task.status).toBe("killed");
+    expect(fs.existsSync(sentinel)).toBe(false);
+  });
+
+  it("releases a late grant before kill returns without launching the command", async () => {
+    let grant!: (claim: { fd: number; releaseAdmission(): void; releaseSlot(): void }) => void;
+    const reg = new Registry({ acquire: () => new Promise((resolve) => { grant = resolve; }) });
+    const sentinel = path.join(dir, "late-grant-sentinel");
+    const task = reg.start({ ...base, command: `touch '${sentinel}'`, name: "late", kind: "job", cwd: dir, heavy: true });
+    const releases: string[] = [];
+    const killing = reg.kill(task.id, "agent");
+    grant({ fd: -1, releaseAdmission: () => releases.push("admission"), releaseSlot: () => releases.push("slot") });
+    await killing;
+    expect(releases).toEqual(["slot", "admission"]);
+    expect(task.status).toBe("killed");
+    expect(fs.existsSync(sentinel)).toBe(false);
+  });
+
+  it("starts the timeout at spawn and transfers queued admission across reload", async () => {
+    let grant!: (claim: { fd: number; releaseAdmission(): void; releaseSlot(): void }) => void;
+    let acquisitions = 0;
+    const old = new Registry({ acquire: () => { acquisitions++; return new Promise((resolve) => { grant = resolve; }); } });
+    const task = old.start({ ...base, command: "sleep 30", name: "heavy", kind: "job", cwd: dir, heavy: true, timeoutSec: 0.15 });
+    const next = new Registry({ acquire: () => { throw new Error("must not requeue"); } });
+    next.adopt(old);
+    const events: string[] = [];
+    next.subscribe((e) => events.push(e.type));
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    expect(task.status).toBe("queued");
+    expect(task.startedAt).toBe(0);
+    expect(next.find(task.id)).toBe(task);
+    const fd = fs.openSync("/dev/null", "r");
+    let slotReleases = 0;
+    grant({ fd, releaseAdmission: () => {}, releaseSlot: () => { slotReleases++; fs.closeSync(fd); } });
+    await until(() => task.status === "running");
+    expect(task.startedAt).toBeGreaterThanOrEqual(task.requestedAt! + 150);
+    await until(() => task.status === "timeout", 4_000);
+    expect(acquisitions).toBe(1);
+    expect(events.filter((e) => e === "end")).toHaveLength(1);
+    expect(slotReleases).toBe(1);
+  });
+
+  it("does not consult admission for unmarked jobs or services", async () => {
+    const reg = new Registry({ acquire: () => { throw new Error("unexpected admission"); } });
+    const job = reg.start({ ...base, command: "true", name: "plain", kind: "job", cwd: dir });
+    const service = reg.start({ ...base, command: "sleep 30", name: "service", kind: "service", cwd: dir });
+    expect(job.status).toBe("running");
+    expect(service.status).toBe("running");
+    await until(() => job.status !== "running");
+    await reg.kill(service.id, "agent");
+    expect(job.status).toBe("done");
+    expect(() => reg.start({ ...base, command: "true", name: "invalid", kind: "service", cwd: dir, heavy: true })).toThrow(/finite jobs/);
+  });
+});
+
 describe("registry across a reload and over time", () => {
   it("a registry from an earlier load shares its state: old exit handlers reach new listeners", async () => {
     const old = new Registry();
