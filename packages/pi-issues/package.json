@@ -1,6 +1,6 @@
 {
   "name": "@justmytwospence/pi-issues",
-  "version": "0.1.113",
+  "version": "0.1.114",
   "description": "Start GitHub issues in linked-branch worktrees; statuses through GitHub's own links.",
   "type": "module",
   "license": "MIT",
