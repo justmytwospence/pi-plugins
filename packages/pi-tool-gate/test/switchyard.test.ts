@@ -249,6 +249,24 @@ describe("contract v2", () => {
     expect(c.toPiResponse({ kind: "action", actionId: "option:2" })).toEqual({ value: "Block" });
   });
 
+  it("matches only the current reference and safely falls back for an unknown one", () => {
+    const { ctx } = makeCtx(V2);
+    const ref = (n: number) => `${bashTitle}\nApproval reference: 00000000-0000-4000-8000-00000000000${n}`;
+    adapter.onEntry({ ...entry, data: { ...entry.data, title: ref(1), command: "npm publish --first" } }, ctx);
+    adapter.onEntry({ ...entry, data: { ...entry.data, title: ref(2), command: "npm publish --second" } }, ctx);
+    const matched = JSON.stringify(adapter.claimInteraction({ ...bash, title: ref(1) }, ctx)!.presentation);
+    expect(matched).toContain("npm publish --first");
+    expect(matched).not.toContain("npm publish --second");
+    const fallback = JSON.stringify(adapter.claimInteraction({ ...bash, title: ref(3) }, ctx)!.presentation);
+    expect(fallback).not.toContain("npm publish --first");
+    expect(fallback).not.toContain("npm publish --second");
+    expect(fallback).not.toContain("Approval reference");
+    const ordinaryNote = JSON.stringify(adapter.claimInteraction({ ...bash, title: `${bashTitle}\nApproval reference: not-a-uuid` }, ctx)!.presentation);
+    expect(ordinaryNote).toContain("Approval reference: not-a-uuid");
+    const legacy = makeCtx();
+    expect(JSON.stringify(adapter.claimInteraction({ ...bash, title: ref(3) }, legacy.ctx)!.presentation)).toContain('"t":"table"');
+  });
+
   it("a short one-line command is the Target fact alone", () => {
     const { ctx } = makeCtx(V2);
     adapter.onEntry({ ...entry, data: { ...entry.data, command: "npm publish" } }, ctx);

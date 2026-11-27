@@ -89,7 +89,8 @@ export interface ParsedApproval {
 export function parseApprovalTitle(title: string): ParsedApproval {
   const rows: [string, string][] = [];
   const note: string[] = [];
-  for (const line of title.slice(TITLE_PREFIX.length).split("\n")) {
+  const fallback = title.replace(/\nApproval reference: [0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u, "");
+  for (const line of fallback.slice(TITLE_PREFIX.length).split("\n")) {
     const m = FIELD_RE.exec(line);
     if (m) rows.push([m[1]!, m[2]!.trim()]);
     else if (line.trim()) note.push(line.trim());

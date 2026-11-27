@@ -37,6 +37,7 @@ import {
 } from "@earendil-works/pi-tui";
 import { beginComposition, type EditorCreator, editorOwnsCancel, inline, type ProseEditor } from "./editor.ts";
 import type { CallView } from "./view.ts";
+import { raceRemote, type RemoteUi } from "./switchyard-remote.ts";
 
 /** Pi 1.5's `blocked` option for inline `ctx.ui.custom()` (OSC 7501 program status). The 1.2.0 types here lack it, hence the cast; older Pi ignores it. */
 const blockedOn = (kind: "question" | "permission" | "auth", message: string) => ({ blocked: { kind, message } }) as never;
@@ -80,27 +81,50 @@ export async function askApproval(
   approval: Approval,
   fallbackTitle: string,
   createEditor?: EditorCreator,
+  mirror?: { ui: RemoteUi; title: string; signal: AbortSignal },
 ): Promise<ApprovalAnswer | undefined> {
-  const refuse = approval.options[approval.options.length - 1] ?? "Block";
+  const native = (signal?: AbortSignal) => {
+    if (signal?.aborted) return Promise.resolve(undefined);
+    return ctx.ui.custom<ApprovalAnswer | undefined>(
+      (tui, theme, keybindings, done) => new ApprovalDialog(tui, theme, keybindings, approval, done, createEditor, signal),
+      blockedOn("permission", fallbackTitle),
+    );
+  };
+  if (ctx.mode === "tui" && mirror) {
+    try {
+      const result = await raceRemote<ApprovalAnswer>(native, (signal) => askApprovalWithDialogs(mirror.ui, approval, mirror.title, signal), mirror.signal);
+      return mirror.signal.aborted ? undefined : result.value;
+    } catch {
+      return undefined;
+    }
+  }
   if (ctx.mode === "tui") {
     try {
-      const answer = await ctx.ui.custom<ApprovalAnswer | undefined>(
-        (tui, theme, keybindings, done) => new ApprovalDialog(tui, theme, keybindings, approval, done, createEditor),
-        blockedOn("permission", fallbackTitle),
-      );
+      const answer = await native();
       if (answer !== undefined) return answer;
     } catch {
       // Fall through to the plain dialog rather than lose the question.
     }
   }
-  const choice = await ctx.ui.select(fallbackTitle, [...approval.options, BLOCK_WITH_MESSAGE]);
-  if (choice === undefined) return undefined;
+  return askApprovalWithDialogs(ctx.ui, approval, fallbackTitle);
+}
+
+async function askApprovalWithDialogs(ui: Pick<RemoteUi, "select" | "input" | "editor">, approval: Approval, title: string, signal?: AbortSignal): Promise<ApprovalAnswer | undefined> {
+  if (signal?.aborted) return undefined;
+  const options = [...approval.options, BLOCK_WITH_MESSAGE];
+  const choice = signal ? await ui.select(title, options, { signal }) : await ui.select(title, options);
+  if (signal?.aborted || choice === undefined || !options.includes(choice)) return undefined;
   if (approval.editRow !== undefined && choice === approval.editRow) {
-    const edited = (await ctx.ui.editor("Edit the rule", approval.editText ?? ""))?.trim();
+    const value = signal ? await ui.editor("Edit the rule", approval.editText ?? "", { signal }) : await ui.editor("Edit the rule", approval.editText ?? "");
+    if (signal?.aborted) return undefined;
+    const edited = value?.trim();
     return edited ? { choice, edited } : { choice };
   }
   if (choice !== BLOCK_WITH_MESSAGE) return { choice };
-  const message = (await ctx.ui.input("Message for the agent", "why, or what to do instead"))?.trim();
+  const value = signal ? await ui.input("Message for the agent", "why, or what to do instead", { signal }) : await ui.input("Message for the agent", "why, or what to do instead");
+  if (signal?.aborted) return undefined;
+  const message = value?.trim();
+  const refuse = approval.options[approval.options.length - 1] ?? "Block";
   return message ? { choice: refuse, message } : { choice: refuse };
 }
 
@@ -150,6 +174,8 @@ class ApprovalDialog implements Component {
   private emptyMessage = false;
   private hasFocus = false;
   private finished = false;
+  private readonly onAbort = () => this.finish(undefined);
+  private readonly signal?: AbortSignal;
 
   private readonly tui: TUI;
   private readonly theme: Theme;
@@ -165,7 +191,9 @@ class ApprovalDialog implements Component {
     a: Approval,
     done: (answer: ApprovalAnswer | undefined) => void,
     createEditor?: EditorCreator,
+    signal?: AbortSignal,
   ) {
+    this.signal = signal;
     this.tui = tui;
     this.theme = theme;
     this.keybindings = keybindings;
@@ -252,6 +280,8 @@ class ApprovalDialog implements Component {
     this.footer.addChild(border());
     this.paint();
     if (a.editError !== undefined && a.editRow !== undefined) this.openField("rule");
+    signal?.addEventListener("abort", this.onAbort, { once: true });
+    if (signal?.aborted) this.onAbort();
   }
 
   /** Bake the theme's colours into the text; again on every theme change. */
@@ -379,10 +409,11 @@ class ApprovalDialog implements Component {
     else this.finish({ choice: this.refuse, message: text });
   }
 
-  private finish(answer: ApprovalAnswer): void {
+  private finish(answer: ApprovalAnswer | undefined): void {
     if (this.finished) return;
     this.finished = true;
-    this.message.dispose?.();
+    this.signal?.removeEventListener("abort", this.onAbort);
+    try { this.message.dispose?.(); } catch { /* Disposal must not strand the approval. */ }
     this.done(answer);
   }
 

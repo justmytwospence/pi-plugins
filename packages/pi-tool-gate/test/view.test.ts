@@ -198,13 +198,13 @@ describe("askApproval in the terminal UI", () => {
   });
 
   test("outside the terminal UI it falls back to a plain select", async () => {
-    const asked: string[][] = [];
+    const asked: Array<{ title: string; options: string[] }> = [];
     const ctx: any = {
       mode: "rpc",
-      ui: { custom: async () => undefined, select: async (title: string, options: string[]) => (asked.push(options), `asked: ${title}`) },
+      ui: { custom: async () => undefined, select: async (title: string, options: string[]) => (asked.push({ title, options }), "Block") },
     };
-    expect(await askApproval(ctx, { view, options: ["Allow once", "Block"] }, "Allow? bash: x")).toEqual({ choice: "asked: Allow? bash: x" });
-    expect(asked[0]).toEqual(["Allow once", "Block", BLOCK_WITH_MESSAGE]);
+    expect(await askApproval(ctx, { view, options: ["Allow once", "Block"] }, "Allow? bash: x")).toEqual({ choice: "Block" });
+    expect(asked[0]).toEqual({ title: "Allow? bash: x", options: ["Allow once", "Block", BLOCK_WITH_MESSAGE] });
   });
 
   test("the fallback asks for the message after the select", async () => {

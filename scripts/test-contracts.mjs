@@ -12,7 +12,7 @@ for (const { source, copies } of transcriptHelpers) {
   for (const copy of copies) assert.equal(readFileSync(resolve(root, copy), 'utf8'), expected, `generated transcript helper drift: ${copy}`);
 }
 const identical = [
-  ['pi-ask-user-question','pi-plan-mode'].map(p => `packages/${p}/src/switchyard-remote.ts`),
+  ['pi-ask-user-question','pi-plan-mode','pi-tool-gate'].map(p => `packages/${p}/src/switchyard-remote.ts`),
   ['pi-context','pi-cc-render'].map(p => `packages/${p}/src/context-metadata.ts`),
   ['pi-plan-mode','pi-status-footer','pi-sidebar','pi-compact-plan','pi-cache-guard','pi-subagents'].map(p => `packages/${p}/src/routed-model.ts`),
   ['pi-status-footer','pi-tool-gate','pi-plan-mode','pi-context','pi-cache-guard','pi-cc-render','pi-system1','pi-sidebar'].map(p => `packages/${p}/src/footer-actions.ts`),

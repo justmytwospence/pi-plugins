@@ -1,7 +1,9 @@
 import { stripVTControlCharacters } from "node:util";
 import { initTheme } from "@earendil-works/pi-coding-agent";
-import { setKeybindings } from "@earendil-works/pi-tui";
-import { beforeAll, describe, expect, test } from "vitest";
+import { Editor, setKeybindings } from "@earendil-works/pi-tui";
+import type { EditorCreator } from "../src/editor.ts";
+import { beforeAll, describe, expect, test, vi } from "vitest";
+import type { RemoteUi } from "../src/switchyard-remote.ts";
 import { type Approval, type ApprovalAnswer, askApproval } from "../src/prompt.ts";
 
 const sdk = import.meta.resolve("@earendil-works/pi-coding-agent");
@@ -27,28 +29,126 @@ const approval = (extra: Partial<Approval> = {}): Approval => ({
 });
 
 /** The dialog as Pi's terminal UI hosts it: drive it with keys, read what it draws, await its answer. */
-function open(a: Approval, width = 60) {
+function open(a: Approval, width = 60, mirror?: { ui: RemoteUi; title: string; signal: AbortSignal }, order?: string[], createEditor?: EditorCreator) {
+  let doneCount = 0;
+  let plainCalls = 0;
   let dialog: { render(width: number): string[]; handleInput(data: string): void; focused: boolean } | undefined;
   const ctx = {
     mode: "tui",
     ui: {
       custom: (factory: (...args: unknown[]) => typeof dialog) =>
         new Promise((resolve) => {
-          dialog = factory({ terminal: { rows: 40, columns: width }, requestRender() {} }, themeModule.theme, kb, resolve);
+          order?.push("native");
+          dialog = factory({ terminal: { rows: 40, columns: width }, requestRender() {} }, themeModule.theme, kb, (value: unknown) => { doneCount++; resolve(value); });
           if (dialog) dialog.focused = true;
         }),
-      select: async () => undefined,
-      editor: async () => undefined,
+      select: async () => { plainCalls++; return undefined; },
+      editor: async () => { plainCalls++; return undefined; },
     },
   };
-  const answer = askApproval(ctx as never, a, "Allow?") as Promise<ApprovalAnswer | undefined>;
+  const answer = askApproval(ctx as never, a, "Allow?", createEditor, mirror) as Promise<ApprovalAnswer | undefined>;
   const screen = () => stripVTControlCharacters((dialog?.render(width) ?? []).join("\n"));
   const press = (...keys: string[]) => keys.forEach((k) => dialog?.handleInput(k));
-  return { answer, screen, press };
+  return { answer, screen, press, doneCount: () => doneCount, plainCalls: () => plainCalls };
 }
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((r) => { resolve = r; });
+  return { promise, resolve };
+}
+
 const DOWN = "\x1b[B";
 const ENTER = "\r";
 const ESC = "\x1b";
+
+test("a throwing embedded editor disposal still completes once", async () => {
+  const dispose = vi.fn(() => { throw new Error("dispose failed"); });
+  const createEditor: EditorCreator = (tui, theme) => Object.assign(new Editor(tui, theme), { dispose });
+  const dialog = open(approval(), 60, undefined, undefined, createEditor);
+  dialog.press(ESC, ESC);
+  expect(await dialog.answer).toEqual({ choice: "Block" });
+  expect(dispose).toHaveBeenCalledOnce();
+  expect(dialog.doneCount()).toBe(1);
+});
+
+describe("mirrored approvals", () => {
+  function remote() {
+    const select = deferred<string | undefined>();
+    const input = deferred<string | undefined>();
+    const editor = deferred<string | undefined>();
+    const order: string[] = [];
+    const ui = {
+      select: vi.fn((_title: string, _options: string[], opts?: { signal?: AbortSignal }) => { order.push("remote"); opts?.signal?.addEventListener("abort", () => select.resolve(undefined)); return select.promise; }),
+      input: vi.fn((_title: string, _placeholder?: string, opts?: { signal?: AbortSignal }) => { opts?.signal?.addEventListener("abort", () => input.resolve(undefined)); return input.promise; }),
+      editor: vi.fn((_title: string, _prefill?: string, opts?: { signal?: AbortSignal }) => { opts?.signal?.addEventListener("abort", () => editor.resolve(undefined)); return editor.promise; }),
+      confirm: vi.fn(async () => false),
+    };
+    const outer = new AbortController();
+    const dialog = open(approval(), 60, { ui, title: "remote title", signal: outer.signal }, order);
+    return { ui, select, input, editor, outer, dialog, order };
+  }
+  test("remote allow closes native once and starts first", async () => {
+    const r = remote();
+    expect(r.order).toEqual(["remote", "native"]);
+    r.select.resolve("Allow once");
+    expect(await r.dialog.answer).toEqual({ choice: "Allow once" });
+    expect(r.dialog.doneCount()).toBe(1);
+  });
+  test("native block aborts remote with terminal reason", async () => {
+    const r = remote();
+    r.dialog.press(ESC);
+    expect(await r.dialog.answer).toEqual({ choice: "Block" });
+    expect(r.ui.select.mock.calls[0]![2]!.signal!.reason).toBe("terminal");
+  });
+  test("an intermediate remote answer does not beat native", async () => {
+    const r = remote();
+    r.select.resolve("Block with a message");
+    await Promise.resolve();
+    expect(r.ui.input).toHaveBeenCalled();
+    r.dialog.press(ESC);
+    expect(await r.dialog.answer).toEqual({ choice: "Block" });
+    expect(r.ui.input.mock.calls[0]![2]!.signal!.reason).toBe("terminal");
+  });
+  test("remote message and edit return complete answers", async () => {
+    const a = remote();
+    a.select.resolve("Block with a message");
+    await Promise.resolve();
+    a.input.resolve("  please stop  ");
+    expect(await a.dialog.answer).toEqual({ choice: "Block", message: "please stop" });
+    const b = remote();
+    b.select.resolve("Edit the rule...");
+    await Promise.resolve();
+    b.editor.resolve("  Bash(npm publish)  ");
+    expect(await b.dialog.answer).toEqual({ choice: "Edit the rule...", edited: "Bash(npm publish)" });
+  });
+  test("cancel, abort during edit, invalid answers and errors fail closed", async () => {
+    const a = remote();
+    a.select.resolve(undefined);
+    expect(await a.dialog.answer).toBeUndefined();
+    expect(a.dialog.plainCalls()).toBe(0);
+    const b = remote();
+    b.select.resolve("Edit the rule...");
+    await Promise.resolve();
+    b.outer.abort();
+    expect(await b.dialog.answer).toBeUndefined();
+    expect(b.dialog.doneCount()).toBe(1);
+    expect(b.dialog.plainCalls()).toBe(0);
+    const c = remote();
+    c.select.resolve("unoffered");
+    expect(await c.dialog.answer).toBeUndefined();
+    const ui: RemoteUi = { select: async () => { throw new Error("disconnected"); }, input: async () => undefined, editor: async () => undefined, confirm: async () => false };
+    const d = open(approval(), 60, { ui, title: "remote", signal: new AbortController().signal });
+    expect(await d.answer).toBeUndefined();
+    expect(d.doneCount()).toBe(1);
+    expect(d.plainCalls()).toBe(0);
+  });
+  test("RPC message uses the ordinary two-argument input", async () => {
+    const input = vi.fn(async () => "  please stop  ");
+    const ctx = { mode: "rpc", ui: { select: async () => "Block with a message", input } };
+    expect(await askApproval(ctx as never, approval(), "title")).toEqual({ choice: "Block", message: "please stop" });
+    expect(input).toHaveBeenCalledWith("Message for the agent", "why, or what to do instead");
+  });
+});
 
 describe("the approval dialog's rule rows", () => {
   test("the rules are in the question, one flat line each, over short rows", async () => {

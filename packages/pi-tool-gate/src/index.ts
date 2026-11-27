@@ -11,7 +11,9 @@
 // alone decides whether a call that passes is judged, pushed back or put to you. Deny rules apply
 // in every combination. Manual and accept-edits remain explicit legacy approval settings.
 import path from "node:path";
+import { randomUUID } from "node:crypto";
 import { readFileSync, realpathSync } from "node:fs";
+import { remoteUi } from "./switchyard-remote.ts";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { truncateToWidth } from "@earendil-works/pi-tui";
 import {
@@ -521,13 +523,14 @@ export default function toolGate(pi: ExtensionAPI) {
   const denyInsteadOfPrompting = () => effectiveDenyInsteadOfPrompting(promptingOverride, inheritedModes().denyInsteadOfPrompting, config.denyInsteadOfPrompting);
   const promptingState = () => `Permission prompts: ${denyInsteadOfPrompting() ? "off" : "on"} (source: ${promptingOverride !== undefined ? "session" : inheritedModes().denyInsteadOfPrompting !== undefined ? "inherited" : "config"}).`;
   let revision = 0;
+  let activeApprovalMirror: AbortController | undefined;
   const effectiveWorkflow = (): WorkflowMode => workflow;
   const currentModeGuidance = () => modeGuidanceText({ workflow: effectiveWorkflow(), approval, denyInsteadOfPrompting: denyInsteadOfPrompting() });
   let modeSettingsNoticePending = false;
   /** Where each guidance snapshot first appeared; see guidance-anchors.ts. */
   let guidanceAnchors: GuidanceAnchor[] = [];
   // Mode and classifier changes cancel decisions, not usage of tools already running on this branch.
-  const invalidate = () => { revision++; pushedBackThisTurn.clear(); classifierFailures.clear(); };
+  const invalidate = () => { revision++; activeApprovalMirror?.abort(); pushedBackThisTurn.clear(); classifierFailures.clear(); };
   const staleResult = () => ({ block: true, reason: "tool-gate blocked this call: modes changed or System 1 changed; the call must be reevaluated." });
   let system1Key = resolveSystem1Target(config.jev).key;
   const refreshSystem1Target = () => {
@@ -1171,10 +1174,16 @@ export default function toolGate(pi: ExtensionAPI) {
         ].join("\n");
         if (decisionStale(epoch)) return staleResult();
         if (denyInsteadOfPrompting()) return promptingDenied(q.tool, q.held);
+        const remote = ctx.mode === "tui" ? remoteUi(pi) : undefined;
+        const remoteTitle = remote ? `${title}\nApproval reference: ${randomUUID()}` : undefined;
+        const controller = remote ? new AbortController() : undefined;
+        const signal = controller ? (ctx.signal ? AbortSignal.any([controller.signal, ctx.signal]) : controller.signal) : undefined;
+        if (signal?.aborted) return { block: true, reason: DECLINED };
+        activeApprovalMirror = controller;
         // The same facts as data, for remote hosts that would otherwise parse the title (approval-entry.ts).
         try {
           pi.appendEntry(APPROVAL_REQUEST_ENTRY, approvalRequest({
-            title, tool: q.tool, action: presented.action, target: presented.target, cwd: ctx.cwd,
+            title: remoteTitle ?? title, tool: q.tool, action: presented.action, target: presented.target, cwd: SHELL_TOOLS.has(q.tool) ? shellDir(q.tool, q.input, ctx.cwd) : ctx.cwd,
             ...(SHELL_TOOLS.has(q.tool) && typeof q.input.command === "string" ? { command: q.input.command } : {}),
             ...(q.held !== undefined ? { held: q.held } : {}),
             ...(agent !== undefined ? { agent } : {}),
@@ -1183,23 +1192,30 @@ export default function toolGate(pi: ExtensionAPI) {
             ...(problem ? { problem } : {}),
           }));
         } catch { /* No session: the dialog still opens. */ }
-        const answer = await whileBlocked(pi.events, label, () =>
-          askApproval(
-            ctx,
-            {
-              view,
-              held: q.held,
-              agentCase: q.agentCase,
-              note: q.note,
-              options,
-              ...(grant ? { grant } : {}),
-              ...(labels?.edit ? { editRow: labels.edit, editText: draft ?? items.join("\n"), ...(problem ? { editError: problem } : {}) } : {}),
-            },
-            title,
-            editorFactory,
-          ),
-        );
+        let answer: Awaited<ReturnType<typeof askApproval>>;
+        try {
+          answer = await whileBlocked(pi.events, label, () =>
+            askApproval(
+              ctx,
+              {
+                view,
+                held: q.held,
+                agentCase: q.agentCase,
+                note: q.note,
+                options,
+                ...(grant ? { grant } : {}),
+                ...(labels?.edit ? { editRow: labels.edit, editText: draft ?? items.join("\n"), ...(problem ? { editError: problem } : {}) } : {}),
+              },
+              title,
+              editorFactory,
+              remote && remoteTitle && signal ? { ui: remote, title: remoteTitle, signal } : undefined,
+            ),
+          );
+        } finally {
+          if (activeApprovalMirror === controller) activeApprovalMirror = undefined;
+        }
         if (decisionStale(epoch)) return staleResult();
+        if (signal?.aborted) return { block: true, reason: DECLINED };
         problem = undefined;
         if (!answer) return { block: true, reason: DECLINED };
         if (answer.choice === ALLOW_ONCE) return undefined;
@@ -1874,9 +1890,10 @@ export default function toolGate(pi: ExtensionAPI) {
         ...[...localDirs.values()].map((d) => ({ ...d, scope: "project" as const, source: grantsFile(), writable: true })),
         ...fileDirs.map((d) => ({ ...d, scope: "project" as const })),
       ],
-      add: (scope, list, text) => addRule(scope, list, text, cwd),
-      remove: (rule) => removeRule(rule, cwd),
+      add: (scope, list, text) => { activeApprovalMirror?.abort(); return addRule(scope, list, text, cwd); },
+      remove: (rule) => { activeApprovalMirror?.abort(); return removeRule(rule, cwd); },
       removeDir: async (d) => {
+        activeApprovalMirror?.abort();
         if (d.scope === "session") sessionDirs.delete(d.key);
         else {
           if (d.writable === false) throw new Error(`${d.source} is read-only here`);

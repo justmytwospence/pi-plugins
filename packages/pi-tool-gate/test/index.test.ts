@@ -13,6 +13,7 @@ import { SYSTEM1_CHANGED } from "../src/system1.js";
 import { WORKAROUNDS } from "../src/judge.ts";
 import { assistantEntry, fakeJev, harness, usage, userEntry } from "./harness.ts";
 import { PROMPTING_DISABLED, PROMPTING_STATUS_KEY } from "../src/prompting.ts";
+import { REMOTE_UI_CHANNEL } from "../src/switchyard-remote.ts";
 import * as views from "../src/view.ts";
 
 let configDir: string;
@@ -1179,6 +1180,96 @@ test("without UI, a retried hold is blocked", async () => {
   expect(second.reason).toMatch(/no user to approve it/u);
 });
 
+test("invalidating a mirrored approval aborts it and returns stale without a grant", async () => {
+  const { h, ctx } = setup(risky);
+  DEFAULT_CONFIG.pushBack = false;
+  try {
+    const started = deferred<AbortSignal>();
+    h.pi.events.on(REMOTE_UI_CHANNEL, (request: any) => { request.ui = {
+      select: (_title: string, _options: string[], opts: { signal: AbortSignal }) => new Promise((resolve) => {
+        started.resolve(opts.signal);
+        opts.signal.addEventListener("abort", () => resolve(undefined));
+      }),
+    }; });
+    ctx.ui.custom = () => new Promise(() => {});
+    await h.emit("before_agent_start", { prompt: "x" }, ctx);
+    const result = h.emit("tool_call", call("bash", { command: "npm publish" }), ctx);
+    const signal = await started.promise;
+    await h.commands.get("gate").handler("prompts off", ctx);
+    expect(signal.aborted).toBe(true);
+    expect(signal.reason).toBe("pi");
+    expect(await result).toMatchObject({ block: true, reason: expect.stringContaining("must be reevaluated") });
+    await h.commands.get("gate").handler("prompts on", ctx);
+    const again = h.emit("tool_call", call("bash", { command: "npm publish" }, "t2"), ctx);
+    const nextSignal = await started.promise;
+    // The next call must still need approval, rather than having acquired a grant.
+    await vi.waitFor(() => expect(h.events.filter((e) => e.channel === REMOTE_UI_CHANNEL)).toHaveLength(2));
+    await h.commands.get("gate").handler("prompts off", ctx);
+    expect(nextSignal.aborted).toBe(true);
+    expect(await again).toMatchObject({ block: true });
+  } finally { DEFAULT_CONFIG.pushBack = true; }
+});
+
+test("remote rule edit starts a new approval and does not grant", async () => {
+  const { h, ctx } = setup(risky);
+  DEFAULT_CONFIG.pushBack = false;
+  try {
+    const titles: string[] = [];
+    const options: string[][] = [];
+    h.pi.events.on(REMOTE_UI_CHANNEL, (request: any) => { request.ui = {
+      select: async (title: string, rows: string[]) => { titles.push(title); options.push(rows); return titles.length === 1 ? "Edit the rule..." : "Block"; },
+      editor: async () => "Bash(npm publish --dry-run)",
+    }; });
+    ctx.ui.custom = () => new Promise(() => {});
+    await h.emit("before_agent_start", { prompt: "x" }, ctx);
+    expect(await h.emit("tool_call", call("bash", { command: "npm publish" }), ctx)).toMatchObject({ block: true });
+    expect(options[0]).toContain("Edit the rule...");
+    expect(titles).toHaveLength(2);
+    const refs = titles.map((title) => title.match(/Approval reference: ([0-9a-f-]+)$/u)?.[1]);
+    expect(refs[0]).toBeDefined();
+    expect(refs[1]).toBeDefined();
+    expect(refs[0]).not.toBe(refs[1]);
+    expect(titles[1]).toContain("Bash(npm publish --dry-run)");
+    await h.emit("tool_call", call("bash", { command: "npm publish --dry-run" }, "t2"), ctx);
+    expect(titles).toHaveLength(3);
+  } finally { DEFAULT_CONFIG.pushBack = true; }
+});
+
+test("explicit rule mutation retires a mirror before a late allow", async () => {
+  const { h, ctx } = setup(risky);
+  DEFAULT_CONFIG.pushBack = false;
+  try {
+    const started = deferred<AbortSignal>();
+    const answer = deferred<string | undefined>();
+    let asks = 0;
+    h.pi.events.on(REMOTE_UI_CHANNEL, (request: any) => { request.ui = {
+      select: (_title: string, _rows: string[], opts: { signal: AbortSignal }) => { asks++; started.resolve(opts.signal); return answer.promise; },
+    }; });
+    ctx.ui.custom = () => new Promise(() => {});
+    await h.emit("before_agent_start", { prompt: "x" }, ctx);
+    const result = h.emit("tool_call", call("bash", { command: "npm publish" }), ctx);
+    const signal = await started.promise;
+    await h.commands.get("gate").handler("rules add deny Bash(npm publish) --scope session", ctx);
+    expect(signal.aborted).toBe(true);
+    answer.resolve("Allow once");
+    expect(await result).toMatchObject({ block: true });
+    expect(await h.emit("tool_call", call("bash", { command: "npm publish" }, "t2"), ctx)).toMatchObject({ block: true, reason: expect.stringMatching(/deny rule/iu) });
+    expect(asks).toBe(1);
+  } finally { DEFAULT_CONFIG.pushBack = true; }
+});
+
+test("background approval entry records the resolved relative cwd", async () => {
+  const { h, ctx } = setup(risky);
+  DEFAULT_CONFIG.pushBack = false;
+  try {
+    mkdirSync(path.join(ctx.cwd, "sub"));
+    await h.emit("before_agent_start", { prompt: "x" }, ctx);
+    ctx.ui.selectAnswers.push("Block");
+    expect(await h.emit("tool_call", call("bg_run", { command: "npm publish", cwd: "sub", kind: "job" }), ctx)).toMatchObject({ block: true });
+    expect(h.entries.find((e) => e.customType === "tool-gate:approval-request")?.data).toMatchObject({ tool: "bg_run", cwd: path.join(ctx.cwd, "sub") });
+  } finally { DEFAULT_CONFIG.pushBack = true; }
+});
+
 test("with push-back off, holds go straight to the user", async () => {
   const { h, ctx } = setup(risky);
   DEFAULT_CONFIG.pushBack = false;
@@ -1338,10 +1429,11 @@ describe("herdr", () => {
         await h.emit("before_agent_start", { prompt: "x" }, ctx);
         const result: any = await h.emit("tool_call", call("bash", { command: "npm publish" }), ctx);
         expect(result?.block).toBe(answer === "Block" ? true : undefined);
-        expect(h.events.map((e) => e.channel)).toEqual(["herdr:blocked", "ui.select", "herdr:blocked"]);
-        expect(h.events[0]?.data).toEqual({ active: true, label: "Allow? bash — npm publish" });
-        expect(h.events[1]?.data).toContain("Action: bash\nTarget: npm publish");
-        expect(h.events[2]?.data).toEqual({ active: false });
+        const events = h.events.filter((e) => e.channel !== "switchyard.remote-ui.v1");
+        expect(events.map((e) => e.channel)).toEqual(["herdr:blocked", "ui.select", "herdr:blocked"]);
+        expect(events[0]?.data).toEqual({ active: true, label: "Allow? bash — npm publish" });
+        expect(events[1]?.data).toContain("Action: bash\nTarget: npm publish");
+        expect(events[2]?.data).toEqual({ active: false });
       }
     } finally {
       DEFAULT_CONFIG.pushBack = true;
@@ -1356,7 +1448,7 @@ describe("herdr", () => {
       });
       await h.emit("before_agent_start", { prompt: "x" }, ctx);
       await expect(h.emit("tool_call", call("bash", { command: "npm publish" }), ctx)).rejects.toThrow(/dialog failed/u);
-      expect(h.events.map((e) => [e.channel, e.data.active ?? "select"])).toEqual([
+      expect(h.events.filter((e) => e.channel !== "switchyard.remote-ui.v1").map((e) => [e.channel, e.data.active ?? "select"])).toEqual([
         ["herdr:blocked", true],
         ["ui.select", "select"],
         ["herdr:blocked", false],
@@ -1380,7 +1472,7 @@ describe("herdr", () => {
       const long = held(async () => "Allow once");
       await long.h.emit("before_agent_start", { prompt: "x" }, long.ctx);
       await long.h.emit("tool_call", call("bash", { command: `npm publish ${"--tag next ".repeat(20)}` }), long.ctx);
-      const label: string = long.h.events[0]?.data.label;
+      const label: string = long.h.events.find((e) => e.channel === "herdr:blocked")?.data.label;
       expect(label).toHaveLength(60);
       expect(label).toMatch(/^Allow\? bash — npm publish --tag next .*…$/u);
     } finally {
