@@ -8,7 +8,7 @@ import { homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { requireNode } from './lib/pool.mjs';
-import { bumpPin, nextPatch } from './lib/release.mjs';
+import { bumpPin, nextPatch, waitForReleaseCi } from './lib/release.mjs';
 import { setVersion } from './set-version.mjs';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
@@ -37,30 +37,6 @@ const run = (cmd, argv, opts = {}) => (execFileSync(cmd, argv, { cwd: root, enco
 const git = (...argv) => run('git', argv);
 const ok = (cmd, argv, opts = {}) => spawnSync(cmd, argv, { cwd: root, stdio: 'ignore', ...opts }).status === 0;
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-
-async function waitForRun(workflow, query, label, sha) {
-  const list = () => JSON.parse(run('gh', ['run', 'list', '--workflow', workflow, ...query, '--limit', '1',
-    '--json', 'databaseId,status,conclusion,url,headSha']) || '[]')[0];
-  let latest = list();
-  for (let waited = 0; !latest && waited < 180 && !dryRun; waited += 10) {
-    await sleep(10_000);
-    latest = list();
-  }
-  if (!latest) {
-    if (dryRun) return console.log(`${label}: no run yet for ${sha.slice(0, 7)}`);
-    fail(`no ${label} run for ${sha.slice(0, 7)}`);
-  }
-  if (dryRun) {
-    console.log(`${label}: ${latest.status} ${latest.conclusion || ''} ${latest.url}`);
-    return;
-  }
-  if (latest.status !== 'completed') {
-    spawnSync('gh', ['run', 'watch', String(latest.databaseId), '--exit-status', '--compact', '--interval', '15'], { cwd: root, stdio: 'inherit' });
-    latest = list();
-  }
-  if (latest.conclusion !== 'success') fail(`CI is ${latest.conclusion || latest.status} on ${sha.slice(0, 7)}: ${latest.url}`);
-  console.log(`${label}: success`);
-}
 
 async function main() {
   requireNode();
@@ -94,15 +70,14 @@ async function main() {
   if (skipCi) console.log('warning: releasing without CI');
   else if (!pinOnly) {
     step('CI gate');
-    await waitForRun('checks.yml', ['--commit', head, '--event', 'push'], 'Checks', head);
-    // The workflow may not exist yet on the default branch (gh then fails with a 404).
-    let sw;
-    try {
-      sw = JSON.parse(execFileSync('gh', ['run', 'list', '--workflow', 'switchyard.yml', '--branch', 'main', '--limit', '1', '--json', 'headSha'],
-        { cwd: root, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }) || '[]')[0];
-    } catch { sw = undefined; }
-    if (!sw || ok('git', ['merge-base', '--is-ancestor', sw.headSha, last])) console.log(`switchyard: no run since ${last}`);
-    else await waitForRun('switchyard.yml', ['--branch', 'main'], 'Switchyard', sw.headSha);
+    await waitForReleaseCi(head, {
+      run, sleep, dryRun,
+      watch: (id) => {
+        const result = spawnSync('gh', ['run', 'watch', String(id), '--exit-status', '--compact', '--interval', '15'], { cwd: root, stdio: 'inherit' });
+        if (result.error) throw result.error;
+        if (result.status !== 0) throw new Error(`CI watch failed for run ${id}`);
+      },
+    });
   }
 
   if (!pinOnly) {

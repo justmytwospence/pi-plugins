@@ -2,19 +2,7 @@ name: Switchyard
 on:
   push:
     branches: [main]
-    paths:
-      - 'packages/*/src/switchyard/**'
-      - 'scripts/check-switchyard.mjs'
-      - '.github/compat-switchyard.json'
-      - '.github/workflows/switchyard.yml'
-      - 'package.json'
   pull_request:
-    paths:
-      - 'packages/*/src/switchyard/**'
-      - 'scripts/check-switchyard.mjs'
-      - '.github/compat-switchyard.json'
-      - '.github/workflows/switchyard.yml'
-      - 'package.json'
   schedule:
     - cron: '0 12 * * 1'
   workflow_dispatch:
@@ -60,3 +48,13 @@ jobs:
       - run: pnpm install --frozen-lockfile && pnpm build
         working-directory: ${{ env.SWITCHYARD_DIR }}
       - run: npm run check:switchyard
+  switchyard:
+    name: Switchyard compatibility
+    needs: [switchyard-compat]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require the compatibility matrix
+        env:
+          MATRIX_RESULT: ${{ needs.switchyard-compat.result }}
+        run: test "$MATRIX_RESULT" = success

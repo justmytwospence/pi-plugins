@@ -1,0 +1,12 @@
+{
+  "version": 1,
+  "skills": {
+    "switchyard-plugin-development": {
+      "source": "justmytwospence/switchyard",
+      "ref": "b479fc7c0d70ee167bbd7f77c02cb61e80f2e9a7",
+      "sourceType": "github",
+      "skillPath": "skills/switchyard-plugin-development/SKILL.md",
+      "computedHash": "c5e21e6c5bfbb7afc424b9c5283c1c28669ef2552cd71c8e1959b157607aa556"
+    }
+  }
+}

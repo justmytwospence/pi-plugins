@@ -6,14 +6,30 @@ import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
+import { needsSwitchyard } from './lib/switchyard-changes.mjs';
+
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
-const git = (...args) => execFileSync('git', args, { cwd: root, encoding: 'utf8' }).split('\n').filter(Boolean);
-const base = process.argv[2] ?? 'origin/main';
-const mergeBase = git('merge-base', 'HEAD', base)[0];
-const changed = [...new Set([
-  ...git('diff', '--name-only', mergeBase),
-  ...git('ls-files', '--others', '--exclude-standard'),
-])];
+
+export function collectChangedFiles(root, base, exec = execFileSync) {
+  const git = (...args) => exec('git', args, { cwd: root, encoding: 'utf8' });
+  const mergeBase = git('merge-base', 'HEAD', base).trim();
+  return [...new Set([
+    ...git('diff', '--no-renames', '--name-only', '-z', mergeBase, '--').split('\0').filter(Boolean),
+    ...git('ls-files', '--others', '--exclude-standard', '-z').split('\0').filter(Boolean),
+  ])];
+}
+
+export function runSelectedChecks({ tasks, components, switchyard }, run) {
+  let status = 0;
+  const check = (args) => { if (run(args) !== 0) status = 1; };
+  if (tasks.length) check(['scripts/test-suite.mjs', '--only', tasks.join(',')]);
+  if (components.length) check(['scripts/check-components.mjs', ...components]);
+  if (switchyard) check(['scripts/check-switchyard.mjs']);
+  return status;
+}
+
+function main() {
+const changed = collectChangedFiles(root, process.argv[2] ?? 'origin/main');
 
 const manifest = JSON.parse(readFileSync(resolve(root, 'package.json'), 'utf8'));
 const plugins = new Set(manifest.pi.extensions.map((entry) => entry.split('/')[2]));
@@ -46,16 +62,16 @@ for (const path of changed) {
   if (/^scripts\/set-version/.test(path)) suite.add('set-version');
   if (/^scripts\/release/.test(path) || path === 'scripts/lib/release.mjs') suite.add('release');
   if (path.startsWith('scripts/remote-clients/') || path === 'scripts/lib/remote-client-paths.mjs') suite.add('client-paths');
+  if (['scripts/check-changed.mjs', 'scripts/check-changed.test.mjs', 'scripts/lib/switchyard-changes.mjs'].includes(path)) suite.add('changed-checks');
+  if (path.startsWith('.agents/skills/switchyard-plugin-development/') || path.startsWith('.claude/skills/switchyard-plugin-development/') || path === 'skills-lock.json') suite.add('contracts');
 }
 const tasks = [...suite].filter((name) => known.includes(name));
 
-console.log(`changed: ${changed.length} files; suite: ${tasks.join(', ') || 'none'}; components: ${components.join(', ') || 'none'}`);
-if (!tasks.length && !components.length) {
-  console.log('nothing to check');
-  process.exit(0);
+const switchyard = needsSwitchyard(changed);
+console.log(`changed: ${changed.length} files; suite: ${tasks.join(', ') || 'none'}; components: ${components.join(', ') || 'none'}; switchyard: ${switchyard ? 'selected' : 'not selected'}`);
+if (!tasks.length && !components.length && !switchyard) console.log('nothing to check');
+return runSelectedChecks({ tasks, components, switchyard }, (args) =>
+  spawnSync(process.execPath, args, { cwd: root, stdio: 'inherit' }).status);
 }
-let status = 0;
-const run = (args) => { if (spawnSync(process.execPath, args, { cwd: root, stdio: 'inherit' }).status !== 0) status = 1; };
-if (tasks.length) run(['scripts/test-suite.mjs', '--only', tasks.join(',')]);
-if (components.length) run(['scripts/check-components.mjs', ...components]);
-process.exit(status);
+
+if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) process.exitCode = main();

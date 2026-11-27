@@ -25,6 +25,7 @@ const TASKS = {
   'dialog-focus': script('test-dialog-focus.mjs', { serial: true }),
   'client-paths': { command: node, args: ['--test', 'scripts/remote-clients/client-paths.test.mjs'] },
   'set-version': { command: node, args: ['--test', 'scripts/set-version.test.mjs'] },
+  'changed-checks': { command: node, args: ['--test', 'scripts/check-changed.test.mjs'] },
   release: { command: node, args: ['--test', 'scripts/release.test.mjs'] },
   lifecycle: script('test-lifecycle.mjs'),
   'family-sidebar': script('test-family-sidebar.mjs'),

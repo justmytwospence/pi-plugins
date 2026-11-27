@@ -9,7 +9,11 @@ Keep components independently usable, and keep sibling integrations optional. Fo
 
 ## Switchyard compatibility
 
-The [Switchyard integration contract](/architecture/switchyard/) is structured and separate from Ovis and Collie's screen-reading contract. Assess both where relevant: passing one does not prove the other. Adapter and remote-UI changes need a portable fallback and cross-repository compatibility checks; report any checks not run. Dedicated adapter development tools are upcoming, not a prerequisite available today.
+The [Switchyard integration contract](/architecture/switchyard/) is structured and separate from Ovis and Collie's screen-reading contract. Assess both where relevant: passing one does not prove the other. Adapter and remote-UI changes need a portable fallback and cross-repository compatibility checks; report any checks not run. Capable Switchyard hosts provide adapter inspection and safe reload, and its authoring tools provide portable preview; check the selected host version before relying on them.
+
+The project installs copied, commit-pinned instances of Switchyard's [public plugin-development skill](https://github.com/justmytwospence/switchyard/tree/dev/skills/switchyard-plugin-development) for Pi/Codex and Claude. Update its source in Switchyard, then reinstall the targeted skill from the new immutable commit with the skills CLI and `--copy`; commit both copies and `skills-lock.json` together. Do not edit the copies independently.
+
+`npm run check:changed` selects the real-Pi Switchyard compatibility check for package changes and compatibility infrastructure changes. It requires an installed Pi, component dependencies and a built Switchyard checkout; missing prerequisites fail. Set `SWITCHYARD_DIR` to an absolute checkout path when the default sibling path is not correct, including from nested worktrees. Local dirty paired checks do not establish the pinned CI result. The release gate requires successful Checks and Switchyard push workflows on the exact source HEAD.
 
 ## Live local loading
 

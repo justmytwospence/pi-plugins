@@ -151,6 +151,11 @@ for (const entry of manifest.switchyard.adapter) {
 for (const file of contracts.slice(1)) {
   assert.equal(readFileSync(resolve(root,file),'utf8'),readFileSync(resolve(root,contracts[0]),'utf8'),`Switchyard contract copy drift: ${file}`);
 }
+const skillCheck = spawnSync(process.execPath, [
+  '.agents/skills/switchyard-plugin-development/scripts/check.mjs',
+  '--lock', 'skills-lock.json', '--mirror', '.claude/skills/switchyard-plugin-development',
+], { cwd: root, encoding: 'utf8' });
+assert.equal(skillCheck.status, 0, `Switchyard skill integrity: ${skillCheck.stdout}${skillCheck.stderr}`);
 const { plugins } = await import('../site/src/data/plugins.mjs');
 const names = plugins.map(p => p.id ?? p.name ?? p.slug);
 assert.deepEqual(new Set(names),new Set(components),'public catalog matches selectable manifest');
