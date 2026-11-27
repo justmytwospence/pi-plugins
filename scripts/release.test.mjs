@@ -67,8 +67,8 @@ test('release CI waits for missing Switchyard run and fails closed', async () =>
   assert.ok(f.sleeps.every((ms) => ms === 10_000));
 });
 
-test('release CI rejects failure, cancellation and API errors', async () => {
-  for (const conclusion of ['failure', 'cancelled']) {
+test('release CI rejects failure, cancellation, skipped runs and API errors', async () => {
+  for (const conclusion of ['failure', 'cancelled', 'skipped']) {
     const f = ciFixture({ 'switchyard.yml': [{ databaseId: 1, headSha: SHA, status: 'completed', conclusion }] });
     await assert.rejects(waitForReleaseCi(SHA, f.options), new RegExp(conclusion));
   }
@@ -84,6 +84,13 @@ test('release CI watches pending runs and rejects disappearance', async () => {
   assert.deepEqual(g.watched, [42]);
   const missing = ciFixture({ 'checks.yml': [pending, null] });
   await assert.rejects(waitForReleaseCi(SHA, missing.options), /disappeared/);
+});
+
+test('release CI fails closed if no matching run ever appears', async () => {
+  const f = ciFixture({ 'checks.yml': [null] });
+  await assert.rejects(waitForReleaseCi(SHA, f.options), /no Checks run/);
+  assert.equal(f.sleeps.length, 18);
+  assert.deepEqual(f.watched, []);
 });
 
 test('release CI dry run reports missing workflows without waiting', async () => {

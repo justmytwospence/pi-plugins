@@ -13,8 +13,6 @@ import { readTranscriptCheckpoint } from "../src/transcript-contract.ts";
 import { fakeCall } from "./core/fake.ts";
 import { relocatingHerdr } from "./relocation-fixture.ts";
 
-// Real-timer waits run in the full tier (PI_TEST_FULL=1).
-const FULL = process.env.PI_TEST_FULL === "1";
 
 afterEach(() => vi.unstubAllEnvs());
 
@@ -461,18 +459,20 @@ test("a message held behind a dialog survives /reload; the draft guard submits w
   const two = await start();
   expect(two.p.messages.map((m) => m.message.content).join()).toContain("survive");
 
-  // Draft guard: a foreign paste and Enter into an idle draft. It waits out a real 3 s
-  // window, so it runs in the full tier (PI_TEST_FULL=1).
-  if (FULL) {
+  // Exercise expiry of the trusted-input window without waiting on wall time.
+  vi.useFakeTimers({ toFake: ["Date"] });
+  try {
     two.state.editor = "my draft";
-    await new Promise((r) => setTimeout(r, 3_050));
+    vi.setSystemTime(Date.now() + 3_050);
     expect(two.input("\x1b[200~from a script\x1b[201~")).toBeUndefined();
     two.state.editor = "my draftfrom a script";
     expect(two.input("\r")).toEqual({ consume: true });
     expect(two.submitted).toEqual([["from a script", undefined]]);
     expect(two.state.editor).toBe("my draft");
+  } finally {
+    vi.useRealTimers();
+    await two.p.emit("session_shutdown", { type: "session_shutdown", reason: "quit" }, two.ctx);
   }
-  await two.p.emit("session_shutdown", { type: "session_shutdown", reason: "quit" }, two.ctx);
 }, 10_000);
 
 /** A herdr with the parent pane and named agents whose state the test sets. */

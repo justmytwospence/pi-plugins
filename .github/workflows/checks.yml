@@ -11,8 +11,6 @@ permissions:
   contents: read
 jobs:
   suite:
-    # Release commits only change version fields of an already-checked tree.
-    if: "${{ !startsWith(github.event.head_commit.message, 'chore: release ') }}"
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -28,7 +26,6 @@ jobs:
       - run: npm ci --prefix packages/pi-sidebar
       - run: node scripts/test-suite.mjs --full
   components:
-    if: "${{ !startsWith(github.event.head_commit.message, 'chore: release ') }}"
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -45,3 +42,16 @@ jobs:
             packages/*/package-lock.json
       - run: npm ci
       - run: node scripts/check-components.mjs --shard ${{ matrix.shard }}/4 --install --full
+  pressure-macos:
+    runs-on: macos-latest
+    env:
+      PI_PRESSURE_REQUIRE_SWIFT: '1'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: packages/pi-pressure/package-lock.json
+      - run: npm ci --prefix packages/pi-pressure
+      - run: node scripts/check-components.mjs pi-pressure --full

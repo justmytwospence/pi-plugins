@@ -1,9 +1,11 @@
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
+import { once } from "node:events";
+import { createInterface } from "node:readline";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, test } from "vitest";
-import { ensureHelper, parseHelperLine, startHelper, type HelperLine } from "../src/darwin.ts";
+import { ensureHelper, parseHelperLine, type HelperLine } from "../src/darwin.ts";
 import { mergeConfig } from "../src/index.ts";
 import { bandLevel, createMonitor, darwinMemoryText, DEFAULTS, formatRate, formatStatus, topBy, trends } from "../src/pressure.ts";
 import { busyPercent, cpuTimes, createSampler, parseProcVmstat, cwdContext, parsePs, parsePsi, parseVmStat, processLabel, processName, standouts, psiShare, type Reading, type SamplerDeps } from "../src/sample.ts";
@@ -340,23 +342,48 @@ const hasSwift = (() => {
   try { execFileSync("xcrun", ["--find", "swiftc"], { stdio: "ignore" }); return true; } catch { return false; }
 })();
 
-describe.skipIf(!hasSwift)("macOS helper", () => {
+const requireSwift = process.env.PI_PRESSURE_REQUIRE_SWIFT === "1";
+describe.skipIf(!requireSwift && (!hasSwift || process.env.PI_TEST_FULL !== "1"))("macOS helper", () => {
   test("compiles, reports both states at start, and exits when its stdin closes", async () => {
+    expect(hasSwift, "Swift compiler required for the macOS helper check").toBe(true);
     const dir = mkdtempSync(join(tmpdir(), "pi-pressure-test-"));
     try {
       const binary = await ensureHelper(dir);
       expect(binary).toBeDefined();
       expect(await ensureHelper(dir)).toBe(binary); // cached
-      const lines: HelperLine[] = [];
-      let exited = false;
-      const helper = startHelper(binary!, (line) => lines.push(line), () => { exited = true; });
-      await new Promise((resolve) => setTimeout(resolve, 1_000));
-      expect(lines.some((l) => "memoryLevel" in l && [1, 2, 4].includes(l.memoryLevel))).toBe(true);
-      expect(lines.some((l) => "thermalState" in l && l.thermalState >= 0 && l.thermalState <= 3)).toBe(true);
-      expect(exited).toBe(false);
-      helper.stop();
+      const child = spawn(binary!, [], { stdio: ["pipe", "pipe", "inherit"] });
+      const lines = createInterface({ input: child.stdout });
+      const done = once(child, "close", { signal: AbortSignal.timeout(10_000) });
+      // Observe a spawn/timeout rejection even while we wait for the startup lines.
+      void done.catch(() => {});
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      try {
+        const states = new Map<string, HelperLine>();
+        const ready = new Promise<void>((resolve, reject) => {
+          timer = setTimeout(() => reject(new Error("Swift helper did not report both initial states")), 5_000);
+          lines.on("line", (line) => {
+            const parsed = parseHelperLine(line);
+            if (!parsed) return;
+            states.set("memoryLevel" in parsed ? "memory" : "thermal", parsed);
+            if (states.size === 2) resolve();
+          });
+        });
+        await Promise.race([ready, done.then(() => { throw new Error("Swift helper exited before stdin closed"); })]);
+        expect([1, 2, 4]).toContain((states.get("memory") as { memoryLevel: number }).memoryLevel);
+        expect([0, 1, 2, 3]).toContain((states.get("thermal") as { thermalState: number }).thermalState);
+        child.stdin.end();
+        expect(await done).toEqual([0, null]);
+      } finally {
+        clearTimeout(timer);
+        lines.close();
+        if (child.pid && child.exitCode === null && child.signalCode === null) {
+          const killed = once(child, "close", { signal: AbortSignal.timeout(5_000) });
+          child.kill("SIGKILL");
+          await killed;
+        }
+      }
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
-  }, 120_000);
+  }, 135_000);
 });
