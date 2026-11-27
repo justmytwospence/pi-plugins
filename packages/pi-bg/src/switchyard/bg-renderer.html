@@ -58,11 +58,12 @@
       (() => {
         const root = document.getElementById("root");
 
-        const progress = (text) => {
-          const f = /(\d+)\s*\/\s*(\d+)/.exec(text);
-          if (f && Number(f[2]) > 0) return Math.min(1, Number(f[1]) / Number(f[2]));
-          const p = /(\d+(?:\.\d+)?)\s*%/.exec(text);
-          return p ? Math.min(1, Number(p[1]) / 100) : null;
+        // Use the portable node's progress; a queued reason can itself contain a percentage.
+        const progressOf = (node) => {
+          if (node?.t === "progress" && Number.isFinite(node.value)) return node.value;
+          if (node?.t === "section" && Array.isArray(node.children)) {
+            return node.children.map(progressOf).find((value) => value !== undefined);
+          }
         };
 
         // Fallback when no state is passed: collect text from the portable node.
@@ -98,8 +99,8 @@
           }
           if (status) {
             root.appendChild(el("div", "status", status));
-            const v = progress(status);
-            if (v !== null) {
+            const v = progressOf(node);
+            if (v !== undefined) {
               const bar = el("div", "bar");
               const fill = el("div");
               fill.style.width = `${Math.round(v * 100)}%`;

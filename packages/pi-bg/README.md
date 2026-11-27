@@ -34,7 +34,7 @@ Add `-ne` to disable your other discovered and configured extensions for that ru
 
 | tool | parameters |
 |---|---|
-| `bg_run` | `command`, `kind` (`job` or `service`, required), `name`, `ready` (service only: a regex matched case-insensitively, or `/src/flags`), `timeout` (job only: seconds before it is killed), `keep` (service only: outlive this Pi session), `progress` (a format name, `none`, or a regex; see Progress below), `cwd` |
+| `bg_run` | `command`, `kind` (`job` or `service`, required), `name`, `ready` (service only: a regex matched case-insensitively, or `/src/flags`), `timeout` (job only: seconds before it is killed), `heavy` (job only: queue for host capacity), `keep` (service only: outlive this Pi session), `progress` (a format name, `none`, or a regex; see Progress below), `cwd` |
 | `bg_wait` | `id` (a task, or outside work another extension reports; default: whichever running agent job ends first), `timeout` (seconds, default 1800, max 3600) |
 | `bg_logs` | `id` (omit to list every task), `lines` (default 60, max 400), `grep`, `head` |
 | `bg_kill` | `id`: SIGTERM to the task's process group, SIGKILL after 3 seconds |
@@ -44,6 +44,18 @@ Ids also accept a task's name (the most recent task with it) or a unique id pref
 **Ending the turn with a job running.** When the agent ends its turn while a job it started is still running, pi-bg waits for it at Pi's `agent_before_settle` boundary, with the same `Waiting on…` message, timeout, and interruptions as `bg_wait` (type a message or press Esc). The session never goes idle meanwhile, so Pi, Herdr and tmux keep showing it working, and the job's outcome continues the run instead of waking an idle agent. Interrupted, the turn settles and the job wakes the agent later as below. Only jobs the agent started are waited for; services and outside work are not.
 
 **Wake-ups.** A wake-up is sent only while Pi is idle: one that comes due during a turn waits for the turn to settle (a follow-up queued mid-turn would be dropped by Esc), and several that pile up go out as one message. Whatever `bg_wait`, `bg_logs` or `bg_kill` has already shown the agent is no longer owed. A task that ends during `/reload` wakes the agent once the new session is up. A task you stop yourself does not wake the agent; it is told on its next turn instead.
+
+## Heavy jobs and host capacity
+
+Set `heavy: true` on finite jobs that place substantial local load on the host, such as full browser suites, builds, fits or large imports, even if they take under a minute. Leave targeted checks, remote-only CI waits and services unmarked.
+
+```js
+bg_run({ kind: "job", name: "browser suite", heavy: true, command: "pnpm test:e2e" })
+```
+
+A marked job gets an ID and log immediately and queues until host capacity permits it to start. `bg_logs`, the task view and wait rows show its queue reason; execution time and the job's `timeout` begin at spawn, not submission. `bg_wait` and the turn-end wait include queued jobs. `bg_kill` cancels a queued job without running it; stopping a wait with Esc or input does not cancel it. Reload transfers the same queued request; quitting or changing sessions cancels it.
+
+Admission is cooperative and host-local: marked jobs from Pi sessions belonging to the same user share at most two slots. CPU and memory pressure can delay admission; unknown sensors limit capacity to one, and running jobs are not preempted. Queue order is best effort, not FIFO. Plain shell commands, hooks, unmarked jobs and services do not take slots (although their load affects the readings). Daemonizing or deliberately closing inherited descriptors is outside the finite-job guarantee. macOS uses `/usr/bin/lockf`; Linux requires util-linux `flock`. An unavailable or unsafe lock backend fails marked jobs rather than bypassing admission. Queue reasons do not expose other sessions' commands.
 
 ## Progress
 

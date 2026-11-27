@@ -1,4 +1,4 @@
-// Live result rows (bg_run, a waiting bg_wait) redraw while their task runs. Pi's invalidate
+// Live result rows (bg_run, a waiting bg_wait) redraw while their task is queued or running. Pi's invalidate
 // re-renders the whole transcript, so a row redraws only when the line it shows changed.
 interface Row { redraw: () => void; line: () => string; drawn: string }
 
@@ -14,10 +14,10 @@ export class LiveRows {
     this.rows.set(taskId, rows);
   }
 
-  /** Redraws each row whose line changed; a task no longer running gets that last redraw, then its rows drop. */
-  tick(running: (taskId: string) => boolean): void {
+  /** Redraws each row whose line changed; an inactive task gets that last redraw, then its rows drop. */
+  tick(active: (taskId: string) => boolean): void {
     for (const [taskId, rows] of [...this.rows]) {
-      const live = running(taskId);
+      const live = active(taskId);
       for (const [key, row] of [...rows]) {
         let now: string;
         try { now = row.line(); } catch { rows.delete(key); continue; }

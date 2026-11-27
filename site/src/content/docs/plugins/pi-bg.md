@@ -37,7 +37,7 @@ Commands run through `bash -c` in separate process groups. Bash and the programs
 
 | Tool | Arguments and behavior |
 | --- | --- |
-| `bg_run` | Required `command` and `kind` (`job` or `service`); optional `name`, `cwd`, service `ready` and `keep`, job `timeout` in seconds, and `progress` (see [Progress](#progress)). |
+| `bg_run` | Required `command` and `kind` (`job` or `service`); optional `name`, `cwd`, service `ready` and `keep`, job `timeout` in seconds, `heavy` (job only: queue for host capacity), and `progress` (see [Progress](#progress)). |
 | `bg_wait` | Optional `id` and `timeout`; waits inside the turn, default 1800 seconds, maximum 3600. Without an ID, waits for the next running agent-started job to finish. |
 | `bg_logs` | Optional `id`, `lines`, `grep`, `head`. Omit the ID to list tasks; log reads default to 60 lines, maximum 400. |
 | `bg_kill` | Required `id`; sends SIGTERM to the process group, then SIGKILL after three seconds if necessary. |
@@ -75,6 +75,18 @@ For a development server, use a pattern matching its actual readiness output:
 ```
 
 Plain readiness patterns are case-insensitive; `/pattern/flags` supplies explicit regex flags. A service without a readiness pattern has no readiness event to wait for. Recognized marimo server commands receive an automatic name and readiness pattern unless overridden.
+
+## Heavy jobs and host capacity
+
+Set `heavy: true` on finite jobs that place substantial local load on the host, such as full browser suites, builds, fits or large imports, even if they take under a minute. Leave targeted checks, remote-only CI waits and services unmarked.
+
+```js
+bg_run({ kind: "job", name: "browser suite", heavy: true, command: "pnpm test:e2e" })
+```
+
+A marked job gets an ID and log immediately and queues until host capacity permits it to start. `bg_logs`, the task view and wait rows show its queue reason; execution time and the job's `timeout` begin at spawn, not submission. `bg_wait` and the turn-end wait include queued jobs. `bg_kill` cancels a queued job without running it; stopping a wait with Esc or input does not cancel it. Reload transfers the same queued request; quitting or changing sessions cancels it.
+
+Admission is cooperative and host-local: marked jobs from Pi sessions belonging to the same user share at most two slots. CPU and memory pressure can delay admission; unknown sensors limit capacity to one, and running jobs are not preempted. Queue order is best effort, not FIFO. Plain shell commands, hooks, unmarked jobs and services do not take slots (although their load affects the readings). Daemonizing or deliberately closing inherited descriptors is outside the finite-job guarantee. macOS uses `/usr/bin/lockf`; Linux requires util-linux `flock`. An unavailable or unsafe lock backend fails marked jobs rather than bypassing admission. Queue reasons do not expose other sessions' commands.
 
 ## Progress
 

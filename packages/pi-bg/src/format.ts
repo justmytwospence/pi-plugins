@@ -1,7 +1,7 @@
 // Text for the footer, lists, tool results and wake-up messages.
 import { bounded, tail } from "./log.ts";
 import { eta, etaText, percent } from "./progress.ts";
-import type { Task } from "./registry.ts";
+import { isActive, type Task } from "./registry.ts";
 
 /**
  * For the agent: `45% (450/1000, ~3m left)`, `87% (fold 3, detected: tqdm)`; `last progress 87%`
@@ -30,7 +30,41 @@ export function elapsed(ms: number): string {
 }
 
 export function runtime(t: Task, now = Date.now()): string {
-  return elapsed((t.endedAt ?? now) - t.startedAt);
+  return t.startedAt > 0 ? elapsed((t.endedAt ?? now) - t.startedAt) : "—";
+}
+
+/** Queue time ticks only until spawn (or cancellation before spawn). */
+export function queueTime(t: Task, now = Date.now()): string | undefined {
+  if (t.requestedAt === undefined) return undefined;
+  const end = t.startedAt > 0 ? t.startedAt : (t.endedAt ?? now);
+  const seconds = Math.max(0, Math.floor((end - t.requestedAt) / 1000));
+  return seconds < 60 ? `${seconds}s` : elapsed(seconds * 1000);
+}
+
+export function queueReason(t: Task): string {
+  return t.queueReason || "waiting for host capacity";
+}
+
+/** A compact description for live rows, the log header and the working message. */
+export function queueLabel(t: Task, now = Date.now()): string {
+  const time = queueTime(t, now);
+  return ["queued", queueReason(t), time === undefined ? undefined : `${time} in queue`].filter(Boolean).join(" · ");
+}
+
+export function waitedText(t: Task): string | undefined {
+  const time = t.startedAt > 0 ? queueTime(t) : undefined;
+  return time === undefined ? undefined : `waited ${time}`;
+}
+
+/** Runtime and admission wait are separate, including when work ends before spawning. */
+export function timedOutcome(t: Task, now = Date.now()): string {
+  if (t.status === "queued") return queueLabel(t, now);
+  if (t.startedAt <= 0) {
+    const time = queueTime(t, now);
+    return `${outcome(t)} · ${time === undefined ? "never started" : `${time} in queue`}`;
+  }
+  const time = runtime(t, now);
+  return [`${outcome(t)} ${t.status === "running" ? "for" : "after"} ${time}`, waitedText(t)].filter(Boolean).join(" · ");
 }
 
 /** A name from the command when the model gives none: its first words, without `cd x &&` setup. */
@@ -47,6 +81,8 @@ export function nameFromCommand(command: string): string {
 /** `exit 0`, `exit 1`, `killed`, `timed out`, `signal SIGSEGV`. */
 export function outcome(t: Task): string {
   switch (t.status) {
+    case "queued":
+      return "queued";
     case "running":
       return t.kind === "service" ? (t.ready ? "ready" : "starting") : "running";
     case "timeout":
@@ -65,17 +101,26 @@ const FOOTER_ITEMS = 4;
 
 /**
  * The footer status (key `bg`): `bg: tests 2:14 · vite ready · lint ✗`. Running jobs first, then
- * services, then what finished in the last minute (✓, ✗, or ■ when stopped). Undefined when empty.
+ * queued jobs, services and recent ends (✓, ✗, or ■ when stopped). Undefined when empty.
  */
 export function footerStatus(tasks: Task[], now = Date.now()): string | undefined {
   const items: string[] = [];
-  for (const t of tasks) if (t.status === "running" && t.kind === "job") items.push([t.name, shortProgress(t), runtime(t, now)].filter(Boolean).join(" "));
+  for (const t of tasks) {
+    if (t.status !== "running" || t.kind !== "job") continue;
+    const waited = waitedText(t);
+    items.push([t.name, shortProgress(t), runtime(t, now), waited && `(${waited})`].filter(Boolean).join(" "));
+  }
+  for (const t of tasks) {
+    if (t.status !== "queued") continue;
+    const detail = [queueTime(t, now), queueReason(t)].filter(Boolean).join("; ");
+    items.push(`${t.name} queued (${detail})`);
+  }
   for (const t of tasks) {
     if (t.status !== "running" || t.kind !== "service") continue;
     items.push(`${t.name} ${t.ready ? "ready" : t.readyPattern ? "starting" : "up"}${t.keep ? " (kept)" : ""}`);
   }
   for (const t of tasks) {
-    if (t.status === "running" || !t.endedAt || now - t.endedAt > FOOTER_LINGER_MS) continue;
+    if (isActive(t) || !t.endedAt || now - t.endedAt > FOOTER_LINGER_MS) continue;
     const mark = t.status === "done" ? "✓" : t.status === "killed" ? "■" : "✗";
     items.push(`${t.name} ${mark}`);
   }
@@ -87,7 +132,10 @@ export function footerStatus(tasks: Task[], now = Date.now()): string | undefine
 
 /** One line per task for `bg_logs` without an id and for `/bg`. */
 export function taskLine(t: Task, now = Date.now()): string {
-  const bits = [t.id, t.name, t.kind, `${outcome(t)} ${runtime(t, now)}`];
+  const state = t.status === "queued" || t.startedAt <= 0
+    ? timedOutcome(t, now)
+    : [`${outcome(t)} ${runtime(t, now)}`, waitedText(t)].filter(Boolean).join(" · ");
+  const bits = [t.id, t.name, t.kind, state];
   const progress = progressText(t, now);
   if (progress) bits.push(progress);
   if (t.keep) bits.push("kept");
@@ -96,8 +144,7 @@ export function taskLine(t: Task, now = Date.now()): string {
 }
 
 export function header(t: Task, now = Date.now()): string {
-  const bits = [`${t.name} (${t.kind} ${t.id})`, `${outcome(t)} after ${runtime(t, now)}`];
-  if (t.status === "running") bits[1] = `${outcome(t)} for ${runtime(t, now)}`;
+  const bits = [`${t.name} (${t.kind} ${t.id})`, timedOutcome(t, now)];
   const progress = progressText(t, now);
   if (progress) bits.splice(2, 0, progress);
   if (t.pid) bits.push(`pid ${t.pid}`);

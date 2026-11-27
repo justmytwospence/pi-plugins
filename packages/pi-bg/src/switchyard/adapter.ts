@@ -55,7 +55,9 @@ export function progressValue(text: string): number | undefined {
 export function bgPanel(s: BgState): UINode | null {
   const children: UINode[] = [];
   if (s.status) {
-    const value = progressValue(s.status);
+    // In legacy status text, CPU percentages and slot counts on queued jobs are not progress.
+    const nonQueued = s.status.split(" · ").filter((item) => !/\bqueued \([^)]*\)$/u.test(item));
+    const value = progressValue(nonQueued.join(" · "));
     children.push(
       value === undefined ? { t: "text", text: s.status } : { t: "progress", label: s.status, value, status: "running" },
     );
@@ -102,7 +104,7 @@ const current = (ctx: AdapterContext): BgState =>
 
 export const TASK_ENTRY = "pi-bg:task";
 const TASKS_KEY = "tasks";
-/** Tasks listed in the tracker: the running ones and the latest ended ones, up to this many. */
+/** Tasks listed in the tracker: the active ones and the latest ended ones, up to this many. */
 const LISTED = 8;
 /** How long ended tasks keep the tracker up once nothing runs (the footer lingers a minute). */
 export const LINGER_MS = 5 * 60_000;
@@ -113,11 +115,14 @@ export interface TaskRecord {
   id: string;
   name: string;
   kind: "job" | "service";
-  status: "running" | "done" | "failed" | "killed" | "timeout";
+  status: "queued" | "running" | "done" | "failed" | "killed" | "timeout";
   origin: "agent" | "user";
   command: string;
   cwd: string;
   logPath: string;
+  requestedAt?: number;
+  queueReason?: string;
+  /** 0 until the task spawns. */
   startedAt: number;
   endedAt?: number;
   exitCode?: number | null;
@@ -127,14 +132,17 @@ export interface TaskRecord {
   progress?: { fraction: number; count?: string; note?: string };
 }
 
-const STATUSES = new Set(["running", "done", "failed", "killed", "timeout"]);
+const STATUSES = new Set(["queued", "running", "done", "failed", "killed", "timeout"]);
 
 export function parseTaskRecord(data: unknown): TaskRecord | undefined {
   const d = data as Partial<TaskRecord> | null | undefined;
   if (!d || typeof d !== "object" || d.version !== 1) return undefined;
-  if (typeof d.id !== "string" || typeof d.name !== "string" || typeof d.startedAt !== "number") return undefined;
+  if (typeof d.id !== "string" || typeof d.name !== "string" || !Number.isFinite(d.startedAt)) return undefined;
   if (d.kind !== "job" && d.kind !== "service") return undefined;
   if (typeof d.status !== "string" || !STATUSES.has(d.status)) return undefined;
+  if (d.status === "queued" && d.startedAt !== 0) return undefined;
+  if (d.requestedAt !== undefined && !Number.isFinite(d.requestedAt)) return undefined;
+  if (d.queueReason !== undefined && typeof d.queueReason !== "string") return undefined;
   if (d.progress !== undefined && typeof d.progress?.fraction !== "number") return undefined;
   return d as TaskRecord;
 }
@@ -149,8 +157,12 @@ export function duration(ms: number): string {
 }
 
 const percentOf = (t: TaskRecord) => (t.progress ? `${Math.round(t.progress.fraction * 100)}%` : undefined);
+const active = (t: TaskRecord) => t.status === "queued" || t.status === "running";
+const orderedAt = (t: TaskRecord) => t.requestedAt ?? t.startedAt;
+const reasonOf = (t: TaskRecord) => t.queueReason || "waiting for host capacity";
 
 function taskState(t: TaskRecord): { status: string; tone: UIRow["tone"] } {
+  if (t.status === "queued") return { status: "queued", tone: "default" };
   if (t.status === "running") {
     if (t.kind === "service") return { status: t.ready ? "ready" : "starting", tone: "default" };
     return { status: percentOf(t) ?? "running", tone: "default" };
@@ -166,20 +178,24 @@ function taskState(t: TaskRecord): { status: string; tone: UIRow["tone"] } {
 /** One row per task: name, state, then kind and time. */
 export function taskRow(t: TaskRecord, now: number): UIRow {
   const { status, tone } = taskState(t);
-  const time = duration((t.endedAt ?? now) - t.startedAt);
-  const meta = [t.kind === "service" ? "service" : "", t.status === "running" ? `for ${time}` : `after ${time}`, t.progress?.note ?? ""]
-    .filter(Boolean)
-    .join(" · ");
+  const end = t.endedAt ?? now;
+  const spawned = t.startedAt > 0;
+  const wait = t.requestedAt === undefined ? undefined : duration((spawned ? t.startedAt : end) - t.requestedAt);
+  const inQueue = wait === undefined ? undefined : `${wait} in queue`;
+  const time = t.status === "queued" ? [inQueue, reasonOf(t)]
+    : !spawned ? [inQueue ?? "never started"]
+    : [`${t.status === "running" ? "for" : "after"} ${duration(end - t.startedAt)}`, wait && `waited ${wait}`, t.progress?.note];
+  const meta = [t.kind === "service" ? "service" : "", ...time].filter(Boolean).join(" · ");
   return { title: t.name, status, ...(tone !== "default" ? { tone } : {}), meta: meta.slice(0, 200) };
 }
 
 const tasksOf = (ctx: AdapterContext): TaskRecord[] => Object.values(ctx.state.get<Record<string, TaskRecord>>(TASKS_KEY) ?? {});
 
-/** The tracker's tasks: running first (oldest first), then the latest ended. */
+/** The tracker's tasks: active first (oldest first), then the latest ended. */
 export function listed(tasks: TaskRecord[]): TaskRecord[] {
-  const running = tasks.filter((t) => t.status === "running").sort((a, b) => a.startedAt - b.startedAt);
-  const ended = tasks.filter((t) => t.status !== "running").sort((a, b) => (b.endedAt ?? 0) - (a.endedAt ?? 0));
-  return [...running, ...ended].slice(0, Math.max(LISTED, running.length));
+  const live = tasks.filter(active).sort((a, b) => orderedAt(a) - orderedAt(b));
+  const ended = tasks.filter((t) => !active(t)).sort((a, b) => (b.endedAt ?? 0) - (a.endedAt ?? 0));
+  return [...live, ...ended].slice(0, Math.max(LISTED, live.length));
 }
 
 function renderTracker(ctx: AdapterContext & Required<Pick<AdapterContext, "setContribution">>, now = Date.now()): void {
@@ -188,14 +204,17 @@ function renderTracker(ctx: AdapterContext & Required<Pick<AdapterContext, "setC
   ctx.setContribution("bg-pill", null);
   const tasks = listed(tasksOf(ctx));
   const running = tasks.filter((t) => t.status === "running");
+  const queued = tasks.filter((t) => t.status === "queued");
+  const live = running.length + queued.length > 0;
   const lastEnd = Math.max(0, ...tasks.map((t) => t.endedAt ?? 0));
-  if (!running.length && now - lastEnd > LINGER_MS) {
+  if (!live && now - lastEnd > LINGER_MS) {
     ctx.setContribution("bg-tracker", null);
     return;
   }
-  const failed = !running.length && tasks.some((t) => (t.endedAt ?? 0) === lastEnd && (t.status === "failed" || t.status === "timeout"));
-  const first = running.find((t) => t.kind === "job") ?? running[0];
-  const step = first ? [first.name, percentOf(first)].filter(Boolean).join(" ") : undefined;
+  const failed = !live && tasks.some((t) => (t.endedAt ?? 0) === lastEnd && (t.status === "failed" || t.status === "timeout"));
+  const first = running.find((t) => t.kind === "job") ?? running[0] ?? queued[0];
+  const step = first ? [first.name, first.status === "queued" ? "queued" : percentOf(first)].filter(Boolean).join(" ") : undefined;
+  const count = [running.length ? `${running.length} running` : undefined, queued.length ? `${queued.length} queued` : undefined].filter(Boolean).join(" · ");
   const rows = tasks.map((t) => taskRow(t, now));
   ctx.setContribution("bg-tracker", {
     placement: "composer.tracker",
@@ -205,8 +224,8 @@ function renderTracker(ctx: AdapterContext & Required<Pick<AdapterContext, "setC
       : { t: "table", columns: ["Task", "State", "Time"], rows: rows.map((r) => [r.title, r.status ?? "", r.meta ?? ""]) },
     mobileFallback: rows.map((r) => `${r.title}: ${r.status}${r.meta ? ` (${r.meta})` : ""}`).join("\n").slice(0, 2000) || "No tasks",
     tracker: {
-      ...(running.length ? { count: `${running.length} running` } : {}),
-      status: running.length ? "running" : failed ? "error" : "ok",
+      ...(count ? { count } : {}),
+      status: live ? "running" : failed ? "error" : "ok",
       ...(step ? { step: step.slice(0, 120) } : {}),
     },
   });
@@ -215,7 +234,7 @@ function renderTracker(ctx: AdapterContext & Required<Pick<AdapterContext, "setC
 function record(task: TaskRecord, ctx: AdapterContext): void {
   const all = ctx.state.get<Record<string, TaskRecord>>(TASKS_KEY) ?? {};
   all[task.id] = task;
-  // Keep the running tasks and the latest ended ones.
+  // Keep the active tasks and the latest ended ones.
   const keep = new Set(listed(Object.values(all)).map((t) => t.id));
   ctx.state.set(TASKS_KEY, Object.fromEntries(Object.entries(all).filter(([id]) => keep.has(id))));
 }
@@ -234,22 +253,25 @@ export function bgToolView(tool: ToolInfo, ctx: AdapterContext): ToolViewData | 
   const args = (tool.args ?? {}) as Record<string, unknown>;
   const str = (k: string) => (typeof args[k] === "string" ? (args[k] as string) : "");
   const tasks = ctx.state.get<Record<string, TaskRecord>>(TASKS_KEY) ?? {};
-  const id = str("id") || ((tool.details as { id?: unknown } | undefined)?.id as string | undefined) || "";
+  const details = tool.details as { id?: unknown; status?: unknown } | undefined;
+  const id = str("id") || (typeof details?.id === "string" ? details.id : "");
   // `id` may be a task's id or its name.
   const task = id ? (tasks[id] ?? Object.values(tasks).find((t) => t.name === id)) : undefined;
   const meta: string[] = [];
   let target = task?.name ?? (id || str("name"));
+  const queuedRun = tool.name === "bg_run" && !tool.isError && (task?.status === "queued" || details?.status === "queued");
   if (tool.name === "bg_run") {
     target = str("name") || task?.name || str("command").split("\n")[0]!.slice(0, 120);
     meta.push(str("kind") === "service" ? "service" : "job");
+    if (task?.status === "queued") meta.push(reasonOf(task));
   } else if (tool.name === "bg_wait" && !target) target = "the next task";
   else if (tool.name === "bg_logs" && !target) target = "all tasks";
   if (task && tool.result !== undefined && tool.name !== "bg_run") meta.push(taskState(task).status);
   if (tool.isError) meta.push("failed");
   return {
     kind: tool.name === "bg_run" || tool.name === "bg_kill" ? "command" : "other",
-    verb: verbs[0],
-    activeVerb: verbs[1],
+    verb: queuedRun ? "Queued" : verbs[0],
+    activeVerb: tool.name === "bg_run" && args.heavy === true ? "Queueing" : verbs[1],
     target: target.slice(0, 500),
     meta,
     ...(tool.name === "bg_run" && str("command") ? { detail: { t: "code", text: str("command"), lang: "bash" } } : {}),

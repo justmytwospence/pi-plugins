@@ -26,12 +26,14 @@ function fakeRegistry() {
   return {
     tasks, list, emit, cleared: new Set<string>(),
     running: (sid?: string) => list(sid).filter((t) => t.status === "running"),
+    active: (sid?: string) => list(sid).filter((t) => t.status === "running" || t.status === "queued"),
     find: (id: string, sid?: string) => list(sid).find((t) => t.id === id) ?? list(sid).filter((t) => t.name === id).at(-1) ?? list(sid).find((t) => t.id.startsWith(id)),
     start: (options: StartOptions) => {
       const id = `task${tasks.size + 1}`;
       const logPath = path.join(dir, `${id}.log`);
       fs.writeFileSync(logPath, "concurrent-failure\n");
       const task: Task = { id, name: options.name, kind: options.kind, command: options.command, cwd: options.cwd, sessionId: options.sessionId, origin: options.origin, logPath, startedAt: Date.now(), status: "running", ready: false, readyPattern: options.ready, keep: false, delivered: false, readyDelivered: false };
+      if (options.heavy) Object.assign(task, { status: "queued", requestedAt: Date.now(), startedAt: 0, queueReason: "waiting for host capacity" });
       tasks.set(id, task); emit("start", task); return task;
     },
     subscribe: (listener: (event: TaskEvent) => void) => { listeners.add(listener); return () => listeners.delete(listener); },
@@ -72,6 +74,18 @@ beforeEach(async () => {
 afterEach(async () => {
   await event("session_shutdown", "quit");
   vi.restoreAllMocks(); vi.useRealTimers(); fs.rmSync(dir, { recursive: true, force: true });
+});
+
+it.each(["named", "any"])("waits for a queued job through its completion (%s)", async (which) => {
+  const run = await call("bg_run", { command: "echo concurrent-failure; exit 2", kind: "job", name: "build", heavy: true });
+  expect(textOf(run)).toMatch(/Queued build/);
+  const wait = tracked(call("bg_wait", which === "named" ? { id: "build" } : {}));
+  await flush();
+  expect(wait.result).toBeUndefined();
+  Object.assign(task(), { status: "running", startedAt: Date.now() });
+  reg.emit("change", task());
+  end(); await flush();
+  expect(textOf(wait.result)).toMatch(/exit 2/);
 });
 
 it("same tick startup and named wait both settle on failure", async () => {

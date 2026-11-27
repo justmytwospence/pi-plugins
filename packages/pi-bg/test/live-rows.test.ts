@@ -1,5 +1,7 @@
 import { expect, it } from "vitest";
 import { LiveRows } from "../src/live-rows.ts";
+import { isActive, type Task } from "../src/registry.ts";
+import { taskState } from "../src/rows.ts";
 
 it("redraws a row only when its line changed", () => {
   const rows = new LiveRows();
@@ -41,6 +43,36 @@ it("an ended task's rows redraw once with their final line, then drop", () => {
   text = "c";
   rows.tick(() => false);
   expect(redraws).toBe(1);
+});
+
+it("redraws queue reason changes, then execution time without counting the queue", () => {
+  const rows = new LiveRows();
+  const task = { name: "build", kind: "job", status: "queued", requestedAt: 100_000, startedAt: 0 } as Task;
+  let now = 100_000;
+  const rendered: string[] = [];
+  const line = () => taskState(task, now);
+  const tick = () => rows.tick(() => isActive(task));
+  rows.track("t", "run", () => rendered.push(line()), line);
+  tick();
+  now = 105_000;
+  task.queueReason = "CPU 91%";
+  tick();
+  expect(rows.size).toBe(1);
+  now = 112_000;
+  task.status = "running";
+  task.startedAt = now;
+  tick();
+  now = 118_000;
+  task.endedAt = now;
+  task.exitCode = 0;
+  task.status = "done";
+  tick();
+  expect(rows.size).toBe(0);
+  expect(rendered).toEqual([
+    "build queued · CPU 91% · 5s in queue",
+    "build running · 0:00 · waited 12s",
+    "build exit 0 after 0:06 · waited 12s",
+  ]);
 });
 
 it("a row whose redraw or line throws is dropped", () => {

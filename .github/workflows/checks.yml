@@ -55,3 +55,17 @@ jobs:
           cache-dependency-path: packages/pi-pressure/package-lock.json
       - run: npm ci --prefix packages/pi-pressure
       - run: node scripts/check-components.mjs pi-pressure --full
+  background-admission-macos:
+    runs-on: macos-latest
+    timeout-minutes: 5
+    env:
+      PI_TEST_FULL: '1'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: packages/pi-bg/package-lock.json
+      - run: npm ci --prefix packages/pi-bg
+      - run: npm test --prefix packages/pi-bg -- --maxWorkers=1 test/admission.test.ts

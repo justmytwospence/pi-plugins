@@ -54,10 +54,10 @@ import type { AgentBeforeSettleEvent, BoundaryResult, ExtensionAPI, ExtensionCon
 import { Row, toneOfTool } from "./transcript-style.ts";
 import { WORKING_MESSAGE_EVENT } from "./working-message.ts";
 import { Type } from "typebox";
-import { elapsed, footerStatus, header, marimoNote, nameFromCommand, outcome, progressText, report, runtime, shortProgress, taskLine } from "./format.ts";
+import { elapsed, footerStatus, header, marimoNote, nameFromCommand, outcome, progressText, queueLabel, report, runtime, shortProgress, taskLine, timedOutcome, waitedText } from "./format.ts";
 import { CATALOGUE, FORMAT_NAMES, bar, eta, etaText, percent } from "./progress.ts";
 import { bounded, grep, head, tail } from "./log.ts";
-import { type Kind, type Task, type TaskEvent, parsePattern, registry } from "./registry.ts";
+import { type Kind, type Task, type TaskEvent, isActive, parsePattern, registry } from "./registry.ts";
 import {
   ACTIVITY_CHANGED,
   ACTIVITY_GONE,
@@ -73,7 +73,7 @@ import {
   stoppable,
 } from "./activity.ts";
 import { type DialogResult, TasksDialog } from "./dialog.ts";
-import { onWebCommand, section as webSection, table as webTable, text as webText } from "./switchyard-web.ts";
+import { onWebCommand, tasksWebView } from "./switchyard-web.ts";
 import { FULL_SCREEN } from "./frame.ts";
 import { PillView } from "./pill.ts";
 import { LiveRows } from "./live-rows.ts";
@@ -141,7 +141,8 @@ const RunParams = Type.Object({
   }),
   name: Type.Optional(Type.String({ description: "Short label for the footer and lists, e.g. `tests`, `vite`" })),
   ready: Type.Optional(Type.String({ description: "service: regex (case-insensitive, or /src/flags) for the log line that means it is up; you are woken once when it matches" })),
-  timeout: Type.Optional(Type.Number({ description: "job: kill it after this many seconds" })),
+  timeout: Type.Optional(Type.Number({ description: "job: kill it after this many seconds of execution (excludes queue time)" })),
+  heavy: Type.Optional(Type.Boolean({ description: "Finite job with substantial local CPU, memory or disk load: queue across Pi sessions on this host. Do not set for remote CI waits, small checks or services." })),
   keep: Type.Optional(Type.Boolean({ description: "service: leave it running when this pi session ends (a server the user works in)" })),
   progress: Type.Optional(
     Type.String({
@@ -214,7 +215,7 @@ export default function piBg(pi: ExtensionAPI) {
   let lastStatus: string | undefined;
   let herdrActive = false;
   /** The running jobs the agent started: what bg_wait without an id waits for. */
-  const agentJobs = () => reg.running(sessionId).filter((t) => t.kind === "job" && t.origin === "agent");
+  const agentJobs = () => reg.active(sessionId).filter((t) => t.kind === "job" && t.origin === "agent");
   /** Running outside work that will wake the agent (bg:external with `settle`): a turn's end waits for it too. */
   const settleWork = () => [...externals.values()].filter((x) => x.settle && x.state === "running");
   /** The tasks a bg_wait is waiting on. */
@@ -313,20 +314,21 @@ export default function piBg(pi: ExtensionAPI) {
   const bindPill = () => pill.setUI(attached && tui() && !hosted() ? (ctx?.ui as any) : undefined);
 
   const entryStatus = (t: Task): ActivityEntry["status"] =>
-    t.status === "running" ? "running" : t.status === "done" ? "done" : t.status === "killed" ? "stopped" : "failed";
+    isActive(t) ? "running" : t.status === "done" ? "done" : t.status === "killed" ? "stopped" : "failed";
   /** A failure the user has not seen: it ended after their last message and is not dismissed. */
   const alerting = (t: Task) => (t.status === "failed" || t.status === "timeout") && (t.endedAt ?? 0) > dismissedAt && !reg.cleared.has(t.id);
   const pillOf = (now: number): ActivityPill | undefined => {
     void now;
-    const running = reg.running(sessionId).filter((t) => !represented(t));
+    const running = reg.active(sessionId).filter((t) => !represented(t));
     const failed = reg.list(sessionId).filter(alerting).length;
     if (!running.length && !failed) return undefined;
     // One task's progress, when exactly one running task has any: `2 tasks · fit 45%`.
     const measured = running.filter((t) => t.progress);
     const one = measured.length === 1 ? measured[0] : undefined;
     const count = running.length ? `${running.length} task${running.length === 1 ? "" : "s"}` : "tasks";
+    const queued = running.filter((t) => t.status === "queued").length;
     const label = one ? `${count} · ${running.length === 1 ? "" : `${one.name} `}${shortProgress(one)}` : count;
-    return { label, ...(failed ? { alert: `${failed} failed` } : {}) };
+    return { label: queued ? `${label} · ${queued} queued` : label, ...(failed ? { alert: `${failed} failed` } : {}) };
   };
   /** A row's progress, before its runtime: `45% · ~3m`; the bar goes last, flush right, so bars line up. */
   const progressStats = (t: Task, now: number): string | undefined => {
@@ -337,8 +339,10 @@ export default function piBg(pi: ExtensionAPI) {
   };
   /** `fit ███▌░░░░ 45% · 2:14` for the settle-wait's working message, which has no transcript row. */
   const waitLabel = (t: Task) => {
+    if (t.status === "queued") return `${t.name} ${queueLabel(t)}`;
     const p = t.status === "running" ? t.progress : undefined;
-    return p ? `${t.name} ${bar(p.fraction, 8)} ${percent(p)} · ${runtime(t)}` : `${t.name} ${runtime(t)}`;
+    const label = p ? `${t.name} ${bar(p.fraction, 8)} ${percent(p)} · ${runtime(t)}` : `${t.name} ${runtime(t)}`;
+    return [label, waitedText(t)].filter(Boolean).join(" · ");
   };
   const section: ActivitySection = {
     id: "bg",
@@ -346,10 +350,10 @@ export default function piBg(pi: ExtensionAPI) {
     noun: "task",
     // Running first (oldest first), then what ended (newest first).
     entries: (now) =>
-      [...reg.running(sessionId).filter((t) => !represented(t)), ...reg.list(sessionId).filter((t) => t.status !== "running").sort((a, b) => (b.endedAt ?? 0) - (a.endedAt ?? 0))].map((t) => ({
+      [...reg.active(sessionId).filter((t) => !represented(t)), ...reg.list(sessionId).filter((t) => !isActive(t)).sort((a, b) => (b.endedAt ?? 0) - (a.endedAt ?? 0))].map((t) => ({
         key: t.id,
         label: t.name,
-        detail: [noteOf(t)?.detail, t.status === "running" ? t.progress?.note : undefined, t.command.replace(/\s+/gu, " ").trim()].filter(Boolean).join(" · "),
+        detail: [t.status === "queued" ? `queued: ${t.queueReason ?? "waiting for host capacity"}` : undefined, noteOf(t)?.detail, t.status === "running" ? t.progress?.note : undefined, t.command.replace(/\s+/gu, " ").trim()].filter(Boolean).join(" · "),
         status: entryStatus(t),
         stats:
           t.status === "running"
@@ -358,11 +362,12 @@ export default function piBg(pi: ExtensionAPI) {
                 t.kind === "service" ? (t.ready ? "ready" : t.readyPattern ? "starting" : "service") : undefined,
                 progressStats(t, now),
                 runtime(t, now),
+                t.requestedAt === undefined ? undefined : `waited ${elapsed(t.startedAt - t.requestedAt)}`,
               ]
                 .filter(Boolean)
                 .join(" · ") + (t.progress ? ` ${bar(t.progress.fraction)}` : "")
-            : `${outcome(t)} · ${runtime(t, now)}`,
-        startedAt: t.startedAt,
+            : t.status === "queued" ? `queued · ${elapsed(now - (t.requestedAt ?? now))}` : `${outcome(t)} · ${runtime(t, now)}`,
+        startedAt: t.requestedAt ?? t.startedAt,
         ...(t.endedAt ? { endedAt: t.endedAt } : {}),
       })),
     open: (key, ui) => {
@@ -371,11 +376,11 @@ export default function piBg(pi: ExtensionAPI) {
     },
     stop: (key) => {
       const t = reg.find(key, sessionId);
-      if (t?.status === "running") return stopTask(t, "user");
+      if (t && isActive(t)) return stopTask(t, "user");
     },
     dismiss: (key) => {
       const t = reg.find(key, sessionId);
-      if (!t || t.status === "running") return;
+      if (!t || isActive(t)) return;
       reg.cleared.add(t.id);
       refresh();
     },
@@ -463,7 +468,8 @@ export default function piBg(pi: ExtensionAPI) {
       ready: t.ready,
       origin: t.origin,
       keep: t.keep,
-      willWake: t.origin === "agent" && t.status === "running" && !t.delivered,
+      willWake: t.origin === "agent" && isActive(t) && !t.delivered,
+      ...(t.queueReason ? { queueReason: t.queueReason } : {}),
       logPath: t.logPath,
       ...(t.progress
         ? { progress: { fraction: t.progress.fraction, source: t.progress.source, ...(t.progress.count ? { count: t.progress.count } : {}), ...(t.progress.note ? { note: t.progress.note } : {}) } }
@@ -496,7 +502,7 @@ export default function piBg(pi: ExtensionAPI) {
   const syncHolds = () => {
     if (!attached) return;
     const want = new Set([
-      ...reg.running(sessionId).filter((t) => t.origin === "agent" && t.kind === "job" && !t.delivered).map((t) => t.id),
+      ...reg.active(sessionId).filter((t) => t.origin === "agent" && t.kind === "job" && !t.delivered).map((t) => t.id),
       ...[...owed.keys()].filter((id) => reg.tasks.has(id)),
     ]);
     for (const id of want) {
@@ -520,7 +526,10 @@ export default function piBg(pi: ExtensionAPI) {
   /** Running bg_wait calls by tool call: the tasks they wait on and their live row line. */
   const waitRows = new Map<string, { tasks: () => Task[]; line: () => string }>();
   const redrawRows = () => {
-    liveRows.tick((id) => reg.tasks.get(id)?.status === "running");
+    liveRows.tick((id) => {
+      const task = reg.tasks.get(id);
+      return task !== undefined && isActive(task);
+    });
   };
   const refresh = () => {
     redrawRows();
@@ -538,7 +547,7 @@ export default function piBg(pi: ExtensionAPI) {
       return `Background service ${t.name} (${t.id}) is ready${t.readyLine ? `: ${t.readyLine}` : ""}. It keeps running; bg_logs ${t.id} reads its log.`;
     }
     const what = t.kind === "job" ? "Background job" : "Background service";
-    return `${what} ${t.name} (${t.id}) ended: ${outcome(t)} after ${runtime(t)}.\n\n${report(t)}`;
+    return `${what} ${t.name} (${t.id}) ended: ${timedOutcome(t)}.\n\n${report(t)}`;
   };
 
   /**
@@ -580,7 +589,7 @@ export default function piBg(pi: ExtensionAPI) {
   const oweFromState = () => {
     for (const t of reg.tasks.values()) {
       if (t.origin !== "agent" || t.sessionId !== sessionId) continue;
-      if (t.status !== "running" && !t.delivered) owed.set(t.id, "end");
+      if (!isActive(t) && !t.delivered) owed.set(t.id, "end");
       else if (t.status === "running" && t.ready && t.readyPattern && !t.readyDelivered) owed.set(t.id, "ready");
     }
   };
@@ -607,24 +616,24 @@ export default function piBg(pi: ExtensionAPI) {
     if (kind === "end") t.delivered = true;
     else t.readyDelivered = true;
     open.extras.push(kind === "end"
-      ? completedReport(`${t.name} (${t.id}) ended: ${outcome(t)} after ${runtime(t)}. bg_logs ${t.id} for its output.`)
+      ? completedReport(`${t.name} (${t.id}) ended: ${timedOutcome(t)}. bg_logs ${t.id} for its output.`)
       : { text: `${t.name} (${t.id}) is ready${t.readyLine ? `: ${t.readyLine}` : ""}.` });
     return true;
   };
 
   const notifyUser = (t: Task) => {
     const ok = t.status === "done";
-    if (ctx?.hasUI) ctx.ui.notify(`bg: ${t.name} ${outcome(t)} after ${runtime(t)}`, ok ? "info" : "warning");
+    if (ctx?.hasUI) ctx.ui.notify(`bg: ${t.name} ${timedOutcome(t)}`, ok ? "info" : "warning");
     emit("herdr:notify", { title: `${t.name} ${ok ? "finished" : outcome(t)}`, body: `ran ${runtime(t)}`, sound: "done", unlessFocused: true });
   };
 
-  /** The progress tenth last recorded per task (task-entry.ts). */
-  const recordedTenth = new Map<string, number | undefined>();
+  /** Record admission changes and progress in tenths, not each poll. */
+  const recordedTenth = new Map<string, string>();
   const record = (e: TaskEvent) => {
     const t = e.task;
-    const tenth = progressTenth(t);
-    if (e.type === "change" && recordedTenth.get(t.id) === tenth) return;
-    recordedTenth.set(t.id, tenth);
+    const key = `${t.status}:${t.queueReason ?? ""}:${progressTenth(t) ?? ""}`;
+    if (e.type === "change" && recordedTenth.get(t.id) === key) return;
+    recordedTenth.set(t.id, key);
     try {
       pi.appendEntry(TASK_ENTRY, taskRecord(t));
     } catch {
@@ -649,7 +658,7 @@ export default function piBg(pi: ExtensionAPI) {
           t.delivered = true;
           if (attached) {
             pi.sendMessage(
-              transcriptCheckpoint({ customType: "pi-bg", content: `The user stopped background task ${t.name} (${t.id}) after ${runtime(t)}.`, display: true, details: { id: t.id, kind: "end", status: t.status } }, { id: randomUUID(), kind: "report" }),
+              transcriptCheckpoint({ customType: "pi-bg", content: t.startedAt ? `The user stopped background task ${t.name} (${t.id}) after ${runtime(t)}.` : `The user cancelled background job ${t.name} (${t.id}) before it started.`, display: true, details: { id: t.id, kind: "end", status: t.status } }, { id: randomUUID(), kind: "report" }),
               { deliverAs: "nextTurn" },
             );
           }
@@ -867,7 +876,7 @@ export default function piBg(pi: ExtensionAPI) {
   pi.events.on("bg:stop", (data) => {
     const id = (data as { task?: unknown } | undefined)?.task;
     const t = typeof id === "string" ? reg.find(id, sessionId) : undefined;
-    if (t && t.status === "running") void stopTask(t, "user").catch(() => undefined);
+    if (t && isActive(t)) void stopTask(t, "user").catch(() => undefined);
   });
   pi.events.on("bg:probe", (data) => {
     (data as { reply?: () => void } | undefined)?.reply?.();
@@ -1019,6 +1028,7 @@ export default function piBg(pi: ExtensionAPI) {
     promptSnippet: "Run long commands (jobs) or servers (services) in the background; wait on them with bg_wait",
     promptGuidelines: [
       "Use bg_run for commands that may take more than a minute (kind=job) and for anything that must keep running (kind=service); plain bash for the rest.",
+      "Set heavy: true for a finite job that will put substantial local load on the host, such as a full browser suite, build, fit or large import, even if it may finish in under a minute. Heavy work queues across sessions. Leave CI watches, small checks and services unmarked.",
       "After starting a job, keep doing other useful work. When nothing is left but the job's result, call bg_wait, or end your turn: a running job keeps the turn open until it ends and its outcome continues the turn; the user can still interrupt by typing.",
       "Never poll a background task with sleep loops or repeated bg_logs calls: bg_wait or the wake-up message tells you when it ends.",
       "Use keep=true only for a service the user works in themselves (a notebook or dev server they have open) that should outlive this pi session.",
@@ -1032,7 +1042,8 @@ export default function piBg(pi: ExtensionAPI) {
     },
     renderResult(result, { expanded, isPartial }, theme, context) {
       const id = (result.details as { id?: string } | undefined)?.id;
-      if (id && !isPartial && reg.tasks.get(id)?.status === "running" && context?.invalidate) {
+      const activeTask = id ? reg.tasks.get(id) : undefined;
+      if (id && !isPartial && activeTask && isActive(activeTask) && context?.invalidate) {
         liveRows.track(id, (context as { toolCallId?: string }).toolCallId ?? id, context.invalidate, () => {
           const t = reg.tasks.get(id);
           return t ? `${t.status}\0${taskState(t)}` : "";
@@ -1046,6 +1057,8 @@ export default function piBg(pi: ExtensionAPI) {
       if (params.ready) parsePattern(params.ready);
       if (params.keep && kind !== "service") throw new Error("`keep` is for services.");
       if (params.timeout && kind !== "job") throw new Error("`timeout` is for jobs; a service runs until it is stopped.");
+      if (params.heavy && kind !== "job") throw new Error("`heavy` is for finite jobs.");
+      if (_signal?.aborted) throw new Error("Background task cancelled before submission.");
       // A marimo server without pi-marimo's help still gets a name and a ready line.
       const server = kind === "service" ? marimoServer(params.command) : undefined;
       const cwd = params.cwd ? path.resolve(c.cwd, params.cwd.replace(/^~(?=\/|$)/u, process.env.HOME ?? "~")) : c.cwd;
@@ -1061,7 +1074,15 @@ export default function piBg(pi: ExtensionAPI) {
         timeoutSec: params.timeout,
         keep: params.keep,
         progress: params.progress,
+        heavy: params.heavy,
       });
+      if (task.status === "queued") {
+        refresh();
+        return {
+          ...text(`Queued ${task.name} (${task.kind} ${task.id}) · ${task.queueReason}. Log: ${task.logPath}\nUse bg_wait for the outcome or bg_kill to cancel. Execution timeout starts when the command starts.`),
+          details: { id: task.id, status: "queued" as const },
+        };
+      }
       // A command that fails at once (a typo, a missing file) is reported here rather than as a wake-up.
       const { waiter, done } = waitFor({ targets: new Set([task.id]), any: false, silent: true }, STARTUP_WAIT_MS, undefined);
       await done;
@@ -1101,7 +1122,7 @@ export default function piBg(pi: ExtensionAPI) {
       if (live) {
         if (c?.invalidate) {
           for (const t of live.tasks()) {
-            if (t.status !== "running") continue;
+            if (!isActive(t)) continue;
             liveRows.track(t.id, `wait:${c.toolCallId}`, c.invalidate, live.line);
           }
         }
@@ -1131,7 +1152,7 @@ export default function piBg(pi: ExtensionAPI) {
         } else if (!t) {
           const known = [...reg.list(sessionId).map((k) => `${k.id} ${k.name}`), ...[...externals.values()].filter((e) => e.state === "running").map((e) => e.id)];
           throw new Error(`No task or outside work matches "${params.id}". ${known.length ? `Known: ${known.join(", ")}.` : "Nothing is running."}`);
-        } else if (t.status !== "running") {
+        } else if (!isActive(t)) {
           t.delivered = true;
           refresh();
           return blocks([completedReport(report(t))], id);
@@ -1182,7 +1203,7 @@ export default function piBg(pi: ExtensionAPI) {
         for (const taskId of candidates) {
           const t = reg.tasks.get(taskId);
           if (!t || t.sessionId !== sessionId) continue;
-          if (t.status !== "running") {
+          if (!isActive(t)) {
             t.delivered = true;
             waiter.readied = waiter.readied.filter((ready) => ready.id !== t.id);
             if (!waiter.finished.some((finished) => finished.id === t.id)) waiter.finished.push(t);
@@ -1224,7 +1245,7 @@ export default function piBg(pi: ExtensionAPI) {
       for (const t of waiter.readied) out.push({ text: report(t) });
       for (const x of waiter.externals) out.push(...consumeExternal(x));
       if (reason !== "done") {
-        const still = names().filter((t) => t.status === "running").map((t) => `${t.name} (${[t.id, runtime(t), progressText(t)].filter(Boolean).join(", ")})`);
+        const still = names().filter(isActive).map((t) => `${t.name} (${[t.id, t.status === "queued" ? `queued: ${t.queueReason}` : runtime(t), progressText(t)].filter(Boolean).join(", ")})`);
         if (!any) for (const target of targets) {
           const x = externals.get(target);
           if (x?.state === "running") still.push(x.label);
@@ -1283,7 +1304,7 @@ export default function piBg(pi: ExtensionAPI) {
       if (!t) throw new Error(`No task matches "${params.id}".`);
       const n = Math.min(Math.max(1, Math.round(params.lines ?? LOGS_DEFAULT)), LOGS_MAX);
       const lines = params.grep ? grep(t.logPath, parsePattern(params.grep), n) : params.head ? head(t.logPath, n) : tail(t.logPath, n);
-      if (t.status !== "running") t.delivered = true;
+      if (!isActive(t)) t.delivered = true;
       const { text: body, dropped } = bounded(lines, LOGS_BYTES);
       const what = params.grep ? `lines matching ${params.grep}` : params.head ? "first lines" : "last lines";
       const shown = lines.length - dropped;
@@ -1300,7 +1321,7 @@ export default function piBg(pi: ExtensionAPI) {
   pi.registerTool({
     name: "bg_kill",
     label: "Stop",
-    description: "Stop a background task: SIGTERM to its process group, then SIGKILL after 3 seconds.",
+    description: "Cancel a queued background job before it starts, or stop a running task (SIGTERM to its process group, then SIGKILL after 3 seconds).",
     promptSnippet: "Stop a background task",
     parameters: KillParams,
     ...OWN_RESULT,
@@ -1315,11 +1336,13 @@ export default function piBg(pi: ExtensionAPI) {
     async execute(_id, params) {
       const t = reg.find(params.id, sessionId);
       if (!t) throw new Error(`No task matches "${params.id}".`);
-      if (t.status !== "running") {
+      if (!isActive(t)) {
         t.delivered = true;
-        return text(`${t.name} (${t.id}) already ended: ${outcome(t)} after ${runtime(t)}.`);
+        return text(`${t.name} (${t.id}) already ended: ${timedOutcome(t)}.`);
       }
+      const wasQueued = t.status === "queued";
       await stopTask(t, "agent");
+      if (wasQueued) return text(`Cancelled ${t.name} (${t.id}) before it started.`);
       const note = marimoNote(t.command);
       const last = tail(t.logPath, 10);
       return text([`Stopped ${t.name} (${t.id}) after ${runtime(t)}.`, note, last.length ? `Last lines:\n${bounded(last, 3_000).text}` : undefined].filter(Boolean).join("\n\n"));
@@ -1330,7 +1353,7 @@ export default function piBg(pi: ExtensionAPI) {
 
   const openLog = async (ui: ExtensionContext["ui"], t: Task) => {
     await ui.custom<void>(
-      (tui, theme, _kb, done) => new LogViewer(tui as any, theme as any, t, t.status === "running" ? () => void stopTask(t, "user") : undefined, () => done(undefined)),
+      (tui, theme, _kb, done) => new LogViewer(tui as any, theme as any, t, isActive(t) ? () => void stopTask(t, "user") : undefined, () => done(undefined)),
       FULL_SCREEN,
     );
   };
@@ -1398,14 +1421,14 @@ export default function piBg(pi: ExtensionAPI) {
       }
       if (sub === "kill") {
         const t = reg.find(rest.join(" "), sessionId);
-        if (!t || t.status !== "running") return c.ui.notify(`No running task matches "${arg}".`, "warning");
+        if (!t || !isActive(t)) return c.ui.notify(`No active task matches "${arg}".`, "warning");
         await stopTask(t, "user");
         return c.ui.notify(`bg: stopped ${t.name}`, "info");
       }
       if (sub === "clear") {
         let n = 0;
         for (const t of reg.list(sessionId)) {
-          if (t.status === "running") continue;
+          if (isActive(t)) continue;
           reg.cleared.add(t.id);
           n++;
         }
@@ -1422,20 +1445,7 @@ export default function piBg(pi: ExtensionAPI) {
   for (const name of ["tasks", "bashes", "ps", "bg"]) pi.registerCommand(name, tasksCommand);
 
   // Switchyard's web app shows the task list as a view instead of the TUI dialog.
-  onWebCommand(pi, ["tasks", "bashes", "ps", "bg"], (_n, args) => args === "", () => {
-    const tasks = reg.list(sessionId);
-    const running = tasks.filter((t) => t.status === "running");
-    const ended = tasks.filter((t) => t.status !== "running");
-    const body = tasks.length
-      ? webSection(undefined, [
-        webText(`${running.length} running · ${ended.length} ended`),
-        webTable(["ID", "Name", "Status", "Runtime", "Command"], tasks.map((t) => [t.id, t.name ?? "", outcome(t), runtime(t), t.command.slice(0, 120)])),
-      ])
-      : webText("No background tasks.");
-    const actions = running.map((t) => ({ label: `Stop ${t.name || t.id}`, command: `/tasks kill ${t.id}`, tone: "danger" as const }));
-    if (ended.length) actions.push({ label: "Clear ended", command: "/tasks clear", tone: "danger" as const });
-    return { title: "Background tasks", body, actions };
-  });
+  onWebCommand(pi, ["tasks", "bashes", "ps", "bg"], (_n, args) => args === "", () => tasksWebView(reg.list(sessionId)));
 
   // Codex's /stop: stop every background task this pi started (kept services from earlier sessions
   // stay). Other sources' work (subagents, notebooks, herdr children) is stopped from its own
@@ -1443,7 +1453,7 @@ export default function piBg(pi: ExtensionAPI) {
   pi.registerCommand("stop", {
     description: "Stop every background task this session started (not kept services from earlier sessions; subagents, notebooks and herdr children are stopped from /tasks or their own commands)",
     handler: async (_args, c) => {
-      const running = reg.running(sessionId).filter((t) => !t.adopted);
+      const running = reg.active(sessionId).filter((t) => !t.adopted);
       if (!running.length) return c.ui.notify("No background tasks running.", "info");
       await Promise.all(running.map((t) => stopTask(t, "user")));
       c.ui.notify(`bg: stopped ${running.length} task${running.length === 1 ? "" : "s"}`, "info");

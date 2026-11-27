@@ -17,13 +17,14 @@ import { randomBytes } from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { Admission, type Claim } from "./admission.ts";
 import { LogFollower, logSize, parsePattern } from "./log.ts";
 import { type Progress, ProgressTracker, percent, progressSpec } from "./progress.ts";
 
 export { parsePattern };
 
 export type Kind = "job" | "service";
-export type Status = "running" | "done" | "failed" | "killed" | "timeout";
+export type Status = "queued" | "running" | "done" | "failed" | "killed" | "timeout";
 export type Origin = "agent" | "user";
 
 export interface Task {
@@ -39,7 +40,11 @@ export interface Task {
    */
   sessionId: string;
   pid?: number;
+  /** Heavy work's enqueue time. */
+  requestedAt?: number;
+  /** 0 until the shell actually spawns. */
   startedAt: number;
+  queueReason?: string;
   endedAt?: number;
   exitCode?: number | null;
   signal?: string | null;
@@ -69,6 +74,12 @@ export interface Task {
   progress?: Progress;
 }
 
+export function isActive(t: Pick<Task, "status">): boolean {
+  return t.status === "queued" || t.status === "running";
+}
+
+const orderedAt = (t: Task): number => t.requestedAt ?? t.startedAt;
+
 export type TaskEvent = { type: "start" | "ready" | "end" | "change"; task: Task };
 
 export interface StartOptions {
@@ -82,6 +93,7 @@ export interface StartOptions {
   timeoutSec?: number;
   keep?: boolean;
   progress?: string;
+  heavy?: boolean;
 }
 
 /** The file a task may write its progress to (`PI_BG_PROGRESS`), beside its log. */
@@ -210,6 +222,10 @@ export class Registry {
   private readonly procs = new Map<string, ChildProcess>();
   private readonly followers = new Map<string, { follower: LogFollower; re: RegExp }>();
   private readonly timeouts = new Map<string, ReturnType<typeof setTimeout>>();
+  private readonly pending = new Map<string, { controller: AbortController; settled?: Promise<void> }>();
+  private readonly claims = new Map<string, Claim>();
+
+  constructor(private readonly admission: Pick<Admission, "acquire"> = new Admission()) {}
   /**
    * Progress watchers of running tasks. Not taken over on a reload: the new code builds its own,
    * starting near the log's end.
@@ -243,13 +259,13 @@ export class Registry {
   adopt(old: unknown): void {
     const o = old as Record<string, unknown>;
     const self = this as unknown as Record<string, unknown>;
-    for (const key of ["tasks", "procs", "followers", "timeouts"]) if (o[key] instanceof Map) self[key] = o[key];
+    for (const key of ["tasks", "procs", "followers", "timeouts", "pending", "claims"]) if (o[key] instanceof Map) self[key] = o[key];
     for (const key of ["listeners", "cleared", "strays", "live", "released"]) if (o[key] instanceof Set) self[key] = o[key];
     // One poller: the new code's.
     if (o.poller) clearInterval(o.poller as ReturnType<typeof setInterval>);
     o.poller = undefined;
     o.successor = this;
-    if (this.running().length) this.ensurePoller();
+    if (this.running().length || this.claims.size) this.ensurePoller();
   }
 
   subscribe(fn: (e: TaskEvent) => void): () => void {
@@ -276,7 +292,7 @@ export class Registry {
     this.live.add(sessionId);
     for (const [id, t] of this.tasks) {
       if (t.sessionId === sessionId || this.live.has(t.sessionId)) continue;
-      if (t.status !== "running") this.tasks.delete(id);
+      if (!isActive(t) && !this.claims.has(id)) this.tasks.delete(id);
       else if (t.keep) {
         t.sessionId = sessionId;
         t.delivered = true;
@@ -297,7 +313,11 @@ export class Registry {
   }
 
   list(sessionId?: string): Task[] {
-    return this.of(sessionId).filter((t) => !this.cleared.has(t.id)).sort((a, b) => a.startedAt - b.startedAt);
+    return this.of(sessionId).filter((t) => !this.cleared.has(t.id)).sort((a, b) => orderedAt(a) - orderedAt(b));
+  }
+
+  active(sessionId?: string): Task[] {
+    return this.of(sessionId).filter(isActive).sort((a, b) => orderedAt(a) - orderedAt(b));
   }
 
   running(sessionId?: string): Task[] {
@@ -310,7 +330,7 @@ export class Registry {
     if (!r) return undefined;
     const exact = this.tasks.get(r);
     if (exact) return sessionId === undefined || exact.sessionId === sessionId ? exact : undefined;
-    const all = this.of(sessionId).sort((a, b) => b.startedAt - a.startedAt);
+    const all = this.of(sessionId).sort((a, b) => orderedAt(b) - orderedAt(a));
     const byName = all.find((t) => t.name === r);
     if (byName) return byName;
     const byPrefix = all.filter((t) => t.id.startsWith(r));
@@ -325,6 +345,7 @@ export class Registry {
   }
 
   start(o: StartOptions): Task {
+    if (o.heavy && o.kind !== "job") throw new Error("`heavy` is for finite jobs.");
     const id = this.newId();
     const dir = path.join(bgDir(), o.sessionId || "no-session");
     fs.mkdirSync(dir, { recursive: true });
@@ -340,8 +361,9 @@ export class Registry {
       cwd: o.cwd,
       logPath,
       sessionId: o.sessionId,
-      startedAt: Date.now(),
-      status: "running",
+      startedAt: o.heavy ? 0 : Date.now(),
+      status: o.heavy ? "queued" : "running",
+      ...(o.heavy ? { requestedAt: Date.now(), queueReason: "waiting for host capacity" } : {}),
       ready: false,
       readyPattern: o.ready,
       timeoutSec: o.kind === "job" ? o.timeoutSec : undefined,
@@ -351,26 +373,80 @@ export class Registry {
       readyDelivered: false,
       ...(o.progress?.trim() ? { progressSpec: o.progress.trim() } : {}),
     };
-    const fd = fs.openSync(logPath, "a");
+    if (o.heavy) {
+      fs.closeSync(fs.openSync(logPath, "a", 0o600));
+      this.tasks.set(id, task);
+      const request = { controller: new AbortController(), settled: undefined as Promise<void> | undefined };
+      this.pending.set(id, request);
+      this.emit("start", task);
+      request.settled = this.admit(task, request.controller, spec);
+    } else {
+      this.launch(task, spec, re);
+      this.emit("start", task);
+    }
+    return task;
+  }
+
+  private async admit(task: Task, controller: AbortController, spec: ReturnType<typeof progressSpec>): Promise<void> {
+    let claim: Claim | undefined;
+    let launched = false;
+    try {
+      claim = await this.admission.acquire(controller.signal, (reason) => {
+        if (task.status !== "queued" || task.queueReason === reason) return;
+        task.queueReason = reason;
+        this.latest().emit("change", task);
+      });
+      if (controller.signal.aborted || task.status !== "queued") return;
+      const reg = this.latest();
+      reg.launch(task, spec, undefined, claim);
+      launched = true;
+      claim.releaseAdmission();
+      reg.emit("change", task);
+    } catch (err) {
+      if (task.status === "queued" && !controller.signal.aborted) {
+        this.latest().cannotStart(task, err);
+      }
+    } finally {
+      if (!launched && claim) {
+        claim.releaseSlot();
+        claim.releaseAdmission();
+      }
+      this.latest().pending.delete(task.id);
+    }
+  }
+
+  private cannotStart(task: Task, err: unknown): void {
+    try {
+      fs.appendFileSync(task.logPath, `\n[pi-bg] could not start: ${err instanceof Error ? err.message : String(err)}\n`);
+    } catch {
+      // The outcome must still be delivered if the log became unwritable.
+    }
+    this.finish(task.id, 127, null);
+  }
+
+  private launch(task: Task, spec: ReturnType<typeof progressSpec>, re?: RegExp, claim?: Claim): void {
+    const { id, cwd, command, logPath } = task;
+    const fd = fs.openSync(logPath, "a", 0o600);
     let child: ChildProcess;
     try {
-      child = spawn(shell(), ["-c", o.command], {
-        cwd: o.cwd,
+      child = spawn(shell(), ["-c", command], {
+        cwd,
         detached: true,
-        stdio: ["ignore", fd, fd],
+        stdio: claim ? ["ignore", fd, fd, claim.fd] : ["ignore", fd, fd],
         env: { ...process.env, PI_BG_TASK_ID: id, PI_BG_PROGRESS: progressPath(task) },
       });
     } finally {
       fs.closeSync(fd);
     }
     task.pid = child.pid;
+    task.startedAt = Date.now();
+    delete task.queueReason;
+    task.status = "running";
     this.tasks.set(id, task);
     this.procs.set(id, child);
+    if (claim) this.claims.set(id, claim);
     child.unref();
-    child.on("error", (err) => {
-      fs.appendFileSync(logPath, `\n[pi-bg] could not start: ${err.message}\n`);
-      this.latest().finish(id, 127, null);
-    });
+    child.on("error", (err) => this.latest().cannotStart(task, err));
     child.on("exit", (code, signal) => this.latest().finish(id, code, signal));
     if (re) this.followers.set(id, { follower: new LogFollower(logPath), re });
     this.progress.set(id, { tracker: new ProgressTracker(spec), follower: new LogFollower(logPath), stamp: "" });
@@ -381,8 +457,6 @@ export class Registry {
     }
     this.ensurePoller();
     this.persist();
-    this.emit("start", task);
-    return task;
   }
 
   private ensurePoller(): void {
@@ -412,7 +486,13 @@ export class Registry {
     for (const task of this.tasks.values()) {
       if (task.adopted && task.status === "running" && task.pid && !groupAlive(task.pid)) this.finish(task.id, null, null);
     }
-    if (!this.followers.size && !this.running().length) {
+    for (const [id, claim] of this.claims) {
+      const task = this.tasks.get(id);
+      if (task?.status === "running" || (task?.pid && groupAlive(task.pid))) continue;
+      claim.releaseSlot();
+      this.claims.delete(id);
+    }
+    if (!this.followers.size && !this.running().length && !this.claims.size) {
       if (this.poller) clearInterval(this.poller);
       this.poller = undefined;
     }
@@ -520,7 +600,7 @@ export class Registry {
 
   private finish(id: string, code: number | null, signal: NodeJS.Signals | null): void {
     const task = this.tasks.get(id);
-    if (!task || task.status !== "running") return;
+    if (!task || !isActive(task)) return;
     // Read the last of the log before deciding about readiness, in case the line came at the end.
     const w = this.followers.get(id);
     if (w && !task.ready) {
@@ -557,7 +637,11 @@ export class Registry {
     if (task.pid && !task.adopted && groupAlive(task.pid)) {
       task.strays = true;
       this.strays.add(task.pid);
+    } else {
+      this.claims.get(id)?.releaseSlot();
+      this.claims.delete(id);
     }
+    delete task.queueReason;
     this.persist();
     this.emit("end", task);
   }
@@ -565,8 +649,16 @@ export class Registry {
   /** SIGTERM to the task's process group, then SIGKILL after a grace period. Resolves once it ended. */
   async kill(id: string, by: NonNullable<Task["killedBy"]>, graceMs = KILL_GRACE_MS): Promise<void> {
     const task = this.tasks.get(id);
-    if (!task || task.status !== "running" || !task.pid) return;
+    if (!task || !isActive(task)) return;
     task.killedBy ??= by;
+    if (task.status === "queued") {
+      const request = this.pending.get(id);
+      request?.controller.abort();
+      this.finish(id, null, null);
+      await request?.settled;
+      return;
+    }
+    if (!task.pid) return;
     const pid = task.pid;
     signalGroup(pid, "SIGTERM");
     const deadline = Date.now() + graceMs;
@@ -591,7 +683,7 @@ export class Registry {
     const strays = last ? [...this.strays] : [];
     if (last) this.strays.clear();
     for (const pgid of strays) signalGroup(pgid, "SIGTERM");
-    await Promise.all(this.running(sessionId).filter((t) => !t.keep).map((t) => this.kill(t.id, by, graceMs)));
+    await Promise.all(this.active(sessionId).filter((t) => !t.keep).map((t) => this.kill(t.id, by, graceMs)));
     for (const pgid of strays) if (groupAlive(pgid)) signalGroup(pgid, "SIGKILL");
   }
 
@@ -599,7 +691,7 @@ export class Registry {
   forgetEnded(sessionId?: string): void {
     for (const [id, t] of this.tasks) {
       if (sessionId !== undefined && t.sessionId !== sessionId) continue;
-      if (t.status !== "running") this.tasks.delete(id);
+      if (!isActive(t) && !this.claims.has(id)) this.tasks.delete(id);
       else if (t.keep) {
         t.delivered = true;
         t.readyDelivered = true;

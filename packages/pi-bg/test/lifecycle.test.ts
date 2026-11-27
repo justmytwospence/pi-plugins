@@ -21,6 +21,7 @@ function fakeRegistry() {
     cleared: new Set<string>(),
     list: (sid?: string) => [...tasks.values()].filter((t) => !sid || t.sessionId === sid),
     running: (sid?: string) => [...tasks.values()].filter((t) => t.status === "running" && (!sid || t.sessionId === sid)),
+    active: (sid?: string) => [...tasks.values()].filter((t) => (t.status === "running" || t.status === "queued") && (!sid || t.sessionId === sid)),
     forgetEnded: vi.fn(),
     attach: vi.fn(),
     detach: vi.fn(),
