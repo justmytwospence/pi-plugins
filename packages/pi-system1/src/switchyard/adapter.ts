@@ -26,7 +26,7 @@ export function answerText(a: Record<string, unknown>): string {
   if (typeof a.probability === "number") return a.probability.toFixed(2);
   if (typeof a.choice === "string") return a.choice;
   if (typeof a.score === "number") return String(Math.round(a.score * 100) / 100);
-  return JSON.stringify(a).slice(0, 80);
+  return "Unsupported answer";
 }
 
 export function judgeView(tool: ToolInfo, ctx: Pick<AdapterContext, "features">): ToolViewData | undefined {

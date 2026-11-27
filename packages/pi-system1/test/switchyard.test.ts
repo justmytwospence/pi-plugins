@@ -11,14 +11,14 @@ describe("system1 Switchyard tool views", () => {
     });
     const details = {
       ok: true, backend: "jev", provider: "typesafe", model: "jev-1", latencyMs: 812,
-      answers: { only_reads: { type: "bool", probability: 0.973 }, risky: { type: "choice", choice: "no", probabilities: {}, confidence: 1 } },
+      answers: { only_reads: { type: "bool", probability: 0.973 }, risky: { type: "choice", choice: "no", probabilities: {}, confidence: 1 }, unknown: { nested: { secret: "not shown" } } },
     };
     expect(adapter.toolView({ toolCallId: "1", name: "system1_judge", args, result: {}, details }, V2)).toEqual({
       kind: "other", verb: "Judged", activeVerb: "Judging", target: "only_reads, risky", meta: ["jev", "0.8s"],
-      detail: { t: "facts", items: [{ label: "only_reads", value: "0.97", mono: true }, { label: "risky", value: "no", mono: true }] },
+      detail: { t: "facts", items: [{ label: "only_reads", value: "0.97", mono: true }, { label: "risky", value: "no", mono: true }, { label: "unknown", value: "Unsupported answer", mono: true }] },
     });
     expect(adapter.toolView({ toolCallId: "1", name: "system1_judge", args, result: {}, details }, {})).toMatchObject({
-      detail: { t: "table", rows: [["only_reads", "0.97"], ["risky", "no"]] },
+      detail: { t: "table", rows: [["only_reads", "0.97"], ["risky", "no"], ["unknown", "Unsupported answer"]] },
     });
   });
 
