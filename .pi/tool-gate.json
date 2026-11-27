@@ -4,13 +4,15 @@
       "~/Projects/herdr-*",
       "~/Projects/ovis",
       "~/Projects/collie",
-      "~/Projects/homelab"
+      "~/Projects/homelab",
+      "~/Projects/switchyard"
     ],
     "write": [
       "~/Projects/dotfiles",
       "~/Projects/herdr-web-ui",
       "~/Projects/collie",
-      "~/Projects/pi-marimo"
+      "~/Projects/pi-marimo",
+      "~/Projects/switchyard"
     ]
   }
 }
