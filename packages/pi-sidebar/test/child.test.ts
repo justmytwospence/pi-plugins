@@ -201,7 +201,19 @@ describe("preflight", () => {
   });
 
   it("refuses an API it cannot share a cache with", () => {
-    expect(setup({ api: "google-generative-ai" }).agent.preflight()).toMatchObject({ kind: "refuse" });
+    expect(setup({ api: "bedrock-converse-stream" }).agent.preflight()).toMatchObject({ kind: "refuse" });
+  });
+
+  it("allows google-generative-ai and preserves AbortSignal on replay and foreign payloads", () => {
+    expect(setup({ api: "google-generative-ai" }).agent.preflight()).toEqual({ kind: "send" });
+    const signal = new AbortController().signal;
+    const googlePayload = { model: "gemini-2.5-pro", contents: [{ role: "user", parts: [{ text: "hi" }] }], config: { abortSignal: signal } };
+    const replayed = replayPayload("google-generative-ai", googlePayload, "side-session", "main-session") as any;
+    expect(replayed).not.toBe(googlePayload);
+    expect(replayed.config.abortSignal).toBe(signal);
+    const foreign = anchorForeign("google-generative-ai", googlePayload) as any;
+    expect(foreign).not.toBe(googlePayload);
+    expect(foreign.config.abortSignal).toBe(signal);
   });
 
   it("asks after an answer that missed main's cache", async () => {

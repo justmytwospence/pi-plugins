@@ -106,7 +106,7 @@ describe("splicePayload: Anthropic", () => {
     expect(splicePayload("anthropic-messages", anthropicMain(), { ...anthropicSide(), model: "other" }).ok).toBe(false);
     expect(splicePayload("anthropic-messages", undefined, anthropicSide()).ok).toBe(false);
     expect(splicePayload("anthropic-messages", { ...anthropicMain(), messages: [] }, anthropicSide()).ok).toBe(false);
-    const unknown = splicePayload("google-generative-ai", anthropicMain(), anthropicSide());
+    const unknown = splicePayload("bedrock-converse-stream", anthropicMain(), anthropicSide());
     expect(unknown.ok).toBe(false);
     if (!unknown.ok) expect(unknown.reason).toMatch(/not supported/);
   });
@@ -163,10 +163,85 @@ describe("splicePayload: OpenAI", () => {
   });
 });
 
+describe("splicePayload: Google", () => {
+  const googleMain = (abortSignal?: AbortSignal) => ({
+    model: "gemini-2.5-pro",
+    contents: [
+      { role: "user", parts: [{ text: "do it" }] },
+      { role: "model", parts: [{ text: "done" }] },
+    ],
+    config: {
+      systemInstruction: "MAIN PROMPT",
+      tools: [{ functionDeclarations: [{ name: "read" }] }],
+      thinkingConfig: { includeThoughts: true, thinkingLevel: "HIGH" },
+      maxOutputTokens: 1,
+      automaticContinuation: false,
+      ...(abortSignal ? { abortSignal } : {}),
+    },
+  });
+
+  const googleSide = (abortSignal?: AbortSignal) => ({
+    model: "gemini-2.5-pro",
+    contents: [
+      { role: "user", parts: [{ text: "<sidebar>…</sidebar>" }] },
+      { role: "user", parts: [{ text: "what now?" }] },
+    ],
+    config: {
+      systemInstruction: "SIDE PROMPT",
+      tools: [{ functionDeclarations: [{ name: "read" }] }],
+      thinkingConfig: { includeThoughts: true, thinkingLevel: "LOW" },
+      maxOutputTokens: 16000,
+      automaticContinuation: false,
+      ...(abortSignal ? { abortSignal } : {}),
+    },
+  });
+
+  it("keeps main's config and contents intact, appends Sidebar's contents, and swaps abortSignal/maxOutputTokens", () => {
+    const mainAbort = new AbortController().signal;
+    const sideAbort = new AbortController().signal;
+    const main = googleMain(mainAbort);
+    const side = googleSide(sideAbort);
+    const result = splicePayload("google-generative-ai", main, side);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const p = result.payload as any;
+    expect(p.model).toBe("gemini-2.5-pro");
+    expect(p.config.systemInstruction).toBe("MAIN PROMPT");
+    expect(p.config.tools).toEqual(main.config.tools);
+    expect(p.config.thinkingConfig).toEqual(main.config.thinkingConfig);
+    expect(p.config.maxOutputTokens).toBe(16000);
+    expect(p.config.abortSignal).toBe(sideAbort);
+    expect(p.contents).toEqual([...main.contents, ...side.contents]);
+    expect(result.mainItems).toBe(2);
+    expect(result.sideItems).toBe(2);
+    // Does not mutate main's abortSignal.
+    expect(main.config.abortSignal).toBe(mainAbort);
+  });
+
+  it("drops main's stale abortSignal and maxOutputTokens when Sidebar's request omits them", () => {
+    const main = googleMain(new AbortController().signal);
+    const side = { model: "gemini-2.5-pro", contents: [{ role: "user", parts: [{ text: "q" }] }], config: {} };
+    const result = splicePayload("google-vertex", main, side);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const p = result.payload as any;
+    expect(p.config.abortSignal).toBeUndefined();
+    expect(p.config.maxOutputTokens).toBeUndefined();
+    expect(p.config.systemInstruction).toBe("MAIN PROMPT");
+  });
+
+  it("fails closed when main or side contents are missing", () => {
+    expect(splicePayload("google-generative-ai", { ...googleMain(), contents: [] }, googleSide()).ok).toBe(false);
+    expect(splicePayload("google-generative-ai", googleMain(), { model: "gemini-2.5-pro" }).ok).toBe(false);
+  });
+});
+
 describe("helpers", () => {
   it("inertPayload empties the conversation", () => {
     expect((inertPayload("anthropic-messages", anthropicSide()) as any).messages).toEqual([]);
     expect((inertPayload("openai-responses", { input: [1] }) as any).input).toEqual([]);
+    expect((inertPayload("google-generative-ai", { contents: [1] }) as any).contents).toEqual([]);
+    expect((inertPayload("google-vertex", { contents: [1] }) as any).contents).toEqual([]);
   });
 
   it("reads the requested cache TTL", () => {
@@ -174,5 +249,6 @@ describe("helpers", () => {
     const short = JSON.parse(JSON.stringify(anthropicMain()).replaceAll(',"ttl":"1h"', ""));
     expect(requestedCacheTtlMs("anthropic-messages", short)).toBe(300_000);
     expect(requestedCacheTtlMs("openai-responses", { prompt_cache_retention: "24h" })).toBe(86_400_000);
+    expect(requestedCacheTtlMs("google-generative-ai", { contents: [] })).toBe(300_000);
   });
 });

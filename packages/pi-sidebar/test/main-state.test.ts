@@ -14,6 +14,28 @@ describe("telling main's requests apart", () => {
     expect(payloadSystemText(payload())).toContain(PROMPT);
     expect(payloadSystemText({ instructions: "INS", input: [] })).toBe("INS");
     expect(payloadSystemText({ messages: [{ role: "system", content: "SYS" }] })).toBe("SYS");
+    expect(payloadSystemText({ config: { systemInstruction: "G-SYS" }, contents: [] })).toBe("G-SYS");
+    expect(payloadSystemText({ config: { systemInstruction: { parts: [{ text: "G-PART" }] } }, contents: [] })).toBe("G-PART");
+  });
+
+  it("snapshots a Google request carrying a non-cloneable AbortSignal", async () => {
+    const pi = new FakePi();
+    const state = new MainState(pi as never, () => 1000);
+    const { ctx } = fakeCtx({
+      model: { provider: "google", id: "gemini-2.5-pro", api: "google-generative-ai" },
+      systemPrompt: PROMPT,
+    });
+    await pi.emit("session_start", { reason: "startup" }, ctx);
+    const sent = {
+      model: "gemini-2.5-pro",
+      contents: [{ role: "user", parts: [{ text: "hi" }] }],
+      config: { systemInstruction: PROMPT, abortSignal: new AbortController().signal },
+    };
+    await pi.emit("before_provider_request", { payload: sent }, ctx);
+    expect(state.request).toMatchObject({ api: "google-generative-ai", model: "gemini-2.5-pro" });
+    const snap = state.snapshot();
+    expect(snap.request?.payload).toMatchObject({ model: "gemini-2.5-pro", config: { systemInstruction: PROMPT } });
+    expect((snap.request?.payload.config as Record<string, unknown>).abortSignal).toBeUndefined();
   });
 
   it("accepts main's conversation requests only", () => {

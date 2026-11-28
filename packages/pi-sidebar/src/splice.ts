@@ -16,7 +16,13 @@ export const SUPPORTED_APIS = new Set([
   "openai-codex-responses",
   "azure-openai-responses",
   "openai-completions",
+  "google-generative-ai",
+  "google-vertex",
 ]);
+
+function isGoogleApi(api: string): boolean {
+  return api === "google-generative-ai" || api === "google-vertex";
+}
 
 const ANTHROPIC_MAX_BREAKPOINTS = 4;
 
@@ -24,8 +30,25 @@ function isObject(value: unknown): value is Json {
   return !!value && typeof value === "object" && !Array.isArray(value);
 }
 
+/**
+ * Deep-clones a provider payload without failing on non-cloneable runtime handles such as
+ * Google's `config.abortSignal`. When `preserveAbortSignal` is true, the original `AbortSignal`
+ * reference is re-attached on the copy so aborting the request still cancels it.
+ */
+export function clonePayload<T>(value: T, options: { preserveAbortSignal?: boolean } = {}): T {
+  if (!isObject(value)) return structuredClone(value);
+  const config = isObject(value.config) ? value.config : undefined;
+  if (!config || !("abortSignal" in config)) return structuredClone(value);
+  const { abortSignal, ...restConfig } = config;
+  const copy = structuredClone({ ...value, config: restConfig }) as Json;
+  if (options.preserveAbortSignal && abortSignal !== undefined) {
+    (copy.config as Json).abortSignal = abortSignal;
+  }
+  return copy as T;
+}
+
 function clone<T>(value: T): T {
-  return structuredClone(value);
+  return clonePayload(value);
 }
 
 export interface SpliceOptions {
@@ -45,6 +68,7 @@ export function splicePayload(api: string, main: unknown, side: unknown, options
   }
   if (api === "anthropic-messages") return spliceAnthropic(main, side, options.sideBreakpoint !== false);
   if (api === "openai-completions") return spliceChat(main, side);
+  if (isGoogleApi(api)) return spliceGoogle(main, side);
   return spliceResponses(main, side);
 }
 
@@ -163,10 +187,32 @@ function spliceChat(main: Json, side: Json): SpliceResult {
   return { ok: true, payload, mainItems: mainMessages.length, sideItems: sideMessages.length };
 }
 
+// ---------------------------------------------------------------- Google Generative AI & Vertex
+
+function spliceGoogle(main: Json, side: Json): SpliceResult {
+  if (!Array.isArray(main.contents) || main.contents.length === 0) return { ok: false, reason: "main's last request has no contents" };
+  if (!Array.isArray(side.contents)) return { ok: false, reason: "Sidebar's request has no contents" };
+  const mainContents = clone(main.contents as unknown[]);
+  const sideContents = clone(side.contents as unknown[]);
+  const payload: Json = { ...clone(main), contents: [...mainContents, ...sideContents] };
+  const sideConfig = isObject(side.config) ? side.config : undefined;
+  if (isObject(payload.config) || sideConfig) {
+    const config: Json = isObject(payload.config) ? payload.config : {};
+    if (sideConfig) {
+      if ("maxOutputTokens" in sideConfig) config.maxOutputTokens = sideConfig.maxOutputTokens;
+      else delete config.maxOutputTokens;
+      if (sideConfig.abortSignal !== undefined) config.abortSignal = sideConfig.abortSignal;
+    }
+    if (Object.keys(config).length > 0 || isObject(main.config)) payload.config = config;
+  }
+  return { ok: true, payload, mainItems: mainContents.length, sideItems: sideContents.length };
+}
+
 /** An empty request the provider rejects without generating, for when aborting is not enough. */
 export function inertPayload(api: string, side: unknown): unknown {
   if (!isObject(side)) return side;
   if (api === "anthropic-messages" || api === "openai-completions") return { ...side, messages: [] };
+  if (isGoogleApi(api)) return { ...side, contents: [] };
   return { ...side, input: [] };
 }
 
@@ -178,6 +224,7 @@ export function requestedCacheTtlMs(api: string, payload: unknown): number {
     return ttl ? 60 * 60_000 : 5 * 60_000;
   }
   // OpenAI keeps prompt caches for minutes in memory, up to 24h with extended retention.
+  // Google implicit prompt caching lasts about 5 minutes and is not configured per request.
   if (payload.prompt_cache_retention === "24h") return 24 * 60 * 60_000;
   return 5 * 60_000;
 }

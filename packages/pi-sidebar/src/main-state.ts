@@ -5,6 +5,7 @@ import { buildSessionContext, type ExtensionAPI, type ExtensionContext } from "@
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import type { Api, Model } from "@earendil-works/pi-ai";
 import { isVirtual, payloadModel } from "./routed-model.ts";
+import { clonePayload } from "./splice.ts";
 import { summarizeArgs } from "./transcript.ts";
 
 type Json = Record<string, unknown>;
@@ -76,11 +77,14 @@ export function payloadSystemText(payload: unknown): string {
     else if (value && typeof value === "object") {
       const v = value as Json;
       if (typeof v.text === "string") parts.push(v.text);
+      else if (v.parts !== undefined) collect(v.parts);
       else if (v.content !== undefined) collect(v.content);
     }
   };
   collect(p.system);
   collect(p.instructions);
+  collect(p.systemInstruction);
+  if (p.config && typeof p.config === "object") collect((p.config as Json).systemInstruction);
   const list = Array.isArray(p.messages) ? p.messages : Array.isArray(p.input) ? p.input : [];
   const first = list[0] as Json | undefined;
   if (first && (first.role === "system" || first.role === "developer")) collect(first.content);
@@ -286,11 +290,12 @@ export class MainState {
   /** Detached data only: no session manager, UI, registry or provider runtime escapes. */
   snapshot(): MainSnapshot {
     const ctx = this.ctx;
+    const request = this.request ? { ...this.request, payload: clonePayload(this.request.payload) } : undefined;
     return structuredClone({
       sessionId: this.sessionId,
       leafId: ctx?.sessionManager.getLeafId() ?? null,
       revision: this.revision,
-      request: this.request,
+      request,
       messages: ctx ? buildSessionContext(ctx.sessionManager.getEntries() as never, ctx.sessionManager.getLeafId()).messages as AgentMessage[] : [],
       live: this.live,
       ...(ctx?.model ? { model: `${ctx.model.provider}/${ctx.model.id}` } : {}),

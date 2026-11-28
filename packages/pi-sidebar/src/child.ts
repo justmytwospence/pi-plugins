@@ -25,7 +25,7 @@ import { describeGithubIssueWrite } from "./github-issues.ts";
 import { draftsCreated } from "./slack-drafts.ts";
 import { askShellReads } from "./shell-reads.ts";
 import { GUARD_ENV, judgeCall, REFUSED_TOOLS, SUBAGENT_ENV_CHANNEL, type SubagentEnvRequest } from "./guard.ts";
-import { inertPayload, isStatusBlock, placeSideBreakpoint, requestedCacheTtlMs, splicePayload, SUPPORTED_APIS } from "./splice.ts";
+import { clonePayload, inertPayload, isStatusBlock, placeSideBreakpoint, requestedCacheTtlMs, splicePayload, SUPPORTED_APIS } from "./splice.ts";
 import { compactExchange, EXCHANGE_ENTRY } from "./thread.ts";
 import { assembleContext, describeLive, foreignRoleMessage, mainDelta, roleMessage, statusMessage, trimOpenTurn, type MainDelta } from "./transcript.ts";
 import { derivedSessionId, interleave, newPartAt, TRANSCRIPT_TAG, TranscriptParts } from "./foreign.ts";
@@ -665,7 +665,7 @@ const ANTHROPIC_MAX_BREAKPOINTS = 4;
  */
 export function anchorForeign(api: string, payload: unknown): unknown {
   if (!payload || typeof payload !== "object") return payload;
-  const out = structuredClone(payload) as Record<string, unknown>;
+  const out = clonePayload(payload, { preserveAbortSignal: true }) as Record<string, unknown>;
   if (api !== "anthropic-messages" || !Array.isArray(out.messages)) return out;
   const blocks: Block[] = [];
   for (const message of out.messages as Msg[]) {
@@ -706,7 +706,7 @@ export const ROLE_SEAM = (text: string): boolean => text.startsWith("<sidebar>\n
  */
 export function replayPayload(api: string, payload: unknown, ownSessionId: string | undefined, mainSessionId: string | undefined): unknown {
   if (!payload || typeof payload !== "object") return payload;
-  const out = structuredClone(payload) as Record<string, unknown>;
+  const out = clonePayload(payload, { preserveAbortSignal: true }) as Record<string, unknown>;
   if (ownSessionId && mainSessionId && ownSessionId !== mainSessionId) {
     for (const [key, value] of Object.entries(out)) {
       if (value === ownSessionId) out[key] = mainSessionId;
@@ -723,7 +723,7 @@ export function replayPayload(api: string, payload: unknown, ownSessionId: strin
  */
 export function anchorPayload(api: string, payload: unknown, seam: (text: string) => boolean, sideBreakpoint = true): unknown {
   if (!payload || typeof payload !== "object") return payload;
-  const out = structuredClone(payload) as Record<string, unknown>;
+  const out = clonePayload(payload, { preserveAbortSignal: true }) as Record<string, unknown>;
   if (api !== "anthropic-messages" || !Array.isArray(out.messages)) return out;
   const messages = out.messages as Msg[];
   const flat: Array<{ role: string; block: Block }> = [];

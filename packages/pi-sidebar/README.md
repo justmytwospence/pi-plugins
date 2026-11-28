@@ -309,7 +309,7 @@ Sidebar refuses outright on an API it cannot share a cache with. It aborts a req
 
 On main's model it uses main's thinking settings too: a cache belongs to one model and one set of settings. It never keeps its own cache warm.
 
-Supported APIs: Anthropic Messages, OpenAI Responses (including Codex and Azure) and OpenAI Chat Completions. It has been tested live on Anthropic.
+Supported APIs: Anthropic Messages, OpenAI Responses (including Codex and Azure), OpenAI Chat Completions and Google Generative AI / Vertex. It has been tested live on Anthropic.
 
 On [another model](#another-model) it asks instead when that model's own cache is probably cold (its last request is older than the cache TTL, or it has none) and main's transcript is 8k tokens or more, and after an answer that missed its own cache. It refuses when your chosen favorite matches no model you are logged in to.
 
