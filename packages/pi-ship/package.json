@@ -1,6 +1,6 @@
 {
   "name": "@justmytwospence/pi-ship",
-  "version": "0.1.114",
+  "version": "0.1.115",
   "description": "Watch CI after pushes and run /ship: checks, review, human gate, publish.",
   "type": "module",
   "license": "MIT",
